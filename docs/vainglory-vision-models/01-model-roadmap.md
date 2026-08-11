@@ -8,7 +8,7 @@
 
 | 模型 | 人工标签 | 运行位置与频率 |
 |---|---|---|
-| 对局流程分类 | `match_flow` / `not_match_flow` | Worker 每约 5 秒运行一次 |
+| 对局流程分类 | `match_flow` / `not_match_flow` | Worker 每约 60 秒粗扫，状态边界局部补 5 秒 |
 | 英雄选择分类 | `not_select` / `select_3v3` / `select_aram` / `select_5v5` | 只在开局候选附近运行 |
 | 对局模式分类 | `3v3` / `aram` / `5v5` | 只处理能看出地图的对局画面 |
 | 结算面板检测 | `result_panel` 框 / `no_result_panel` | 只在结束候选窗口运行 |

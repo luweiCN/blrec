@@ -16,7 +16,10 @@
     </div>
     <nav id="side-nav">
       <button class="nav-item active" data-view="source">数据源</button>
-      <button class="nav-item" data-view="candidates">新模型统一打标</button>
+      <button class="nav-item" data-view="candidates"
+              data-candidate-status="needs_review">新模型统一打标</button>
+      <button class="nav-item" data-view="candidates"
+              data-candidate-status="legacy_hero">历史英雄补标</button>
       <button class="nav-item" data-view="label" data-task="result_detector">历史通用标注</button>
       <button class="nav-item" data-view="label" data-task="mode_gate">历史光栅标注</button>
       <button class="nav-item" data-view="inspect">数据检查</button>
@@ -491,7 +494,7 @@
     <!-- ============ 新模型统一复核视图 ============ -->
     <section class="view" id="view-candidates">
       <header class="view-header">
-        <h2>新模型统一打标</h2>
+        <h2 id="candidate-page-title">新模型统一打标</h2>
         <div class="toolbar">
           <button id="btn-candidate-sync" class="primary">同步 NAS（Worker＋历史结算图）</button>
           <span id="candidate-sync-state" class="muted"></span>
@@ -500,6 +503,7 @@
             <select id="candidate-status-filter">
               <option value="needs_review">待确认／待补齐</option>
               <option value="missing_player">只补本人标记</option>
+              <option value="legacy_hero">历史英雄快速补标</option>
               <option value="confirmed">已确认</option>
               <option value="skipped">已跳过</option>
               <option value="all">全部</option>
@@ -507,7 +511,26 @@
           </label>
           <button id="btn-candidate-refresh">刷新</button>
         </div>
-        <p class="hint small">一张图只看一次：右侧确认对局状态、模式、英雄选择和结算面板，图片下方确认英雄头像来自 HUD、积分板还是结算图。模型结果只是预选，未人工确认的图片不会进入训练集；旧积分板、商店和光栅框会保留，但这里不要求重画。</p>
+        <div id="candidate-legacy-filters"
+             class="toolbar candidate-legacy-filters hidden">
+          <strong>历史补标范围</strong>
+          <label>主播
+            <select id="candidate-legacy-streamer">
+              <option value="">全部主播（连续排列）</option>
+            </select>
+          </label>
+          <label>画面
+            <select id="candidate-legacy-screen">
+              <option value="">HUD＋积分板＋结算</option>
+              <option value="gameplay_hud">只看 HUD</option>
+              <option value="scoreboard">只看积分板</option>
+              <option value="result_page">只看结算图</option>
+            </select>
+          </label>
+          <span id="candidate-legacy-summary" class="muted"
+                role="status" aria-live="polite"></span>
+        </div>
+        <p id="candidate-page-hint" class="hint small">一张图只看一次：右侧确认对局状态、模式、英雄选择和结算面板，图片下方确认英雄头像来自 HUD、积分板还是结算图。模型结果只是预选，未人工确认的图片不会进入训练集；旧积分板、商店和光栅框会保留，但这里不要求重画。</p>
       </header>
       <div id="candidate-layout">
         <div id="candidate-stage">
@@ -551,6 +574,9 @@
                 </div>
               </details>
               <div class="candidate-hero-tools">
+                <button id="btn-candidate-player-unreadable" type="button"
+                        class="hidden"
+                        title="画面中无法判断哪个英雄是主播本人">本人看不清</button>
                 <button id="btn-candidate-hero-draw" type="button"
                         title="缺少头像框时，按左队到右队的顺序继续补画">补画头像</button>
                 <button id="btn-candidate-hero-save-template" type="button"
@@ -576,7 +602,8 @@
         <aside id="candidate-inspector">
           <div class="toolbar tight">
             <button id="btn-candidate-prev">←</button>
-            <span id="candidate-progress" class="muted">0/0</span>
+            <span id="candidate-progress" class="muted"
+                  role="status" aria-live="polite">0/0</span>
             <button id="btn-candidate-next">→</button>
           </div>
           <div id="candidate-meta" class="muted small"></div>
@@ -659,20 +686,25 @@
     <!-- ============ 模型测试视图 ============ -->
     <section class="view" id="view-model-tests">
       <header class="view-header">
-        <h2>模型测试与部署候选</h2>
+        <h2>模型验收</h2>
         <div class="toolbar">
           <label>训练结果 <select id="model-test-run"></select></label>
           <label>数据切分
             <select id="model-test-split">
               <option value="test">固定测试集</option>
+              <option value="post_run_challenge">训练后新增确认集</option>
               <option value="val">验证集</option>
               <option value="train">训练集（只排查，不作验收）</option>
             </select>
           </label>
           <button id="btn-model-test-load">载入样本</button>
+          <button id="btn-model-test-batch" class="primary">一键测试全部</button>
           <span id="model-test-state" class="muted"></span>
         </div>
-        <p class="hint small">这里直接读取某次训练 run 的 ONNX 和它绑定的不可变数据快照，不再先覆盖“current”文件。先看固定测试集和难例，再记录通过／不通过；只有验收通过的 run 才能进入 Worker 模型包。</p>
+        <p class="hint small">逐张对比“训练标签”和“模型答案”。固定测试集保持不变；训练后新增确认集只收本次训练没有使用、且训练完成后由人工确认的数据，两套结果分开看。</p>
+        <div id="model-test-summary" class="model-test-summary"></div>
+        <section id="model-test-report" class="model-test-report hidden"
+                 aria-live="polite"></section>
       </header>
       <div id="model-test-layout">
         <div id="model-test-stage">
@@ -686,14 +718,22 @@
             <button id="btn-model-test-next">→</button>
           </div>
           <div class="insp-block">
-            <h3>人工真值</h3>
-            <pre id="model-test-expected">--</pre>
+            <h3>这一张是否答对</h3>
+            <div id="model-test-comparison" class="model-test-empty">运行后显示结果</div>
           </div>
           <div class="insp-block">
-            <h3>模型输出</h3>
-            <label>检测阈值 <input id="model-test-conf" type="number" value="0.25" min="0" max="1" step="0.05"></label>
+            <h3>训练标签（标准答案）</h3>
+            <div id="model-test-expected" class="model-test-answer">--</div>
+          </div>
+          <div class="insp-block">
+            <h3>模型答案</h3>
+            <label id="model-test-conf-row">检测阈值 <input id="model-test-conf" type="number" value="0.25" min="0" max="1" step="0.05"></label>
             <button id="btn-model-test-predict" class="primary full">运行这一张</button>
-            <pre id="model-test-output">--</pre>
+            <div id="model-test-output" class="model-test-answer">尚未运行</div>
+            <details id="model-test-raw-details" class="model-test-raw hidden">
+              <summary>查看原始技术输出</summary>
+              <pre id="model-test-raw-output">--</pre>
+            </details>
           </div>
           <div class="insp-block">
             <h3>本次验收结论</h3>
@@ -706,10 +746,19 @@
         </aside>
       </div>
       <div class="model-package-panel">
-        <h3>组装 Analysis Worker 模型包</h3>
-        <p class="hint small">每个角色选择一个“验收通过”的 run。五个角色齐全，并且各自固定测试集覆盖必要类别后，状态才是 ready；否则只生成 incomplete 研究包，不能生产部署。服务端不会加载这些 ONNX。</p>
+        <div class="model-package-heading">
+          <div>
+            <h3>生成 Worker 发布候选包</h3>
+            <p class="hint small">把 7 个新模型以及各自的标签、预处理规则、训练数据版本、指标和文件哈希封装成一个不可变 ZIP。</p>
+          </div>
+          <span class="model-package-notice">不会自动部署或重启 Worker</span>
+        </div>
+        <details class="model-package-explainer">
+          <summary>这个模型包具体有什么用？</summary>
+          <p>它相当于一次可追溯的“装箱”：以后部署时可以准确知道 Worker 使用的是哪几个模型、哪批训练数据和哪套输入规则。7 个新模型都必须验收通过，避免发布一个只能扫时间线、却不能完成头像、英雄和主播位置识别的半成品。生成 ZIP 只是准备候选版本，仍需后续的 Worker 加载与发布步骤。</p>
+        </details>
         <div id="model-package-runs"></div>
-        <button id="btn-build-model-package" class="primary">生成不可变 Worker 模型包</button>
+        <button id="btn-build-model-package" class="primary">生成候选包</button>
         <span id="model-package-state" class="muted"></span>
         <div id="model-package-list"></div>
       </div>
@@ -724,19 +773,35 @@
           <span id="training-global-state" class="muted"></span>
         </div>
         <p class="hint small">点击训练时会先冻结“这一刻”的数据集快照，再启动后台训练。之后继续打标不会改变正在训练的内容；新增数据后再次点击，会生成新的数据集版本和训练记录，旧模型完整保留。</p>
+        <div id="training-overview" class="training-overview"></div>
       </header>
       <div id="training-task-grid"></div>
-      <h3 class="section-title">训练记录</h3>
+      <div class="training-section-heading">
+        <div><h3 class="section-title">训练记录</h3>
+          <p>每次训练都绑定不可变数据快照；可从成功记录直接进入模型验收。</p></div>
+        <span id="training-runs-count">0 条记录</span>
+      </div>
       <div class="table-wrap training-table-wrap">
         <table id="training-runs-table">
           <thead><tr><th>模型</th><th>数据快照</th><th>状态</th><th>进度</th><th>指标</th><th>模型文件</th><th>操作</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
-      <details id="training-log-box" class="training-log-box hidden" open>
-        <summary>训练日志（最近 200 行）</summary>
+      <dialog id="training-log-dialog" class="training-log-dialog"
+        aria-labelledby="training-log-title">
+        <div class="training-log-heading">
+          <div>
+            <h3 id="training-log-title">训练日志</h3>
+            <p id="training-log-run" class="muted small"></p>
+          </div>
+          <div class="training-log-actions">
+            <button id="btn-training-log-refresh" type="button">刷新</button>
+            <button id="btn-training-log-close" type="button"
+              aria-label="关闭训练日志">关闭</button>
+          </div>
+        </div>
         <pre id="training-log"></pre>
-      </details>
+      </dialog>
     </section>
   </main>
 </div>

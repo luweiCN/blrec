@@ -18,6 +18,7 @@ from blrec.vainglory.repository import (
     VaingloryConflict,
     VaingloryNotFound,
     VaingloryRepository,
+    _unified_training_suggestions,
 )
 from blrec.vainglory.vision import RecordedPlayer, ResultLayout
 
@@ -72,6 +73,48 @@ async def seed_part(
         "VALUES(?,?,?,?,?,1,'ready',1,1)",
         (part_id, session_id, 'run:{}'.format(session_id), part_index, str(path)),
     )
+
+
+def test_new_model_candidates_map_directly_to_unified_suggestions() -> None:
+    common = {
+        'at_ms': 10_000,
+        'segment_start_ms': 0,
+        'image_jpeg': b'jpeg',
+        'model_version': 'vision-package-v1',
+        'stage_class': 'gameplay',
+        'stage_confidence': 0.9,
+        'mode_class': 'aram',
+        'mode_confidence': 0.8,
+        'selection_reason': '新模型直接预填',
+    }
+    suggestions = _unified_training_suggestions(
+        (
+            TrainingCandidate(
+                **common,
+                task='match_flow',
+                suggested_label='match_flow',
+                suggestion_confidence=0.91,
+            ),
+            TrainingCandidate(
+                **common,
+                task='hero_select',
+                suggested_label='not_select',
+                suggestion_confidence=0.93,
+            ),
+            TrainingCandidate(
+                **common,
+                task='match_mode',
+                suggested_label='aram',
+                suggestion_confidence=0.88,
+            ),
+        )
+    )
+
+    assert {key: value['label'] for key, value in suggestions.items()} == {
+        'match_flow': 'match_flow',
+        'hero_select': 'not_select',
+        'match_mode': 'aram',
+    }
 
 
 @pytest.mark.asyncio
@@ -348,6 +391,60 @@ async def test_same_worker_frame_is_stored_once_with_multiple_suggestions(
         metadata = json.loads(sidecars[0].read_text(encoding='utf8'))
         assert metadata['suggestions']['match_flow']['label'] == 'match_flow'
         assert metadata['suggestions']['result_panel']['label'] == 'result_panel'
+        assert len(metadata['model_outputs']) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_same_result_event_stores_one_worker_training_candidate(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        candidate_root = tmp_path / 'training-candidates'
+        repository = VaingloryRepository(
+            database, training_candidate_root=candidate_root, clock=lambda: 100
+        )
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        common = {
+            'segment_start_ms': 10_000,
+            'model_version': 'result-detector-v1',
+            'suggested_label': 'result_panel',
+            'stage_class': 'result_page',
+            'stage_confidence': 0.9,
+            'mode_class': '3v3',
+            'mode_confidence': 0.8,
+            'selection_reason': '同一结算事件',
+            'task': 'result_detector',
+        }
+        candidates = (
+            TrainingCandidate(
+                **common,
+                at_ms=12_000,
+                image_jpeg=b'\xff\xd8first-result\xff\xd9',
+                suggestion_confidence=0.8,
+            ),
+            TrainingCandidate(
+                **common,
+                at_ms=25_000,
+                image_jpeg=b'\xff\xd8second-result\xff\xd9',
+                suggestion_confidence=0.9,
+            ),
+        )
+
+        await repository.complete_part(1, (), training_candidates=candidates)
+
+        images = list(candidate_root.rglob('*.jpg'))
+        sidecars = list(candidate_root.rglob('*.json'))
+        assert len(images) == len(sidecars) == 1
+        metadata = json.loads(sidecars[0].read_text(encoding='utf8'))
+        assert metadata['at_ms'] == 25_000
         assert len(metadata['model_outputs']) == 2
     finally:
         await database.close()
@@ -1117,7 +1214,15 @@ async def test_analysis_queue_exposes_live_time_durations_and_confirmed_matches(
 
         first_claim = await repository.claim_next()
         assert first_claim is not None
-        await repository.complete_part(1, (analyzed_match(),))
+        await repository.complete_part(
+            1,
+            (analyzed_match(),),
+            analysis_summary={
+                'schemaVersion': 1,
+                'pipeline': 'timeline-v2',
+                'modelPackageId': 'vision-package-v1',
+            },
+        )
         await database.execute(
             'UPDATE recording_parts SET video_deleted_at=1500 WHERE id=1'
         )
@@ -1140,6 +1245,11 @@ async def test_analysis_queue_exposes_live_time_durations_and_confirmed_matches(
         assert status.recent_completions[0].match_previews[0].match_id > 0
         assert status.recent_completions[0].part_match_duration_seconds == 900
         assert status.recent_completions[0].session_match_duration_seconds == 900
+        assert status.recent_completions[0].analysis_summary == {
+            'schemaVersion': 1,
+            'pipeline': 'timeline-v2',
+            'modelPackageId': 'vision-package-v1',
+        }
     finally:
         await database.close()
 

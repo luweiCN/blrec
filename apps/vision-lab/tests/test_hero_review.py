@@ -1,5 +1,6 @@
 """积分板／结算图英雄阵容预填与人工纠错。"""
 
+import json
 import sys
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from labeler import db, hero_review  # noqa: E402
+from labeler import config, db, export, hero_review, training  # noqa: E402
 
 
 class HeroReviewTestCase(unittest.TestCase):
@@ -129,12 +130,11 @@ class TestHeroReviewStorage(HeroReviewTestCase):
 
         self.conn = db.connect(self.root / 'lab.db')
 
-        migrated = db.get_training_review_hero_lineup(
-            self.conn, self.frame_id
-        )
+        migrated = db.get_training_review_hero_lineup(self.conn, self.frame_id)
         self.assertEqual(migrated['slots'][0]['suggested_label'], 'Adagio')
         self.assertIsNone(migrated['player_side'])
         self.assertIsNone(migrated['player_slot'])
+        self.assertEqual(migrated['player_status'], 'pending')
         hud = db.replace_training_review_hero_layout(
             self.conn,
             frame_id=self.frame_id,
@@ -193,9 +193,7 @@ class TestHeroReviewStorage(HeroReviewTestCase):
             db.save_training_review_hero_lineup(
                 self.conn,
                 frame_id=self.frame_id,
-                labels=[
-                    {'side': 'left', 'slot': 1, 'hero_label': 'Adagio'}
-                ],
+                labels=[{'side': 'left', 'slot': 1, 'hero_label': 'Adagio'}],
                 allowed_labels={'Adagio'},
             )
 
@@ -209,11 +207,7 @@ class TestHeroReviewStorage(HeroReviewTestCase):
             slots=self.slots(),
         )
         labels = [
-            {
-                'side': slot['side'],
-                'slot': slot['slot'],
-                'hero_label': 'Adagio',
-            }
+            {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
             for slot in self.slots()
         ]
 
@@ -228,6 +222,7 @@ class TestHeroReviewStorage(HeroReviewTestCase):
 
         self.assertEqual(confirmed['player_side'], 'right')
         self.assertEqual(confirmed['player_slot'], 2)
+        self.assertEqual(confirmed['player_status'], 'identified')
         moved = db.replace_training_review_hero_layout(
             self.conn,
             frame_id=self.frame_id,
@@ -245,12 +240,14 @@ class TestHeroReviewStorage(HeroReviewTestCase):
             team_size=3,
             method='manual-circle-v1',
             slots=[
-                slot for slot in self.slots()
+                slot
+                for slot in self.slots()
                 if not (slot['side'] == 'right' and slot['slot'] == 2)
             ],
         )
         self.assertIsNone(removed['player_side'])
         self.assertIsNone(removed['player_slot'])
+        self.assertEqual(removed['player_status'], 'pending')
         with self.assertRaisesRegex(ValueError, '主播英雄位置无效'):
             db.save_training_review_hero_lineup(
                 self.conn,
@@ -259,6 +256,42 @@ class TestHeroReviewStorage(HeroReviewTestCase):
                 allowed_labels={'Adagio'},
                 player_side='left',
                 player_slot=4,
+            )
+
+    def test_player_position_can_be_marked_unreadable(self):
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=self.frame_id,
+            screen_type='scoreboard',
+            team_size=3,
+            method='sift-v1',
+            slots=self.slots(),
+        )
+        labels = [
+            {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'unreadable'}
+            for slot in self.slots()
+        ]
+
+        confirmed = db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=self.frame_id,
+            labels=labels,
+            allowed_labels={'Adagio'},
+            player_status='unreadable',
+        )
+
+        self.assertEqual(confirmed['player_status'], 'unreadable')
+        self.assertIsNone(confirmed['player_side'])
+        self.assertIsNone(confirmed['player_slot'])
+        with self.assertRaisesRegex(ValueError, '主播英雄位置状态冲突'):
+            db.save_training_review_hero_lineup(
+                self.conn,
+                frame_id=self.frame_id,
+                labels=labels,
+                allowed_labels={'Adagio'},
+                player_status='unreadable',
+                player_side='left',
+                player_slot=1,
             )
 
     def test_manual_hud_layout_can_be_saved_one_circle_at_a_time(self):
@@ -337,6 +370,46 @@ class TestHeroReviewStorage(HeroReviewTestCase):
                 slots=self.slots()[:-1],
             )
 
+    def test_complete_layout_still_saves_when_streamer_name_is_empty(self):
+        from labeler import server
+
+        with self.conn:
+            self.conn.execute(
+                'UPDATE videos SET streamer = ? WHERE id = '
+                '(SELECT video_id FROM frames WHERE id = ?)',
+                ('', self.frame_id),
+            )
+
+        def recognize(_path, slots):
+            return [
+                {**slot, 'suggested_label': 'Adagio', 'suggestion_confidence': 0.8}
+                for slot in slots
+            ]
+
+        with (
+            mock.patch.object(
+                server, '_conn', side_effect=lambda: db.connect(self.root / 'lab.db')
+            ),
+            mock.patch.object(
+                server.hero_review, 'recognize_slots', side_effect=recognize
+            ),
+        ):
+            lineup = server.api_save_training_review_hero_layout(
+                self.frame_id,
+                {
+                    'screen_type': 'result_page',
+                    'team_size': 3,
+                    'slots': self.slots(),
+                    'recognize': True,
+                    'save_template': True,
+                },
+            )
+
+        self.assertEqual(len(lineup['slots']), 6)
+        self.assertFalse(lineup['template_saved'])
+        saved = db.get_training_review_hero_lineup(self.conn, self.frame_id)
+        self.assertEqual(len(saved['slots']), 6)
+
     def test_newer_template_refreshes_pending_automatic_layout(self):
         from labeler import server
 
@@ -368,33 +441,25 @@ class TestHeroReviewStorage(HeroReviewTestCase):
             )
             self.conn.execute(
                 "UPDATE training_review_hero_templates SET updated_at = "
-                "'2026-08-09T12:01:00' WHERE streamer = '测试主播'",
+                "'2026-08-09T12:01:00' WHERE streamer = '测试主播'"
             )
 
         def recognize(_path, slots):
             return [
-                {
-                    **slot,
-                    'suggested_label': 'Adagio',
-                    'suggestion_confidence': 0.8,
-                }
+                {**slot, 'suggested_label': 'Adagio', 'suggestion_confidence': 0.8}
                 for slot in slots
             ]
 
         with (
             mock.patch.object(
-                server, '_conn',
-                side_effect=lambda: db.connect(self.root / 'lab.db'),
+                server, '_conn', side_effect=lambda: db.connect(self.root / 'lab.db')
             ),
             mock.patch.object(
-                server.hero_review, 'recognize_slots', side_effect=recognize,
+                server.hero_review, 'recognize_slots', side_effect=recognize
             ),
         ):
             lineup = server.api_training_review_hero_lineup(
-                self.frame_id,
-                screen_type='result_page',
-                team_size=3,
-                refresh=False,
+                self.frame_id, screen_type='result_page', team_size=3, refresh=False
             )
 
         self.assertEqual(lineup['slots'][-1]['crop']['w'], 0.06)
@@ -429,21 +494,300 @@ class TestHeroReviewStorage(HeroReviewTestCase):
             )
             self.conn.execute(
                 "UPDATE training_review_hero_templates SET updated_at = "
-                "'2026-08-09T12:01:00' WHERE streamer = '测试主播'",
+                "'2026-08-09T12:01:00' WHERE streamer = '测试主播'"
             )
 
         with mock.patch.object(
-            server, '_conn',
-            side_effect=lambda: db.connect(self.root / 'lab.db'),
+            server, '_conn', side_effect=lambda: db.connect(self.root / 'lab.db')
         ):
             lineup = server.api_training_review_hero_lineup(
-                self.frame_id,
-                screen_type='result_page',
-                team_size=3,
-                refresh=False,
+                self.frame_id, screen_type='result_page', team_size=3, refresh=False
             )
 
         self.assertEqual(lineup['slots'][-1]['crop']['w'], 0.03)
+
+
+class TestHeroTrainingExport(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.conn = db.connect(self.root / 'lab.db')
+        self.old_export_dir = config.EXPORT_DIR
+        config.EXPORT_DIR = self.root / 'datasets'
+
+    def tearDown(self):
+        config.EXPORT_DIR = self.old_export_dir
+        self.conn.close()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _slots():
+        return [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.40 if side == 'left' else 0.52,
+                    'y': 0.15 + slot * 0.16,
+                    'w': 0.06,
+                    'h': 0.106667,
+                },
+                'suggested_label': 'Adagio',
+                'suggestion_confidence': 0.8,
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+
+    @staticmethod
+    def _player_slots(team_size: int):
+        return [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.12 + slot * 0.07 + (0.42 if side == 'right' else 0),
+                    'y': 0.2,
+                    'w': 0.05,
+                    'h': 0.09,
+                },
+                'suggested_label': 'Adagio',
+                'suggestion_confidence': 0.8,
+            }
+            for side in ('left', 'right')
+            for slot in range(1, team_size + 1)
+        ]
+
+    def _confirmed_lineup(self, video_id: int, index: int, screen_type: str) -> int:
+        path = self.root / f'frame-{index}.jpg'
+        Image.new('RGB', (1280, 720), (index * 10, 40, 60)).save(path)
+        frame_id = db.add_frames(
+            self.conn,
+            video_id,
+            [
+                {
+                    'timestamp_ms': index * 1_000,
+                    'width': 1280,
+                    'height': 720,
+                    'sha256': f'{index:064x}',
+                    'phash': '',
+                    'frame_path': str(path),
+                    'thumb_path': '',
+                    'strategy': 'test',
+                    'model_source': '',
+                    'model_confidence': None,
+                }
+            ],
+        )[0]
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id=f'part-{video_id}:{index}',
+            suggestions={},
+        )
+        slots = self._slots()
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=frame_id,
+            screen_type=screen_type,
+            team_size=3,
+            method='test',
+            slots=slots,
+        )
+        labels = [
+            {
+                'side': slot['side'],
+                'slot': slot['slot'],
+                'hero_label': (
+                    'unreadable'
+                    if index == 1 and slot['side'] == 'left' and slot['slot'] == 1
+                    else 'Alpha' if slot['slot'] % 2 else 'Adagio'
+                ),
+            }
+            for slot in slots
+        ]
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=labels,
+            allowed_labels={'Adagio', 'Alpha'},
+        )
+        return frame_id
+
+    def test_confirmed_boxes_and_readable_heroes_export_to_separate_tasks(self):
+        videos = [
+            db.upsert_video(
+                self.conn,
+                remote_path=f'/nas/{index}.flv',
+                streamer=f'主播{index}',
+                room_id=str(index),
+                filename=f'{index}.flv',
+                duration_seconds=100,
+                size_bytes=1,
+            )
+            for index in (1, 2)
+        ]
+        index = 1
+        for video_id in videos:
+            for screen_type in ('gameplay_hud', 'scoreboard', 'result_page'):
+                self._confirmed_lineup(video_id, index, screen_type)
+                index += 1
+
+        summaries = {item['id']: item for item in training.task_summaries(self.conn)}
+        avatar = export.export_hero_avatar_detector(self.conn)
+        identity = export.export_hero_identity_classifier(self.conn)
+
+        self.assertTrue(summaries['hero_avatar_detector']['ready'])
+        self.assertTrue(summaries['hero_identity']['ready'])
+        self.assertEqual(avatar['total'], 6)
+        self.assertEqual(avatar['boxes'], 36)
+        self.assertEqual(identity['total'], 35)
+        self.assertEqual(identity['excluded_unreadable'], 1)
+        avatar_samples = [
+            json.loads(line)
+            for line in (Path(avatar['dir']) / 'samples.jsonl')
+            .read_text(encoding='utf-8')
+            .splitlines()
+        ]
+        first_avatar = avatar_samples[0]
+        detector_labels = (
+            (
+                Path(avatar['dir'])
+                / 'labels'
+                / first_avatar['split']
+                / f"{first_avatar['sample_id']}.txt"
+            )
+            .read_text(encoding='utf-8')
+            .splitlines()
+        )
+        self.assertEqual(len(detector_labels), 6)
+        identity_samples = [
+            json.loads(line)
+            for line in (Path(identity['dir']) / 'samples.jsonl')
+            .read_text(encoding='utf-8')
+            .splitlines()
+        ]
+        self.assertNotIn('unreadable', {sample['label'] for sample in identity_samples})
+        first_identity = identity_samples[0]
+        crop = (
+            Path(identity['dir'])
+            / 'images'
+            / first_identity['split']
+            / first_identity['label']
+            / f"{first_identity['sample_id']}.jpg"
+        )
+        self.assertTrue(crop.is_file())
+        with Image.open(crop) as image:
+            self.assertGreaterEqual(min(image.size), 70)
+
+    def test_player_position_exports_full_panels_as_an_independent_task(self):
+        positions = [
+            ('left', 1),
+            ('left', 2),
+            ('left', 3),
+            ('left', 4),
+            ('left', 5),
+            ('right', 1),
+            ('right', 2),
+            ('right', 3),
+        ]
+        index = 100
+        for video_number in range(1, 4):
+            video_id = db.upsert_video(
+                self.conn,
+                remote_path=f'/nas/player-{video_number}.flv',
+                streamer=f'主播{video_number}',
+                room_id=str(video_number),
+                filename=f'player-{video_number}.flv',
+                duration_seconds=100,
+                size_bytes=1,
+            )
+            for side, slot in positions:
+                index += 1
+                team_size = 5 if slot > 3 else 3
+                frame_path = self.root / f'player-frame-{index}.jpg'
+                Image.new('RGB', (1280, 720), (index % 255, 80, 120)).save(frame_path)
+                frame_id = db.add_frames(
+                    self.conn,
+                    video_id,
+                    [
+                        {
+                            'timestamp_ms': index * 1_000,
+                            'width': 1280,
+                            'height': 720,
+                            'sha256': f'{index:064x}',
+                            'phash': '',
+                            'frame_path': str(frame_path),
+                            'thumb_path': '',
+                            'strategy': 'test',
+                            'model_source': '',
+                            'model_confidence': None,
+                        }
+                    ],
+                )[0]
+                db.add_training_review_source(
+                    self.conn,
+                    frame_id=frame_id,
+                    source_type='worker',
+                    source_id=f'player-{video_number}:{index}',
+                    suggestions={},
+                )
+                slots = self._player_slots(team_size)
+                db.replace_training_review_hero_suggestions(
+                    self.conn,
+                    frame_id=frame_id,
+                    screen_type=('scoreboard' if index % 2 else 'result_page'),
+                    team_size=team_size,
+                    method='test',
+                    slots=slots,
+                )
+                db.save_training_review_hero_lineup(
+                    self.conn,
+                    frame_id=frame_id,
+                    labels=[
+                        {
+                            'side': value['side'],
+                            'slot': value['slot'],
+                            'hero_label': 'Adagio',
+                        }
+                        for value in slots
+                    ],
+                    allowed_labels={'Adagio'},
+                    player_side=side,
+                    player_slot=slot,
+                )
+
+        summary = next(
+            item
+            for item in training.task_summaries(self.conn)
+            if item['id'] == 'player_position'
+        )
+        snapshot = export.export_player_position_classifier(self.conn)
+
+        self.assertTrue(summary['ready'])
+        self.assertEqual(summary['counts']['total'], 24)
+        self.assertEqual(snapshot['classes'], 8)
+        self.assertEqual(snapshot['by_split'], {'train': 8, 'val': 8, 'test': 8})
+        samples = [
+            json.loads(line)
+            for line in (Path(snapshot['dir']) / 'samples.jsonl')
+            .read_text(encoding='utf-8')
+            .splitlines()
+        ]
+        self.assertEqual(
+            {sample['label'] for sample in samples}, set(export.PLAYER_POSITION_LABELS)
+        )
+        first = samples[0]
+        exported_image = (
+            Path(snapshot['dir'])
+            / 'images'
+            / first['split']
+            / first['label']
+            / f"{first['sample_id']}.jpg"
+        )
+        with Image.open(exported_image) as image:
+            self.assertEqual(image.size, (1280, 720))
 
 
 class TestHeroReviewInference(unittest.TestCase):
@@ -456,10 +800,7 @@ class TestHeroReviewInference(unittest.TestCase):
                 'sources': [
                     {
                         'source_type': 'worker',
-                        'metadata': {
-                            'stage_class': 'scoreboard',
-                            'mode_class': '5v5',
-                        },
+                        'metadata': {'stage_class': 'scoreboard', 'mode_class': '5v5'},
                     }
                 ],
             }
@@ -485,16 +826,10 @@ class TestHeroReviewInference(unittest.TestCase):
                 'result_panel_label': None,
                 'match_mode_label': None,
                 'suggestions': {
-                    'result_panel': {
-                        'label': 'result_panel',
-                        'confidence': 0.9,
-                    }
+                    'result_panel': {'label': 'result_panel', 'confidence': 0.9}
                 },
                 'sources': [
-                    {
-                        'source_type': 'result_archive',
-                        'metadata': {'game_mode': '3v3'},
-                    }
+                    {'source_type': 'result_archive', 'metadata': {'game_mode': '3v3'}}
                 ],
             }
         )
@@ -511,10 +846,7 @@ class TestHeroReviewInference(unittest.TestCase):
                 screen_type='scoreboard',
                 team_size=3,
                 panel_box={'x': 0.0, 'y': 0.2, 'w': 1.0, 'h': 0.6},
-                recognize_crop=lambda _image: {
-                    'label': 'Adagio',
-                    'confidence': 0.9,
-                },
+                recognize_crop=lambda _image: {'label': 'Adagio', 'confidence': 0.9},
             )
 
         self.assertEqual(team_size, 3)
@@ -522,8 +854,12 @@ class TestHeroReviewInference(unittest.TestCase):
         self.assertEqual(
             {(slot['side'], slot['slot']) for slot in result},
             {
-                ('left', 1), ('left', 2), ('left', 3),
-                ('right', 1), ('right', 2), ('right', 3),
+                ('left', 1),
+                ('left', 2),
+                ('left', 3),
+                ('right', 1),
+                ('right', 2),
+                ('right', 3),
             },
         )
         self.assertTrue(all(slot['suggested_label'] == 'Adagio' for slot in result))
@@ -555,10 +891,7 @@ class TestHeroReviewInference(unittest.TestCase):
             result = hero_review.recognize_slots(
                 frame_path,
                 slots,
-                recognize_crop=lambda _image: {
-                    'label': 'Adagio',
-                    'confidence': 0.9,
-                },
+                recognize_crop=lambda _image: {'label': 'Adagio', 'confidence': 0.9},
             )
 
         self.assertEqual(len(result), 2)

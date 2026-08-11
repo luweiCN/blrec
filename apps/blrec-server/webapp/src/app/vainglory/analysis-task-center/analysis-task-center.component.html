@@ -143,7 +143,12 @@
       </section>
 
       <dl *ngIf="active.runtimeStage" class="analysis-stage-metrics">
-        <div><dt>分类采样帧</dt><dd>{{ active.coarseFrames }}</dd></div>
+        <div *ngIf="active.modelPackageId">
+          <dt>模型包</dt><dd>{{ active.modelPackageId }}</dd>
+        </div>
+        <div><dt>时间线采样帧</dt><dd>{{ active.coarseFrames }}</dd></div>
+        <div><dt>关键帧</dt><dd>{{ active.keyframeFrames }}</dd></div>
+        <div><dt>精确补帧</dt><dd>{{ active.seekFillFrames }}</dd></div>
         <div><dt>推断对局段</dt><dd>{{ active.gameplayRuns }}</dd></div>
         <div><dt>精扫区间</dt><dd>{{ active.resultWindows }}</dd></div>
         <div>
@@ -285,6 +290,24 @@
             <dt>处理总耗时</dt>
             <dd>{{ formatDuration(completion.elapsedSeconds) }}</dd>
           </div>
+          <ng-container *ngIf="completion.analysisSummary as summary">
+            <div><dt>模型包</dt><dd>{{ summary.modelPackageId || "旧流程" }}</dd></div>
+            <div>
+              <dt>时间线采样</dt>
+              <dd>
+                {{ summary.sampledFrames }} 帧 · 关键帧
+                {{ summary.keyframeFrames }} · 补帧 {{ summary.seekFillFrames }}
+              </dd>
+            </div>
+            <div>
+              <dt>新流程结果</dt>
+              <dd>
+                {{ summary.timelineSegments.length }} 个对局段 ·
+                {{ summary.resultWindows.length }} 个精扫区间 ·
+                {{ summary.hudLineupCandidateCount }} 个 HUD 阵容证据
+              </dd>
+            </div>
+          </ng-container>
         </dl>
         <button
           *ngIf="completion.matchPreviews.length > 0"

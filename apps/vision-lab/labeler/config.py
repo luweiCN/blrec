@@ -227,6 +227,16 @@ OCR_USABLE = {'yes': '可用', 'no': '不可用', 'unknown': '未知'}
 
 # 结算框评估(仅 result_page 时填写)
 RESULT_CLARITY = {'clear': '清晰', 'translucent': '半透明', 'unknown': '不确定'}
+PANEL_RENDER_STATES = {
+    'clear': '正常显示',
+    'translucent': '半透明／过渡中',
+    'unknown': '看不清',
+}
+HERO_SELECT_VISIBILITY = {
+    'clear': '清晰',
+    'occluded': '有遮挡但仍能确认',
+    'unknown': '历史数据未记录',
+}
 RESULT_OCCLUSION = {'none': '无遮挡', 'occluded': '有遮挡', 'unknown': '不确定'}
 # 遮挡物类型(可多选,有遮挡时填写)
 OCCLUDER_TYPES = [
@@ -253,16 +263,14 @@ STRATEGIES = {
 
 # 模型预打分只读取 Vision Lab 自己的模型工作目录。
 MODEL_PATH = Path(
-    os.environ.get(
-        'VISION_LAB_RESULT_MODEL', str(MODELS_DIR / 'result-panel.onnx')
-    )
+    os.environ.get('VISION_LAB_RESULT_MODEL', str(MODELS_DIR / 'result-panel.onnx'))
 ).expanduser()
 MODEL_INPUT_SIZE = 640
 MODEL_CONF_THRESHOLD = 0.55
 
 # 抽帧默认
-COARSE_SAMPLE_SECONDS = 2   # 模型粗扫间隔(秒)
-DENSE_FPS = 4               # 密集抽帧帧率
-DENSE_WINDOW_SECONDS = 5    # 候选前后窗口(秒)
-DEFAULT_JPEG_QUALITY = 5    # mjpeg 质量(2-31,越小越好;原始分辨率保存)
+COARSE_SAMPLE_SECONDS = 2  # 模型粗扫间隔(秒)
+DENSE_FPS = 4  # 密集抽帧帧率
+DENSE_WINDOW_SECONDS = 5  # 候选前后窗口(秒)
+DEFAULT_JPEG_QUALITY = 5  # mjpeg 质量(2-31,越小越好;原始分辨率保存)
 MAX_FRAMES_PER_VIDEO = 5000  # 单个视频保护上限

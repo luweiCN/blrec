@@ -10,9 +10,20 @@ from blrec.vainglory.analyzer import (
     AnalyzedHero,
     AnalyzedMatch,
     ResultHit,
+    TrainingCandidate,
     VaingloryVideoAnalyzer,
     VideoPart,
+    _apply_hud_team_size_evidence,
+    _candidate_segment_start,
+    _cap_training_candidate_timestamps,
+    _ModeConflict,
+    _model_package_mode_conflicts,
+    _model_package_run_modes,
+    _remember_model_package_prediction_candidates,
     _remember_training_candidate,
+    _segments_with_gameplay,
+    _selected_model_package_candidates,
+    _timeline_refinement_windows,
     classify_match_kind,
     collapse_analyzed_matches,
     collapse_result_hits,
@@ -25,15 +36,20 @@ from blrec.vainglory.sampling import ScanWindow, TimedFrame, VideoProfile
 from blrec.vainglory.stage_classifier import (
     CONTENT_VAINGLORY,
     MODE_3V3,
+    MODE_5V5,
     MODE_ARAM,
     STAGE_GAMEPLAY,
+    STAGE_OUT_OF_MATCH,
     STAGE_PRE_MATCH,
+    STAGE_TRANSITION,
     ClassifiedObservation,
     StagePrediction,
 )
 from blrec.vainglory.vision import (
     GameplayHud,
+    HeroAvatarDetection,
     HeroFrame,
+    PixelRect,
     ResultLayout,
     RgbFrame,
     ViewportTransform,
@@ -85,6 +101,616 @@ def test_result_hits_collapse_repeated_frames_and_overlapping_windows() -> None:
     )
 
     assert [item.at_ms for item in collapsed] == [10_500, 40_250]
+
+
+def test_model_package_run_mode_prefers_hero_selection_evidence() -> None:
+    observations = (
+        ClassifiedObservation(0, STAGE_PRE_MATCH, 0.9, MODE_ARAM, CONTENT_VAINGLORY),
+        ClassifiedObservation(
+            5_000, STAGE_PRE_MATCH, 0.9, MODE_ARAM, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(10_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+        ClassifiedObservation(15_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+    )
+
+    assert _model_package_run_modes(observations) == {0: 'aram'}
+
+
+def test_model_package_mode_jitter_is_saved_without_changing_locked_mode() -> None:
+    observations = (
+        ClassifiedObservation(0, STAGE_PRE_MATCH, 0.99, MODE_5V5, CONTENT_VAINGLORY),
+        ClassifiedObservation(
+            60_000, STAGE_GAMEPLAY, 0.99, MODE_5V5, CONTENT_VAINGLORY, 0.98
+        ),
+        ClassifiedObservation(
+            120_000, STAGE_GAMEPLAY, 0.99, MODE_3V3, CONTENT_VAINGLORY, 0.97
+        ),
+        ClassifiedObservation(
+            180_000, STAGE_GAMEPLAY, 0.99, MODE_5V5, CONTENT_VAINGLORY, 0.99
+        ),
+    )
+    segments = ((0, 180_000),)
+
+    modes = _model_package_run_modes(observations, run_gap_ms=75_000)
+    conflicts = _model_package_mode_conflicts(observations, segments, modes)
+
+    assert modes == {0: '5v5'}
+    assert [
+        (item.segment_start_ms, item.at_ms, item.predicted_mode, item.stable_mode)
+        for item in conflicts
+    ] == [(0, 120_000, '3v3', '5v5')]
+
+
+def test_ten_hud_positions_disprove_three_player_mode() -> None:
+    assert _apply_hud_team_size_evidence(
+        {0: '3v3'}, {0: tuple('hero-{}'.format(index) for index in range(10))}
+    ) == {0: '5v5'}
+    assert _apply_hud_team_size_evidence(
+        {0: '5v5'}, {0: tuple('hero-{}'.format(index) for index in range(6))}
+    ) == {0: '5v5'}
+
+
+def test_mode_conflict_candidates_are_selected_before_regular_samples() -> None:
+    def candidate(at_ms: int, *, reason: str) -> TrainingCandidate:
+        return TrainingCandidate(
+            at_ms=at_ms,
+            segment_start_ms=0,
+            image_jpeg=b'image',
+            model_version='vision-package-v1',
+            suggested_label='3v3',
+            suggestion_confidence=0.9,
+            stage_class='gameplay',
+            stage_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.9,
+            selection_reason=reason,
+            task='match_mode',
+        )
+
+    conflict = candidate(120_000, reason='模式冲突')
+    regular = tuple(
+        candidate(index * 60_000, reason='正常代表帧') for index in range(1, 40)
+    )
+
+    selected = _selected_model_package_candidates((conflict,), regular, (), (), (), ())
+    capped = _cap_training_candidate_timestamps(selected, maximum_timestamps=24)
+
+    assert conflict in selected
+    assert conflict in capped
+
+
+def test_refined_boundary_frames_feed_the_same_training_candidate_pools() -> None:
+    frame = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
+    representative = []
+    borderline = []
+    result_candidates = []
+    prediction = StagePrediction(
+        CONTENT_VAINGLORY,
+        0.9,
+        STAGE_PRE_MATCH,
+        0.88,
+        MODE_ARAM,
+        0.87,
+        model_version='vision-package-v1',
+        match_flow_label='not_match_flow',
+        match_flow_conf=0.81,
+        hero_select_label='select_aram',
+        hero_select_conf=0.88,
+        match_mode_label='aram',
+        match_mode_conf=0.87,
+    )
+
+    _remember_model_package_prediction_candidates(
+        representative,
+        borderline,
+        result_candidates,
+        prediction=prediction,
+        timed=TimedFrame(45_000, frame, sample_source='keyframe'),
+        model_package_id='vision-package-v1',
+        result_model_version='result-v1',
+        selection_context='新模型边界局部复核',
+    )
+
+    assert any(
+        item.task == 'hero_select' and item.suggested_label == 'select_aram'
+        for item in representative
+    )
+    assert any('边界局部复核' in item.selection_reason for item in borderline)
+    assert [item.suggested_label for item in result_candidates] == ['no_result_panel']
+
+
+def test_timeline_refinement_only_targets_state_change_intervals() -> None:
+    observations = (
+        ClassifiedObservation(0, STAGE_OUT_OF_MATCH, 0.99, MODE_3V3, CONTENT_VAINGLORY),
+        ClassifiedObservation(
+            60_000, STAGE_OUT_OF_MATCH, 0.99, MODE_3V3, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(
+            120_000, STAGE_GAMEPLAY, 0.99, MODE_5V5, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(
+            180_000, STAGE_GAMEPLAY, 0.99, MODE_5V5, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(
+            240_000, STAGE_OUT_OF_MATCH, 0.99, MODE_3V3, CONTENT_VAINGLORY
+        ),
+    )
+    assert _timeline_refinement_windows(observations, duration_ms=300_000) == (
+        ScanWindow(60_000, 120_000),
+        ScanWindow(180_000, 240_000),
+    )
+
+
+def test_cancelled_hero_selection_segment_is_not_scanned_for_results() -> None:
+    observations = (
+        ClassifiedObservation(0, STAGE_PRE_MATCH, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+        ClassifiedObservation(
+            60_000, STAGE_PRE_MATCH, 0.9, MODE_3V3, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(
+            120_000, STAGE_OUT_OF_MATCH, 0.9, MODE_3V3, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(
+            180_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY
+        ),
+    )
+
+    assert _segments_with_gameplay(((0, 60_000), (180_000, 180_000)), observations) == (
+        (180_000, 180_000),
+    )
+
+
+def test_model_package_cascade_keeps_source_timeline_and_direct_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
+
+    class Sampler:
+        def probe(self, _path: str) -> VideoProfile:
+            return VideoProfile(width=4, height=4, duration_ms=25_000)
+
+        def classify_frames(self, _path: str):
+            for target_ms, at_ms, source in (
+                (0, 400, 'keyframe'),
+                (5_000, 5_200, 'keyframe'),
+                (10_000, 10_000, 'seek_fill'),
+                (15_000, 15_100, 'keyframe'),
+                (20_000, 20_000, 'seek_fill'),
+            ):
+                yield TimedFrame(
+                    at_ms=at_ms, frame=frame, target_ms=target_ms, sample_source=source
+                )
+
+        def fine_frames(self, *_args, **_kwargs):
+            return iter(())
+
+    predictions = iter(
+        (
+            StagePrediction(
+                0,
+                0.9,
+                STAGE_PRE_MATCH,
+                0.92,
+                MODE_3V3,
+                0.92,
+                model_version='vision-package-v1',
+                match_flow_label='match_flow',
+                match_flow_conf=0.9,
+                hero_select_label='select_3v3',
+                hero_select_conf=0.92,
+                match_mode_label='3v3',
+                match_mode_conf=0.92,
+            ),
+            StagePrediction(
+                0,
+                0.91,
+                STAGE_PRE_MATCH,
+                0.93,
+                MODE_3V3,
+                0.93,
+                model_version='vision-package-v1',
+                match_flow_label='match_flow',
+                match_flow_conf=0.91,
+                hero_select_label='select_3v3',
+                hero_select_conf=0.93,
+                match_mode_label='3v3',
+                match_mode_conf=0.93,
+            ),
+            StagePrediction(
+                0,
+                0.95,
+                STAGE_GAMEPLAY,
+                0.9,
+                MODE_3V3,
+                0.88,
+                model_version='vision-package-v1',
+                match_flow_label='match_flow',
+                match_flow_conf=0.95,
+                hero_select_label='not_select',
+                hero_select_conf=0.9,
+                match_mode_label='3v3',
+                match_mode_conf=0.88,
+            ),
+            StagePrediction(
+                0,
+                0.96,
+                STAGE_GAMEPLAY,
+                0.91,
+                MODE_3V3,
+                0.89,
+                model_version='vision-package-v1',
+                match_flow_label='match_flow',
+                match_flow_conf=0.96,
+                hero_select_label='not_select',
+                hero_select_conf=0.91,
+                match_mode_label='3v3',
+                match_mode_conf=0.89,
+            ),
+            StagePrediction(
+                0,
+                0.94,
+                STAGE_OUT_OF_MATCH,
+                0.94,
+                MODE_3V3,
+                0,
+                model_version='vision-package-v1',
+                match_flow_label='not_match_flow',
+                match_flow_conf=0.94,
+            ),
+        )
+    )
+
+    class Classifier:
+        model_version = 'vision-package-v1'
+
+        def classify(self, _frame: RgbFrame) -> StagePrediction:
+            return next(predictions)
+
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=Sampler(), stage_classifier=Classifier(), result_panel_detector=object()
+    )
+    monkeypatch.setattr(analyzer, '_detect_result_layout', lambda _frame: None)
+    monkeypatch.setattr(analyzer, '_tail_regression', lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(analyzer, '_exit_regression', lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(
+        analyzer,
+        '_probe_run_modes',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('新模型不应再跑旧开局模式探测')
+        ),
+    )
+    statuses = []
+
+    dense = analyzer.scan_part_cascade(
+        VideoPart(id=1, index=1, path='unused'), status_callback=statuses.append
+    )
+
+    assert dense.model_package_id == 'vision-package-v1'
+    assert [
+        (item.target_ms, item.at_ms, item.sample_source)
+        for item in dense.timeline_points
+    ] == [
+        (0, 400, 'keyframe'),
+        (5_000, 5_200, 'keyframe'),
+        (10_000, 10_000, 'seek_fill'),
+        (15_000, 15_100, 'keyframe'),
+        (20_000, 20_000, 'seek_fill'),
+    ]
+    assert {'match_flow', 'hero_select', 'match_mode'} <= {
+        item.task for item in dense.training_candidates
+    }
+    stage_transitions = []
+    for status in statuses:
+        if not stage_transitions or stage_transitions[-1] != status.stage:
+            stage_transitions.append(status.stage)
+    assert stage_transitions == [
+        'timeline_scan',
+        'timeline_analysis',
+        'result_scan',
+        'candidate_upload',
+    ]
+    assert statuses[-1].keyframe_frames == 3
+    assert statuses[-1].seek_fill_frames == 2
+
+
+def test_avatar_detector_orders_result_heroes_before_identity_recognition() -> None:
+    frame = RgbFrame(100, 100, b'\x00\x00\x00' * 10_000)
+    detections = tuple(
+        HeroAvatarDetection(PixelRect(x, y, x + 8, y + 8), 0.95)
+        for x, y in ((60, 50), (30, 70), (60, 30), (30, 30), (60, 70), (30, 50))
+    )
+
+    class Detector:
+        def detect(self, _frame: RgbFrame):
+            return detections
+
+    labels = iter(('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta'))
+
+    class Recognizer:
+        def recognize(self, _frame: RgbFrame):
+            return HeroMatch(next(labels), 0.9, 10, 5)
+
+    analyzer = VaingloryVideoAnalyzer(
+        hero_avatar_detector=Detector(), hero_recognizer=Recognizer()
+    )
+
+    heroes = analyzer._recognize_detected_result_heroes(frame, hit(0).layout)
+
+    assert heroes is not None
+    assert [(hero.side, hero.slot, hero.label) for hero in heroes] == [
+        ('left', 1, 'Alpha'),
+        ('left', 2, 'Beta'),
+        ('left', 3, 'Gamma'),
+        ('right', 1, 'Delta'),
+        ('right', 2, 'Epsilon'),
+        ('right', 3, 'Zeta'),
+    ]
+
+
+def test_segment_hud_lineup_uses_full_frame_and_retries_after_one_minute() -> None:
+    frame = RgbFrame(100, 50, b'\x00\x00\x00' * 5_000)
+
+    class Sampler:
+        def __init__(self) -> None:
+            self.requested = []
+
+        def frame_at(self, _path: str, at_ms: int) -> RgbFrame:
+            self.requested.append(at_ms)
+            return frame
+
+    class Detector:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def detect(self, _frame: RgbFrame):
+            self.calls += 1
+            count = 5 if self.calls == 1 else 6
+            return tuple(
+                HeroAvatarDetection(PixelRect(index * 10, 0, index * 10 + 8, 8), 0.9)
+                for index in range(count)
+            )
+
+    class Recognizer:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def recognize(self, _frame: RgbFrame):
+            self.index += 1
+            return HeroMatch('hero-{}'.format(self.index), 0.9, 10, 5)
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=sampler, hero_avatar_detector=Detector(), hero_recognizer=Recognizer()
+    )
+    observations = (
+        ClassifiedObservation(10_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+        ClassifiedObservation(40_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+        ClassifiedObservation(70_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+    )
+
+    lineups = analyzer._recognize_segment_hud_lineups(
+        'unused',
+        observations,
+        ((10_000, 70_000),),
+        {10_000: '3v3'},
+        cancelled=None,
+        frame_cache={},
+    )
+
+    assert sampler.requested == [10_000, 70_000]
+    assert lineups == {10_000: tuple('hero-{}'.format(index) for index in range(1, 7))}
+
+
+def test_mode_conflict_probes_nearby_full_frames_for_ten_player_hud() -> None:
+    frame = RgbFrame(100, 50, b'\x00\x00\x00' * 5_000)
+
+    class Sampler:
+        def __init__(self) -> None:
+            self.requested = []
+
+        def frame_at(self, _path: str, at_ms: int) -> RgbFrame:
+            self.requested.append(at_ms)
+            return frame
+
+    class Detector:
+        def detect(self, _frame: RgbFrame):
+            return tuple(
+                HeroAvatarDetection(PixelRect(index * 9, 0, index * 9 + 8, 8), 0.9)
+                for index in range(10)
+            )
+
+    class Recognizer:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def recognize(self, _frame: RgbFrame):
+            self.index += 1
+            return HeroMatch('hero-{}'.format(self.index), 0.9, 10, 5)
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=sampler, hero_avatar_detector=Detector(), hero_recognizer=Recognizer()
+    )
+    observations = tuple(
+        ClassifiedObservation(at_ms, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY)
+        for at_ms in (10_000, 40_000, 70_000)
+    )
+
+    lineups = analyzer._recognize_segment_hud_lineups(
+        'unused',
+        observations,
+        ((10_000, 70_000),),
+        {10_000: '3v3'},
+        cancelled=None,
+        frame_cache={},
+        mode_conflicts=(_ModeConflict(10_000, 40_000, '5v5', '3v3', 0.95),),
+    )
+
+    assert sampler.requested == [40_000]
+    assert len(lineups[10_000]) == 10
+    assert _apply_hud_team_size_evidence({10_000: '3v3'}, lineups) == {10_000: '5v5'}
+
+
+def test_training_candidate_materialization_reuses_full_resolution_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    low = b'\xff\xd8low\xff\xd9'
+    high = b'\xff\xd8high\xff\xd9'
+    frame = RgbFrame(1_920, 1_080, b'\x00\x00\x00' * (1_920 * 1_080))
+
+    class Sampler:
+        def __init__(self) -> None:
+            self.requested = []
+
+        def frame_at(self, _path: str, at_ms: int) -> RgbFrame:
+            self.requested.append(at_ms)
+            return frame
+
+    def candidate(task: str) -> TrainingCandidate:
+        return TrainingCandidate(
+            at_ms=10_000,
+            segment_start_ms=0,
+            image_jpeg=low,
+            model_version='vision-v1',
+            suggested_label='match_flow',
+            suggestion_confidence=0.9,
+            stage_class='gameplay',
+            stage_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.9,
+            selection_reason='test',
+            task=task,
+        )
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(sampler=sampler)
+    monkeypatch.setattr(analyzer_module, '_high_quality_training_jpeg', lambda _: high)
+
+    refreshed = analyzer._refresh_training_candidate_images(
+        'unused',
+        (candidate('match_flow'), candidate('match_flow')),
+        cancelled=None,
+        frame_cache={},
+    )
+
+    assert sampler.requested == [10_000]
+    assert [item.image_jpeg for item in refreshed] == [high, high]
+
+
+def test_training_candidate_limit_keeps_all_tasks_for_selected_timestamps() -> None:
+    candidates = tuple(
+        TrainingCandidate(
+            at_ms=at_ms,
+            segment_start_ms=0,
+            image_jpeg=b'\xff\xd8x\xff\xd9',
+            model_version='vision-v1',
+            suggested_label='match_flow',
+            suggestion_confidence=0.9,
+            stage_class='gameplay',
+            stage_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.9,
+            selection_reason='test',
+            task='match_flow',
+        )
+        for at_ms in (10_000, 10_000, 20_000, 30_000)
+    )
+
+    selected = _cap_training_candidate_timestamps(candidates, maximum_timestamps=2)
+
+    assert [item.at_ms for item in selected] == [10_000, 10_000, 20_000]
+
+
+def test_result_candidate_uses_segment_nearest_to_window_focus() -> None:
+    assert (
+        _candidate_segment_start(
+            205_000, focus_ms=200_000, segments=((0, 100_000), (110_000, 200_000))
+        )
+        == 110_000
+    )
+
+
+def test_result_regression_scans_backwards_in_chunks_and_stops_after_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = RgbFrame(2, 2, b'\x00\x00\x00' * 4)
+    result = RgbFrame(2, 2, b'\x01\x01\x01' * 4)
+
+    class Sampler:
+        def __init__(self) -> None:
+            self.windows = []
+
+        def fine_frames(self, _path: str, window: ScanWindow):
+            self.windows.append((window.start_ms, window.end_ms))
+            yield TimedFrame(
+                at_ms=window.start_ms + 1_000,
+                frame=result if window.start_ms == 30_000 else empty,
+            )
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(sampler=sampler, result_panel_detector=object())
+    monkeypatch.setattr(
+        analyzer,
+        '_detect_result_layout',
+        lambda frame: hit(0).layout if frame.pixels[0] else None,
+    )
+
+    hits = []
+    found = analyzer._scan_result_backwards(
+        'unused',
+        start_ms=0,
+        end_ms=120_000,
+        hits=hits,
+        cancelled=None,
+        training_candidates=None,
+        key_screen_reason='test',
+        detector_reason='test',
+    )
+
+    assert found.hit_count == 1
+    assert found.decoded_frames == 2
+    assert found.scanned_ms == 90_000
+    assert sampler.windows == [(75_000, 120_000), (30_000, 75_000)]
+    assert [item.at_ms for item in hits] == [31_000]
+
+
+def test_tail_regression_skips_segment_that_already_has_a_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analyzer = VaingloryVideoAnalyzer(result_panel_detector=object())
+    monkeypatch.setattr(
+        analyzer,
+        '_scan_result_backwards',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('已有结算的对局不应再回扫')
+        ),
+    )
+
+    assert (
+        analyzer._tail_regression('unused', [hit(500_000)], ((100_000, 1_000_000),), ())
+        == 0
+    )
+
+
+def test_strict_exit_regression_ignores_cancelled_bp_and_transition() -> None:
+    analyzer = VaingloryVideoAnalyzer(result_panel_detector=object())
+    observations = (
+        ClassifiedObservation(0, STAGE_PRE_MATCH, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+        ClassifiedObservation(
+            60_000, STAGE_OUT_OF_MATCH, 0.9, MODE_3V3, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(
+            120_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(
+            180_000, STAGE_TRANSITION, 0.9, MODE_3V3, CONTENT_VAINGLORY
+        ),
+    )
+
+    assert (
+        analyzer._exit_regression('unused', observations, [], strict_gameplay_exit=True)
+        == 0
+    )
 
 
 def test_opening_probe_keeps_bp_and_hard_negative_training_frames(

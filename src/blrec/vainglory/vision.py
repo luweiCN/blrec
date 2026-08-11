@@ -59,6 +59,16 @@ class ResultPanelDetection:
 
 
 @dataclass(frozen=True)
+class HeroAvatarDetection:
+    rect: PixelRect
+    confidence: float
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.confidence <= 1:
+            raise ValueError('hero avatar confidence must be between 0 and 1')
+
+
+@dataclass(frozen=True)
 class RgbFrame:
     width: int
     height: int

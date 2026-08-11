@@ -1,5 +1,6 @@
 """训练任务必须绑定不可变数据集快照并保留历史。"""
 
+import json
 import sys
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from labeler import config, db, export, training
+from labeler import config, db, export, training, training_runner
 
 
 class TestTrainingRuns(unittest.TestCase):
@@ -80,6 +81,51 @@ class TestTrainingRuns(unittest.TestCase):
             db.update_training_run(
                 self.conn, 'bp-train-1', unsafe_sql_fragment='DROP TABLE'
             )
+
+    def test_detector_artifact_metadata_does_not_require_classification_size(self):
+        metadata = training_runner._artifact_input_metadata(
+            'detect', input_width=0, input_height=0
+        )
+
+        self.assertNotIn('input', metadata)
+        self.assertEqual(metadata['preprocessing']['resize'], 'letterbox')
+
+    def test_interrupted_run_can_resume_only_with_nonempty_last_checkpoint(self):
+        old_work_dir = config.WORK_DIR
+        config.WORK_DIR = Path(self.tmp.name) / 'work'
+        try:
+            db.create_training_run(
+                self.conn,
+                run_id='bp-train-resume',
+                task_id='bp_review',
+                dataset_version_id='bp-classifier-v1',
+                epochs=60,
+                config_json={'imgsz': 224},
+                log_path='/tmp/resume.log',
+            )
+            run = db.get_training_run(self.conn, 'bp-train-resume')
+            with self.assertRaisesRegex(ValueError, '已中断'):
+                training.interrupted_run_checkpoint(run)
+
+            db.update_training_run(self.conn, 'bp-train-resume', status='interrupted')
+            run = db.get_training_run(self.conn, 'bp-train-resume')
+            with self.assertRaisesRegex(FileNotFoundError, 'last.pt'):
+                training.interrupted_run_checkpoint(run)
+
+            checkpoint = (
+                config.WORK_DIR
+                / 'training-runs'
+                / 'bp-train-resume'
+                / 'ultralytics'
+                / 'weights'
+                / 'last.pt'
+            )
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b'checkpoint')
+
+            self.assertEqual(training.interrupted_run_checkpoint(run), checkpoint)
+        finally:
+            config.WORK_DIR = old_work_dir
 
 
 class TestTrainingReadiness(unittest.TestCase):
@@ -210,6 +256,94 @@ class TestTrainingReadiness(unittest.TestCase):
             )
         finally:
             config.EXPORT_DIR = old_export_dir
+
+    def test_task_summary_reports_exact_delta_since_latest_run(self):
+        video_id = db.upsert_video(
+            self.conn,
+            remote_path='/nas/delta.flv',
+            streamer='主播',
+            room_id='delta',
+            filename='delta.flv',
+            duration_seconds=10,
+            size_bytes=1,
+        )
+        frame_ids = [self._frame(video_id, index) for index in range(20, 24)]
+        labels = ('match_flow', 'not_match_flow', 'match_flow')
+        manifest = self.root / 'match-flow-delta.jsonl'
+        manifest.write_text(
+            ''.join(
+                json.dumps(
+                    {
+                        'sample_id': f'f{frame_id:08d}',
+                        'video_id': video_id,
+                        'label': label,
+                        'split': 'train',
+                    }
+                )
+                + '\n'
+                for frame_id, label in zip(frame_ids[:3], labels)
+            ),
+            encoding='utf-8',
+        )
+        db.create_dataset_version(
+            self.conn,
+            version_id='match-flow-delta-v1',
+            task_id='match_flow',
+            filter_json={},
+            counts={'total': 3},
+            manifest_path=str(manifest),
+        )
+        db.create_training_run(
+            self.conn,
+            run_id='match-flow-delta-run',
+            task_id='match_flow',
+            dataset_version_id='match-flow-delta-v1',
+            epochs=1,
+            config_json={},
+            log_path=str(self.root / 'match-flow-delta.log'),
+        )
+        db.update_training_run(
+            self.conn,
+            'match-flow-delta-run',
+            status='succeeded',
+            artifact_path=str(self.root / 'match-flow-delta.onnx'),
+            finished_at='2020-01-01T00:00:00',
+        )
+        current_labels = ('match_flow', 'match_flow', None, 'not_match_flow')
+        for frame_id, label in zip(frame_ids, current_labels):
+            if label is None:
+                continue
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label=label,
+                match_mode_label='3v3' if label == 'match_flow' else None,
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+                status='confirmed',
+            )
+
+        summary = next(
+            item
+            for item in training.task_summaries(self.conn)
+            if item['id'] == 'match_flow'
+        )
+
+        self.assertEqual(
+            summary['dataset_delta'],
+            {
+                'run_id': 'match-flow-delta-run',
+                'dataset_version_id': 'match-flow-delta-v1',
+                'baseline_total': 3,
+                'current_total': 3,
+                'new': 1,
+                'removed': 1,
+                'changed': 1,
+                'net': 0,
+                'new_videos': 0,
+                'new_by_label': {'not_match_flow': 1},
+            },
+        )
 
 
 class TestLocalModelPublish(unittest.TestCase):

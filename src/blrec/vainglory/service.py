@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
 from loguru import logger
 
@@ -251,6 +251,7 @@ class VaingloryIndexService:
         *,
         candidate_count: int,
         training_candidates: Sequence[TrainingCandidate] = (),
+        analysis_summary: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self._require_remote_worker()
         await self._repository.complete_part(
@@ -258,6 +259,7 @@ class VaingloryIndexService:
             matches,
             candidate_count=candidate_count,
             training_candidates=training_candidates,
+            analysis_summary=analysis_summary,
         )
         self._clear_runtime_status(part_id)
 
@@ -352,6 +354,9 @@ class VaingloryIndexService:
                 total_candidates=status.total_candidates,
                 rejected_candidates=status.rejected_candidates,
                 recognized_matches=status.recognized_matches,
+                model_package_id=status.model_package_id,
+                keyframe_frames=status.keyframe_frames,
+                seek_fill_frames=status.seek_fill_frames,
                 events=item_events,
             )
 
@@ -373,6 +378,15 @@ class VaingloryIndexService:
                     current_window=status.current_window or previous.current_window,
                     total_windows=status.total_windows or previous.total_windows,
                     candidate_count=status.candidate_count or previous.candidate_count,
+                    model_package_id=(
+                        status.model_package_id or previous.model_package_id
+                    ),
+                    keyframe_frames=(
+                        status.keyframe_frames or previous.keyframe_frames
+                    ),
+                    seek_fill_frames=(
+                        status.seek_fill_frames or previous.seek_fill_frames
+                    ),
                 )
             self._runtime_status[part_id] = status
             if (

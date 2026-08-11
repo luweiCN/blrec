@@ -95,6 +95,8 @@ def test_runtime_log_deduplicates_repeated_stage_messages() -> None:
             detail='分类粗扫 10% · 已采样 2 帧',
             elapsed_seconds=1,
             coarse_frames=2,
+            model_package_id='vision-package-v1',
+            keyframe_frames=2,
         ),
     )
     service._record_runtime_status(
@@ -109,6 +111,8 @@ def test_runtime_log_deduplicates_repeated_stage_messages() -> None:
 
     assert len(service._runtime_events[1]) == 1
     assert service._runtime_status[1].coarse_frames == 3
+    assert service._runtime_status[1].model_package_id == 'vision-package-v1'
+    assert service._runtime_status[1].keyframe_frames == 2
 
 
 @pytest.mark.asyncio

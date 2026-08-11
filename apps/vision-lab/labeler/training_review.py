@@ -9,9 +9,7 @@ from typing import Any, Dict, Optional
 from . import db
 
 _MIGRATION_ID = 'training-review-labels-v1'
-_HERO_SELECT_TYPES = {
-    'hero_select_bp', 'hero_select_blind', 'hero_select_aram'
-}
+_HERO_SELECT_TYPES = {'hero_select_bp', 'hero_select_blind', 'hero_select_aram'}
 
 
 def _review_status(values: Dict[str, Optional[str]], *, has_result_box: bool) -> str:
@@ -49,6 +47,7 @@ def _upsert_human_labels(
         'match_flow_label': None,
         'match_mode_label': None,
         'hero_select_label': None,
+        'hero_select_variant': None,
         'result_panel_label': None,
     }
     if current is not None:
@@ -56,31 +55,43 @@ def _upsert_human_labels(
             values[key] = current[key]
     for key, value in labels.items():
         values[key] = value
-    has_result_box = conn.execute(
-        "SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = 'result_panel'",
-        (int(frame_id),),
-    ).fetchone() is not None
+    has_result_box = (
+        conn.execute(
+            "SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = 'result_panel'",
+            (int(frame_id),),
+        ).fetchone()
+        is not None
+    )
     status = _review_status(values, has_result_box=has_result_box)
     conn.execute(
         """
         INSERT INTO training_review_items
             (frame_id, match_flow_label, match_mode_label, hero_select_label,
-             result_panel_label, review_status, created_at, updated_at,
+             hero_select_variant, result_panel_label, review_status,
+             created_at, updated_at,
              reviewed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(frame_id) DO UPDATE SET
             match_flow_label=excluded.match_flow_label,
             match_mode_label=excluded.match_mode_label,
             hero_select_label=excluded.hero_select_label,
+            hero_select_variant=excluded.hero_select_variant,
             result_panel_label=excluded.result_panel_label,
             review_status=excluded.review_status,
             updated_at=excluded.updated_at,
             reviewed_at=excluded.reviewed_at
         """,
         (
-            int(frame_id), values['match_flow_label'],
-            values['match_mode_label'], values['hero_select_label'],
-            values['result_panel_label'], status, timestamp, timestamp, timestamp,
+            int(frame_id),
+            values['match_flow_label'],
+            values['match_mode_label'],
+            values['hero_select_label'],
+            values['hero_select_variant'],
+            values['result_panel_label'],
+            status,
+            timestamp,
+            timestamp,
+            timestamp,
         ),
     )
     conn.execute(
@@ -95,11 +106,14 @@ def _upsert_human_labels(
             updated_at=excluded.updated_at
         """,
         (
-            int(frame_id), source_type, source_id,
+            int(frame_id),
+            source_type,
+            source_id,
             json.dumps(
                 metadata, ensure_ascii=False, separators=(',', ':'), sort_keys=True
             ),
-            timestamp, timestamp,
+            timestamp,
+            timestamp,
         ),
     )
 
@@ -131,14 +145,22 @@ def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]
     if screen_type in _HERO_SELECT_TYPES:
         if screen_type == 'hero_select_aram':
             select = 'select_aram'
+            select_variant: Optional[str] = 'random'
         else:
             select = {
                 '3v3': 'select_3v3',
                 'aram': 'select_aram',
                 '5v5': 'select_5v5',
             }.get(game_mode, 'unreadable')
+            if select == 'select_aram':
+                select_variant = 'random'
+            elif select in ('select_3v3', 'select_5v5'):
+                select_variant = 'bp' if screen_type == 'hero_select_bp' else 'blind'
+            else:
+                select_variant = None
     else:
         select = 'not_select'
+        select_variant = None
 
     if screen_type == 'result_page':
         result: Optional[str] = 'result_panel' if has_result_box else None
@@ -148,6 +170,7 @@ def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]
         'match_flow_label': flow,
         'match_mode_label': mode,
         'hero_select_label': select,
+        'hero_select_variant': select_variant,
         'result_panel_label': result,
     }
 
@@ -155,8 +178,7 @@ def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]
 def migrate_legacy_training_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
     """把已有人工真值映射到新标签；原表和原框只读保留。"""
     prior = conn.execute(
-        'SELECT detail_json FROM workspace_migrations WHERE id = ?',
-        (_MIGRATION_ID,),
+        'SELECT detail_json FROM workspace_migrations WHERE id = ?', (_MIGRATION_ID,)
     ).fetchone()
     if prior is not None:
         value = json.loads(prior['detail_json'] or '{}')
@@ -222,6 +244,13 @@ def migrate_legacy_training_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
             if row['visual_condition'] == 'unreadable':
                 select = 'unreadable'
             labels: Dict[str, Optional[str]] = {'hero_select_label': select}
+            if old_label == 'bp_aram' and select == 'select_aram':
+                labels['hero_select_variant'] = 'random'
+            elif old_label in {'bp_3v3', 'bp_5v5'} and select in {
+                'select_3v3',
+                'select_5v5',
+            }:
+                labels['hero_select_variant'] = 'bp'
             if old_label != 'not_bp':
                 labels.update(
                     match_flow_label='not_match_flow',
@@ -317,8 +346,109 @@ def migrate_legacy_training_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
             'INSERT INTO workspace_migrations (id, applied_at, detail_json) '
             'VALUES (?, ?, ?)',
             (
-                _MIGRATION_ID, db.now(),
+                _MIGRATION_ID,
+                db.now(),
                 json.dumps(counts, ensure_ascii=False, sort_keys=True),
             ),
         )
     return counts
+
+
+def mirror_confirmed_bp_review(
+    conn: sqlite3.Connection, frame_id: int
+) -> Optional[Dict[str, Any]]:
+    """把迁移完成后仍从旧 BP 入口保存的人工结论同步到统一真值。"""
+    row = conn.execute(
+        'SELECT confirmed_label, visual_condition FROM bp_review_items '
+        "WHERE frame_id = ? AND review_status = 'confirmed' "
+        'AND confirmed_label IS NOT NULL',
+        (int(frame_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    old_label = str(row['confirmed_label'])
+    select = {
+        'bp_3v3': 'select_3v3',
+        'bp_aram': 'select_aram',
+        'bp_5v5': 'select_5v5',
+        'not_bp': 'not_select',
+    }.get(old_label)
+    if select is None:
+        return None
+    if row['visual_condition'] == 'unreadable':
+        select = 'unreadable'
+    labels: Dict[str, Optional[str]] = {'hero_select_label': select}
+    if old_label == 'bp_aram' and select == 'select_aram':
+        labels['hero_select_variant'] = 'random'
+    elif old_label in {'bp_3v3', 'bp_5v5'} and select in {'select_3v3', 'select_5v5'}:
+        labels['hero_select_variant'] = 'bp'
+    if old_label != 'not_bp':
+        labels.update(
+            match_flow_label='not_match_flow',
+            match_mode_label=None,
+            result_panel_label='no_result_panel',
+        )
+    with conn:
+        _upsert_human_labels(
+            conn,
+            frame_id=int(frame_id),
+            labels=labels,
+            source_type='legacy_bp_review',
+            source_id=f'frame:{int(frame_id)}',
+            metadata={
+                'confirmed_label': old_label,
+                'visual_condition': row['visual_condition'],
+            },
+        )
+    return db.get_training_review_item(conn, int(frame_id))
+
+
+def mirror_confirmed_key_screen_review(
+    conn: sqlite3.Connection, frame_id: int
+) -> Optional[Dict[str, Any]]:
+    """把迁移完成后仍从旧关键界面入口保存的结论同步到统一真值。"""
+    row = conn.execute(
+        'SELECT confirmed_label, visual_condition FROM key_screen_review_items '
+        "WHERE frame_id = ? AND review_status = 'confirmed' "
+        'AND confirmed_label IS NOT NULL',
+        (int(frame_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    label = str(row['confirmed_label'])
+    has_result_box = (
+        conn.execute(
+            "SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = 'result_panel'",
+            (int(frame_id),),
+        ).fetchone()
+        is not None
+    )
+    if label == 'result_page':
+        labels: Dict[str, Optional[str]] = {
+            'match_flow_label': 'match_flow',
+            'match_mode_label': 'unreadable',
+            'hero_select_label': 'not_select',
+            'result_panel_label': 'result_panel' if has_result_box else None,
+        }
+    elif label == 'scoreboard':
+        labels = {
+            'match_flow_label': 'match_flow',
+            'match_mode_label': 'unreadable',
+            'hero_select_label': 'not_select',
+            'result_panel_label': 'no_result_panel',
+        }
+    else:
+        labels = {'result_panel_label': 'no_result_panel'}
+    with conn:
+        _upsert_human_labels(
+            conn,
+            frame_id=int(frame_id),
+            labels=labels,
+            source_type='legacy_key_screen_review',
+            source_id=f'frame:{int(frame_id)}',
+            metadata={
+                'confirmed_label': label,
+                'visual_condition': row['visual_condition'],
+            },
+        )
+    return db.get_training_review_item(conn, int(frame_id))

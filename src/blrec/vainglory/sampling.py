@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import subprocess
 import tempfile
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
+from queue import Empty, Queue
 from typing import IO, Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from .vision import RgbFrame
@@ -33,6 +36,52 @@ class VideoProfile:
 class TimedFrame:
     at_ms: int
     frame: RgbFrame
+    target_ms: Optional[int] = None
+    sample_source: Literal['decoded', 'keyframe', 'seek_fill'] = 'decoded'
+
+
+@dataclass(frozen=True)
+class AdaptiveSamplingPoint:
+    target_ms: int
+    at_ms: int
+    source: Literal['keyframe', 'seek_fill']
+
+
+def adaptive_sampling_plan(
+    keyframe_times_ms: Sequence[int],
+    *,
+    duration_ms: int,
+    interval_ms: int = 5_000,
+    maximum_keyframe_distance_ms: int = 2_500,
+) -> Tuple[AdaptiveSamplingPoint, ...]:
+    if duration_ms <= 0:
+        raise ValueError('video duration must be positive')
+    if interval_ms <= 0:
+        raise ValueError('sampling interval must be positive')
+    if maximum_keyframe_distance_ms < 0:
+        raise ValueError('keyframe distance must not be negative')
+    keyframes = tuple(
+        sorted({int(value) for value in keyframe_times_ms if 0 <= value < duration_ms})
+    )
+    selected_by_target: Dict[int, int] = {}
+    for keyframe_ms in keyframes:
+        target_index = (2 * keyframe_ms + interval_ms) // (2 * interval_ms)
+        target_ms = target_index * interval_ms
+        if (
+            target_ms >= duration_ms
+            or target_ms in selected_by_target
+            or abs(keyframe_ms - target_ms) > maximum_keyframe_distance_ms
+        ):
+            continue
+        selected_by_target[target_ms] = keyframe_ms
+    return tuple(
+        AdaptiveSamplingPoint(
+            target_ms,
+            selected_by_target.get(target_ms, target_ms),
+            'keyframe' if target_ms in selected_by_target else 'seek_fill',
+        )
+        for target_ms in range(0, duration_ms, interval_ms)
+    )
 
 
 @dataclass(frozen=True)
@@ -391,16 +440,27 @@ class FfmpegSampler:
         ffprobe: str = 'ffprobe',
         coarse_interval_seconds: int = 5,
         fine_frames_per_second: int = 4,
+        maximum_keyframe_distance_ms: Optional[int] = None,
     ) -> None:
         if coarse_interval_seconds < 1:
             raise ValueError('coarse interval must be positive')
         if fine_frames_per_second < 1:
             raise ValueError('fine frame rate must be positive')
+        if (
+            maximum_keyframe_distance_ms is not None
+            and maximum_keyframe_distance_ms < 0
+        ):
+            raise ValueError('keyframe distance must not be negative')
         self._ffmpeg = ffmpeg
         self._ffprobe = ffprobe
         self._coarse_interval_seconds = coarse_interval_seconds
         self._fine_frames_per_second = fine_frames_per_second
+        self._maximum_keyframe_distance_ms = maximum_keyframe_distance_ms
         self._profile_cache: Dict[str, Tuple[int, int, VideoProfile]] = {}
+
+    @property
+    def coarse_interval_seconds(self) -> int:
+        return self._coarse_interval_seconds
 
     def probe(self, path: str) -> VideoProfile:
         resolved = self._regular_file(path)
@@ -452,23 +512,41 @@ class FfmpegSampler:
         interval = self._coarse_interval_seconds
         profile = self.probe(path)
         width, height = fit_frame_dimensions(profile.width, profile.height, 480, 270)
-        yield from self._frames(
+        yield from self._adaptive_frames(
             path,
+            profile=profile,
             width=width,
             height=height,
-            filter_value='fps=1/{},scale={}:{}:flags=fast_bilinear'.format(
-                interval, width, height
-            ),
-            frame_step_ms=interval * 1_000,
-            skip_frame='nokey',
+            interval_ms=interval * 1_000,
         )
 
     def classify_frames(
-        self, path: str, *, interval_seconds: int = 5
+        self, path: str, *, interval_seconds: Optional[int] = None
+    ) -> Iterator[TimedFrame]:
+        if interval_seconds is None:
+            interval_seconds = self._coarse_interval_seconds
+        if interval_seconds < 1:
+            raise ValueError('classify interval must be positive')
+        profile = self.probe(path)
+        width, height = fit_frame_dimensions(profile.width, profile.height, 480, 270)
+        yield from self._adaptive_frames(
+            path,
+            profile=profile,
+            width=width,
+            height=height,
+            interval_ms=interval_seconds * 1_000,
+        )
+
+    def classify_window_frames(
+        self, path: str, window: ScanWindow, *, interval_seconds: int = 5
     ) -> Iterator[TimedFrame]:
         if interval_seconds < 1:
             raise ValueError('classify interval must be positive')
         profile = self.probe(path)
+        start_ms = max(0, min(profile.duration_ms, window.start_ms))
+        end_ms = max(start_ms, min(profile.duration_ms, window.end_ms))
+        if end_ms <= start_ms:
+            return
         width, height = fit_frame_dimensions(profile.width, profile.height, 480, 270)
         yield from self._frames(
             path,
@@ -479,7 +557,197 @@ class FfmpegSampler:
             ),
             frame_step_ms=interval_seconds * 1_000,
             skip_frame='nokey',
-            threads=6,
+            start_ms=start_ms,
+            duration_ms=end_ms - start_ms,
+            sample_source='keyframe',
+        )
+
+    def _adaptive_frames(
+        self,
+        path: str,
+        *,
+        profile: VideoProfile,
+        width: int,
+        height: int,
+        interval_ms: int,
+    ) -> Iterator[TimedFrame]:
+        maximum_distance_ms = (
+            interval_ms // 2
+            if self._maximum_keyframe_distance_ms is None
+            else self._maximum_keyframe_distance_ms
+        )
+        next_target_ms = 0
+        for timed in self._selected_keyframe_frames(
+            path,
+            width=width,
+            height=height,
+            interval_ms=interval_ms,
+            maximum_keyframe_distance_ms=maximum_distance_ms,
+        ):
+            if timed.target_ms is None:
+                raise RuntimeError('FFmpeg 关键帧缺少目标时间')
+            if timed.target_ms >= profile.duration_ms:
+                # Drain the FFmpeg generator so its process and stderr reader are
+                # closed deterministically even when the final rounded time bucket
+                # lands just beyond the declared video duration.
+                continue
+            while next_target_ms < timed.target_ms:
+                yield self._seek_frame(path, next_target_ms, width=width, height=height)
+                next_target_ms += interval_ms
+            if timed.target_ms < next_target_ms:
+                raise RuntimeError('FFmpeg 为同一个采样时间桶返回了多个关键帧')
+            yield timed
+            next_target_ms += interval_ms
+        while next_target_ms < profile.duration_ms:
+            yield self._seek_frame(path, next_target_ms, width=width, height=height)
+            next_target_ms += interval_ms
+
+    def _selected_keyframe_frames(
+        self,
+        path: str,
+        *,
+        width: int,
+        height: int,
+        interval_ms: int,
+        maximum_keyframe_distance_ms: int,
+    ) -> Iterator[TimedFrame]:
+        interval_seconds = interval_ms / 1_000
+        half_interval_seconds = interval_seconds / 2
+        maximum_distance_seconds = maximum_keyframe_distance_ms / 1_000
+        bin_expression = 'floor((t+{half})/{interval})'.format(
+            half=half_interval_seconds, interval=interval_seconds
+        )
+        previous_bin_expression = 'floor((prev_selected_t+{half})/{interval})'.format(
+            half=half_interval_seconds, interval=interval_seconds
+        )
+        center_expression = '{}*{}'.format(interval_seconds, bin_expression)
+        within_distance = 'lte(abs(t-{})\\,{})'.format(
+            center_expression, maximum_distance_seconds
+        )
+        first_in_bin = 'isnan(prev_selected_t)+gt({}\\,{})'.format(
+            bin_expression, previous_bin_expression
+        )
+        selection = '{}*({})'.format(within_distance, first_in_bin)
+        resolved = self._regular_file(path)
+        command = [
+            self._ffmpeg,
+            '-nostdin',
+            '-v',
+            'info',
+            '-threads',
+            '1',
+            '-skip_frame',
+            'nokey',
+            '-i',
+            resolved,
+            '-vf',
+            "select='{}',scale={}:{}:flags=fast_bilinear,showinfo".format(
+                selection, width, height
+            ),
+            '-an',
+            '-sn',
+            '-dn',
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'rgb24',
+            '-vsync',
+            '0',
+            'pipe:1',
+        ]
+        timestamps: Queue[Optional[int]] = Queue()
+        stderr_lines: List[bytes] = []
+        try:
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError('未安装 FFmpeg') from error
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stderr_thread = threading.Thread(
+            target=_read_showinfo_timestamps,
+            args=(process.stderr, timestamps, stderr_lines),
+            daemon=True,
+        )
+        stderr_thread.start()
+        frame_size = width * height * 3
+        try:
+            while True:
+                pixels = _read_exact(process.stdout, frame_size, timeout=60)
+                if not pixels:
+                    break
+                if len(pixels) != frame_size:
+                    raise RuntimeError('FFmpeg 返回了不完整的关键帧')
+                try:
+                    at_ms = timestamps.get(timeout=10)
+                except Empty as error:
+                    raise RuntimeError('FFmpeg 没有及时返回关键帧时间戳') from error
+                if at_ms is None:
+                    raise RuntimeError('FFmpeg 返回的关键帧与时间戳数量不一致')
+                target_index = (2 * at_ms + interval_ms) // (2 * interval_ms)
+                target_ms = target_index * interval_ms
+                if abs(at_ms - target_ms) > maximum_keyframe_distance_ms + 1:
+                    raise RuntimeError('FFmpeg 返回了超出采样时间桶的关键帧')
+                yield TimedFrame(
+                    at_ms=at_ms,
+                    frame=RgbFrame(width, height, pixels),
+                    target_ms=target_ms,
+                    sample_source='keyframe',
+                )
+            try:
+                return_code = process.wait(timeout=30)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError('FFmpeg 读取视频超时') from error
+            stderr_thread.join(timeout=5)
+            if return_code != 0:
+                message = b''.join(stderr_lines[-100:]).decode('utf8', errors='replace')
+                raise RuntimeError(
+                    'FFmpeg 读取视频失败：{}'.format(message.strip() or return_code)
+                )
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            stderr_thread.join(timeout=5)
+
+    def _seek_frame(
+        self, path: str, at_ms: int, *, width: int, height: int
+    ) -> TimedFrame:
+        resolved = self._regular_file(path)
+        command = [
+            self._ffmpeg,
+            '-nostdin',
+            '-v',
+            'error',
+            '-threads',
+            '1',
+            '-ss',
+            '{:.3f}'.format(at_ms / 1_000),
+            '-i',
+            resolved,
+            '-frames:v',
+            '1',
+            '-vf',
+            'scale={}:{}:flags=fast_bilinear'.format(width, height),
+            '-an',
+            '-sn',
+            '-dn',
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'rgb24',
+            'pipe:1',
+        ]
+        result = self._run_ffmpeg(command, timeout=60)
+        expected = width * height * 3
+        if len(result.stdout) != expected:
+            raise RuntimeError('FFmpeg 未能读取补帧时间点的完整画面')
+        return TimedFrame(
+            at_ms=at_ms,
+            frame=RgbFrame(width, height, result.stdout),
+            target_ms=at_ms,
+            sample_source='seek_fill',
         )
 
     def fine_frames(
@@ -654,6 +922,10 @@ class FfmpegSampler:
         start_ms: int = 0,
         duration_ms: Optional[int] = None,
         threads: int = 1,
+        timestamps_ms: Optional[Sequence[int]] = None,
+        target_times_ms: Optional[Sequence[int]] = None,
+        sample_source: Literal['decoded', 'keyframe', 'seek_fill'] = 'decoded',
+        variable_frame_rate: bool = False,
     ) -> Iterator[TimedFrame]:
         resolved = self._regular_file(path)
         command = [self._ffmpeg, '-nostdin', '-v', 'error', '-threads', str(threads)]
@@ -675,9 +947,11 @@ class FfmpegSampler:
                 'rawvideo',
                 '-pix_fmt',
                 'rgb24',
-                'pipe:1',
             )
         )
+        if variable_frame_rate:
+            command.extend(('-vsync', '0'))
+        command.append('pipe:1')
         frame_size = width * height * 3
         with tempfile.TemporaryFile() as stderr:
             try:
@@ -695,9 +969,23 @@ class FfmpegSampler:
                         break
                     if len(pixels) != frame_size:
                         raise RuntimeError('FFmpeg 返回了不完整的视频画面')
+                    if timestamps_ms is not None and index >= len(timestamps_ms):
+                        raise RuntimeError('FFmpeg 返回了计划外的视频画面')
+                    at_ms = (
+                        start_ms + index * frame_step_ms
+                        if timestamps_ms is None
+                        else int(timestamps_ms[index])
+                    )
+                    target_ms = (
+                        at_ms
+                        if target_times_ms is None
+                        else int(target_times_ms[index])
+                    )
                     yield TimedFrame(
-                        at_ms=start_ms + index * frame_step_ms,
+                        at_ms=at_ms,
                         frame=RgbFrame(width, height, pixels),
+                        target_ms=target_ms,
+                        sample_source=sample_source,
                     )
                     index += 1
                 try:
@@ -710,6 +998,8 @@ class FfmpegSampler:
                     raise RuntimeError(
                         'FFmpeg 读取视频失败：{}'.format(message or return_code)
                     )
+                if timestamps_ms is not None and index != len(timestamps_ms):
+                    raise RuntimeError('FFmpeg 返回的关键帧数量与采样计划不一致')
             finally:
                 if process.poll() is None:
                     process.kill()
@@ -854,6 +1144,28 @@ def _read_exact(stream: IO[bytes], size: int, *, timeout: float) -> bytes:
         chunks.extend(chunk)
         deadline = time.monotonic() + timeout
     return bytes(chunks)
+
+
+_SHOWINFO_PTS = re.compile(rb'\bpts_time:([-+0-9.eE]+)')
+
+
+def _read_showinfo_timestamps(
+    stream: IO[bytes], timestamps: Queue[Optional[int]], stderr_lines: List[bytes]
+) -> None:
+    try:
+        for line in iter(stream.readline, b''):
+            stderr_lines.append(line)
+            if len(stderr_lines) > 200:
+                del stderr_lines[:100]
+            match = _SHOWINFO_PTS.search(line)
+            if match is None:
+                continue
+            try:
+                timestamps.put(int(round(float(match.group(1)) * 1_000)))
+            except ValueError:
+                continue
+    finally:
+        timestamps.put(None)
 
 
 def _process_error(name: str, result: subprocess.CompletedProcess[Any]) -> str:

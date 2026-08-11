@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,7 +16,21 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, bp_review, config, db, events
+from . import export as export_mod
+from . import hero_review
+from . import inference as inference_mod
+from . import local, model_prefill, model_testing, result_archive
+from . import stats as stats_mod
+from . import training, training_review, worker_candidates
+from .extract import (
+    cancel_extraction,
+    extract_videos_multi,
+    live_next_frame,
+    sync_videos,
+    task_state,
+)
+from .nas import NasClient
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -25,29 +40,6 @@ class NoCacheStaticFiles(StaticFiles):
         resp = super().file_response(*args, **kwargs)
         resp.headers['Cache-Control'] = 'no-store'
         return resp
-from contextlib import asynccontextmanager
-
-from . import (
-    bp_review,
-    config,
-    db,
-    events,
-    export as export_mod,
-    hero_review,
-    inference as inference_mod,
-    local,
-    model_testing,
-    result_archive,
-    stats as stats_mod,
-    training,
-    training_review,
-    worker_candidates,
-)
-from .extract import (
-    _state, cancel_extraction, extract_videos_multi, live_next_frame,
-    sync_videos, task_state,
-)
-from .nas import NasClient
 
 
 @asynccontextmanager
@@ -59,11 +51,13 @@ async def lifespan(_app: FastAPI):
         conn.execute(
             "UPDATE extraction_jobs SET status='failed', "
             "error=COALESCE(error,'') || '; server restart' "
-            "WHERE status='running'")
+            "WHERE status='running'"
+        )
         conn.execute(
             "UPDATE videos SET status='pending', "
             "error='抽帧被服务重启中断,请重新抽帧' "
-            "WHERE status='extracting'")
+            "WHERE status='extracting'"
+        )
         conn.execute(
             "UPDATE training_runs SET status='interrupted', "
             "error='标注服务重启，训练进程已中断', finished_at=? "
@@ -131,6 +125,7 @@ def _nas() -> NasClient:
 
 # ---------- 配置与任务 ----------
 
+
 @app.get('/api/config')
 def api_config() -> Dict[str, Any]:
     return {
@@ -146,6 +141,8 @@ def api_config() -> Dict[str, Any]:
         'black_bars': config.BLACK_BARS,
         'ocr_usable': config.OCR_USABLE,
         'result_clarity': config.RESULT_CLARITY,
+        'panel_render_states': config.PANEL_RENDER_STATES,
+        'hero_select_visibility': config.HERO_SELECT_VISIBILITY,
         'result_occlusion': config.RESULT_OCCLUSION,
         'occluder_types': config.OCCLUDER_TYPES,
         'box_types': config.BOX_TYPES,
@@ -160,18 +157,25 @@ def api_tasks() -> List[Dict[str, Any]]:
     with _db_lock:
         conn = _conn()
         try:
-            return [dict(r) for r in conn.execute(
-                'SELECT * FROM annotation_tasks ORDER BY rowid').fetchall()]
+            return [
+                dict(r)
+                for r in conn.execute(
+                    'SELECT * FROM annotation_tasks ORDER BY rowid'
+                ).fetchall()
+            ]
         finally:
             conn.close()
 
 
 # ---------- 视频 ----------
 
+
 @app.get('/api/videos/auto-pick')
-def api_auto_pick(per_streamer: int = Query(5, ge=1, le=20),
-                  min_size_bytes: Optional[int] = Query(1073741824),
-                  strategy: Optional[str] = None) -> Dict[str, Any]:
+def api_auto_pick(
+    per_streamer: int = Query(5, ge=1, le=20),
+    min_size_bytes: Optional[int] = Query(1073741824),
+    strategy: Optional[str] = None,
+) -> Dict[str, Any]:
     """自动挑选:每个主播取 N 个 >= 阈值的视频(按大小降序,优先完整场次)。"""
     with _db_lock:
         conn = _conn()
@@ -187,16 +191,22 @@ def api_auto_pick(per_streamer: int = Query(5, ge=1, le=20),
                     picks.append(v)
             total_frames = sum(
                 int(v['duration_seconds'] / 5) + 1 if v['duration_seconds'] else 0
-                for v in picks)
+                for v in picks
+            )
             return {
                 'video_ids': [v['id'] for v in picks],
                 'videos': len(picks),
                 'streamers': len(by_streamer),
-                'picks': [{'id': v['id'], 'streamer': v['streamer'],
-                           'filename': v['filename'],
-                           'size_bytes': v['size_bytes'],
-                           'duration_seconds': v['duration_seconds']}
-                          for v in picks],
+                'picks': [
+                    {
+                        'id': v['id'],
+                        'streamer': v['streamer'],
+                        'filename': v['filename'],
+                        'size_bytes': v['size_bytes'],
+                        'duration_seconds': v['duration_seconds'],
+                    }
+                    for v in picks
+                ],
                 'estimated_frames': total_frames,
             }
         finally:
@@ -204,15 +214,24 @@ def api_auto_pick(per_streamer: int = Query(5, ge=1, le=20),
 
 
 @app.get('/api/videos')
-def api_videos(status: Optional[str] = None, streamer: Optional[str] = None,
-               room_id: Optional[str] = None, bvid: Optional[str] = None,
-               min_size_bytes: Optional[int] = None) -> List[Dict[str, Any]]:
+def api_videos(
+    status: Optional[str] = None,
+    streamer: Optional[str] = None,
+    room_id: Optional[str] = None,
+    bvid: Optional[str] = None,
+    min_size_bytes: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     with _db_lock:
         conn = _conn()
         try:
-            return db.list_videos(conn, status=status, streamer=streamer,
-                                  room_id=room_id, bvid=bvid,
-                                  min_size_bytes=min_size_bytes)
+            return db.list_videos(
+                conn,
+                status=status,
+                streamer=streamer,
+                room_id=room_id,
+                bvid=bvid,
+                min_size_bytes=min_size_bytes,
+            )
         finally:
             conn.close()
 
@@ -249,6 +268,7 @@ def api_sync_state() -> Dict[str, Any]:
 
 
 # ---------- 抽帧 ----------
+
 
 @app.post('/api/extract')
 def api_extract(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -297,7 +317,8 @@ def api_extraction_jobs(limit: int = 50) -> List[Dict[str, Any]]:
             rows = conn.execute(
                 'SELECT j.*, v.streamer, v.filename FROM extraction_jobs j '
                 'JOIN videos v ON v.id = j.video_id '
-                'ORDER BY j.id DESC LIMIT ?', (limit,)
+                'ORDER BY j.id DESC LIMIT ?',
+                (limit,),
             ).fetchall()
             out = []
             for r in rows:
@@ -311,23 +332,33 @@ def api_extraction_jobs(limit: int = 50) -> List[Dict[str, Any]]:
 
 # ---------- 帧 ----------
 
+
 @app.get('/api/frames')
-def api_frames(video_id: Optional[int] = None, event_id: Optional[int] = None,
-               labeled: Optional[int] = None, status: Optional[str] = None,
-               screen_type: Optional[str] = None,
-               strategy: Optional[str] = None,
-               representative_only: bool = False,
-               limit: int = Query(200, ge=1, le=100000),
-               offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+def api_frames(
+    video_id: Optional[int] = None,
+    event_id: Optional[int] = None,
+    labeled: Optional[int] = None,
+    status: Optional[str] = None,
+    screen_type: Optional[str] = None,
+    strategy: Optional[str] = None,
+    representative_only: bool = False,
+    limit: int = Query(200, ge=1, le=100000),
+    offset: int = Query(0, ge=0),
+) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
             frames = db.query_frames(
-                conn, video_id=video_id, event_id=event_id, labeled=labeled,
+                conn,
+                video_id=video_id,
+                event_id=event_id,
+                labeled=labeled,
                 status=status,
-                screen_type=screen_type, strategy=strategy,
+                screen_type=screen_type,
+                strategy=strategy,
                 representative_only=representative_only,
-                limit=limit, offset=offset,
+                limit=limit,
+                offset=offset,
             )
             return {'frames': frames}
         finally:
@@ -346,7 +377,8 @@ def api_frame(frame_id: int) -> Dict[str, Any]:
             f['boxes'] = db.get_boxes(conn, frame_id)
             preds = conn.execute(
                 'SELECT model_version, pred_type, confidence, bbox FROM '
-                'model_predictions WHERE frame_id = ? ORDER BY id', (frame_id,)
+                'model_predictions WHERE frame_id = ? ORDER BY id',
+                (frame_id,),
             ).fetchall()
             f['predictions'] = [dict(r) for r in preds]
             return f
@@ -375,15 +407,17 @@ def api_frame_thumb(frame_id: int) -> FileResponse:
         conn = _conn()
         try:
             row = conn.execute(
-                'SELECT thumb_path, frame_path FROM frames WHERE id = ?',
-                (frame_id,)
+                'SELECT thumb_path, frame_path FROM frames WHERE id = ?', (frame_id,)
             ).fetchone()
         finally:
             conn.close()
     if not row:
         raise HTTPException(404, '帧不存在')
-    path = row['thumb_path'] if row['thumb_path'] and Path(row['thumb_path']).exists() \
+    path = (
+        row['thumb_path']
+        if row['thumb_path'] and Path(row['thumb_path']).exists()
         else row['frame_path']
+    )
     return FileResponse(path, media_type='image/jpeg')
 
 
@@ -395,7 +429,8 @@ def api_set_representative(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any
         try:
             cur = conn.execute(
                 'UPDATE frames SET is_representative = ? WHERE id = ?',
-                (value, frame_id))
+                (value, frame_id),
+            )
             conn.commit()
             if not cur.rowcount:
                 raise HTTPException(404, '帧不存在')
@@ -405,6 +440,7 @@ def api_set_representative(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any
 
 
 # ---------- 事件 ----------
+
 
 @app.post('/api/live/frame')
 def api_live_frame(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -425,7 +461,8 @@ def api_live_frame(body: Dict[str, Any]) -> Dict[str, Any]:
         try:
             row = conn.execute(
                 'SELECT remote_path, duration_seconds FROM videos WHERE id = ?',
-                (video_id,)).fetchone()
+                (video_id,),
+            ).fetchone()
         finally:
             conn.close()
     if not row:
@@ -436,8 +473,13 @@ def api_live_frame(body: Dict[str, Any]) -> Dict[str, Any]:
         work_conn = db.connect(config.DB_PATH)
         try:
             result = live_next_frame(
-                work_conn, nas, video_id, after_ms=after_ms,
-                interval_ms=interval_ms, last_sha=last_sha)
+                work_conn,
+                nas,
+                video_id,
+                after_ms=after_ms,
+                interval_ms=interval_ms,
+                last_sha=last_sha,
+            )
         finally:
             work_conn.close()
     except Exception as exc:  # noqa: BLE001
@@ -453,17 +495,27 @@ def api_live_videos() -> Dict[str, Any]:
         try:
             videos = db.list_videos(conn, min_size_bytes=1073741824)
             progress = db.all_video_progress(conn)
-            labeled = {r['video_id']: r['c'] for r in conn.execute(
-                'SELECT video_id, COUNT(*) c FROM frames WHERE labeled = 1 '
-                'GROUP BY video_id').fetchall()}
-            total = {r['video_id']: r['c'] for r in conn.execute(
-                'SELECT video_id, COUNT(*) c FROM frames GROUP BY video_id').fetchall()}
+            labeled = {
+                r['video_id']: r['c']
+                for r in conn.execute(
+                    'SELECT video_id, COUNT(*) c FROM frames WHERE labeled = 1 '
+                    'GROUP BY video_id'
+                ).fetchall()
+            }
+            total = {
+                r['video_id']: r['c']
+                for r in conn.execute(
+                    'SELECT video_id, COUNT(*) c FROM frames GROUP BY video_id'
+                ).fetchall()
+            }
             # 本地已下载的 mp4 集合(一次目录扫描)
             local_ready = set()
             if config.LOCAL_VIDEO_DIR.exists():
                 local_ready = {
-                    int(p.stem) for p in config.LOCAL_VIDEO_DIR.glob('*.mp4')
-                    if p.stat().st_size > 1024 * 1024}
+                    int(p.stem)
+                    for p in config.LOCAL_VIDEO_DIR.glob('*.mp4')
+                    if p.stat().st_size > 1024 * 1024
+                }
             for v in videos:
                 p = progress.get(v['id'], {})
                 v['last_pts_ms'] = p.get('last_pts_ms')
@@ -474,7 +526,8 @@ def api_live_videos() -> Dict[str, Any]:
                 v['progress_pct'] = (
                     round(p['last_pts_ms'] / (v['duration_seconds'] * 1000) * 100)
                     if p.get('last_pts_ms') is not None and v['duration_seconds'] > 0
-                    else None)
+                    else None
+                )
             return {'videos': videos, 'count': len(videos)}
         finally:
             conn.close()
@@ -486,7 +539,8 @@ def api_save_video_progress(video_id: int, body: Dict[str, Any]) -> Dict[str, An
         conn = _conn()
         try:
             db.save_video_progress(
-                conn, video_id,
+                conn,
+                video_id,
                 last_pts_ms=body.get('last_pts_ms'),
                 last_frame_id=body.get('last_frame_id'),
             )
@@ -531,8 +585,8 @@ def api_download_video(video_id: int) -> Dict[str, Any]:
         conn = _conn()
         try:
             row = conn.execute(
-                'SELECT remote_path FROM videos WHERE id = ?',
-                (video_id,)).fetchone()
+                'SELECT remote_path FROM videos WHERE id = ?', (video_id,)
+            ).fetchone()
         finally:
             conn.close()
     if not row:
@@ -569,8 +623,7 @@ def api_live_frame_local(body: Dict[str, Any]) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
-            result = local.local_frame(conn, video_id, pts_ms,
-                                       interval_ms=interval_ms)
+            result = local.local_frame(conn, video_id, pts_ms, interval_ms=interval_ms)
         except RuntimeError as exc:
             raise HTTPException(400, str(exc))
         finally:
@@ -579,6 +632,7 @@ def api_live_frame_local(body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------- 3V3 / 大乱斗光栅专项 ----------
+
 
 @app.get('/api/mode-gate/rounds/active')
 def api_active_mode_gate_round() -> Dict[str, Any]:
@@ -619,7 +673,8 @@ def api_mode_gate_annotation(round_id: str, frame_id: int) -> Dict[str, Any]:
                 raise HTTPException(404, '该帧不属于本轮挑选的视频')
             return {
                 'annotation': db.get_mode_gate_annotation(
-                    conn, round_id=round_id, frame_id=frame_id),
+                    conn, round_id=round_id, frame_id=frame_id
+                ),
                 'expected_mode': member['expected_mode'],
             }
         finally:
@@ -627,8 +682,9 @@ def api_mode_gate_annotation(round_id: str, frame_id: int) -> Dict[str, Any]:
 
 
 @app.put('/api/mode-gate/rounds/{round_id}/frames/{frame_id}')
-def api_save_mode_gate_annotation(round_id: str, frame_id: int,
-                                  body: Dict[str, Any]) -> Dict[str, Any]:
+def api_save_mode_gate_annotation(
+    round_id: str, frame_id: int, body: Dict[str, Any]
+) -> Dict[str, Any]:
     evidence = str(body.get('evidence') or '')
     boxes: Optional[List[Dict[str, Any]]] = None
     raw_boxes = body.get('boxes')
@@ -640,9 +696,9 @@ def api_save_mode_gate_annotation(round_id: str, frame_id: int,
             for raw_box in raw_boxes:
                 if not isinstance(raw_box, dict):
                     raise TypeError
-                boxes.append({
-                    name: float(raw_box[name]) for name in ('x', 'y', 'w', 'h')
-                })
+                boxes.append(
+                    {name: float(raw_box[name]) for name in ('x', 'y', 'w', 'h')}
+                )
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, '每个边界框都必须包含数字 x/y/w/h')
     coords: Dict[str, Optional[float]] = {}
@@ -684,15 +740,15 @@ def api_save_mode_gate_annotation(round_id: str, frame_id: int,
 
 
 @app.delete('/api/mode-gate/rounds/{round_id}/frames/{frame_id}')
-def api_delete_mode_gate_annotation(round_id: str,
-                                    frame_id: int) -> Dict[str, Any]:
+def api_delete_mode_gate_annotation(round_id: str, frame_id: int) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
-            db.delete_mode_gate_annotation(
-                conn, round_id=round_id, frame_id=frame_id)
+            db.delete_mode_gate_annotation(conn, round_id=round_id, frame_id=frame_id)
             db.audit(
-                conn, 'mode_gate_label', frame_id=frame_id,
+                conn,
+                'mode_gate_label',
+                frame_id=frame_id,
                 detail=json.dumps({'round_id': round_id, 'deleted': True}),
             )
             return {'deleted': True}
@@ -701,8 +757,7 @@ def api_delete_mode_gate_annotation(round_id: str,
 
 
 @app.get('/api/mode-gate/rounds/{round_id}/videos/{video_id}/frames')
-def api_mode_gate_frames(round_id: str,
-                         video_id: int) -> Dict[str, Any]:
+def api_mode_gate_frames(round_id: str, video_id: int) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
@@ -715,7 +770,8 @@ def api_mode_gate_frames(round_id: str,
                 raise HTTPException(404, '视频不在本轮任务中')
             return {
                 'frames': db.list_mode_gate_frames(
-                    conn, round_id=round_id, video_id=video_id)
+                    conn, round_id=round_id, video_id=video_id
+                )
             }
         finally:
             conn.close()
@@ -732,7 +788,8 @@ def api_video_viewport_box(video_id: int) -> Dict[str, Any]:
                 "JOIN frames f ON f.id = b.frame_id "
                 "WHERE f.video_id = ? AND b.box_type = 'viewport' "
                 "ORDER BY f.timestamp_ms DESC LIMIT 1",
-                (video_id,)).fetchone()
+                (video_id,),
+            ).fetchone()
             return {'box': dict(row) if row else None}
         finally:
             conn.close()
@@ -745,13 +802,18 @@ def api_video_streamer_boxes(video_id: int) -> Dict[str, Any]:
         conn = _conn()
         try:
             row = conn.execute(
-                'SELECT v.streamer FROM videos v WHERE v.id = ?',
-                (video_id,)).fetchone()
+                'SELECT v.streamer FROM videos v WHERE v.id = ?', (video_id,)
+            ).fetchone()
             if not row or not row['streamer']:
                 return {'streamer': None, 'boxes': {}}
-            boxes = {r['box_type']: dict(r) for r in conn.execute(
-                'SELECT box_type, x, y, w, h FROM streamer_boxes '
-                'WHERE streamer = ?', (row['streamer'],)).fetchall()}
+            boxes = {
+                r['box_type']: dict(r)
+                for r in conn.execute(
+                    'SELECT box_type, x, y, w, h FROM streamer_boxes '
+                    'WHERE streamer = ?',
+                    (row['streamer'],),
+                ).fetchall()
+            }
             return {'streamer': row['streamer'], 'boxes': boxes}
         finally:
             conn.close()
@@ -764,11 +826,13 @@ def api_delete_streamer_box(video_id: int, box_type: str) -> Dict[str, Any]:
         conn = _conn()
         try:
             row = conn.execute(
-                'SELECT streamer FROM videos WHERE id = ?', (video_id,)).fetchone()
+                'SELECT streamer FROM videos WHERE id = ?', (video_id,)
+            ).fetchone()
             if row and row['streamer']:
                 conn.execute(
                     'DELETE FROM streamer_boxes WHERE streamer = ? AND box_type = ?',
-                    (row['streamer'], box_type))
+                    (row['streamer'], box_type),
+                )
                 conn.commit()
             return {'deleted': True}
         finally:
@@ -781,13 +845,19 @@ def api_backfill_boxes(video_id: int) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
-            v = conn.execute('SELECT streamer FROM videos WHERE id = ?',
-                             (video_id,)).fetchone()
+            v = conn.execute(
+                'SELECT streamer FROM videos WHERE id = ?', (video_id,)
+            ).fetchone()
             if not v or not v['streamer']:
                 return {'filled': 0, 'note': '视频不存在'}
-            defaults = {r['box_type']: r for r in conn.execute(
-                'SELECT box_type, x, y, w, h FROM streamer_boxes '
-                'WHERE streamer = ?', (v['streamer'],)).fetchall()}
+            defaults = {
+                r['box_type']: r
+                for r in conn.execute(
+                    'SELECT box_type, x, y, w, h FROM streamer_boxes '
+                    'WHERE streamer = ?',
+                    (v['streamer'],),
+                ).fetchall()
+            }
             if not defaults:
                 return {'filled': 0, 'note': '该主播还没有默认框,先画一次'}
             # screen_type → 需要的框类型(未列出的类型不需要面板框)
@@ -804,34 +874,37 @@ def api_backfill_boxes(video_id: int) -> Dict[str, Any]:
                 'FROM annotations a JOIN frames f ON f.id = a.frame_id '
                 "WHERE f.video_id = ? AND a.annotation_status = 'complete' "
                 'AND a.screen_type IS NOT NULL',
-                (video_id,)).fetchall()
+                (video_id,),
+            ).fetchall()
             filled = 0
             for r in rows:
                 bt = need.get(r['screen_type'])
                 if bt and bt in defaults:
                     exists = conn.execute(
                         'SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = ?',
-                        (r['frame_id'], bt)).fetchone()
+                        (r['frame_id'], bt),
+                    ).fetchone()
                     if not exists:
                         d = defaults[bt]
                         conn.execute(
                             'INSERT INTO boxes (frame_id, box_type, x, y, w, h) '
                             'VALUES (?, ?, ?, ?, ?, ?)',
-                            (r['frame_id'], bt, d['x'], d['y'], d['w'], d['h']))
+                            (r['frame_id'], bt, d['x'], d['y'], d['w'], d['h']),
+                        )
                         filled += 1
                 # 游戏窗口:虚荣画面都可补(非虚荣画面没有游戏窗口)
-                if (r['content_family'] == 'vainglory'
-                        and 'viewport' in defaults):
+                if r['content_family'] == 'vainglory' and 'viewport' in defaults:
                     exists = conn.execute(
                         'SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = ?',
-                        (r['frame_id'], 'viewport')).fetchone()
+                        (r['frame_id'], 'viewport'),
+                    ).fetchone()
                     if not exists:
                         d = defaults['viewport']
                         conn.execute(
                             'INSERT INTO boxes (frame_id, box_type, x, y, w, h) '
                             'VALUES (?, ?, ?, ?, ?, ?)',
-                            (r['frame_id'], 'viewport',
-                             d['x'], d['y'], d['w'], d['h']))
+                            (r['frame_id'], 'viewport', d['x'], d['y'], d['w'], d['h']),
+                        )
                         filled += 1
             conn.commit()
             return {'filled': filled}
@@ -860,9 +933,7 @@ def api_clear_annotation(frame_id: int) -> Dict[str, Any]:
                     (row['event_id'],),
                 ).fetchone()['c']
                 if other == 0:
-                    conn.execute(
-                        'DELETE FROM events WHERE id = ?', (row['event_id'],)
-                    )
+                    conn.execute('DELETE FROM events WHERE id = ?', (row['event_id'],))
             conn.execute('UPDATE frames SET labeled = 0 WHERE id = ?', (frame_id,))
             conn.commit()
             return {'cleared': True}
@@ -872,6 +943,7 @@ def api_clear_annotation(frame_id: int) -> Dict[str, Any]:
 
 # ---------- BP 主动学习复核 ----------
 
+
 def _set_worker_candidate_sync_state(**values: Any) -> None:
     with _worker_candidate_sync_lock:
         _worker_candidate_sync_state.update(values)
@@ -879,12 +951,27 @@ def _set_worker_candidate_sync_state(**values: Any) -> None:
 
 def _sync_worker_candidate_queue(*, maximum: int) -> None:
     _set_worker_candidate_sync_state(
-        running=True, total=0, processed=0, inserted=0, updated=0,
-        downloaded=0, failed=0, last_error='', reviews_pulled=0,
-        reviews_pushed=0, review_conflicts=0, push_failed=0, error=None,
-        archive_total=0, archive_processed=0, archive_inserted=0,
-        archive_updated=0, archive_downloaded=0, archive_failed=0,
-        archive_last_error='', archive_box_suggested=0,
+        running=True,
+        total=0,
+        processed=0,
+        inserted=0,
+        updated=0,
+        downloaded=0,
+        failed=0,
+        last_error='',
+        reviews_pulled=0,
+        reviews_pushed=0,
+        review_conflicts=0,
+        push_failed=0,
+        error=None,
+        archive_total=0,
+        archive_processed=0,
+        archive_inserted=0,
+        archive_updated=0,
+        archive_downloaded=0,
+        archive_failed=0,
+        archive_last_error='',
+        archive_box_suggested=0,
     )
     conn = None
     try:
@@ -908,22 +995,23 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
         unified_pull = worker_candidates.pull_training_review_reviews(conn, reviews)
         legacy_push = worker_candidates.push_worker_candidate_reviews(conn, nas)
         unified_push = worker_candidates.push_training_review_reviews(conn, nas)
-        result.update({
-            'reviews_pulled': (
-                legacy_pull['reviews_pulled'] + unified_pull['reviews_pulled']
-            ),
-            'review_conflicts': (
-                legacy_pull['review_conflicts']
-                + unified_pull['review_conflicts']
-            ),
-            'reviews_ignored': (
-                legacy_pull['reviews_ignored'] + unified_pull['reviews_ignored']
-            ),
-            'reviews_pushed': (
-                legacy_push['reviews_pushed'] + unified_push['reviews_pushed']
-            ),
-            'push_failed': legacy_push['push_failed'] + unified_push['push_failed'],
-        })
+        result.update(
+            {
+                'reviews_pulled': (
+                    legacy_pull['reviews_pulled'] + unified_pull['reviews_pulled']
+                ),
+                'review_conflicts': (
+                    legacy_pull['review_conflicts'] + unified_pull['review_conflicts']
+                ),
+                'reviews_ignored': (
+                    legacy_pull['reviews_ignored'] + unified_pull['reviews_ignored']
+                ),
+                'reviews_pushed': (
+                    legacy_push['reviews_pushed'] + unified_push['reviews_pushed']
+                ),
+                'push_failed': legacy_push['push_failed'] + unified_push['push_failed'],
+            }
+        )
         archive = result_archive.sync_result_archive(
             conn,
             nas,
@@ -941,16 +1029,18 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
                 archive_box_suggested=values['box_suggested'],
             ),
         )
-        result.update({
-            'archive_total': archive['total'],
-            'archive_processed': archive['processed'],
-            'archive_inserted': archive['inserted'],
-            'archive_updated': archive['updated'],
-            'archive_downloaded': archive['downloaded'],
-            'archive_failed': archive['failed'],
-            'archive_last_error': archive['last_error'],
-            'archive_box_suggested': archive['box_suggested'],
-        })
+        result.update(
+            {
+                'archive_total': archive['total'],
+                'archive_processed': archive['processed'],
+                'archive_inserted': archive['inserted'],
+                'archive_updated': archive['updated'],
+                'archive_downloaded': archive['downloaded'],
+                'archive_failed': archive['failed'],
+                'archive_last_error': archive['last_error'],
+                'archive_box_suggested': archive['box_suggested'],
+            }
+        )
         _set_worker_candidate_sync_state(**result, running=False)
     except Exception as exc:  # noqa: BLE001
         _set_worker_candidate_sync_state(running=False, error=str(exc))
@@ -970,9 +1060,7 @@ def api_sync_worker_candidates(body: Dict[str, Any]) -> Dict[str, Any]:
         _worker_candidate_sync_state['running'] = True
         _worker_candidate_sync_state['error'] = None
     threading.Thread(
-        target=_sync_worker_candidate_queue,
-        kwargs={'maximum': maximum},
-        daemon=True,
+        target=_sync_worker_candidate_queue, kwargs={'maximum': maximum}, daemon=True
     ).start()
     return {'started': True}
 
@@ -998,23 +1086,57 @@ def api_worker_candidate_state() -> Dict[str, Any]:
 
 @app.get('/api/training-review/items')
 def api_training_review_items(
-        status: str = 'needs_review',
-        limit: int = Query(500, ge=1, le=2000),
-        offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    status: str = 'needs_review',
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+    streamer: str = '',
+    hero_screen_type: str = '',
+) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
             try:
                 items = db.list_training_review_items(
-                    conn, status=status, limit=limit, offset=offset)
+                    conn,
+                    status=status,
+                    limit=limit,
+                    offset=offset,
+                    streamer=streamer,
+                    hero_screen_type=hero_screen_type,
+                )
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
-            return {'items': items, 'stats': db.training_review_stats(conn)}
+            stats = db.training_review_stats(conn)
+            if status == 'legacy_hero':
+                stats['legacy_hero'] = db.legacy_hero_review_stats(conn)
+                stats['legacy_hero_filtered'] = db.legacy_hero_review_stats(
+                    conn, streamer=streamer, screen_type=hero_screen_type
+                )
+            return {'items': items, 'stats': stats}
         finally:
             conn.close()
 
 
-def _hero_lineup_payload(lineup: Dict[str, Any]) -> Dict[str, Any]:
+@app.post('/api/training-review/items/{frame_id}/prefill')
+def api_training_review_prefill(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return model_prefill.prefill_training_review_item(
+                    conn, frame_id, force=bool(body.get('force'))
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except FileNotFoundError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        finally:
+            conn.close()
+
+
+def _hero_lineup_payload(
+    lineup: Dict[str, Any], *, item: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     frame_id = int(lineup['frame_id'])
     slots = []
     for slot in lineup.get('slots') or []:
@@ -1024,7 +1146,19 @@ def _hero_lineup_payload(lineup: Dict[str, Any]) -> Dict[str, Any]:
             f"{value['side']}/{value['slot']}/crop"
         )
         slots.append(value)
-    return {'applicable': True, **lineup, 'slots': slots}
+    payload = {'applicable': True, **lineup, 'slots': slots}
+    if item is not None:
+        for source in item.get('sources') or []:
+            if source.get('source_type') != 'new_model_hero_prefill':
+                continue
+            metadata = source.get('metadata') or {}
+            if metadata.get('screen_type') == lineup.get('screen_type') and int(
+                metadata.get('team_size') or 0
+            ) == int(lineup.get('team_size') or 0):
+                payload['player_suggestion'] = metadata.get('player_suggestion')
+                payload['model_runs'] = metadata.get('model_runs') or {}
+                break
+    return payload
 
 
 @app.get('/api/training-review/heroes')
@@ -1063,10 +1197,11 @@ def api_training_review_hero_image(label: str) -> Response:
 
 @app.get('/api/training-review/items/{frame_id}/hero-lineup')
 def api_training_review_hero_lineup(
-        frame_id: int,
-        screen_type: Optional[str] = None,
-        team_size: Optional[int] = Query(None),
-        refresh: bool = False) -> Dict[str, Any]:
+    frame_id: int,
+    screen_type: Optional[str] = None,
+    team_size: Optional[int] = Query(None),
+    refresh: bool = False,
+) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
@@ -1078,15 +1213,13 @@ def api_training_review_hero_lineup(
             conn.close()
     try:
         context = hero_review.infer_lineup_context(
-            item,
-            screen_type_hint=screen_type,
-            team_size_hint=team_size,
+            item, screen_type_hint=screen_type, team_size_hint=team_size
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if context is None:
         if existing is not None and screen_type is None:
-            return _hero_lineup_payload(existing)
+            return _hero_lineup_payload(existing, item=item)
         return {'applicable': False, 'reason': '尚未选择英雄头像所在画面'}
     inferred_screen, inferred_size = context
     same_context_existing = False
@@ -1097,16 +1230,10 @@ def api_training_review_hero_lineup(
         refreshes_automatic_layout = (
             inferred_size is not None
             and existing['review_status'] == 'pending'
-            and str(existing['suggestion_method']).startswith(
-                'layout-template+'
-            )
+            and str(existing['suggestion_method']).startswith('layout-template+')
         )
-        if (
-            same_context_existing
-            and not refresh
-            and not refreshes_automatic_layout
-        ):
-            return _hero_lineup_payload(existing)
+        if same_context_existing and not refresh and not refreshes_automatic_layout:
+            return _hero_lineup_payload(existing, item=item)
     if inferred_size is None:
         return {
             'applicable': True,
@@ -1114,6 +1241,51 @@ def api_training_review_hero_lineup(
             'needs_team_size': True,
             'slots': [],
         }
+    if existing is None or existing['review_status'] != 'confirmed':
+        try:
+            with _db_lock:
+                model_conn = _conn()
+                try:
+                    model_result = model_prefill.prefill_hero_lineup(
+                        model_conn,
+                        Path(str(item['frame_path'])),
+                        screen_type=inferred_screen,
+                        team_size=inferred_size,
+                    )
+                finally:
+                    model_conn.close()
+        except (FileNotFoundError, OSError, RuntimeError, ValueError):
+            model_result = {'complete': False}
+        if model_result.get('complete'):
+            with _db_lock:
+                conn = _conn()
+                try:
+                    lineup = db.replace_training_review_hero_suggestions(
+                        conn,
+                        frame_id=frame_id,
+                        screen_type=inferred_screen,
+                        team_size=inferred_size,
+                        method='new-model-cascade-v1',
+                        slots=model_result['slots'],
+                    )
+                    db.add_training_review_source(
+                        conn,
+                        frame_id=frame_id,
+                        source_type='new_model_hero_prefill',
+                        source_id=f'frame:{frame_id}',
+                        metadata={
+                            'screen_type': inferred_screen,
+                            'team_size': inferred_size,
+                            'model_runs': model_result.get('model_runs') or {},
+                            'player_suggestion': model_result.get('player_suggestion'),
+                            'detected': int(model_result.get('detected') or 0),
+                        },
+                        image_path=str(item['frame_path']),
+                    )
+                    item = db.get_training_review_item(conn, frame_id) or item
+                finally:
+                    conn.close()
+            return _hero_lineup_payload(lineup, item=item)
     with _db_lock:
         conn = _conn()
         try:
@@ -1122,15 +1294,13 @@ def api_training_review_hero_lineup(
                 streamer=str(item['streamer'] or ''),
                 screen_type=inferred_screen,
                 team_size=inferred_size,
-                layout_key=db.hero_layout_key(
-                    int(item['width']), int(item['height'])
-                ),
+                layout_key=db.hero_layout_key(int(item['width']), int(item['height'])),
             )
         finally:
             conn.close()
     if template is None:
         if same_context_existing and existing is not None:
-            return _hero_lineup_payload(existing)
+            return _hero_lineup_payload(existing, item=item)
         return {
             'applicable': True,
             'screen_type': inferred_screen,
@@ -1146,7 +1316,7 @@ def api_training_review_hero_lineup(
         and not refresh
         and str(template['updated_at']) <= str(existing['updated_at'])
     ):
-        return _hero_lineup_payload(existing)
+        return _hero_lineup_payload(existing, item=item)
     try:
         slots = hero_review.recognize_slots(
             Path(str(item['frame_path'])), template['slots']
@@ -1171,12 +1341,10 @@ def api_training_review_hero_lineup(
         finally:
             conn.close()
     lineup['template_found'] = True
-    return _hero_lineup_payload(lineup)
+    return _hero_lineup_payload(lineup, item=item)
 
 
-def _same_hero_crop(
-    left: Dict[str, Any], right: Dict[str, Any]
-) -> bool:
+def _same_hero_crop(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
     return all(
         abs(float(left[name]) - float(right[name])) < 0.000001
         for name in ('x', 'y', 'w', 'h')
@@ -1185,7 +1353,8 @@ def _same_hero_crop(
 
 @app.put('/api/training-review/items/{frame_id}/hero-layout')
 def api_save_training_review_hero_layout(
-        frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    frame_id: int, body: Dict[str, Any]
+) -> Dict[str, Any]:
     screen_type = str(body.get('screen_type') or '')
     try:
         team_size = int(body.get('team_size'))
@@ -1205,6 +1374,7 @@ def api_save_training_review_hero_layout(
             conn.close()
     if item is None:
         raise HTTPException(404, '训练复核图片不存在')
+    template_streamer = str(item['streamer'] or '').strip()
     slots = [
         {
             'side': value.get('side'),
@@ -1216,25 +1386,17 @@ def api_save_training_review_hero_layout(
     ]
     try:
         if recognize:
-            slots = hero_review.recognize_slots(
-                Path(str(item['frame_path'])), slots
-            )
+            slots = hero_review.recognize_slots(Path(str(item['frame_path'])), slots)
         else:
             existing_slots = {
                 (slot['side'], int(slot['slot'])): slot
                 for slot in (existing or {}).get('slots', [])
             }
             for slot in slots:
-                previous = existing_slots.get(
-                    (str(slot['side']), int(slot['slot']))
-                )
-                if previous and _same_hero_crop(
-                    previous['crop'], slot['crop'] or {}
-                ):
+                previous = existing_slots.get((str(slot['side']), int(slot['slot'])))
+                if previous and _same_hero_crop(previous['crop'], slot['crop'] or {}):
                     slot['suggested_label'] = previous['suggested_label']
-                    slot['suggestion_confidence'] = previous[
-                        'suggestion_confidence'
-                    ]
+                    slot['suggestion_confidence'] = previous['suggestion_confidence']
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HTTPException(422, f'英雄头像识别失败：{exc}') from exc
     with _db_lock:
@@ -1247,15 +1409,14 @@ def api_save_training_review_hero_layout(
                     screen_type=screen_type,
                     team_size=team_size,
                     method=(
-                        'manual-circle+sift-v1'
-                        if recognize else 'manual-circle-v1'
+                        'manual-circle+sift-v1' if recognize else 'manual-circle-v1'
                     ),
                     slots=slots,
                 )
-                if save_template:
+                if save_template and template_streamer:
                     db.save_training_review_hero_template(
                         conn,
-                        streamer=str(item['streamer'] or ''),
+                        streamer=template_streamer,
                         screen_type=screen_type,
                         team_size=team_size,
                         layout_key=db.hero_layout_key(
@@ -1269,13 +1430,12 @@ def api_save_training_review_hero_layout(
                 raise HTTPException(400, str(exc)) from exc
         finally:
             conn.close()
-    lineup['template_saved'] = save_template
+    lineup['template_saved'] = save_template and bool(template_streamer)
     return _hero_lineup_payload(lineup)
 
 
 @app.get('/api/training-review/items/{frame_id}/heroes/{side}/{slot}/crop')
-def api_training_review_hero_crop(
-        frame_id: int, side: str, slot: int) -> Response:
+def api_training_review_hero_crop(frame_id: int, side: str, slot: int) -> Response:
     with _db_lock:
         conn = _conn()
         try:
@@ -1310,7 +1470,8 @@ def api_training_review_hero_crop(
 
 @app.put('/api/training-review/items/{frame_id}/hero-lineup')
 def api_save_training_review_hero_lineup(
-        frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    frame_id: int, body: Dict[str, Any]
+) -> Dict[str, Any]:
     labels = body.get('heroes')
     if not isinstance(labels, list):
         raise HTTPException(400, '英雄阵容必须是列表')
@@ -1327,6 +1488,7 @@ def api_save_training_review_hero_lineup(
                     frame_id=frame_id,
                     labels=labels,
                     allowed_labels=allowed,
+                    player_status=body.get('player_status'),
                     player_side=body.get('player_side'),
                     player_slot=body.get('player_slot'),
                 )
@@ -1349,8 +1511,10 @@ def _training_review_box(value: Any) -> Optional[Dict[str, float]]:
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(400, '结算框需要 x/y/w/h 数字') from exc
     if not (
-        0 <= box['x'] <= 1 and 0 <= box['y'] <= 1
-        and 0 < box['w'] <= 1 and 0 < box['h'] <= 1
+        0 <= box['x'] <= 1
+        and 0 <= box['y'] <= 1
+        and 0 < box['w'] <= 1
+        and 0 < box['h'] <= 1
         and box['x'] + box['w'] <= 1.001
         and box['y'] + box['h'] <= 1.001
     ):
@@ -1360,7 +1524,8 @@ def _training_review_box(value: Any) -> Optional[Dict[str, float]]:
 
 @app.put('/api/training-review/items/{frame_id}')
 def api_save_training_review_item(
-        frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    frame_id: int, body: Dict[str, Any]
+) -> Dict[str, Any]:
     status = str(body.get('review_status') or 'confirmed')
     result_label = body.get('result_panel_label')
     result_box = _training_review_box(body.get('result_box'))
@@ -1371,13 +1536,19 @@ def api_save_training_review_item(
                 raise HTTPException(404, '训练复核图片不存在')
             if result_label == 'result_panel':
                 if result_box is None and 'result_panel' not in db.get_boxes(
-                        conn, frame_id):
+                    conn, frame_id
+                ):
                     raise HTTPException(400, '结算正样本必须框出完整结算面板')
                 if result_box is not None:
                     db.save_box(
-                        conn, frame_id, 'result_panel',
-                        result_box['x'], result_box['y'],
-                        result_box['w'], result_box['h'])
+                        conn,
+                        frame_id,
+                        'result_panel',
+                        result_box['x'],
+                        result_box['y'],
+                        result_box['w'],
+                        result_box['h'],
+                    )
             try:
                 return db.save_training_review(
                     conn,
@@ -1385,12 +1556,13 @@ def api_save_training_review_item(
                     match_flow_label=body.get('match_flow_label'),
                     match_mode_label=body.get('match_mode_label'),
                     hero_select_label=body.get('hero_select_label'),
+                    hero_select_variant=body.get('hero_select_variant'),
+                    hero_select_visibility=body.get('hero_select_visibility'),
                     result_panel_label=result_label,
                     hero_layout_label=body.get('hero_layout_label'),
+                    panel_render_state=str(body.get('panel_render_state') or 'clear'),
                     ocr_usable=str(body.get('ocr_usable') or 'yes'),
-                    result_occlusion=str(
-                        body.get('result_occlusion') or 'none'
-                    ),
+                    result_occlusion=str(body.get('result_occlusion') or 'none'),
                     occluder_types=body.get('occluder_types') or [],
                     status=status,
                     notes=str(body.get('notes') or ''),
@@ -1405,15 +1577,18 @@ def api_save_training_review_item(
 
 @app.get('/api/worker-candidates/items')
 def api_worker_candidate_items(
-        task: str = '', status: str = 'pending',
-        limit: int = Query(500, ge=1, le=2000),
-        offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    task: str = '',
+    status: str = 'pending',
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
             try:
                 items = db.list_worker_candidates(
-                    conn, task=task, status=status, limit=limit, offset=offset)
+                    conn, task=task, status=status, limit=limit, offset=offset
+                )
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
             return {'items': items, 'stats': db.worker_candidate_stats(conn)}
@@ -1423,7 +1598,8 @@ def api_worker_candidate_items(
 
 @app.put('/api/worker-candidates/items/{candidate_id}')
 def api_review_worker_candidate(
-        candidate_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    candidate_id: int, body: Dict[str, Any]
+) -> Dict[str, Any]:
     raw_label = body.get('label')
     label = None if raw_label in (None, '', 'skip') else str(raw_label)
     visual_condition = str(body.get('visual_condition') or 'clear')
@@ -1472,11 +1648,22 @@ def _set_bp_collect_state(**values: Any) -> None:
 
 
 def _collect_bp_candidates(
-        *, model_name: str, maximum_scan: int, maximum_items: int,
-        maximum_per_video: int, video_ids: List[int]) -> None:
+    *,
+    model_name: str,
+    maximum_scan: int,
+    maximum_items: int,
+    maximum_per_video: int,
+    video_ids: List[int],
+) -> None:
     _set_bp_collect_state(
-        running=True, model=model_name, scanned=0, total=0, selected=0,
-        inserted=0, failed=0, error=None,
+        running=True,
+        model=model_name,
+        scanned=0,
+        total=0,
+        selected=0,
+        inserted=0,
+        failed=0,
+        error=None,
     )
     try:
         with _db_lock:
@@ -1488,14 +1675,18 @@ def _collect_bp_candidates(
                     placeholders = ','.join('?' for _ in video_ids)
                     where.append(f'f.video_id IN ({placeholders})')
                     args.extend(video_ids)
-                rows = [dict(row) for row in conn.execute(
-                    'SELECT f.id AS frame_id, f.video_id, f.timestamp_ms, '
-                    'f.frame_path, f.phash, v.streamer, v.filename '
-                    'FROM frames f JOIN videos v ON v.id = f.video_id '
-                    'WHERE ' + ' AND '.join(where) +
-                    ' ORDER BY f.video_id, f.timestamp_ms',
-                    args,
-                ).fetchall()]
+                rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        'SELECT f.id AS frame_id, f.video_id, f.timestamp_ms, '
+                        'f.frame_path, f.phash, v.streamer, v.filename '
+                        'FROM frames f JOIN videos v ON v.id = f.video_id '
+                        'WHERE '
+                        + ' AND '.join(where)
+                        + ' ORDER BY f.video_id, f.timestamp_ms',
+                        args,
+                    ).fetchall()
+                ]
             finally:
                 conn.close()
         frames = bp_review.balanced_frame_rows(rows, maximum=maximum_scan)
@@ -1515,35 +1706,35 @@ def _collect_bp_candidates(
                 failed += 1
             _set_bp_collect_state(scanned=index, failed=failed)
         candidates = bp_review.select_candidates(
-            observations,
-            maximum=maximum_items,
-            maximum_per_video=maximum_per_video,
+            observations, maximum=maximum_items, maximum_per_video=maximum_per_video
         )
         inserted = 0
         with _db_lock:
             conn = _conn()
             try:
                 for candidate in candidates:
-                    inserted += int(db.upsert_bp_review_item(
-                        conn,
-                        frame_id=int(candidate['frame_id']),
-                        model_version=model_name,
-                        suggested_label=candidate['suggested_label'],
-                        suggestion_confidence=candidate['suggestion_confidence'],
-                        stage_class=candidate['stage_class'],
-                        stage_confidence=candidate['stage_confidence'],
-                        pre_match_confidence=candidate['pre_match_confidence'],
-                        mode_class=candidate['mode_class'],
-                        mode_confidence=candidate['mode_confidence'],
-                        mode_margin=candidate['mode_margin'],
-                        selection_reason=candidate['selection_reason'],
-                        priority=candidate['priority'],
-                        raw_prediction=candidate['raw_prediction'],
-                    ))
+                    inserted += int(
+                        db.upsert_bp_review_item(
+                            conn,
+                            frame_id=int(candidate['frame_id']),
+                            model_version=model_name,
+                            suggested_label=candidate['suggested_label'],
+                            suggestion_confidence=candidate['suggestion_confidence'],
+                            stage_class=candidate['stage_class'],
+                            stage_confidence=candidate['stage_confidence'],
+                            pre_match_confidence=candidate['pre_match_confidence'],
+                            mode_class=candidate['mode_class'],
+                            mode_confidence=candidate['mode_confidence'],
+                            mode_margin=candidate['mode_margin'],
+                            selection_reason=candidate['selection_reason'],
+                            priority=candidate['priority'],
+                            raw_prediction=candidate['raw_prediction'],
+                        )
+                    )
             finally:
                 conn.close()
         _set_bp_collect_state(
-            selected=len(candidates), inserted=inserted, running=False,
+            selected=len(candidates), inserted=inserted, running=False
         )
     except Exception as exc:  # noqa: BLE001
         _set_bp_collect_state(running=False, error=str(exc))
@@ -1566,8 +1757,11 @@ def api_collect_bp_review(body: Dict[str, Any]) -> Dict[str, Any]:
     if not 3 <= maximum_per_video <= 100:
         raise HTTPException(400, 'maximum_per_video 必须在 3 到 100 之间')
     model = next(
-        (item for item in inference_mod.list_models()
-         if item['name'] == model_name and item['task'] == 'multi'),
+        (
+            item
+            for item in inference_mod.list_models()
+            if item['name'] == model_name and item['task'] == 'multi'
+        ),
         None,
     )
     if model is None:
@@ -1603,14 +1797,17 @@ def api_bp_review_state() -> Dict[str, Any]:
 
 @app.get('/api/bp-review/items')
 def api_bp_review_items(
-        status: str = 'pending', limit: int = Query(500, ge=1, le=2000),
-        offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    status: str = 'pending',
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
             try:
                 items = db.list_bp_review_items(
-                    conn, status=status, limit=limit, offset=offset)
+                    conn, status=status, limit=limit, offset=offset
+                )
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
             return {'items': items, 'stats': db.bp_review_stats(conn)}
@@ -1640,6 +1837,7 @@ def api_review_bp_item(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
                     label=label,
                     visual_condition=visual_condition,
                 )
+                training_review.mirror_confirmed_bp_review(conn, frame_id)
                 return result
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
@@ -1650,6 +1848,7 @@ def api_review_bp_item(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------- 结算页 / 计分板主动学习复核 ----------
+
 
 @app.get('/api/key-screen-review/state')
 def api_key_screen_review_state() -> Dict[str, Any]:
@@ -1666,27 +1865,26 @@ def api_key_screen_review_state() -> Dict[str, Any]:
 
 @app.get('/api/key-screen-review/items')
 def api_key_screen_review_items(
-        status: str = 'pending', limit: int = Query(500, ge=1, le=2000),
-        offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    status: str = 'pending',
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
             try:
                 items = db.list_key_screen_review_items(
-                    conn, status=status, limit=limit, offset=offset)
+                    conn, status=status, limit=limit, offset=offset
+                )
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
-            return {
-                'items': items,
-                'stats': db.key_screen_review_stats(conn),
-            }
+            return {'items': items, 'stats': db.key_screen_review_stats(conn)}
         finally:
             conn.close()
 
 
 @app.put('/api/key-screen-review/items/{frame_id}')
-def api_review_key_screen_item(
-        frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+def api_review_key_screen_item(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
     value = body.get('label')
     label = None if value in (None, '', 'skip') else str(value)
     visual_condition = str(body.get('visual_condition') or 'clear')
@@ -1707,6 +1905,7 @@ def api_review_key_screen_item(
                     label=label,
                     visual_condition=visual_condition,
                 )
+                training_review.mirror_confirmed_key_screen_review(conn, frame_id)
                 return result
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
@@ -1741,7 +1940,8 @@ def api_model_test(model_name: str, body: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(404, f'帧文件不存在: {frame_path}')
     try:
         result = inference_mod.run_model(
-            model_name, frame_path, conf_thr=body.get('conf_thr', 0.25))
+            model_name, frame_path, conf_thr=body.get('conf_thr', 0.25)
+        )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except Exception as e:  # 推理异常(模型结构不匹配等)
@@ -1762,14 +1962,15 @@ def api_model_test_runs() -> Dict[str, Any]:
 
 @app.get('/api/model-tests/runs/{run_id}/samples')
 def api_model_test_samples(
-        run_id: str, split: str = 'test',
-        limit: int = Query(500, ge=1, le=2000)) -> Dict[str, Any]:
+    run_id: str, split: str = 'test', limit: int = Query(500, ge=1, le=2000)
+) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
             try:
                 return model_testing.list_run_samples(
-                    conn, run_id, split=split, limit=limit)
+                    conn, run_id, split=split, limit=limit
+                )
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
             except (FileNotFoundError, ValueError) as exc:
@@ -1779,11 +1980,16 @@ def api_model_test_samples(
 
 
 @app.post('/api/model-tests/runs/{run_id}/predict')
-def api_model_test_run_predict(
-        run_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+def api_model_test_run_predict(run_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
     sample_id = str(body.get('sample_id') or '')
     split = str(body.get('split') or '')
-    if not sample_id or split not in {'train', 'val', 'test'}:
+    if not sample_id or split not in {
+        'train',
+        'val',
+        'test',
+        'scoreboard_challenge',
+        'post_run_challenge',
+    }:
         raise HTTPException(400, '需要有效的 sample_id 和 split')
     with _db_lock:
         conn = _conn()
@@ -1806,15 +2012,47 @@ def api_model_test_run_predict(
             conn.close()
 
 
+@app.post('/api/model-tests/runs/{run_id}/batch')
+def api_model_test_run_batch(run_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    split = str(body.get('split') or '')
+    if split not in {
+        'train',
+        'val',
+        'test',
+        'scoreboard_challenge',
+        'post_run_challenge',
+    }:
+        raise HTTPException(400, '需要有效的 split')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return model_testing.evaluate_run_samples(
+                    conn,
+                    run_id,
+                    split=split,
+                    conf_thr=float(body.get('conf_thr', 0.25)),
+                    iou_threshold=float(body.get('iou_threshold', 0.5)),
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
 @app.get('/api/model-tests/runs/{run_id}/samples/{sample_id}/image')
 def api_model_test_sample_image(
-        run_id: str, sample_id: str, split: str) -> FileResponse:
+    run_id: str, sample_id: str, split: str
+) -> FileResponse:
     with _db_lock:
         conn = _conn()
         try:
             try:
                 path = model_testing.run_sample_image_path(
-                    conn, run_id, sample_id=sample_id, split=split)
+                    conn, run_id, sample_id=sample_id, split=split
+                )
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
             except (FileNotFoundError, ValueError) as exc:
@@ -1862,9 +2100,7 @@ def api_build_model_package(body: Dict[str, Any]) -> Dict[str, Any]:
         try:
             try:
                 return model_testing.build_model_package(
-                    conn,
-                    run_ids,
-                    package_id=str(body.get('package_id') or ''),
+                    conn, run_ids, package_id=str(body.get('package_id') or '')
                 )
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
@@ -1887,11 +2123,7 @@ def api_model_package_archive(package_id: str) -> FileResponse:
                 raise HTTPException(400, str(exc))
         finally:
             conn.close()
-    return FileResponse(
-        archive,
-        media_type='application/zip',
-        filename=archive.name,
-    )
+    return FileResponse(archive, media_type='application/zip', filename=archive.name)
 
 
 @app.get('/api/events')
@@ -1899,9 +2131,11 @@ def api_events(video_id: Optional[int] = None) -> List[Dict[str, Any]]:
     with _db_lock:
         conn = _conn()
         try:
-            return db.event_stats(conn) if not video_id else [
-                e for e in db.event_stats(conn) if e['video_id'] == video_id
-            ]
+            return (
+                db.event_stats(conn)
+                if not video_id
+                else [e for e in db.event_stats(conn) if e['video_id'] == video_id]
+            )
         finally:
             conn.close()
 
@@ -1914,7 +2148,7 @@ def api_event(event_id: int) -> Dict[str, Any]:
             ev = conn.execute(
                 'SELECT e.*, v.streamer, v.remote_path FROM events e '
                 'JOIN videos v ON v.id = e.video_id WHERE e.id = ?',
-                (event_id,)
+                (event_id,),
             ).fetchone()
             if not ev:
                 raise HTTPException(404, '事件不存在')
@@ -1948,8 +2182,12 @@ def api_merge_events(event_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
         conn = _conn()
         try:
             keep = db.merge_events(conn, [event_id] + with_ids)
-            db.audit(conn, 'event_merge', event_id=keep,
-                     detail=f'merged {[event_id] + with_ids}')
+            db.audit(
+                conn,
+                'event_merge',
+                event_id=keep,
+                detail=f'merged {[event_id] + with_ids}',
+            )
             return {'event_id': keep}
         finally:
             conn.close()
@@ -1962,8 +2200,12 @@ def api_split_event(event_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
         conn = _conn()
         try:
             new_id = db.split_event(conn, event_id, at_ms)
-            db.audit(conn, 'event_split', event_id=event_id,
-                     detail=f'split at {at_ms} -> new {new_id}')
+            db.audit(
+                conn,
+                'event_split',
+                event_id=event_id,
+                detail=f'split at {at_ms} -> new {new_id}',
+            )
             return {'event_id': event_id, 'new_event_id': new_id}
         finally:
             conn.close()
@@ -1971,11 +2213,14 @@ def api_split_event(event_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- 标注(条件式) ----------
 
+
 def _validate_annotation(body: Dict[str, Any]) -> Dict[str, Any]:
     """按分层规则清洗并校验标注;矛盾字段自动清空。"""
     cf = body.get('content_family')
     if cf not in config.CONTENT_FAMILIES:
-        raise HTTPException(400, f'content_family 必须是 {list(config.CONTENT_FAMILIES)}')
+        raise HTTPException(
+            400, f'content_family 必须是 {list(config.CONTENT_FAMILIES)}'
+        )
     data = {
         'content_family': cf,
         'non_vainglory_type': None,
@@ -1984,8 +2229,11 @@ def _validate_annotation(body: Dict[str, Any]) -> Dict[str, Any]:
         'game_mode': None,
         'match_kind': body.get('match_kind') or 'unknown',
         'view_context': body.get('view_context') or 'unknown',
-        'quality_flags': [f for f in body.get('quality_flags', [])
-                          if f in {x[0] for x in config.QUALITY_FLAGS}],
+        'quality_flags': [
+            f
+            for f in body.get('quality_flags', [])
+            if f in {x[0] for x in config.QUALITY_FLAGS}
+        ],
         'black_bars': body.get('black_bars') or 'none',
         'ocr_usable': None,
         'notes': str(body.get('notes', ''))[:1000],
@@ -2030,14 +2278,21 @@ def _validate_annotation(body: Dict[str, Any]) -> Dict[str, Any]:
         # 结算框评估字段
         rc = body.get('result_clarity')
         if rc is not None and rc not in config.RESULT_CLARITY:
-            raise HTTPException(400, f'result_clarity 必须是 {list(config.RESULT_CLARITY)}')
+            raise HTTPException(
+                400, f'result_clarity 必须是 {list(config.RESULT_CLARITY)}'
+            )
         data['result_clarity'] = rc or 'clear'
         ro = body.get('result_occlusion')
         if ro is not None and ro not in config.RESULT_OCCLUSION:
-            raise HTTPException(400, f'result_occlusion 必须是 {list(config.RESULT_OCCLUSION)}')
+            raise HTTPException(
+                400, f'result_occlusion 必须是 {list(config.RESULT_OCCLUSION)}'
+            )
         data['result_occlusion'] = ro or 'none'
-        occl = [o for o in body.get('occluder_types', [])
-                if o in {x[0] for x in config.OCCLUDER_TYPES}]
+        occl = [
+            o
+            for o in body.get('occluder_types', [])
+            if o in {x[0] for x in config.OCCLUDER_TYPES}
+        ]
         data['occluder_types'] = occl if ro != 'none' else []
     else:
         data['ocr_usable'] = None
@@ -2068,8 +2323,13 @@ def api_save_annotation(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
                 'death_scoreboard': 'scoreboard_panel',
                 'result_page': 'result_panel',
             }.get(data['screen_type'])
-            for bt in ('shop_panel', 'scoreboard_panel', 'result_panel',
-                       'equipment_panel', 'talent_panel'):
+            for bt in (
+                'shop_panel',
+                'scoreboard_panel',
+                'result_panel',
+                'equipment_panel',
+                'talent_panel',
+            ):
                 if bt != expected:
                     db.delete_box(conn, frame_id, bt)
             # 兜底补框:面板类型但没有对应框时,自动带出主播历史框
@@ -2077,7 +2337,8 @@ def api_save_annotation(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
             if expected and expected not in db.get_boxes(conn, frame_id):
                 srow = conn.execute(
                     'SELECT v.streamer FROM frames f JOIN videos v '
-                    'ON v.id = f.video_id WHERE f.id = ?', (frame_id,)
+                    'ON v.id = f.video_id WHERE f.id = ?',
+                    (frame_id,),
                 ).fetchone()
                 if srow and srow['streamer']:
                     sb = conn.execute(
@@ -2086,17 +2347,28 @@ def api_save_annotation(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
                         (srow['streamer'], expected),
                     ).fetchone()
                     if sb:
-                        db.save_box(conn, frame_id, expected,
-                                    sb['x'], sb['y'], sb['w'], sb['h'])
+                        db.save_box(
+                            conn, frame_id, expected, sb['x'], sb['y'], sb['w'], sb['h']
+                        )
             if data['content_family'] != 'vainglory':
                 # 非虚荣画面没有游戏窗口,也不该有任何面板框
-                for bt in ('viewport', 'result_panel', 'scoreboard_panel',
-                           'shop_panel', 'equipment_panel', 'talent_panel'):
+                for bt in (
+                    'viewport',
+                    'result_panel',
+                    'scoreboard_panel',
+                    'shop_panel',
+                    'equipment_panel',
+                    'talent_panel',
+                ):
                     db.delete_box(conn, frame_id, bt)
             # 撤销快照:记录旧值
             old = db.get_annotation(conn, frame_id)
-            db.audit(conn, 'label', frame_id=frame_id,
-                     detail=json.dumps(old or {}, ensure_ascii=False))
+            db.audit(
+                conn,
+                'label',
+                frame_id=frame_id,
+                detail=json.dumps(old or {}, ensure_ascii=False),
+            )
             db.save_annotation(conn, frame_id, data, status=status)
             return db.get_annotation(conn, frame_id)
         finally:
@@ -2112,8 +2384,14 @@ def api_save_box(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
         x, y, w, h = (float(body[k]) for k in ('x', 'y', 'w', 'h'))
     except (KeyError, TypeError, ValueError):
         raise HTTPException(400, '需要 x/y/w/h 数字')
-    if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < w <= 1 and 0 < h <= 1
-            and x + w <= 1.001 and y + h <= 1.001):
+    if not (
+        0 <= x <= 1
+        and 0 <= y <= 1
+        and 0 < w <= 1
+        and 0 < h <= 1
+        and x + w <= 1.001
+        and y + h <= 1.001
+    ):
         raise HTTPException(400, '框坐标必须归一化到 [0,1]')
     with _db_lock:
         conn = _conn()
@@ -2124,8 +2402,7 @@ def api_save_box(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
             # 非虚荣画面没有游戏窗口/面板框,禁止画框
             ann = db.get_annotation(conn, frame_id)
             if ann and ann.get('content_family') == 'not_vainglory':
-                raise HTTPException(
-                    400, '非虚荣画面没有游戏窗口/面板框,不能画框')
+                raise HTTPException(400, '非虚荣画面没有游戏窗口/面板框,不能画框')
             # 面板框必须与当前标注的界面类型匹配(防预选带框/旧保存竞态写回不匹配的框)
             # 未标注或尚未选择界面类型时允许先画框(先画框再选类型的流程)
             panel_required = {
@@ -2141,10 +2418,15 @@ def api_save_box(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
                     raise HTTPException(
                         400,
                         f'{box_type} 与当前界面类型 {st} 不匹配,'
-                        '请先切换界面类型再画框')
+                        '请先切换界面类型再画框',
+                    )
             old = db.get_boxes(conn, frame_id).get(box_type)
-            db.audit(conn, 'box', frame_id=frame_id,
-                     detail=json.dumps({'box_type': box_type, 'old': old}))
+            db.audit(
+                conn,
+                'box',
+                frame_id=frame_id,
+                detail=json.dumps({'box_type': box_type, 'old': old}),
+            )
             db.save_box(conn, frame_id, box_type, x, y, w, h)
             return db.get_boxes(conn, frame_id)
         finally:
@@ -2166,9 +2448,19 @@ def api_delete_box(frame_id: int, box_type: str) -> Dict[str, Any]:
 @app.post('/api/frames/{frame_id}/propagate')
 def api_propagate(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
     """把帧的部分标注字段批量传播到同事件帧。"""
-    fields = [f for f in body.get('fields', [])
-              if f in ('game_mode', 'view_context', 'match_kind', 'quality_flags',
-                       'black_bars', 'viewport_bbox')]
+    fields = [
+        f
+        for f in body.get('fields', [])
+        if f
+        in (
+            'game_mode',
+            'view_context',
+            'match_kind',
+            'quality_flags',
+            'black_bars',
+            'viewport_bbox',
+        )
+    ]
     if not fields:
         raise HTTPException(400, '没有可传播字段')
     with _db_lock:
@@ -2182,9 +2474,13 @@ def api_propagate(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
                 raise HTTPException(400, '该帧不属于任何事件,无法传播')
             src = db.get_annotation(conn, frame_id) or {}
             boxes = db.get_boxes(conn, frame_id)
-            targets = [r['id'] for r in conn.execute(
-                'SELECT id FROM frames WHERE event_id = ? AND id != ?',
-                (event_id, frame_id)).fetchall()]
+            targets = [
+                r['id']
+                for r in conn.execute(
+                    'SELECT id FROM frames WHERE event_id = ? AND id != ?',
+                    (event_id, frame_id),
+                ).fetchall()
+            ]
             count = 0
             for tid in targets:
                 cur = db.get_annotation(conn, tid) or {}
@@ -2193,8 +2489,9 @@ def api_propagate(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
                     if fld == 'viewport_bbox':
                         if 'viewport' in boxes:
                             b = boxes['viewport']
-                            db.save_box(conn, tid, 'viewport', b['x'], b['y'],
-                                        b['w'], b['h'])
+                            db.save_box(
+                                conn, tid, 'viewport', b['x'], b['y'], b['w'], b['h']
+                            )
                             changed = True
                         continue
                     if fld == 'quality_flags':
@@ -2205,8 +2502,12 @@ def api_propagate(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
                 if changed:
                     db.save_annotation(conn, tid, cur)
                     count += 1
-            db.audit(conn, 'propagate', frame_id=frame_id,
-                     detail=f'fields={fields} targets={count}')
+            db.audit(
+                conn,
+                'propagate',
+                frame_id=frame_id,
+                detail=f'fields={fields} targets={count}',
+            )
             return {'propagated': count, 'fields': fields}
         finally:
             conn.close()
@@ -2220,7 +2521,8 @@ def api_undo() -> Dict[str, Any]:
         try:
             row = conn.execute(
                 "SELECT * FROM audit_log WHERE action IN ('label','box') "
-                "ORDER BY id DESC LIMIT 1").fetchone()
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
             if not row:
                 return {'undone': False, 'reason': '没有可撤销操作'}
             if row['action'] == 'label' and row['frame_id']:
@@ -2233,12 +2535,22 @@ def api_undo() -> Dict[str, Any]:
                     db.delete_box(conn, row['frame_id'], detail['box_type'])
                 else:
                     b = detail['old']
-                    db.save_box(conn, row['frame_id'], detail['box_type'],
-                                b['x'], b['y'], b['w'], b['h'])
+                    db.save_box(
+                        conn,
+                        row['frame_id'],
+                        detail['box_type'],
+                        b['x'],
+                        b['y'],
+                        b['w'],
+                        b['h'],
+                    )
             conn.execute('DELETE FROM audit_log WHERE id = ?', (row['id'],))
             conn.commit()
-            return {'undone': True, 'action': row['action'],
-                    'frame_id': row['frame_id']}
+            return {
+                'undone': True,
+                'action': row['action'],
+                'frame_id': row['frame_id'],
+            }
         finally:
             conn.close()
 
@@ -2255,14 +2567,15 @@ def api_audit(limit: int = 50) -> List[Dict[str, Any]]:
 
 # ---------- 同局配对 ----------
 
+
 @app.get('/api/pairs')
 def api_pairs(limit: int = 100) -> List[Dict[str, Any]]:
     with _db_lock:
         conn = _conn()
         try:
             rows = conn.execute(
-                'SELECT * FROM pair_annotations ORDER BY id DESC LIMIT ?',
-                (limit,)).fetchall()
+                'SELECT * FROM pair_annotations ORDER BY id DESC LIMIT ?', (limit,)
+            ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
@@ -2289,6 +2602,7 @@ def api_save_pair(body: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- 导出与版本 ----------
 
+
 @app.post('/api/export')
 def api_export(body: Dict[str, Any]) -> Dict[str, Any]:
     task_id = body.get('task_id', 'result_detector')
@@ -2297,7 +2611,8 @@ def api_export(body: Dict[str, Any]) -> Dict[str, Any]:
         try:
             if task_id == 'result_detector':
                 return export_mod.export_result_detector(
-                    conn, include_negatives=body.get('include_negatives', True))
+                    conn, include_negatives=body.get('include_negatives', True)
+                )
             if task_id == 'bp_review':
                 return export_mod.export_bp_classifier(conn)
             if task_id == 'key_screen_review':
@@ -2323,6 +2638,7 @@ def api_datasets() -> List[Dict[str, Any]]:
 
 # ---------- 训练与本机模型版本 ----------
 
+
 @app.get('/api/training/tasks')
 def api_training_tasks() -> List[Dict[str, Any]]:
     with _db_lock:
@@ -2334,8 +2650,7 @@ def api_training_tasks() -> List[Dict[str, Any]]:
 
 
 @app.get('/api/training/runs')
-def api_training_runs(
-        limit: int = Query(100, ge=1, le=1000)) -> Dict[str, Any]:
+def api_training_runs(limit: int = Query(100, ge=1, le=1000)) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
@@ -2363,18 +2678,18 @@ def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
             conn = _conn()
             try:
                 summary = next(
-                    item for item in training.task_summaries(conn)
+                    item
+                    for item in training.task_summaries(conn)
                     if item['id'] == task_id
                 )
                 if not summary['ready']:
                     raise HTTPException(
-                        400, '当前数据还不能训练：' +
-                        '；'.join(summary['blocking_reasons']))
+                        400,
+                        '当前数据还不能训练：' + '；'.join(summary['blocking_reasons']),
+                    )
                 snapshot = training.export_snapshot(conn, task_id)
                 run_id = training.new_run_id(task_id)
-                log_path = (
-                    config.WORK_DIR / 'training-runs' / run_id / 'train.log'
-                )
+                log_path = config.WORK_DIR / 'training-runs' / run_id / 'train.log'
                 db.create_training_run(
                     conn,
                     run_id=run_id,
@@ -2384,6 +2699,8 @@ def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
                     config_json={
                         'kind': definition['kind'],
                         'imgsz': definition['imgsz'],
+                        'input_width': definition.get('input_width'),
+                        'input_height': definition.get('input_height'),
                         'base_model': definition['base_model'],
                     },
                     log_path=str(log_path),
@@ -2422,9 +2739,36 @@ def api_cancel_training(run_id: str) -> Dict[str, Any]:
     return {'cancel_requested': True, 'run_id': run_id}
 
 
+@app.post('/api/training/runs/{run_id}/resume')
+def api_resume_training(run_id: str) -> Dict[str, Any]:
+    with _training_start_lock:
+        if _training_manager.active_run_id() is not None:
+            raise HTTPException(409, '已有模型正在训练，请等待或先取消')
+        with _db_lock:
+            conn = _conn()
+            try:
+                run = db.get_training_run(conn, run_id)
+                if run is None:
+                    raise HTTPException(404, '训练记录不存在')
+                try:
+                    checkpoint = training.interrupted_run_checkpoint(run)
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from exc
+                except FileNotFoundError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+            finally:
+                conn.close()
+        try:
+            _training_manager.start(run_id)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    return {'run_id': run_id, 'resume_checkpoint': str(checkpoint), 'status': 'running'}
+
+
 @app.get('/api/training/runs/{run_id}/log')
 def api_training_log(
-        run_id: str, tail: int = Query(200, ge=1, le=5000)) -> Dict[str, Any]:
+    run_id: str, tail: int = Query(200, ge=1, le=5000)
+) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
@@ -2459,6 +2803,7 @@ def api_publish_local_model(run_id: str) -> Dict[str, str]:
 
 # ---------- 统计 ----------
 
+
 @app.get('/api/stats')
 def api_stats() -> Dict[str, Any]:
     with _db_lock:
@@ -2472,12 +2817,12 @@ def api_stats() -> Dict[str, Any]:
 # ---------- 静态前端 ----------
 
 _static_dir = Path(__file__).resolve().parent / 'static'
-app.mount('/', NoCacheStaticFiles(directory=str(_static_dir), html=True),
-          name='static')
+app.mount('/', NoCacheStaticFiles(directory=str(_static_dir), html=True), name='static')
 
 
 def main() -> None:
     import uvicorn
+
     uvicorn.run(app, host='127.0.0.1', port=8800, log_level='info')
 
 

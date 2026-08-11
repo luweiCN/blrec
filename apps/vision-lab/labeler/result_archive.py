@@ -6,7 +6,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from PIL import Image
 
@@ -38,6 +38,24 @@ def _validated(item: Mapping[str, Any]) -> Dict[str, Any]:
         hero_slot_count = 0
     if not 0 <= hero_slot_count <= 10:
         hero_slot_count = 0
+    try:
+        duration_seconds = int(item.get('duration_seconds') or 0)
+    except (TypeError, ValueError):
+        duration_seconds = 0
+    if duration_seconds < 0:
+        duration_seconds = 0
+    try:
+        started_at_ms = (
+            None
+            if item.get('started_at_ms') is None
+            else max(0, int(item['started_at_ms']))
+        )
+    except (TypeError, ValueError):
+        started_at_ms = None
+    try:
+        session_started_at = max(0, int(item.get('session_started_at') or 0))
+    except (TypeError, ValueError):
+        session_started_at = 0
     return {
         **item,
         'match_id': match_id,
@@ -48,7 +66,80 @@ def _validated(item: Mapping[str, Any]) -> Dict[str, Any]:
         'result_frame_path': relative_path,
         'confidence': confidence,
         'hero_slot_count': hero_slot_count,
+        'duration_seconds': duration_seconds,
+        'started_at_ms': started_at_ms,
+        'session_started_at': session_started_at,
     }
+
+
+def _collapse_duplicate_items(
+    conn: Any, items: Sequence[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], int]:
+    """同一局的重复 match 记录只导入一个结算代表图。"""
+    existing = {
+        str(row['source_id'])
+        for row in conn.execute(
+            "SELECT source_id FROM training_review_sources "
+            "WHERE source_type = 'result_archive'"
+        ).fetchall()
+    }
+    buckets: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+    for item in items:
+        buckets.setdefault((int(item['session_id']), int(item['part_id'])), []).append(
+            item
+        )
+    groups: List[List[Dict[str, Any]]] = []
+    for candidates in buckets.values():
+        local: List[Tuple[int, Optional[int], List[Dict[str, Any]]]] = []
+        for item in sorted(candidates, key=lambda value: value['result_at_ms']):
+            result_at = int(item['result_at_ms'])
+            duration = int(item.get('duration_seconds') or 0)
+            started_at = item.get('started_at_ms')
+            estimated_start = (
+                int(started_at)
+                if started_at is not None
+                else max(0, result_at - duration * 1_000) if duration > 0 else None
+            )
+            target = next(
+                (
+                    members
+                    for anchor_result, anchor_start, members in local
+                    if abs(anchor_result - result_at) <= 5_000
+                    or (
+                        anchor_start is not None
+                        and estimated_start is not None
+                        and abs(anchor_start - estimated_start) <= 90_000
+                    )
+                ),
+                None,
+            )
+            if target is None:
+                local.append((result_at, estimated_start, [item]))
+            else:
+                target.append(item)
+        groups.extend(members for _result, _start, members in local)
+
+    representatives = []
+    for group in groups:
+        representative = max(
+            group,
+            key=lambda item: (
+                int('match:{}'.format(item['match_id']) in existing),
+                float(item['confidence']),
+                int(item['result_at_ms']),
+                int(item['match_id']),
+            ),
+        )
+        representatives.append(
+            {
+                **representative,
+                'duplicate_match_ids': sorted(int(item['match_id']) for item in group),
+            }
+        )
+    representatives.sort(
+        key=lambda item: (item['session_id'], item['result_at_ms']), reverse=True
+    )
+    return representatives, len(items) - len(representatives)
 
 
 def _mode_from_hero_slot_count(count: int) -> Optional[str]:
@@ -214,6 +305,7 @@ def _sync_item(
         source_id=source_id,
         suggestions=suggestions,
         metadata=metadata,
+        source_created_at=item['session_started_at'],
     )
     return {
         'inserted': inserted,
@@ -229,15 +321,14 @@ def sync_result_archive(
     *,
     maximum: int = 10_000,
     progress: Optional[Callable[[Dict[str, Any]], None]] = None,
-    box_suggester: Optional[
-        Callable[[Path], Optional[Dict[str, Any]]]
-    ] = None,
+    box_suggester: Optional[Callable[[Path], Optional[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """导入历史结算截图；系统识别只写预标，仍需人工确认与画框。"""
     ordered = sorted(
         items,
         key=lambda item: (
-            int(item.get('session_id', 0)), int(item.get('result_at_ms', 0))
+            int(item.get('session_id', 0)),
+            int(item.get('result_at_ms', 0)),
         ),
         reverse=True,
     )[:maximum]
@@ -250,6 +341,7 @@ def sync_result_archive(
         'failed': 0,
         'last_error': '',
         'box_suggested': 0,
+        'duplicates_skipped': 0,
     }
     validated = []
     for raw in ordered:
@@ -259,6 +351,9 @@ def sync_result_archive(
             result['failed'] += 1
             result['last_error'] = str(error)[:200]
             result['processed'] += 1
+    validated, duplicates_skipped = _collapse_duplicate_items(conn, validated)
+    result['duplicates_skipped'] = duplicates_skipped
+    result['processed'] += duplicates_skipped
     for start in range(0, len(validated), 16):
         batch = validated[start : start + 16]
         missing_paths = []

@@ -156,6 +156,10 @@ export type VaingloryAnalysisRuntimeStage =
   | 'probing'
   | 'coarse_scan'
   | 'fine_scan'
+  | 'timeline_scan'
+  | 'timeline_analysis'
+  | 'result_scan'
+  | 'candidate_upload'
   | 'ocr_waiting'
   | 'ocr_recognition'
   | '';
@@ -174,6 +178,39 @@ export interface VaingloryAnalysisMatchPreview {
   readonly resultAtMs: number;
   readonly title: string;
   readonly resultFrameUrl: string;
+}
+
+export interface VaingloryAnalysisTimelineSegment {
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly mode: string;
+}
+
+export interface VaingloryAnalysisResultWindow {
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly focusMs: number | null;
+  readonly mode: string;
+}
+
+export interface VaingloryAnalysisSummary {
+  readonly schemaVersion: 1;
+  readonly pipeline: string;
+  readonly modelPackageId: string;
+  readonly sampledFrames: number;
+  readonly keyframeFrames: number;
+  readonly seekFillFrames: number;
+  readonly decodedResultFrames: number;
+  readonly resultHitFrames: number;
+  readonly resultCandidateCount: number;
+  readonly hudLineupCandidateCount: number;
+  readonly timelineCounts: Readonly<
+    Record<string, Readonly<Record<string, number>>>
+  >;
+  readonly timelineSegments: readonly VaingloryAnalysisTimelineSegment[];
+  readonly resultWindows: readonly VaingloryAnalysisResultWindow[];
+  readonly trainingCandidateCounts: Readonly<Record<string, number>>;
+  readonly timingsSeconds: Readonly<Record<string, number>>;
 }
 
 export interface VaingloryAnalysisQueueCompletion {
@@ -197,6 +234,7 @@ export interface VaingloryAnalysisQueueCompletion {
   readonly localVideoAvailable?: boolean;
   readonly imageCount: number;
   readonly matchPreviews: readonly VaingloryAnalysisMatchPreview[];
+  readonly analysisSummary?: VaingloryAnalysisSummary | null;
 }
 
 export interface VaingloryAnalysisQueueItem {
@@ -233,6 +271,9 @@ export interface VaingloryAnalysisQueueItem {
   readonly totalCandidates: number;
   readonly rejectedCandidates: number;
   readonly recognizedMatches: number;
+  readonly modelPackageId: string;
+  readonly keyframeFrames: number;
+  readonly seekFillFrames: number;
   readonly events: readonly VaingloryAnalysisQueueEvent[];
   readonly bvid?: string | null;
   readonly archivePage?: number | null;

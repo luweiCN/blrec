@@ -43,6 +43,20 @@ def test_gameplay_run_produces_result_window() -> None:
     assert window.mode == 'unknown'
 
 
+def test_open_ended_gameplay_does_not_create_a_result_window() -> None:
+    observations = (
+        _observation(0, STAGE_GAMEPLAY),
+        _observation(60_000, STAGE_GAMEPLAY),
+    )
+
+    assert (
+        build_classified_windows(
+            observations, duration_ms=120_000, run_gap_ms=75_000, skip_open_ended=True
+        )
+        == ()
+    )
+
+
 def test_quit_mid_game_still_generates_window() -> None:
     observations = tuple(
         _observation(_seconds(second), STAGE_GAMEPLAY) for second in range(100, 600)

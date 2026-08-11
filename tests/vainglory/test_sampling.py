@@ -1,14 +1,20 @@
-from typing import Tuple
+from io import BytesIO
+from queue import Queue
+from typing import Iterator, List, Optional, Tuple
 
 from blrec.vainglory.sampling import (
     CoarseObservation,
     FfmpegSampler,
     ScanWindow,
+    TimedFrame,
+    _read_showinfo_timestamps,
+    adaptive_sampling_plan,
     fit_frame_dimensions,
     hud_lineup_similarity,
     result_search_windows,
     same_gameplay_run,
 )
+from blrec.vainglory.vision import RgbFrame
 
 
 def observation(
@@ -34,6 +40,168 @@ def observation(
 
 def test_default_hud_probe_interval_is_five_seconds() -> None:
     assert FfmpegSampler()._coarse_interval_seconds == 5
+
+
+def test_classification_window_uses_five_second_local_keyframe_scan(
+    monkeypatch,
+) -> None:
+    sampler = FfmpegSampler(coarse_interval_seconds=60)
+    monkeypatch.setattr(
+        sampler,
+        'probe',
+        lambda _path: type(
+            'Profile', (), {'width': 1_920, 'height': 1_080, 'duration_ms': 180_000}
+        )(),
+    )
+    observed = []
+
+    def frames(_path, **kwargs):
+        observed.append(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(sampler, '_frames', frames)
+
+    assert sampler.coarse_interval_seconds == 60
+    assert (
+        tuple(
+            sampler.classify_window_frames(
+                '/ignored', ScanWindow(60_000, 120_000), interval_seconds=5
+            )
+        )
+        == ()
+    )
+    assert observed == [
+        {
+            'width': 480,
+            'height': 270,
+            'filter_value': 'fps=1/5,scale=480:270:flags=fast_bilinear',
+            'frame_step_ms': 5_000,
+            'skip_frame': 'nokey',
+            'start_ms': 60_000,
+            'duration_ms': 60_000,
+            'sample_source': 'keyframe',
+        }
+    ]
+
+
+def test_adaptive_sampling_reuses_nearby_keyframes_and_fills_large_gaps() -> None:
+    plan = adaptive_sampling_plan(
+        (0, 4_800, 12_200, 22_000),
+        duration_ms=25_000,
+        interval_ms=5_000,
+        maximum_keyframe_distance_ms=2_500,
+    )
+
+    assert [point.target_ms for point in plan] == [0, 5_000, 10_000, 15_000, 20_000]
+    assert [(point.at_ms, point.source) for point in plan] == [
+        (0, 'keyframe'),
+        (4_800, 'keyframe'),
+        (12_200, 'keyframe'),
+        (15_000, 'seek_fill'),
+        (22_000, 'keyframe'),
+    ]
+
+
+def test_adaptive_sampling_does_not_reuse_one_keyframe_for_two_targets() -> None:
+    plan = adaptive_sampling_plan(
+        (2_500,),
+        duration_ms=10_000,
+        interval_ms=5_000,
+        maximum_keyframe_distance_ms=2_500,
+    )
+
+    assert [(point.target_ms, point.at_ms, point.source) for point in plan] == [
+        (0, 0, 'seek_fill'),
+        (5_000, 2_500, 'keyframe'),
+    ]
+
+
+def test_classify_frames_preserves_actual_keyframe_pts_and_target_time(
+    monkeypatch,
+) -> None:
+    frame = RgbFrame(2, 1, b'\x00\x00\x00' * 2)
+    sampler = FfmpegSampler()
+    monkeypatch.setattr(
+        sampler,
+        'probe',
+        lambda _path: type(
+            'Profile', (), {'width': 2, 'height': 1, 'duration_ms': 16_000}
+        )(),
+    )
+
+    def keyframes(
+        _path: str,
+        *,
+        width: int,
+        height: int,
+        interval_ms: int,
+        maximum_keyframe_distance_ms: int,
+    ) -> Iterator[TimedFrame]:
+        assert (width, height) == (480, 240)
+        assert interval_ms == 5_000
+        assert maximum_keyframe_distance_ms == 2_500
+        for target_ms, at_ms in ((0, 400), (5_000, 5_300), (10_000, 12_000)):
+            yield TimedFrame(
+                at_ms=at_ms, frame=frame, target_ms=target_ms, sample_source='keyframe'
+            )
+
+    monkeypatch.setattr(sampler, '_selected_keyframe_frames', keyframes)
+    monkeypatch.setattr(
+        sampler,
+        '_seek_frame',
+        lambda _path, at_ms, *, width, height: TimedFrame(
+            at_ms=at_ms, frame=frame, target_ms=at_ms, sample_source='seek_fill'
+        ),
+    )
+
+    frames = tuple(sampler.classify_frames('/ignored'))
+
+    assert [(item.target_ms, item.at_ms, item.sample_source) for item in frames] == [
+        (0, 400, 'keyframe'),
+        (5_000, 5_300, 'keyframe'),
+        (10_000, 12_000, 'keyframe'),
+        (15_000, 15_000, 'seek_fill'),
+    ]
+
+
+def test_classify_frames_uses_configured_coarse_interval(monkeypatch) -> None:
+    sampler = FfmpegSampler(coarse_interval_seconds=7)
+    monkeypatch.setattr(
+        sampler,
+        'probe',
+        lambda _path: type(
+            'Profile', (), {'width': 2, 'height': 1, 'duration_ms': 15_000}
+        )(),
+    )
+    observed = []
+
+    def adaptive(_path, *, profile, width, height, interval_ms):
+        observed.append((profile.duration_ms, width, height, interval_ms))
+        return iter(())
+
+    monkeypatch.setattr(sampler, '_adaptive_frames', adaptive)
+
+    assert tuple(sampler.classify_frames('/ignored')) == ()
+    assert observed == [(15_000, 480, 240, 7_000)]
+
+
+def test_showinfo_reader_preserves_real_source_pts() -> None:
+    timestamps: Queue[Optional[int]] = Queue()
+    stderr_lines: List[bytes] = []
+
+    _read_showinfo_timestamps(
+        BytesIO(
+            b'ffmpeg setup\n'
+            b'[Parsed_showinfo_1] n:0 pts:123 pts_time:0.123\n'
+            b'[Parsed_showinfo_1] n:1 pts:5678 pts_time:5.678\n'
+        ),
+        timestamps,
+        stderr_lines,
+    )
+
+    assert timestamps.get_nowait() == 123
+    assert timestamps.get_nowait() == 5_678
+    assert timestamps.get_nowait() is None
 
 
 def test_sustained_hud_loss_scans_only_boundary_and_visual_changes() -> None:

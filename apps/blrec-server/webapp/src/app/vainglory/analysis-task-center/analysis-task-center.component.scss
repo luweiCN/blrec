@@ -211,7 +211,7 @@
 }
 
 .analysis-stage-metrics {
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   padding: 10px 12px;
   border-radius: 6px;
   background: #f7f9fc;

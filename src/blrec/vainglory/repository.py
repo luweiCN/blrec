@@ -138,6 +138,27 @@ def _analysis_revision_snapshot(matches: Sequence[AnalyzedMatch]) -> Tuple[str, 
     return snapshot_json, hashlib.sha256(snapshot_json.encode('utf8')).hexdigest()
 
 
+def _analysis_summary_json(value: Optional[Mapping[str, Any]]) -> Optional[str]:
+    if value is None:
+        return None
+    encoded = json.dumps(
+        value, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+    )
+    if len(encoded.encode('utf8')) > 100_000:
+        raise ValueError('analysis summary is too large')
+    return encoded
+
+
+def _decode_analysis_summary(value: object) -> Optional[Dict[str, Any]]:
+    if value in (None, ''):
+        return None
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
 def _unified_training_suggestions(
     candidates: Sequence[TrainingCandidate],
 ) -> Dict[str, Dict[str, Any]]:
@@ -169,7 +190,9 @@ def _unified_training_suggestions(
 
     for candidate in candidates:
         label = candidate.suggested_label
-        if candidate.task == 'screen_state':
+        if candidate.task in {'match_flow', 'hero_select', 'match_mode'}:
+            remember(candidate.task, str(label), candidate)
+        elif candidate.task == 'screen_state':
             flow = (
                 'match_flow'
                 if label in ('in_match', 'talent_select', 'post_match')
@@ -227,15 +250,57 @@ def _unified_training_suggestions(
 def _training_candidate_groups(
     candidates: Sequence[TrainingCandidate],
 ) -> Tuple[Tuple[TrainingCandidate, ...], ...]:
-    groups: Dict[str, List[TrainingCandidate]] = {}
-    order: List[str] = []
-    for candidate in candidates[:80]:
-        digest = hashlib.sha256(candidate.image_jpeg).hexdigest()
-        if digest not in groups:
-            groups[digest] = []
-            order.append(digest)
-        groups[digest].append(candidate)
-    return tuple(tuple(groups[digest]) for digest in order)
+    selected = tuple(candidates[:80])
+    parent = list(range(len(selected)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    digests = [hashlib.sha256(item.image_jpeg).digest() for item in selected]
+    for left, candidate in enumerate(selected):
+        for right in range(left):
+            previous = selected[right]
+            same_image = digests[left] == digests[right]
+            same_result_event = (
+                _is_result_training_candidate(candidate)
+                and _is_result_training_candidate(previous)
+                and (
+                    candidate.segment_start_ms == previous.segment_start_ms
+                    or abs(candidate.at_ms - previous.at_ms) <= 60_000
+                )
+            )
+            if same_image or same_result_event:
+                union(right, left)
+    groups: Dict[int, List[TrainingCandidate]] = {}
+    for index, candidate in enumerate(selected):
+        groups.setdefault(find(index), []).append(candidate)
+    return tuple(tuple(group) for group in groups.values())
+
+
+def _is_result_training_candidate(candidate: TrainingCandidate) -> bool:
+    return (
+        (
+            candidate.task == 'result_detector'
+            and candidate.suggested_label == 'result_panel'
+        )
+        or (
+            candidate.task == 'key_screen_review'
+            and candidate.suggested_label == 'result_page'
+        )
+        or (
+            candidate.task == 'screen_state'
+            and candidate.suggested_label == 'post_match'
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -320,6 +385,7 @@ class AnalysisQueueCompletion:
     local_video_available: bool = False
     image_count: int = 0
     match_previews: Tuple[AnalysisMatchPreview, ...] = ()
+    analysis_summary: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -357,6 +423,9 @@ class AnalysisQueueItem:
     total_candidates: int = 0
     rejected_candidates: int = 0
     recognized_matches: int = 0
+    model_package_id: str = ''
+    keyframe_frames: int = 0
+    seek_fill_frames: int = 0
     events: Tuple[AnalysisQueueEvent, ...] = ()
     bvid: Optional[str] = None
     archive_page: Optional[int] = None
@@ -1873,7 +1942,8 @@ class VaingloryRepository:
             part_id = int(row['part_id'])
             cursor = connection.execute(
                 "UPDATE vainglory_part_jobs SET state='analyzing',progress=0,"
-                'error=NULL,started_at=?,completed_at=NULL,updated_at=? '
+                'analysis_summary_json=NULL,error=NULL,started_at=?,'
+                'completed_at=NULL,updated_at=? '
                 "WHERE part_id=? AND state='pending'",
                 (now, now, part_id),
             )
@@ -2377,7 +2447,7 @@ class VaingloryRepository:
             completion_rows = connection.execute(
                 'SELECT job.completed_at,job.started_at,job.session_id,job.part_id,'
                 'part.part_index,session.title,part.record_duration_seconds,'
-                'job.candidate_count,job.match_count,'
+                'job.candidate_count,job.match_count,job.analysis_summary_json,'
                 '(SELECT COUNT(*) FROM vainglory_part_jobs effective_job '
                 'WHERE effective_job.session_id=job.session_id '
                 'AND effective_job.ignored_reason IS NULL) AS part_count,'
@@ -2597,6 +2667,9 @@ class VaingloryRepository:
                     local_video_available=local_available,
                     image_count=image_count_by_part.get(int(row['part_id']), 0),
                     match_previews=tuple(previews_by_part.get(int(row['part_id']), ())),
+                    analysis_summary=_decode_analysis_summary(
+                        row['analysis_summary_json']
+                    ),
                 )
 
             return AnalysisQueueStatus(
@@ -2743,8 +2816,10 @@ class VaingloryRepository:
         *,
         candidate_count: Optional[int] = None,
         training_candidates: Sequence[TrainingCandidate] = (),
+        analysis_summary: Optional[Mapping[str, Any]] = None,
     ) -> None:
         now = self._now()
+        analysis_summary_json = _analysis_summary_json(analysis_summary)
         written_paths: List[Path] = []
         written_training_candidates: List[Path] = []
         obsolete_frame_paths: List[str] = []
@@ -2768,7 +2843,11 @@ class VaingloryRepository:
             session_id = int(job['session_id'])
             for candidate_group in _training_candidate_groups(training_candidates):
                 primary = max(
-                    candidate_group, key=lambda item: item.suggestion_confidence
+                    candidate_group,
+                    key=lambda item: (
+                        _is_result_training_candidate(item),
+                        item.suggestion_confidence,
+                    ),
                 )
                 try:
                     relative_path = self._training_candidate_relative_path(
@@ -3111,12 +3190,14 @@ class VaingloryRepository:
                 connection.execute(
                     "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
                     'algorithm_version=?,match_count=?,candidate_count=COALESCE(?,'
-                    'candidate_count),error=NULL,ignored_reason=NULL,requested_at=?,'
-                    'started_at=NULL,completed_at=NULL,updated_at=? WHERE part_id=?',
+                    'candidate_count),analysis_summary_json=?,error=NULL,'
+                    'ignored_reason=NULL,requested_at=?,started_at=NULL,'
+                    'completed_at=NULL,updated_at=? WHERE part_id=?',
                     (
                         self.ALGORITHM_VERSION,
                         len(stored_matches),
                         candidate_count,
+                        analysis_summary_json,
                         now,
                         now,
                         int(part_id),
@@ -3126,9 +3207,16 @@ class VaingloryRepository:
                 connection.execute(
                     "UPDATE vainglory_part_jobs SET state='ready',progress=1,"
                     'match_count=?,candidate_count=COALESCE(?,candidate_count),'
-                    'error=NULL,ignored_reason=NULL,completed_at=?,updated_at=? '
-                    'WHERE part_id=?',
-                    (len(stored_matches), candidate_count, now, now, int(part_id)),
+                    'analysis_summary_json=?,error=NULL,ignored_reason=NULL,'
+                    'completed_at=?,updated_at=? WHERE part_id=?',
+                    (
+                        len(stored_matches),
+                        candidate_count,
+                        analysis_summary_json,
+                        now,
+                        now,
+                        int(part_id),
+                    ),
                 )
             connection.execute(
                 'UPDATE vainglory_publications SET needs_refresh=1 '

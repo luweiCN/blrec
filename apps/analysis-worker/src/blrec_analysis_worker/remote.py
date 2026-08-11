@@ -5,6 +5,7 @@ import os
 import socket
 import threading
 import time
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Literal, Mapping, Optional, Sequence, cast
@@ -19,8 +20,67 @@ from blrec.vainglory.analysis_protocol import (
     encode_recorded_player,
     encode_training_candidate,
 )
-from blrec.vainglory.analyzer import AnalysisStatus, VaingloryVideoAnalyzer, VideoPart
+from blrec.vainglory.analyzer import (
+    AnalysisStatus,
+    DenseScanResult,
+    VaingloryVideoAnalyzer,
+    VideoPart,
+)
 from blrec.vainglory.sampling import UnusableVideoError
+
+
+def _analysis_summary(dense: DenseScanResult) -> Dict[str, Any]:
+    def counts(values: Sequence[str]) -> Dict[str, int]:
+        return dict(sorted(Counter(value or 'unknown' for value in values).items()))
+
+    sampled_frames = len(dense.timeline_points)
+    return {
+        'schemaVersion': 1,
+        'pipeline': 'timeline-v2' if dense.model_package_id else 'legacy-cascade',
+        'modelPackageId': dense.model_package_id,
+        'sampledFrames': sampled_frames,
+        'keyframeFrames': dense.keyframe_frames,
+        'seekFillFrames': dense.seek_fill_frames,
+        'decodedResultFrames': dense.decoded_frames,
+        'resultHitFrames': dense.result_frames,
+        'resultCandidateCount': len(dense.scanned_part.candidate_times_ms),
+        'hudLineupCandidateCount': sum(
+            bool(lineup) for lineup in dense.scanned_part.candidate_hero_lineups
+        ),
+        'timelineCounts': {
+            'matchFlow': counts(
+                [point.match_flow_label for point in dense.timeline_points]
+            ),
+            'heroSelect': counts(
+                [point.hero_select_label for point in dense.timeline_points]
+            ),
+            'matchMode': counts(
+                [point.match_mode_label for point in dense.timeline_points]
+            ),
+        },
+        'timelineSegments': [
+            {'startMs': segment.start_ms, 'endMs': segment.end_ms, 'mode': segment.mode}
+            for segment in dense.timeline_segments
+        ],
+        'resultWindows': [
+            {
+                'startMs': window.start_ms,
+                'endMs': window.end_ms,
+                'focusMs': window.focus_ms,
+                'mode': window.mode,
+            }
+            for window in dense.result_windows
+        ],
+        'trainingCandidateCounts': counts(
+            [candidate.task for candidate in dense.training_candidates]
+        ),
+        'timingsSeconds': {
+            'probe': round(dense.probe_seconds, 3),
+            'decode': round(dense.decode_seconds, 3),
+            'resultDetection': round(dense.detection_seconds, 3),
+            'scanTotal': round(dense.total_seconds, 3),
+        },
+    }
 
 
 class AnalysisWorkerClient:
@@ -455,6 +515,7 @@ class RemoteAnalysisWorker:
                 'itemId': item_id,
                 'candidateCount': len(dense.scanned_part.candidate_times_ms),
                 'matches': [encode_match(match) for match in matches],
+                'analysisSummary': _analysis_summary(dense),
                 'trainingCandidates': [
                     encode_training_candidate(candidate)
                     for candidate in dense.training_candidates

@@ -20,9 +20,9 @@ import shlex
 import struct
 import subprocess
 import threading
-from uuid import uuid4
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from uuid import uuid4
 
 from .config import (
     NAS_HOST,
@@ -324,9 +324,10 @@ connection.row_factory = sqlite3.Row
 rows = connection.execute('''
     SELECT match.id AS match_id, match.session_id,
            match.result_part_id AS part_id, part.part_index,
-           match.result_at_ms, match.game_mode, match.confidence,
+           match.result_at_ms, match.duration_seconds, match.started_at_ms,
+           match.game_mode, match.confidence,
            match.result_frame_path, session.anchor_name, session.room_id,
-           session.title,
+           session.title, session.started_at AS session_started_at,
            (SELECT COUNT(*) FROM vainglory_match_players player
             WHERE player.match_id = match.id) AS hero_slot_count
     FROM vainglory_matches match
@@ -357,8 +358,7 @@ for row in rows:
                 raise ValueError('NAS 历史结算图说明不是 JSON 对象')
             result_root = value.pop('_container_result_root', '')
             if result_root:
-                self._result_frame_root = self._validated_result_frame_root(
-                    result_root)
+                self._result_frame_root = self._validated_result_frame_root(result_root)
             self._result_frame_relative_path(value.get('result_frame_path'))
             result.append(value)
         return result
@@ -370,9 +370,7 @@ for row in rows:
         command = '{} cat {}'.format(DOCKER_EXEC, shlex.quote(absolute))
         return self.run(command, timeout=60, sudo=True)
 
-    def read_result_frames(
-        self, relative_paths: Sequence[str]
-    ) -> Dict[str, bytes]:
+    def read_result_frames(self, relative_paths: Sequence[str]) -> Dict[str, bytes]:
         """一次 SSH 批量读取结算图，避免上千张图重复建立连接。"""
         if not relative_paths:
             return {}

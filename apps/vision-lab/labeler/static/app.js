@@ -22,8 +22,12 @@ let keyReviewIndex = 0;
 let keyVisualCondition = 'clear';
 let keyWorkerSyncTimer = null;
 let trainingPollTimer = null;
+let trainingLogRunId = null;
 let candidateQueue = [];
 let candidateIndex = 0;
+let candidateLoadedStatus = 'needs_review';
+let candidateFilteredTotal = 0;
+let candidateSessionCompleted = 0;
 let candidateDraft = null;
 let candidateBoxes = [];
 let candidateDrawStart = null;
@@ -32,18 +36,24 @@ let candidateHeroCatalog = [];
 let candidateHeroCatalogPromise = null;
 let candidateHeroLineup = null;
 let candidateHeroDraft = new Map();
+let candidateHeroCachedSlots = new Set();
 let candidateHeroDirty = false;
 let candidateHeroLoading = false;
 let candidateHeroLoadToken = 0;
 let candidateHeroPickerSlot = null;
 let candidateHeroPlayerSlot = null;
+let candidateHeroPlayerStatus = 'pending';
 let candidateHeroTeamSizeExplicit = false;
 let candidateHeroTeamSizeOverride = null;
 let candidateHeroDrawMode = false;
 let candidateHeroEdit = null;
+let candidateFormTouched = false;
+const candidatePrefillRequested = new Set();
 let modelTestRuns = [];
 let modelTestSamples = [];
 let modelTestIndex = 0;
+let modelTestPrediction = null;
+let modelTestBatchReport = null;
 const initialTask = new URLSearchParams(window.location.search).get('task');
 const state = {
   task: initialTask === 'mode_gate' ? 'mode_gate' : 'result_detector',
@@ -100,7 +110,11 @@ function bindNav() {
       if (btn.dataset.view === 'label') loadLiveList();
       if (btn.dataset.view === 'bp-review') loadBpReview();
       if (btn.dataset.view === 'key-screen-review') loadKeyScreenReview();
-      if (btn.dataset.view === 'candidates') loadCandidateReview();
+      if (btn.dataset.view === 'candidates') {
+        $('#candidate-status-filter').value =
+          btn.dataset.candidateStatus || 'needs_review';
+        loadCandidateReview();
+      }
       if (btn.dataset.view === 'model-tests') loadModelTesting();
       if (btn.dataset.view === 'records') loadTrainingDashboard();
       if (btn.dataset.view !== 'records' && trainingPollTimer) {
@@ -168,6 +182,9 @@ const TRAINING_REVIEW_LABEL_TEXT = Object.fromEntries(
   TRAINING_REVIEW_FIELDS.map((field) => [field.suggestion, field.labels]));
 const CANDIDATE_REVIEW_DEFAULTS_STORAGE_KEY =
   'vainglory-vision-lab.training-review-defaults.v1';
+const CANDIDATE_HERO_LINEUP_CACHE_STORAGE_KEY =
+  'vainglory-vision-lab.hero-lineup-cache.v1';
+const CANDIDATE_HERO_LINEUP_CACHE_LIMIT = 100;
 
 const CANDIDATE_SUGGESTION_TITLES = {
   match_flow: '对局流程',
@@ -195,6 +212,21 @@ const CANDIDATE_HERO_LAYOUT_SHORT_LABELS = {
 const CANDIDATE_HERO_SCREEN_TYPES = new Set([
   'gameplay_hud', 'scoreboard', 'result_page',
 ]);
+const CANDIDATE_HERO_LINEUP_CACHE_SCREEN_TYPES = new Set([
+  'gameplay_hud', 'scoreboard',
+]);
+
+const CANDIDATE_HERO_SELECT_VARIANTS = {
+  bp: 'BP／征召',
+  blind: '盲选',
+  random: '随机英雄',
+  unreadable: '看不清选择方式',
+};
+
+const CANDIDATE_HERO_SELECT_VISIBILITY = {
+  clear: '清晰',
+  occluded: '有遮挡但仍能确认',
+};
 
 function currentCandidate() {
   return candidateQueue[candidateIndex] || null;
@@ -214,22 +246,30 @@ function candidateCachedReviewLabels() {
     const stored = JSON.parse(
       window.localStorage.getItem(CANDIDATE_REVIEW_DEFAULTS_STORAGE_KEY) || '{}');
     if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
-    return Object.fromEntries(TRAINING_REVIEW_FIELDS.flatMap((field) => {
+    const values = Object.fromEntries(TRAINING_REVIEW_FIELDS.flatMap((field) => {
       const value = stored[field.key];
       return Object.prototype.hasOwnProperty.call(field.labels, value)
         ? [[field.key, value]] : [];
     }));
+    if (['bp', 'blind'].includes(stored.hero_select_variant)) {
+      values.hero_select_variant = stored.hero_select_variant;
+    }
+    return values;
   } catch (_error) {
     return {};
   }
 }
 
 function cacheCandidateReviewLabels(draft) {
-  const values = Object.fromEntries(TRAINING_REVIEW_FIELDS.flatMap((field) => {
+  const values = candidateCachedReviewLabels();
+  Object.assign(values, Object.fromEntries(TRAINING_REVIEW_FIELDS.flatMap((field) => {
     const value = draft[field.key];
     return Object.prototype.hasOwnProperty.call(field.labels, value)
       ? [[field.key, value]] : [];
-  }));
+  })));
+  if (['bp', 'blind'].includes(draft.hero_select_variant)) {
+    values.hero_select_variant = draft.hero_select_variant;
+  }
   try {
     window.localStorage.setItem(
       CANDIDATE_REVIEW_DEFAULTS_STORAGE_KEY, JSON.stringify(values));
@@ -251,16 +291,37 @@ function candidateResultHeroCountMode(item) {
 function candidateDefaultDraft(item) {
   const hasHumanLabels = TRAINING_REVIEW_FIELDS.some(
     (field) => Boolean(item[field.key]));
-  const cached = hasHumanLabels ? {} : candidateCachedReviewLabels();
+  const heroSelectSuggestion = candidateSuggestion(item, 'hero_select');
+  const suggestedHeroSelect = !hasHumanLabels &&
+    String(heroSelectSuggestion && heroSelectSuggestion.label || '')
+      .startsWith('select_') &&
+    Number(heroSelectSuggestion.confidence || 0) >= 0.8
+      ? heroSelectSuggestion.label : null;
+  const preferCachedLabels = item.review_status === 'pending' ||
+    item.review_status === 'partial' || Boolean(item.needs_player_hero_review);
+  const cached = !hasHumanLabels || preferCachedLabels
+    ? candidateCachedReviewLabels() : {};
   const resultHeroCountMode = hasHumanLabels
     ? null : candidateResultHeroCountMode(item);
   const draft = {};
   TRAINING_REVIEW_FIELDS.forEach((field) => {
     const resultMode = field.key === 'match_mode_label'
       ? resultHeroCountMode : null;
-    draft[field.key] = item[field.key] || resultMode || cached[field.key] ||
-      candidateSuggestedValue(item, field);
+    const itemValue = item[field.key];
+    const suggestion = candidateSuggestion(item, field.suggestion);
+    const newModelValue = suggestion &&
+      suggestion.origin === 'new_model_prefill'
+      ? candidateSuggestedValue(item, field) : null;
+    draft[field.key] = itemValue || resultMode || newModelValue ||
+      (preferCachedLabels ? cached[field.key] : null) ||
+      candidateSuggestedValue(item, field) || cached[field.key] || null;
   });
+  if (suggestedHeroSelect) {
+    draft.match_flow_label = 'not_match_flow';
+    draft.match_mode_label = null;
+    draft.hero_select_label = suggestedHeroSelect;
+    draft.result_panel_label = 'no_result_panel';
+  }
   draft.match_flow_label ||= 'unreadable';
   draft.result_panel_label ||= 'no_result_panel';
   if (draft.match_flow_label === 'match_flow') {
@@ -280,7 +341,20 @@ function candidateDefaultDraft(item) {
     draft.match_mode_label ||= 'unreadable';
     draft.hero_select_label = 'not_select';
   }
+  draft.hero_select_variant = preferCachedLabels
+    ? cached.hero_select_variant || item.hero_select_variant || null
+    : item.hero_select_variant || cached.hero_select_variant || null;
+  normalizeCandidateHeroSelectVariant(draft);
+  draft.hero_select_visibility = item.hero_select_visibility || null;
+  if (draft.hero_select_label.startsWith('select_') &&
+      !['clear', 'occluded', 'unknown'].includes(
+        draft.hero_select_visibility)) {
+    draft.hero_select_visibility = 'clear';
+  }
   draft.hero_layout_label = item.hero_layout_label || null;
+  if (CANDIDATE_HERO_SCREEN_TYPES.has(item.legacy_hero_screen_type)) {
+    draft.hero_layout_label = item.legacy_hero_screen_type;
+  }
   if (!draft.hero_layout_label) {
     if (draft.result_panel_label === 'result_panel') {
       draft.hero_layout_label = 'result_page';
@@ -300,11 +374,41 @@ function candidateDefaultDraft(item) {
     }
   }
   draft.hero_layout_label ||= 'none';
+  if (draft.match_flow_label !== 'match_flow') {
+    draft.hero_layout_label = draft.match_flow_label === 'unreadable'
+      ? 'unreadable' : 'none';
+  } else if (draft.result_panel_label === 'result_panel') {
+    draft.hero_layout_label = 'result_page';
+  } else if (draft.hero_layout_label === 'result_page') {
+    draft.hero_layout_label = 'none';
+  }
+  draft.panel_render_state = item.panel_render_state || 'clear';
+  if (!candidateDraftHasRenderState(draft)) {
+    draft.panel_render_state = 'clear';
+  }
   draft.ocr_usable = item.ocr_usable || 'yes';
   draft.result_occlusion = item.result_occlusion || 'none';
   draft.occluder_types = Array.isArray(item.occluder_types)
     ? [...item.occluder_types] : [];
   return draft;
+}
+
+function normalizeCandidateHeroSelectVariant(draft) {
+  const label = draft.hero_select_label || '';
+  if (label === 'select_aram') {
+    draft.hero_select_variant = 'random';
+    draft.hero_select_visibility ||= 'clear';
+    return;
+  }
+  if (['select_3v3', 'select_5v5'].includes(label)) {
+    if (!['bp', 'blind', 'unreadable'].includes(draft.hero_select_variant)) {
+      draft.hero_select_variant = null;
+    }
+    draft.hero_select_visibility ||= 'clear';
+    return;
+  }
+  draft.hero_select_variant = null;
+  draft.hero_select_visibility = null;
 }
 
 function candidateSuggestedResultBox(item) {
@@ -397,7 +501,7 @@ function moveCandidateHeroEdit(event) {
   event.stopPropagation();
   const dx = event.clientX - edit.startX;
   const dy = event.clientY - edit.startY;
-  edit.moved ||= Math.hypot(dx, dy) >= 3;
+  edit.moved ||= Math.hypot(dx, dy) >= 1;
   const original = edit.displayCrop;
   let crop;
   if (edit.mode === 'resize') {
@@ -523,7 +627,9 @@ function renderCandidateBoxes() {
     node.className = 'candidate-hero-circle';
     node.dataset.heroSlot = key;
     node.classList.toggle('selected', candidateHeroPickerSlot === key);
-    const isPlayer = candidateHeroLineup.screen_type === 'result_page' &&
+    const isPlayer = ['scoreboard', 'result_page'].includes(
+      candidateHeroLineup.screen_type) &&
+      candidateHeroPlayerStatus === 'identified' &&
       candidateHeroPlayerSlot === key;
     node.classList.toggle('player', isPlayer);
     applyCandidateHeroCrop(node, box);
@@ -533,6 +639,11 @@ function renderCandidateBoxes() {
       ? `${slot.side === 'left' ? '左队' : '右队'} ${slot.slot}：${hero.name}`
       : `${slot.side === 'left' ? '左队' : '右队'} ${slot.slot}：点击选择英雄`;
     if (isPlayer) node.title += '（主播本人）';
+    if (candidateHeroLineup.screen_type === 'gameplay_hud') {
+      node.title += slot.slot === 2
+        ? '；拖动可调整本队间距和整排高度'
+        : '；拖动可微调横向位置和整排高度';
+    }
     const tag = document.createElement('span');
     tag.className = 'candidate-hero-circle-label';
     tag.textContent = `${slot.side === 'left' ? '左' : '右'}${slot.slot}` +
@@ -599,8 +710,15 @@ function candidateHeroPlayerKey(lineup) {
   return candidateHeroKey(lineup.player_side, lineup.player_slot);
 }
 
+function candidateHeroPlayerStatusForLineup(lineup) {
+  const status = String(lineup && lineup.player_status || '');
+  if (['pending', 'identified', 'unreadable'].includes(status)) return status;
+  return candidateHeroPlayerKey(lineup) ? 'identified' : 'pending';
+}
+
 function candidateHeroPlayerPosition() {
-  if (!candidateHeroPlayerSlot) return null;
+  if (candidateHeroPlayerStatus !== 'identified' ||
+      !candidateHeroPlayerSlot) return null;
   const slot = candidateHeroSlot(candidateHeroPlayerSlot);
   return slot ? {side: slot.side, slot: slot.slot} : null;
 }
@@ -609,17 +727,109 @@ function candidateHeroByLabel(label) {
   return candidateHeroCatalog.find((hero) => hero.label === label) || null;
 }
 
+function candidateHeroLineupCacheEntries() {
+  try {
+    const stored = JSON.parse(
+      window.localStorage.getItem(CANDIDATE_HERO_LINEUP_CACHE_STORAGE_KEY) ||
+      '{}');
+    return stored && typeof stored === 'object' && !Array.isArray(stored)
+      ? stored : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function candidateHeroLineupCacheKey(item, screenType, teamSize) {
+  const streamer = String(item && item.streamer || '').trim();
+  const size = Number(teamSize);
+  if (!streamer || !CANDIDATE_HERO_LINEUP_CACHE_SCREEN_TYPES.has(screenType) ||
+      ![3, 5].includes(size)) return null;
+  return JSON.stringify([streamer, screenType, size]);
+}
+
+function candidateCachedHeroLineup(item, screenType, teamSize) {
+  const cacheKey = candidateHeroLineupCacheKey(item, screenType, teamSize);
+  if (!cacheKey) return new Map();
+  const entry = candidateHeroLineupCacheEntries()[cacheKey];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+      !entry.heroes || typeof entry.heroes !== 'object' ||
+      Array.isArray(entry.heroes)) return new Map();
+  const expected = new Set(candidateHeroExpectedPositions(Number(teamSize))
+    .map((position) => candidateHeroKey(position.side, position.slot)));
+  return new Map(Object.entries(entry.heroes).flatMap(([key, label]) =>
+    expected.has(key) && typeof label === 'string' && candidateHeroByLabel(label)
+      ? [[key, label]] : []));
+}
+
+function cacheCandidateHeroLineup(item, lineup, draft) {
+  if (!lineup || !draft) return;
+  const cacheKey = candidateHeroLineupCacheKey(
+    item, lineup.screen_type, lineup.team_size);
+  if (!cacheKey) return;
+  const expectedCount = Number(lineup.team_size) * 2;
+  const slotKeys = new Set((lineup.slots || []).map((slot) =>
+    candidateHeroKey(slot.side, slot.slot)));
+  if (slotKeys.size !== expectedCount) return;
+  const heroes = {};
+  slotKeys.forEach((key) => {
+    const label = draft.get(key) || '';
+    if (candidateHeroByLabel(label)) heroes[key] = label;
+  });
+  try {
+    const entries = candidateHeroLineupCacheEntries();
+    entries[cacheKey] = {heroes, updated_at: Date.now()};
+    const retained = Object.fromEntries(Object.entries(entries)
+      .sort((left, right) =>
+        Number(right[1] && right[1].updated_at || 0) -
+        Number(left[1] && left[1].updated_at || 0))
+      .slice(0, CANDIDATE_HERO_LINEUP_CACHE_LIMIT));
+    window.localStorage.setItem(
+      CANDIDATE_HERO_LINEUP_CACHE_STORAGE_KEY, JSON.stringify(retained));
+  } catch (_error) {
+    // 浏览器禁止本地存储时仍可继续打标，只是不跨图片沿用阵容。
+  }
+}
+
+function candidateHeroDraftForLineup(item, lineup, previousDraft = new Map()) {
+  const previousCachedSlots = new Set(candidateHeroCachedSlots);
+  const cached = item.legacy_hero_needs_review
+    ? new Map()
+    : candidateCachedHeroLineup(item, lineup.screen_type, lineup.team_size);
+  const nextCachedSlots = new Set();
+  const draft = new Map((lineup.slots || []).map((slot) => {
+    const key = candidateHeroKey(slot.side, slot.slot);
+    const previous = previousDraft.get(key) || '';
+    if (previous && !previousCachedSlots.has(key)) return [key, previous];
+    const recognized = slot.confirmed_label || slot.suggested_label || '';
+    if (recognized) return [key, recognized];
+    const reused = cached.get(key) ||
+      (previousCachedSlots.has(key) ? previous : '');
+    if (reused) nextCachedSlots.add(key);
+    return [key, reused];
+  }));
+  candidateHeroCachedSlots = nextCachedSlots;
+  return draft;
+}
+
+function candidateHeroKnownTeamSize(item) {
+  const selectedMode = candidateDraft && candidateDraft.match_mode_label || '';
+  if (selectedMode === '5v5') return 5;
+  if (['3v3', 'aram'].includes(selectedMode)) return 3;
+  const legacySize = Number(item && item.legacy_hero_team_size);
+  return [3, 5].includes(legacySize) ? legacySize : null;
+}
+
 function candidateHeroContext(item) {
   if (!item || !candidateDraft) return null;
   const screenType = candidateDraft.hero_layout_label;
   if (!CANDIDATE_HERO_SCREEN_TYPES.has(screenType)) return null;
-  const selectedMode = candidateDraft.match_mode_label || '';
-  const teamSize = candidateHeroTeamSizeExplicit
-    ? candidateHeroTeamSizeOverride
-    : selectedMode === '5v5' ? 5
-      : ['3v3', 'aram'].includes(selectedMode) ? 3
+  const knownTeamSize = candidateHeroKnownTeamSize(item);
+  const teamSize = knownTeamSize || (
+    candidateHeroTeamSizeExplicit
+      ? candidateHeroTeamSizeOverride
         : candidateHeroLineup && candidateHeroLineup.screen_type === screenType
-          ? candidateHeroLineup.team_size : null;
+          ? candidateHeroLineup.team_size : null
+  );
   return {screenType, teamSize};
 }
 
@@ -646,7 +856,9 @@ function resetCandidateHeroReview() {
   candidateHeroLoadToken += 1;
   candidateHeroLineup = null;
   candidateHeroDraft = new Map();
+  candidateHeroCachedSlots = new Set();
   candidateHeroPlayerSlot = null;
+  candidateHeroPlayerStatus = 'pending';
   candidateHeroDirty = false;
   candidateHeroLoading = false;
   candidateHeroDrawMode = false;
@@ -726,7 +938,6 @@ function candidateHeroLinkedSlots(
     return result;
   }
 
-  const originalCenter = candidateHeroCropCenter(selected.crop);
   const editedCenter = candidateHeroCropCenter(editedCrop);
   if (['result_page', 'scoreboard'].includes(screenType)) {
     result.forEach((slot) => {
@@ -736,18 +947,29 @@ function candidateHeroLinkedSlots(
       slot.crop = candidateHeroCropAtCenter(center, slot.crop);
     });
   } else if (screenType === 'gameplay_hud') {
-    const delta = {
-      x: editedCenter.x - originalCenter.x,
-      y: editedCenter.y - originalCenter.y,
-    };
     result.forEach((slot) => {
-      if (slot.side !== selected.side) return;
       const center = candidateHeroCropCenter(slot.crop);
-      slot.crop = candidateHeroCropAtCenter({
-        x: center.x + delta.x,
-        y: center.y + delta.y,
-      }, slot.crop);
+      center.y = editedCenter.y;
+      if (candidateHeroKey(slot.side, slot.slot) === selectedKey) {
+        center.x = editedCenter.x;
+      }
+      slot.crop = candidateHeroCropAtCenter(center, slot.crop);
     });
+    if (selected.slot === 2) {
+      const anchor = result.find((slot) =>
+        slot.side === selected.side && slot.slot === 1);
+      if (anchor) {
+        const anchorCenter = candidateHeroCropCenter(anchor.crop);
+        const selectedCenter = candidateHeroCropCenter(selected.crop);
+        const stepX = selectedCenter.x - anchorCenter.x;
+        result.filter((slot) => slot.side === selected.side).forEach((slot) => {
+          const center = candidateHeroCropCenter(slot.crop);
+          center.x = anchorCenter.x + stepX * (slot.slot - 1);
+          slot.crop = candidateHeroCropAtCenter(center, slot.crop);
+        });
+      }
+    }
+    return result;
   }
   selected.crop = {...editedCrop};
   return result;
@@ -769,29 +991,26 @@ function candidateHeroAutofillSlots(slots, screenType, teamSize) {
   };
 
   if (screenType === 'gameplay_hud') {
-    const left1 = findSlot('left', 1);
-    const left2 = findSlot('left', 2);
-    if (!left1 || !left2) return result;
-    const firstCenter = candidateHeroCropCenter(left1.crop);
-    const secondCenter = candidateHeroCropCenter(left2.crop);
-    const step = {
-      x: secondCenter.x - firstCenter.x,
-      y: secondCenter.y - firstCenter.y,
-    };
-    for (let slot = 3; slot <= teamSize; slot += 1) {
-      addSlot('left', slot, {
-        x: firstCenter.x + step.x * (slot - 1),
-        y: firstCenter.y + step.y * (slot - 1),
-      });
-    }
-    const right1 = findSlot('right', 1);
-    if (!right1) return result;
-    const rightCenter = candidateHeroCropCenter(right1.crop);
-    for (let slot = 2; slot <= teamSize; slot += 1) {
-      addSlot('right', slot, {
-        x: rightCenter.x + step.x * (slot - 1),
-        y: rightCenter.y + step.y * (slot - 1),
-      });
+    const rowAnchor = findSlot('left', 1) || findSlot('right', 1) || reference;
+    const rowCenterY = candidateHeroCropCenter(rowAnchor.crop).y;
+    result.forEach((slot) => {
+      const center = candidateHeroCropCenter(slot.crop);
+      slot.crop = candidateHeroCropAtCenter(
+        {x: center.x, y: rowCenterY}, slot.crop);
+    });
+    for (const side of ['left', 'right']) {
+      const first = findSlot(side, 1);
+      const second = findSlot(side, 2);
+      if (!first || !second) continue;
+      const firstCenter = candidateHeroCropCenter(first.crop);
+      const secondCenter = candidateHeroCropCenter(second.crop);
+      const stepX = secondCenter.x - firstCenter.x;
+      for (let slot = 3; slot <= teamSize; slot += 1) {
+        addSlot(side, slot, {
+          x: firstCenter.x + stepX * (slot - 1),
+          y: rowCenterY,
+        });
+      }
     }
     return result;
   }
@@ -830,12 +1049,14 @@ function renderCandidateHeroLineup() {
   const drawButton = $('#btn-candidate-hero-draw');
   const saveTemplate = $('#btn-candidate-hero-save-template');
   const clearButton = $('#btn-candidate-hero-clear');
+  const playerUnreadable = $('#btn-candidate-player-unreadable');
   if (!candidateHeroLineup) {
     teams.classList.add('hidden');
     drawButton.classList.remove('hidden');
     drawButton.disabled = true;
     saveTemplate.disabled = true;
     clearButton.disabled = true;
+    playerUnreadable.classList.add('hidden');
     $('#candidate-hero-status').textContent = candidateHeroLoading
       ? '正在读取本图或该主播缓存的英雄框…'
       : '请先选择每队 3 人或每队 5 人。';
@@ -845,32 +1066,51 @@ function renderCandidateHeroLineup() {
   teams.classList.remove('hidden');
   const recognized = candidateHeroLineup.slots.filter(
     (slot) => slot.suggested_label).length;
+  const reused = candidateHeroCachedSlots.size;
   const screenName = CANDIDATE_HERO_LAYOUTS[candidateHeroLineup.screen_type]
     || candidateHeroLineup.screen_type;
   const complete = candidateHeroLayoutComplete();
   const marksPlayer = ['scoreboard', 'result_page'].includes(
     candidateHeroLineup.screen_type);
   const playerPosition = candidateHeroPlayerPosition();
+  playerUnreadable.classList.toggle('hidden', !marksPlayer);
+  playerUnreadable.classList.toggle(
+    'selected', marksPlayer && candidateHeroPlayerStatus === 'unreadable');
+  playerUnreadable.classList.remove('needs-attention');
+  playerUnreadable.disabled = candidateHeroLoading;
+  playerUnreadable.setAttribute(
+    'aria-pressed', String(candidateHeroPlayerStatus === 'unreadable'));
   const next = candidateNextHeroPosition();
   const status = candidateHeroLineup.review_status === 'confirmed'
     ? '阵容已经人工确认；修改任意下拉框后会更新。'
     : complete
       ? `算法预填 ${recognized}/${candidateHeroLineup.slots.length} 个；` +
+        (reused ? `上次同类画面补齐 ${reused} 个；` : '') +
         '正确的不用改，只修改错误或空白的位置。'
       : next
         ? `已画 ${candidateHeroLineup.slots.length}/` +
           `${candidateHeroLineup.team_size * 2} 个；下一框是` +
           `${next.side === 'left' ? '左队' : '右队'}第 ${next.slot} 个。`
         : '还没有英雄圆框。';
-  const drawingHint = !complete && candidateHeroLineup.slots.length
-    ? ' 后续圆框沿用第一个大小，可直接点头像中心。' : '';
-  const playerHint = !marksPlayer ? '' : playerPosition
-    ? ` 主播本人：${playerPosition.side === 'left' ? '左' : '右'}队第 ` +
-      `${playerPosition.slot} 个。`
-    : ' 请点击“设为本人”，标出画面中高亮的主播英雄。';
+  const drawingHint = !complete
+    ? candidateHeroLineup.slots.length
+      ? ' 后续圆框沿用第一个大小，可直接点头像中心。'
+      : ' 先拖出第一个圆框确定大小。'
+    : '';
+  const playerHint = !marksPlayer ? ''
+    : candidateHeroPlayerStatus === 'unreadable'
+      ? ' 主播本人位置：看不清。'
+      : playerPosition
+        ? ` 主播本人：${playerPosition.side === 'left' ? '左' : '右'}队第 ` +
+          `${playerPosition.slot} 个。`
+        : ' 请点击“设为本人”，或选择“本人看不清”。';
+  const editHint = candidateHeroLineup.screen_type === 'gameplay_hud'
+    ? ' 上下拖任意框会统一整排高度；拖左右第 2 个框调整本队间距；' +
+      '拖其他框只微调横向位置；拖黄点统一缩放。'
+    : ' 拖圆框移动，拖黄点缩放。';
   $('#candidate-hero-status').textContent =
     `${screenName} · ${candidateHeroLineup.team_size}V${candidateHeroLineup.team_size} · ` +
-    `${status}${drawingHint}${playerHint} 拖圆框移动，拖黄点缩放。`;
+    `${status}${drawingHint}${playerHint}${editHint}`;
   drawButton.disabled = candidateHeroLoading || complete;
   drawButton.classList.toggle('hidden', complete);
   drawButton.classList.toggle('selected', candidateHeroDrawMode);
@@ -892,7 +1132,9 @@ function renderCandidateHeroLineup() {
       const key = candidateHeroKey(slot.side, slot.slot);
       const selected = candidateHeroDraft.get(key) || '';
       const hero = candidateHeroDisplay(selected);
-      const isPlayer = marksPlayer && candidateHeroPlayerSlot === key;
+      const isPlayer = marksPlayer &&
+        candidateHeroPlayerStatus === 'identified' &&
+        candidateHeroPlayerSlot === key;
       const card = document.createElement('article');
       card.className = 'candidate-hero-slot';
       card.dataset.heroSlot = key;
@@ -961,6 +1203,7 @@ function renderCandidateHeroLineup() {
           ? '这个英雄是主播本人使用的英雄'
           : '将这个英雄标记为主播本人使用的英雄';
         playerButton.onclick = () => {
+          candidateHeroPlayerStatus = 'identified';
           candidateHeroPlayerSlot = key;
           candidateHeroDirty = true;
           $('#candidate-save-state').classList.remove('error');
@@ -1011,6 +1254,7 @@ function renderCandidateHeroOptions() {
     button.appendChild(names);
     button.onclick = () => {
       candidateHeroDraft.set(candidateHeroPickerSlot, hero.label);
+      candidateHeroCachedSlots.delete(candidateHeroPickerSlot);
       candidateHeroDirty = true;
       $('#candidate-save-state').classList.remove('error');
       $('#candidate-save-state').textContent = '';
@@ -1058,9 +1302,11 @@ function showCandidateMissingHero(label) {
 }
 
 function showCandidateMissingPlayerHero() {
-  showCandidateSaveError('请在英雄阵容中标出画面高亮的主播本人英雄');
+  showCandidateSaveError(
+    '请标出主播本人，或选择“本人看不清”');
   const buttons = $$('.candidate-hero-player');
   buttons.forEach((button) => button.classList.add('needs-attention'));
+  $('#btn-candidate-player-unreadable').classList.add('needs-attention');
   if (buttons[0]) buttons[0].scrollIntoView({block: 'center', inline: 'nearest'});
 }
 
@@ -1077,7 +1323,9 @@ async function loadCandidateHeroLineup(item) {
   candidateHeroLoading = true;
   candidateHeroLineup = null;
   candidateHeroDraft = new Map();
+  candidateHeroCachedSlots = new Set();
   candidateHeroPlayerSlot = null;
+  candidateHeroPlayerStatus = 'pending';
   candidateHeroDirty = false;
   candidateHeroDrawMode = false;
   closeCandidateHeroPicker();
@@ -1105,18 +1353,24 @@ async function loadCandidateHeroLineup(item) {
     }
     lineup.slots ||= [];
     candidateHeroLineup = lineup;
+    candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(lineup);
     candidateHeroPlayerSlot = candidateHeroPlayerKey(lineup);
+    if (candidateHeroPlayerStatus === 'pending' && lineup.player_suggestion) {
+      const suggestion = lineup.player_suggestion;
+      const suggestedKey = candidateHeroKey(
+        suggestion.side, Number(suggestion.slot));
+      if (lineup.slots.some((slot) =>
+        candidateHeroKey(slot.side, slot.slot) === suggestedKey)) {
+        candidateHeroPlayerStatus = 'identified';
+        candidateHeroPlayerSlot = suggestedKey;
+      }
+    }
     if (!context.teamSize && lineup.team_size) {
       candidateHeroTeamSizeExplicit = true;
       candidateHeroTeamSizeOverride = lineup.team_size;
       renderCandidateChoices();
     }
-    candidateHeroDraft = new Map(
-      lineup.slots.map((slot) => [
-        candidateHeroKey(slot.side, slot.slot),
-        slot.confirmed_label || slot.suggested_label || '',
-      ])
-    );
+    candidateHeroDraft = candidateHeroDraftForLineup(item, lineup);
     renderCandidateHeroLineup();
   } catch (error) {
     if (token !== candidateHeroLoadToken || currentCandidate() !== item) return;
@@ -1168,6 +1422,7 @@ async function persistCandidateHeroLayout(
   if (!item || !context || !context.teamSize || candidateHeroLoading) return false;
   const previousDraft = new Map(candidateHeroDraft);
   const previousPlayerSlot = candidateHeroPlayerSlot;
+  const previousPlayerStatus = candidateHeroPlayerStatus;
   candidateHeroLoading = true;
   $('#btn-candidate-save').disabled = true;
   renderCandidateHeroLineup();
@@ -1184,22 +1439,28 @@ async function persistCandidateHeroLayout(
         }),
       });
     candidateHeroLineup = lineup;
+    const persistedPlayerStatus = candidateHeroPlayerStatusForLineup(lineup);
     const persistedPlayerSlot = candidateHeroPlayerKey(lineup);
     const previousPlayerStillExists = previousPlayerSlot && lineup.slots.some(
       (slot) => candidateHeroKey(slot.side, slot.slot) === previousPlayerSlot
     );
-    candidateHeroPlayerSlot = persistedPlayerSlot ||
-      (previousPlayerStillExists ? previousPlayerSlot : null);
-    candidateHeroDraft = new Map(
-      lineup.slots.map((slot) => {
-        const key = candidateHeroKey(slot.side, slot.slot);
-        return [
-          key,
-          previousDraft.get(key) || slot.confirmed_label ||
-            slot.suggested_label || '',
-        ];
-      })
-    );
+    if (persistedPlayerStatus !== 'pending') {
+      candidateHeroPlayerStatus = persistedPlayerStatus;
+      candidateHeroPlayerSlot = persistedPlayerSlot;
+    } else if (
+      previousPlayerStatus === 'identified' && previousPlayerStillExists
+    ) {
+      candidateHeroPlayerStatus = 'identified';
+      candidateHeroPlayerSlot = previousPlayerSlot;
+    } else if (previousPlayerStatus === 'unreadable') {
+      candidateHeroPlayerStatus = 'unreadable';
+      candidateHeroPlayerSlot = null;
+    } else {
+      candidateHeroPlayerStatus = 'pending';
+      candidateHeroPlayerSlot = null;
+    }
+    candidateHeroDraft = candidateHeroDraftForLineup(
+      item, lineup, previousDraft);
     candidateHeroDirty = true;
     if (lineup.template_saved) {
       $('#candidate-save-state').textContent =
@@ -1251,7 +1512,11 @@ async function deleteCandidateHeroSlot() {
   const slots = candidateHeroLineup.slots.filter((slot) =>
     candidateHeroKey(slot.side, slot.slot) !== key);
   candidateHeroDraft.delete(key);
-  if (candidateHeroPlayerSlot === key) candidateHeroPlayerSlot = null;
+  candidateHeroCachedSlots.delete(key);
+  if (candidateHeroPlayerSlot === key) {
+    candidateHeroPlayerSlot = null;
+    candidateHeroPlayerStatus = 'pending';
+  }
   closeCandidateHeroPicker();
   const saved = await persistCandidateHeroLayout(slots);
   if (saved) candidateHeroDrawMode = true;
@@ -1261,7 +1526,9 @@ async function deleteCandidateHeroSlot() {
 async function clearCandidateHeroLayout() {
   if (!candidateHeroLineup || !candidateHeroLineup.slots.length) return;
   candidateHeroDraft = new Map();
+  candidateHeroCachedSlots = new Set();
   candidateHeroPlayerSlot = null;
+  candidateHeroPlayerStatus = 'pending';
   closeCandidateHeroPicker();
   const saved = await persistCandidateHeroLayout([]);
   if (saved) candidateHeroDrawMode = true;
@@ -1304,8 +1571,10 @@ function renderCandidateHeroContextControls() {
   });
   const hasHeroLayout = CANDIDATE_HERO_SCREEN_TYPES.has(
     candidateDraft.hero_layout_label);
-  sizeGroup.classList.toggle('hidden', !hasHeroLayout);
-  if (hasHeroLayout) {
+  const teamSizeAlreadyKnown = Boolean(candidateHeroKnownTeamSize(item));
+  const needsTeamSizeChoice = hasHeroLayout && !teamSizeAlreadyKnown;
+  sizeGroup.classList.toggle('hidden', !needsTeamSizeChoice);
+  if (needsTeamSizeChoice) {
     const context = candidateHeroContext(item);
     [3, 5].forEach((teamSize) => {
       const button = document.createElement('button');
@@ -1325,9 +1594,25 @@ function renderCandidateHeroContextControls() {
   }
 }
 
+function candidateDraftHasRenderState(draft = candidateDraft) {
+  if (!draft) return false;
+  return draft.result_panel_label === 'result_panel' ||
+    ['gameplay_hud', 'scoreboard', 'result_page'].includes(
+      draft.hero_layout_label);
+}
+
 function candidateResultQualitySummary() {
   if (!candidateDraft) return '异常：无';
   const parts = [];
+  if (candidateDraft.panel_render_state === 'translucent') {
+    parts.push('显示：半透明／过渡中');
+  } else if (candidateDraft.panel_render_state === 'unknown') {
+    parts.push('显示：看不清');
+  }
+  const isResultPanel = candidateDraft.result_panel_label === 'result_panel';
+  if (!isResultPanel) {
+    return parts.length ? parts.join(' · ') : '显示：正常';
+  }
   if (candidateDraft.ocr_usable === 'no') parts.push('OCR 不可用');
   else if (candidateDraft.ocr_usable === 'unknown') parts.push('OCR 不确定');
   if (candidateDraft.result_occlusion === 'occluded') {
@@ -1338,7 +1623,7 @@ function candidateResultQualitySummary() {
   } else if (candidateDraft.result_occlusion === 'unknown') {
     parts.push('遮挡不确定');
   }
-  return parts.length ? parts.join(' · ') : '异常：无';
+  return parts.length ? parts.join(' · ') : '显示：正常 · 异常：无';
 }
 
 function appendCandidateResultQualityRow(
@@ -1373,10 +1658,30 @@ function renderCandidateResultQualityDetails(details) {
   details.innerHTML = '';
   const summary = document.createElement('summary');
   summary.textContent = candidateResultQualitySummary();
-  summary.title = '展开填写结算遮挡和 OCR 可用性';
+  summary.title = '展开填写 HUD／面板显示状态、结算遮挡和 OCR 可用性';
   details.appendChild(summary);
   const panel = document.createElement('div');
   panel.className = 'candidate-result-quality-panel';
+  appendCandidateResultQualityRow(
+    panel, '显示', CFG.panel_render_states || {
+      clear: '正常显示',
+      translucent: '半透明／过渡中',
+      unknown: '看不清',
+    },
+    new Set([candidateDraft.panel_render_state || 'clear']),
+    (value) => {
+      candidateDraft.panel_render_state = value;
+      renderCandidateResultQualityDetails(details);
+    },
+  );
+  if (candidateDraft.result_panel_label !== 'result_panel') {
+    const hint = document.createElement('p');
+    hint.className = 'hint small';
+    hint.textContent = '半透明是 HUD／积分版淡入淡出时的过渡状态，不算遮挡。';
+    panel.appendChild(hint);
+    details.appendChild(panel);
+    return;
+  }
   appendCandidateResultQualityRow(
     panel, 'OCR', CFG.ocr_usable,
     new Set([candidateDraft.ocr_usable || 'yes']),
@@ -1407,6 +1712,10 @@ function renderCandidateResultQualityDetails(details) {
       },
     );
   }
+  const hint = document.createElement('p');
+  hint.className = 'hint small';
+  hint.textContent = '半透明是 HUD／面板过渡状态，不算遮挡；有其他 UI 盖住内容才标“有遮挡”。';
+  panel.appendChild(hint);
   details.appendChild(panel);
 }
 
@@ -1414,9 +1723,63 @@ function createCandidateResultQualityDetails() {
   const details = document.createElement('details');
   details.className = 'candidate-result-quality';
   details.classList.toggle(
-    'hidden', candidateDraft.result_panel_label !== 'result_panel');
+    'hidden', !candidateDraftHasRenderState());
   renderCandidateResultQualityDetails(details);
   return details;
+}
+
+function appendCandidateHeroSelectVariant(group) {
+  const label = candidateDraft.hero_select_label || '';
+  if (!label.startsWith('select_')) return;
+  const heading = document.createElement('p');
+  heading.className = 'candidate-subheading';
+  heading.textContent = '选择方式';
+  group.appendChild(heading);
+  const buttons = document.createElement('div');
+  buttons.className = 'candidate-review-buttons compact';
+  const values = label === 'select_aram'
+    ? ['random'] : ['bp', 'blind', 'unreadable'];
+  values.forEach((value) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = CANDIDATE_HERO_SELECT_VARIANTS[value];
+    button.classList.toggle(
+      'selected', candidateDraft.hero_select_variant === value);
+    button.setAttribute(
+      'aria-pressed', String(candidateDraft.hero_select_variant === value));
+    button.onclick = () => {
+      candidateDraft.hero_select_variant = value;
+      renderCandidateChoices();
+    };
+    buttons.appendChild(button);
+  });
+  group.appendChild(buttons);
+
+  const visibilityHeading = document.createElement('p');
+  visibilityHeading.className = 'candidate-subheading';
+  visibilityHeading.textContent = '画面情况';
+  group.appendChild(visibilityHeading);
+  const visibilityButtons = document.createElement('div');
+  visibilityButtons.className = 'candidate-review-buttons compact';
+  Object.entries(CANDIDATE_HERO_SELECT_VISIBILITY).forEach(([value, text]) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = text;
+    const selected = candidateDraft.hero_select_visibility === value;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
+    button.onclick = () => {
+      candidateDraft.hero_select_visibility = value;
+      renderCandidateChoices();
+    };
+    visibilityButtons.appendChild(button);
+  });
+  group.appendChild(visibilityButtons);
+  const visibilityHelp = document.createElement('p');
+  visibilityHelp.className = 'hint small';
+  visibilityHelp.textContent =
+    '局部被挡住但仍能确认模式时选“有遮挡”；挡到无法确认模式时，直接选上面的“看不清”。';
+  group.appendChild(visibilityHelp);
 }
 
 function renderCandidateChoices() {
@@ -1453,6 +1816,9 @@ function renderCandidateChoices() {
       buttons.appendChild(button);
     });
     group.appendChild(buttons);
+    if (field.key === 'hero_select_label') {
+      appendCandidateHeroSelectVariant(group);
+    }
     const help = document.createElement('p');
     help.className = 'hint small';
     help.textContent = field.help;
@@ -1485,6 +1851,10 @@ function selectCandidateHeroLayout(value) {
   } else {
     resetCandidateHeroReview();
   }
+  if (!candidateDraftHasRenderState()) {
+    candidateDraft.panel_render_state = 'clear';
+  }
+  normalizeCandidateHeroSelectVariant(candidateDraft);
   renderCandidateBoxes();
   renderCandidateChoices();
   refreshCandidateHeroReview();
@@ -1513,16 +1883,25 @@ function selectCandidateReviewLabel(field, value) {
   } else if (field === 'match_mode_label') {
     candidateDraft.match_flow_label = 'match_flow';
     candidateDraft.hero_select_label = 'not_select';
-    candidateHeroTeamSizeExplicit = true;
-    candidateHeroTeamSizeOverride = value === '5v5' ? 5
-      : ['3v3', 'aram'].includes(value) ? 3 : null;
+    candidateHeroTeamSizeExplicit = false;
+    candidateHeroTeamSizeOverride = null;
   } else if (field === 'hero_select_label' && value.startsWith('select_')) {
+    const storedItem = currentCandidate();
+    if (storedItem && storedItem.hero_select_label === value) {
+      candidateDraft.hero_select_variant = storedItem.hero_select_variant || null;
+    } else {
+      candidateDraft.hero_select_variant =
+        candidateCachedReviewLabels().hero_select_variant || null;
+    }
     candidateDraft.match_flow_label = 'not_match_flow';
     candidateDraft.match_mode_label = null;
     candidateHeroTeamSizeExplicit = false;
     candidateHeroTeamSizeOverride = null;
     candidateDraft.result_panel_label = 'no_result_panel';
     candidateDraft.hero_layout_label = 'none';
+    candidateDraft.hero_select_visibility =
+      storedItem && storedItem.hero_select_label === value
+        ? storedItem.hero_select_visibility || 'clear' : 'clear';
     candidateBoxes = [];
     renderCandidateBoxes();
   } else if (field === 'hero_select_label' && value === 'unreadable' &&
@@ -1544,16 +1923,129 @@ function selectCandidateReviewLabel(field, value) {
     candidateBoxes = [];
     renderCandidateBoxes();
   }
+  if (!candidateDraftHasRenderState()) {
+    candidateDraft.panel_render_state = 'clear';
+  }
+  normalizeCandidateHeroSelectVariant(candidateDraft);
   renderCandidateChoices();
   refreshCandidateHeroReview();
+}
+
+function candidateItemMatchesStatus(item, status) {
+  if (!item) return false;
+  if (status === 'all') return true;
+  if (status === 'legacy_hero') {
+    return Boolean(item.legacy_hero_needs_review);
+  }
+  if (status === 'needs_review') {
+    return ['pending', 'partial'].includes(item.review_status) ||
+      Boolean(item.needs_player_hero_review);
+  }
+  if (status === 'missing_player') {
+    return Boolean(item.needs_player_hero_review);
+  }
+  return item.review_status === status;
+}
+
+function candidateReviewTotal(stats, status) {
+  const statuses = stats.statuses || {};
+  if (status === 'all') return Number(stats.total || 0);
+  if (status === 'legacy_hero') {
+    return Number(
+      (stats.legacy_hero_filtered || stats.legacy_hero || {}).remaining_groups || 0
+    );
+  }
+  if (status === 'needs_review') {
+    return Number(statuses.pending || 0) + Number(statuses.partial || 0) +
+      Number(stats.missing_player_hero || 0);
+  }
+  if (status === 'missing_player') {
+    return Number(stats.missing_player_hero || 0);
+  }
+  return Number(statuses[status] || 0);
+}
+
+function candidateStatusIsReviewQueue(status) {
+  return [
+    'needs_review', 'missing_player', 'pending', 'partial', 'legacy_hero',
+  ].includes(status);
+}
+
+function candidateReviewQuery(status, offset = null) {
+  const query = new URLSearchParams({status, limit: '2000'});
+  if (offset !== null) query.set('offset', String(offset));
+  if (status === 'legacy_hero') {
+    const streamer = $('#candidate-legacy-streamer').value;
+    const screenType = $('#candidate-legacy-screen').value;
+    if (streamer) query.set('streamer', streamer);
+    if (screenType) query.set('hero_screen_type', screenType);
+  }
+  return `/api/training-review/items?${query}`;
+}
+
+function renderCandidateLegacyControls(stats, status) {
+  const active = status === 'legacy_hero';
+  $('#candidate-legacy-filters').classList.toggle('hidden', !active);
+  $('#candidate-page-title').textContent = active
+    ? '历史英雄快速补标' : '新模型统一打标';
+  $('#candidate-page-hint').textContent = active
+    ? '以前约 7000 张人工标注会按主播、同一局和画面类型折叠。这里只补每组代表图：同一主播、同类画面、同人数和近似比例只需首次画圆框，后续自动套用并预填英雄；近重复帧不会重复塞进英雄训练集。'
+    : '一张图只看一次：右侧确认对局状态、模式、英雄选择和结算面板，图片下方确认英雄头像来自 HUD、积分板还是结算图。模型结果只是预选，未人工确认的图片不会进入训练集；旧积分板、商店和光栅框会保留，但这里不要求重画。';
+  if (!active) return;
+  const globalStats = stats.legacy_hero || {};
+  const filteredStats = stats.legacy_hero_filtered || globalStats;
+  const streamerSelect = $('#candidate-legacy-streamer');
+  const selectedStreamer = streamerSelect.value;
+  const options = (globalStats.by_streamer || []).map((value) => ({
+    value: value.streamer || '',
+    label: `${value.streamer || '未知主播'} · ${value.groups || 0} 组`,
+  }));
+  streamerSelect.replaceChildren(
+    new Option('全部主播（连续排列）', ''),
+    ...options.map((value) => new Option(value.label, value.value)),
+  );
+  if (options.some((value) => value.value === selectedStreamer)) {
+    streamerSelect.value = selectedStreamer;
+  }
+  const screenNames = {
+    gameplay_hud: 'HUD', scoreboard: '积分板', result_page: '结算',
+  };
+  const breakdown = Object.entries(filteredStats.by_screen_type || {})
+    .filter(([, count]) => Number(count) > 0)
+    .map(([screen, count]) => `${screenNames[screen] || screen} ${count} 组`)
+    .join(' · ');
+  $('#candidate-legacy-summary').textContent =
+    `待补 ${filteredStats.remaining_groups || 0} 组，覆盖 ` +
+    `${filteredStats.remaining_frames || 0} 张旧图` +
+    (breakdown ? ` · ${breakdown}` : '');
+}
+
+function renderCandidateProgress() {
+  const activeReview = candidateStatusIsReviewQueue(candidateLoadedStatus);
+  if (activeReview) {
+    $('#candidate-progress').textContent =
+      `待标 ${candidateFilteredTotal} · 本次完成 ${candidateSessionCompleted}`;
+    return;
+  }
+  $('#candidate-progress').textContent = currentCandidate()
+    ? `共 ${candidateFilteredTotal} · 当前第 ${candidateIndex + 1} 张`
+    : `共 ${candidateFilteredTotal}`;
+}
+
+function renderCandidateSyncStats(stats) {
+  const missingPlayer = stats.missing_player_hero || 0;
+  $('#candidate-sync-state').textContent =
+    `本地 ${stats.total || 0} · 待补齐 ${((stats.statuses || {}).pending || 0) +
+      ((stats.statuses || {}).partial || 0) + missingPlayer}（待补本人 ${missingPlayer}） · ` +
+    `已确认 ${(stats.statuses || {}).confirmed || 0} · ` +
+    `待回传 ${stats.dirty || 0}`;
 }
 
 function renderCandidateItem() {
   const item = currentCandidate();
   const image = $('#candidate-image');
   const empty = $('#candidate-empty');
-  $('#candidate-progress').textContent = candidateQueue.length
-    ? `${candidateIndex + 1}/${candidateQueue.length}` : '0/0';
+  renderCandidateProgress();
   $('#btn-candidate-prev').disabled = !item || candidateIndex <= 0;
   $('#btn-candidate-next').disabled = !item || candidateIndex >= candidateQueue.length - 1;
   if (!item) {
@@ -1578,6 +2070,7 @@ function renderCandidateItem() {
   empty.classList.add('hidden');
   $('#candidate-image-wrap').classList.remove('hidden');
   const frameId = item.frame_id;
+  candidateFormTouched = false;
   image.onload = () => {
     if (currentCandidate() && currentCandidate().frame_id === frameId) {
       renderCandidateBoxes();
@@ -1588,46 +2081,97 @@ function renderCandidateItem() {
   candidateHeroTeamSizeOverride = null;
   candidateHeroDrawMode = false;
   candidateDraft = candidateDefaultDraft(item);
-  const suggestedBox = candidateSuggestedResultBox(item);
+  const suggestedBox = candidateDraft.result_panel_label === 'result_panel'
+    ? candidateSuggestedResultBox(item) : null;
   candidateBoxes = suggestedBox ? [suggestedBox] : [];
   $('#candidate-notes').value = item.notes || '';
+  const legacyMeta = item.legacy_hero_needs_review
+    ? ` · 历史第 ${item.legacy_hero_match_index} 局的 ` +
+      `${CANDIDATE_HERO_LAYOUT_SHORT_LABELS[item.legacy_hero_screen_type]}，` +
+      `本组 ${item.legacy_hero_group_size} 张只保留这张代表图补英雄`
+    : '';
   $('#candidate-meta').textContent =
     `${item.streamer || '未知主播'} / ${item.filename || ''} · ` +
     `${(item.timestamp_ms / 1000).toFixed(1)}s · frame #${item.frame_id} · ` +
-    `${item.source_count || 0} 个来源`;
+    `${item.source_count || 0} 个来源${legacyMeta}`;
   renderCandidateSuggestions(item);
   renderCandidateChoices();
   $('#btn-candidate-save').disabled = false;
   $('#candidate-save-state').classList.remove('error');
-  $('#candidate-save-state').textContent = item.needs_player_hero_review
+  $('#candidate-save-state').textContent = item.legacy_hero_needs_review
+    ? '旧的流程和模式标签已保留；只需确认头像来源、圆框和英雄'
+    : item.needs_player_hero_review
     ? '原标注已保留，请补齐英雄阵容并标出主播本人'
     : item.review_status === 'confirmed'
       ? '这张图已经人工确认' : item.review_status === 'partial'
       ? '历史数据只覆盖了部分标签，请补齐后确认'
       : item.review_status === 'skipped' ? '已跳过' : '';
-  $('#btn-candidate-skip').disabled = item.review_status === 'confirmed';
+  $('#btn-candidate-skip').disabled =
+    Boolean(item.legacy_hero_needs_review) || item.review_status === 'confirmed';
   renderCandidateBoxes();
   loadCandidateHeroLineup(item);
+  requestCandidateModelPrefill(item);
+}
+
+async function requestCandidateModelPrefill(item) {
+  const frameId = Number(item && item.frame_id);
+  if (!frameId || candidatePrefillRequested.has(frameId)) return;
+  if (!['pending', 'partial'].includes(String(item.review_status || ''))) return;
+  candidatePrefillRequested.add(frameId);
+  try {
+    const result = await api(
+      `/api/training-review/items/${frameId}/prefill`, {
+        method: 'POST', body: JSON.stringify({}),
+      });
+    if (!result.item) return;
+    const index = candidateQueue.findIndex(
+      (value) => Number(value.frame_id) === frameId);
+    if (index >= 0) candidateQueue[index] = result.item;
+    if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&
+        !candidateFormTouched) {
+      renderCandidateItem();
+    }
+  } catch (error) {
+    if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&
+        !candidateFormTouched) {
+      $('#candidate-save-state').textContent =
+        '新模型预填失败，仍可手工标注：' + error.message;
+    }
+  }
 }
 
 async function loadCandidateReview() {
   const status = $('#candidate-status-filter').value;
   try {
-    const data = await api(
-      `/api/training-review/items?status=${encodeURIComponent(status)}&limit=2000`);
+    const data = await api(candidateReviewQuery(status));
+    candidateLoadedStatus = status;
+    renderCandidateLegacyControls(data.stats || {}, status);
+    candidateFilteredTotal = candidateReviewTotal(data.stats || {}, status);
+    candidateSessionCompleted = 0;
+    candidatePrefillRequested.clear();
     candidateQueue = data.items || [];
     candidateIndex = 0;
     renderCandidateItem();
-    const stats = data.stats || {};
-    const missingPlayer = stats.missing_player_hero || 0;
-    $('#candidate-sync-state').textContent =
-      `本地 ${stats.total || 0} · 待补齐 ${((stats.statuses || {}).pending || 0) +
-        ((stats.statuses || {}).partial || 0) + missingPlayer}（待补本人 ${missingPlayer}） · ` +
-      `已确认 ${(stats.statuses || {}).confirmed || 0} · ` +
-      `待回传 ${stats.dirty || 0}`;
+    renderCandidateSyncStats(data.stats || {});
   } catch (error) {
     $('#candidate-save-state').textContent = '加载失败：' + error.message;
   }
+}
+
+async function refillCandidateReviewQueue() {
+  const status = candidateLoadedStatus;
+  const offset = candidateQueue.filter(
+    (item) => candidateItemMatchesStatus(item, status)).length;
+  const data = await api(
+    candidateReviewQuery(status, offset));
+  if ($('#candidate-status-filter').value !== status) return 0;
+  candidateFilteredTotal = candidateReviewTotal(data.stats || {}, status);
+  renderCandidateSyncStats(data.stats || {});
+  const known = new Set(candidateQueue.map((item) => item.frame_id));
+  const additions = (data.items || []).filter(
+    (item) => !known.has(item.frame_id));
+  candidateQueue.push(...additions);
+  return additions.length;
 }
 
 function moveCandidate(offset) {
@@ -1646,6 +2190,8 @@ function showCandidateSaveError(message) {
 async function saveCandidateReview(skip = false) {
   const item = currentCandidate();
   if (!item || !candidateDraft) return;
+  const loadedStatus = candidateLoadedStatus;
+  const matchedBeforeSave = candidateItemMatchesStatus(item, loadedStatus);
   $('#candidate-save-state').classList.remove('error');
   if (!skip && candidateHeroLoading) {
     showCandidateSaveError('英雄预填仍在进行，请稍等一下');
@@ -1654,6 +2200,11 @@ async function saveCandidateReview(skip = false) {
   if (!skip && candidateDraft.result_panel_label === 'result_panel' &&
       !candidateBoxes.length) {
     showCandidateSaveError('请先在左侧框出完整结算面板');
+    return;
+  }
+  if (!skip && ['select_3v3', 'select_5v5'].includes(
+    candidateDraft.hero_select_label) && !candidateDraft.hero_select_variant) {
+    showCandidateSaveError('请再选择这个英雄选择界面是 BP、盲选还是看不清');
     return;
   }
   const heroContext = candidateHeroContext(item);
@@ -1681,9 +2232,12 @@ async function saveCandidateReview(skip = false) {
     return;
   }
   const playerPosition = candidateHeroPlayerPosition();
-  if (!skip && heroContext &&
-      ['scoreboard', 'result_page'].includes(heroContext.screenType) &&
-      !playerPosition) {
+  const marksPlayer = !skip && heroContext &&
+    ['scoreboard', 'result_page'].includes(heroContext.screenType);
+  if (marksPlayer && (
+    candidateHeroPlayerStatus === 'pending' ||
+    (candidateHeroPlayerStatus === 'identified' && !playerPosition)
+  )) {
     showCandidateMissingPlayerHero();
     return;
   }
@@ -1697,16 +2251,21 @@ async function saveCandidateReview(skip = false) {
           method: 'PUT',
           body: JSON.stringify({
             heroes: heroLabels,
+            player_status: candidateHeroPlayerStatus,
             player_side: playerPosition && playerPosition.side,
             player_slot: playerPosition && playerPosition.slot,
           }),
         });
+      candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(
+        candidateHeroLineup);
       candidateHeroPlayerSlot = candidateHeroPlayerKey(candidateHeroLineup);
       candidateHeroDirty = false;
     }
     const labels = skip ? {
       match_flow_label: null, match_mode_label: null,
-      hero_select_label: null, result_panel_label: null,
+      hero_select_label: null, hero_select_variant: null,
+      hero_select_visibility: null,
+      result_panel_label: null,
       hero_layout_label: null,
     } : candidateDraft;
     const updated = await api(`/api/training-review/items/${item.frame_id}`, {
@@ -1719,13 +2278,44 @@ async function saveCandidateReview(skip = false) {
         notes: $('#candidate-notes').value,
       }),
     });
-    if (!skip) cacheCandidateReviewLabels(candidateDraft);
-    candidateQueue[candidateIndex] = updated;
-    if (candidateIndex < candidateQueue.length - 1) {
-      moveCandidate(1);
-      return;
+    if (!skip) {
+      cacheCandidateReviewLabels(candidateDraft);
+      if (heroLabels) {
+        cacheCandidateHeroLineup(item, candidateHeroLineup, candidateHeroDraft);
+      }
     }
+    candidateQueue[candidateIndex] = updated;
+    if (matchedBeforeSave && !candidateItemMatchesStatus(updated, loadedStatus)) {
+      candidateFilteredTotal = Math.max(0, candidateFilteredTotal - 1);
+      candidateSessionCompleted += 1;
+    }
+    const nextMatchingIndex = () => candidateQueue.findIndex(
+      (value, index) => index > candidateIndex &&
+        candidateItemMatchesStatus(value, loadedStatus));
+    let nextIndex = nextMatchingIndex();
+    let refillError = null;
+    const knownRemaining = candidateQueue.filter(
+      (value) => candidateItemMatchesStatus(value, loadedStatus)).length;
+    if (nextIndex < 0 && candidateFilteredTotal > knownRemaining) {
+      try {
+        await refillCandidateReviewQueue();
+      } catch (error) {
+        refillError = error;
+      }
+      nextIndex = nextMatchingIndex();
+    }
+    if (nextIndex < 0 && candidateStatusIsReviewQueue(loadedStatus)) {
+      nextIndex = candidateQueue.findIndex(
+        (value) => candidateItemMatchesStatus(value, loadedStatus));
+    }
+    if (nextIndex >= 0) candidateIndex = nextIndex;
     renderCandidateItem();
+    if (refillError) {
+      showCandidateSaveError('本张已保存，但加载下一批失败：' + refillError.message);
+    } else if (candidateStatusIsReviewQueue(loadedStatus) &&
+        candidateFilteredTotal === 0) {
+      $('#candidate-save-state').textContent = '当前筛选条件下已经全部标完';
+    }
   } catch (error) {
     showCandidateSaveError('保存失败：' + error.message);
   }
@@ -1753,7 +2343,24 @@ function candidateHeroDrawingDiameter(width, height) {
   const first = candidateHeroLineup && candidateHeroLineup.slots[0];
   if (!first) return null;
   const crop = candidateHeroDisplayCrop(first.crop, {width, height});
-  return crop.w * width;
+  const diameter = crop.w * width;
+  return Number.isFinite(diameter) && diameter > 0 ? diameter : null;
+}
+
+function candidateHeroClickCrop(point) {
+  const diameter = candidateHeroDrawingDiameter(point.width, point.height);
+  if (!diameter) return null;
+  const size = Math.min(diameter, point.width, point.height);
+  const left = candidateHeroClamp(
+    point.x - size / 2, 0, point.width - size);
+  const top = candidateHeroClamp(
+    point.y - size / 2, 0, point.height - size);
+  return {
+    x: left / point.width,
+    y: top / point.height,
+    w: size / point.width,
+    h: size / point.height,
+  };
 }
 
 async function refreshCandidateSync() {
@@ -1799,7 +2406,15 @@ async function syncCandidates() {
 }
 
 function bindCandidateReview() {
+  const candidateView = $('#view-candidates');
+  ['pointerdown', 'input', 'change'].forEach((eventName) => {
+    candidateView.addEventListener(eventName, (event) => {
+      if (event.isTrusted) candidateFormTouched = true;
+    }, true);
+  });
   $('#candidate-status-filter').onchange = loadCandidateReview;
+  $('#candidate-legacy-streamer').onchange = loadCandidateReview;
+  $('#candidate-legacy-screen').onchange = loadCandidateReview;
   $('#btn-candidate-refresh').onclick = loadCandidateReview;
   $('#btn-candidate-sync').onclick = syncCandidates;
   $('#btn-candidate-prev').onclick = () => moveCandidate(-1);
@@ -1821,6 +2436,14 @@ function bindCandidateReview() {
   };
   $('#btn-candidate-hero-save-template').onclick = saveCandidateHeroTemplate;
   $('#btn-candidate-hero-clear').onclick = clearCandidateHeroLayout;
+  $('#btn-candidate-player-unreadable').onclick = () => {
+    candidateHeroPlayerStatus = 'unreadable';
+    candidateHeroPlayerSlot = null;
+    candidateHeroDirty = true;
+    $('#candidate-save-state').classList.remove('error');
+    $('#candidate-save-state').textContent = '';
+    renderCandidateHeroLineup();
+  };
   document.addEventListener('pointerdown', (event) => {
     const picker = $('#candidate-hero-picker');
     if (!picker.classList.contains('hidden') &&
@@ -1834,17 +2457,26 @@ function bindCandidateReview() {
     if (event.key === 'Escape') closeCandidateHeroPicker();
   });
   const layer = $('#candidate-box-layer');
-  layer.onpointerdown = (event) => {
+  layer.onpointerdown = async (event) => {
     const item = currentCandidate();
     if (!item || !candidateDraft ||
         event.target.closest('.candidate-box') ||
         event.target.closest('.candidate-hero-circle')) return;
-    const canDrawHero = candidateHeroDrawMode &&
+    const canDrawHero = !candidateHeroLoading && candidateHeroDrawMode &&
       candidateHeroLineup && candidateNextHeroPosition();
     const canDrawResult = !candidateHeroDrawMode &&
       candidateDraft.result_panel_label === 'result_panel';
     if (!canDrawHero && !canDrawResult) return;
     event.preventDefault();
+    if (canDrawHero) {
+      const point = candidatePixelPoint(event);
+      const crop = candidateHeroClickCrop(point);
+      if (crop) {
+        candidateDrawStart = null;
+        await addCandidateHeroCircle(crop);
+        return;
+      }
+    }
     layer.setPointerCapture(event.pointerId);
     candidateDrawStart = canDrawHero
       ? {kind: 'hero', point: candidatePixelPoint(event)}
@@ -4467,27 +5099,511 @@ $('#btn-pair-diff').onclick = () => savePair('different_match');
 $('#btn-pair-uncertain').onclick = () => savePair('uncertain');
 $('#btn-pair-refresh').onclick = loadPairs;
 
-// ---------- 模型测试与 Worker 模型包 ----------
-const MODEL_TASK_NAMES = {
-  screen_state: '画面状态',
-  bp_review: 'BP 模式',
-  key_screen_review: '结算／计分板',
-  result_detector: '结算面板',
-  mode_gate: '大乱斗光栅',
+// ---------- 模型验收与 Worker 发布候选包 ----------
+const MODEL_TASKS = {
+  match_flow: {
+    name: '是否在对局流程中', kind: 'classify', role: 'match_flow',
+    labels: {match_flow: '对局流程中', not_match_flow: '非对局画面'},
+  },
+  hero_select: {
+    name: '英雄选择与模式', kind: 'classify', role: 'hero_select',
+    labels: {
+      not_select: '不是英雄选择', select_3v3: '3V3 英雄选择',
+      select_aram: '大乱斗英雄选择', select_5v5: '5V5 英雄选择',
+    },
+  },
+  match_mode: {
+    name: '对局画面模式', kind: 'classify', role: 'match_mode',
+    labels: {'3v3': '3V3', aram: '大乱斗', '5v5': '5V5'},
+  },
+  result_detector: {
+    name: '结算面板检测', kind: 'detect', role: 'result_panel',
+    labels: {result_panel: '有结算面板', no_result_panel: '没有结算面板'},
+  },
+  hero_avatar_detector: {
+    name: '英雄头像位置检测', kind: 'detect', role: 'hero_avatar',
+    labels: {hero_avatar: '英雄头像'},
+  },
+  hero_identity: {
+    name: '英雄头像身份识别', kind: 'classify', role: 'hero_identity',
+    labels: {},
+  },
+  player_position: {
+    name: '主播本人位置识别', kind: 'classify', role: 'player_position',
+    labels: {
+      left1: '左队第 1 位', left2: '左队第 2 位', left3: '左队第 3 位',
+      left4: '左队第 4 位', left5: '左队第 5 位',
+      right1: '右队第 1 位', right2: '右队第 2 位', right3: '右队第 3 位',
+    },
+  },
+  // 保留旧训练结果的可读名称，便于回看历史 run。
+  screen_state: {
+    name: '旧·画面状态', kind: 'classify', role: 'screen_state',
+    labels: {
+      gameplay: '对局中', scoreboard: '积分板', result_page: '结算页',
+      victory_defeat: '胜负动画', pre_match: '赛前', out_of_match: '游戏外',
+      transition: '转场', talent_select: '天赋选择', in_match: '对局中',
+      not_vainglory: '非虚荣画面', post_match: '赛后',
+    },
+  },
+  bp_review: {
+    name: '旧·BP 模式', kind: 'classify', role: 'bp_classifier',
+    labels: {
+      bp_3v3: '3V3 BP', bp_aram: '大乱斗 BP', bp_5v5: '5V5 BP', not_bp: '非 BP',
+    },
+  },
+  key_screen_review: {
+    name: '旧·结算／计分板', kind: 'classify', role: 'key_screen',
+    labels: {other: '其他画面', result_page: '结算页', scoreboard: '计分板'},
+  },
+  mode_gate: {
+    name: '旧·大乱斗光栅', kind: 'detect', role: 'mode_gate',
+    labels: {blocked_gate: '有黄色光栅', open_entrance: '开放入口'},
+  },
 };
+const MODEL_PACKAGE_CORE_TASKS = [
+  'match_flow', 'hero_select', 'match_mode', 'result_detector',
+];
+const MODEL_PACKAGE_HERO_TASKS = [
+  'hero_avatar_detector', 'hero_identity', 'player_position',
+];
+const MODEL_PACKAGE_REQUIRED_TASKS = [
+  ...MODEL_PACKAGE_CORE_TASKS, ...MODEL_PACKAGE_HERO_TASKS,
+];
+const MODEL_PACKAGE_TASKS = [...MODEL_PACKAGE_REQUIRED_TASKS];
+
+function currentModelTestRun() {
+  const runId = $('#model-test-run').value;
+  return modelTestRuns.find((run) => run.id === runId) || null;
+}
+
+function modelTask(taskId) {
+  return MODEL_TASKS[taskId] || {
+    name: taskId || '未知模型', kind: 'classify', role: taskId, labels: {},
+  };
+}
+
+function modelLabel(taskId, value) {
+  const text = modelTask(taskId).labels[String(value || '')];
+  if (text) return text;
+  if (taskId === 'hero_identity') {
+    const hero = candidateHeroByLabel(String(value || ''));
+    if (hero) return hero.name;
+  }
+  return String(value || '未知');
+}
+
+function modelPercent(value) {
+  return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function modelValidationLabel(status) {
+  return {passed: '已通过', failed: '未通过', pending: '待验收'}[status] || status;
+}
+
+function modelRunKind(run) {
+  return (run && run.artifact_metadata && run.artifact_metadata.kind) ||
+    modelTask(run && run.task_id).kind;
+}
+
+function modelDetectionObject(run) {
+  if (run && run.task_id === 'mode_gate') return '黄色光栅';
+  if (run && run.task_id === 'hero_avatar_detector') return '英雄头像';
+  return '结算面板';
+}
+
+function modelTestDataUnit(run) {
+  if (!run) return '张';
+  if (run.task_id === 'hero_avatar_detector') return '张完整阵容图';
+  if (run.task_id === 'hero_identity') return '个可读头像';
+  if (run.task_id === 'player_position') return '张完整面板图';
+  return '张';
+}
+
+function renderModelTestSummary() {
+  const run = currentModelTestRun();
+  const root = $('#model-test-summary');
+  if (!run) {
+    root.innerHTML = '<span class="muted small">请选择一个训练结果</span>';
+    return;
+  }
+  const metadata = run.artifact_metadata || {};
+  const input = metadata.input || {};
+  const preprocessing = metadata.preprocessing || {};
+  const runConfig = run.config_json || {};
+  const width = Number(input.width || metadata.imgsz || runConfig.imgsz || 0);
+  const height = Number(input.height || metadata.imgsz || runConfig.imgsz || 0);
+  const resize = preprocessing.resize === 'aspect_fit_letterbox'
+    ? '保留完整画面，等比补边' :
+    preprocessing.resize === 'shortest_edge_center_crop'
+      ? '旧规则：中心裁剪' :
+      preprocessing.resize === 'letterbox'
+        ? '等比缩放并补边' : (preprocessing.resize || '未记录');
+  const total = Number((run.counts_json || {}).total || 0);
+  const gaps = run.evaluation_gaps || [];
+  root.innerHTML = `
+    <div><span>模型</span><b>${esc(modelTask(run.task_id).name)}</b></div>
+    <div><span>训练数据</span><b>${esc(run.dataset_version_id)}</b><small>${total.toLocaleString('zh-CN')} ${esc(modelTestDataUnit(run))}</small></div>
+    <div><span>模型输入</span><b>${width && height ? `${width} × ${height}` : '未记录'}</b><small>${esc(resize)}</small></div>
+    <div><span>当前结论</span><b class="validation-${esc(run.validation_status)}">${esc(modelValidationLabel(run.validation_status))}</b>` +
+      `<small>${gaps.length ? esc(`测试集覆盖不足：${gaps.join('；')}`) : '固定测试集结构完整'}</small></div>`;
+}
+
+function modelTestReportLabel(run, value) {
+  if (modelRunKind(run) === 'detect') {
+    return value === 'found'
+      ? `找到${modelDetectionObject(run)}` : `没有${modelDetectionObject(run)}`;
+  }
+  return modelLabel(run.task_id, value);
+}
+
+function modelTestReportGroupTable(title, groups, run, labelMap = {}) {
+  const rows = Object.entries(groups || {});
+  if (!rows.length) return '';
+  return `<section class="model-test-report-block"><h4>${esc(title)}</h4>` +
+    '<table><thead><tr><th>类别</th><th>正确</th><th>总数</th><th>准确率</th></tr></thead><tbody>' +
+    rows.map(([label, value]) => `<tr><td>${esc(
+      labelMap[label] || modelTestReportLabel(run, label)
+    )}</td>` +
+      `<td>${Number(value.correct || 0)}</td><td>${Number(value.total || 0)}</td>` +
+      `<td>${modelPercent(value.accuracy)}</td></tr>`).join('') +
+    '</tbody></table></section>';
+}
+
+function modelTestConfusionTable(report, run) {
+  const confusion = report.confusion || {};
+  const labels = [...new Set([
+    ...Object.keys(confusion),
+    ...Object.values(confusion).flatMap((value) => Object.keys(value || {})),
+  ])];
+  if (!labels.length) return '';
+  if (labels.length > 12) {
+    const mistakes = Object.entries(confusion).flatMap(([expected, predicted]) =>
+      Object.entries(predicted || {})
+        .filter(([value, count]) => value !== expected && Number(count) > 0)
+        .map(([value, count]) => ({expected, predicted: value, count: Number(count)}))
+    ).sort((left, right) => right.count - left.count);
+    return '<section class="model-test-report-block"><h4>主要混淆</h4>' +
+      (mistakes.length
+        ? '<table><thead><tr><th>人工答案</th><th>模型答案</th><th>数量</th></tr></thead><tbody>' +
+          mistakes.slice(0, 20).map((item) =>
+            `<tr><td>${esc(modelTestReportLabel(run, item.expected))}</td>` +
+            `<td>${esc(modelTestReportLabel(run, item.predicted))}</td>` +
+            `<td>${item.count}</td></tr>`).join('') + '</tbody></table>'
+        : '<p class="model-test-report-success">没有发现英雄之间的混淆。</p>') +
+      '</section>';
+  }
+  return '<section class="model-test-report-block"><h4>混淆表</h4>' +
+    '<p class="hint small">纵向是人工答案，横向是模型答案。</p><div class="table-scroll"><table>' +
+    `<thead><tr><th>人工 ＼ 模型</th>${labels.map((label) =>
+      `<th>${esc(modelTestReportLabel(run, label))}</th>`).join('')}</tr></thead>` +
+    `<tbody>${labels.map((expected) => `<tr><th>${esc(modelTestReportLabel(run, expected))}</th>` +
+      labels.map((predicted) => `<td>${Number(
+        (confusion[expected] || {})[predicted] || 0
+      )}</td>`).join('') + '</tr>').join('')}</tbody></table></div></section>`;
+}
+
+function openModelTestReportError(sampleId) {
+  const index = modelTestSamples.findIndex((sample) => sample.sample_id === sampleId);
+  if (index < 0) {
+    $('#model-test-state').textContent = '这张错例不在当前已载入的页面批次中';
+    return;
+  }
+  modelTestIndex = index;
+  renderModelTestSample();
+  $('#model-test-layout').scrollIntoView({block: 'start'});
+  predictModelTestSample();
+}
+
+function renderModelTestBatchReport() {
+  const root = $('#model-test-report');
+  const report = modelTestBatchReport;
+  const run = currentModelTestRun();
+  root.classList.toggle('hidden', !report || !run);
+  if (!report || !run) {
+    root.innerHTML = '';
+    return;
+  }
+  const errors = report.errors || [];
+  const failures = report.failures || [];
+  const limitedErrors = errors.slice(0, 200);
+  const scenarioNames = {
+    result_panel: '结算面板', scoreboard: '积分板', other_negative: '其他负样本',
+    gameplay_hud: '游戏中 HUD', result_page: '结算界面',
+  };
+  const modeNames = {'3v3': '3V3 计分板', '5v5': '5V5 计分板', aram: '大乱斗计分板', unreadable: '模式看不清的计分板'};
+  root.innerHTML = `
+    <div class="model-test-report-heading">
+      <div><h3>自动验收报告</h3><p class="hint small">${esc(report.run_id)} · ${esc(report.split)} · ${Number(report.elapsed_seconds || 0).toFixed(1)} 秒</p></div>
+      <span class="model-test-report-result ${errors.length || failures.length ? 'has-errors' : 'all-correct'}">
+        ${errors.length || failures.length ? `${errors.length} 张答案不一致` : '全部正确'}
+      </span>
+    </div>
+    <div class="model-test-report-metrics">
+      <div><span>验收总数</span><b>${Number(report.total || 0)}</b></div>
+      <div><span>完成推理</span><b>${Number(report.evaluated || 0)}</b></div>
+      <div><span>正确</span><b>${Number(report.correct || 0)}</b></div>
+      <div><span>准确率</span><b>${modelPercent(report.accuracy)}</b></div>
+    </div>
+    ${report.truncated ? '<p class="model-test-report-warning">样本超过单次上限，本报告未覆盖全部图片。</p>' : ''}
+    ${failures.length ? `<p class="model-test-report-warning">另有 ${failures.length} 张因图片缺失或推理异常未完成，不能算作通过。</p>` : ''}
+    <div class="model-test-report-grid">
+      ${modelTestReportGroupTable('按人工类别', report.by_label, run)}
+      ${modelTestReportGroupTable('按画面难例', report.by_scenario, run, scenarioNames)}
+      ${modelTestReportGroupTable('计分板按模式', report.scoreboard_by_mode, run, modeNames)}
+      ${modelTestConfusionTable(report, run)}
+    </div>
+    <section class="model-test-report-errors">
+      <h4>错图 ${errors.length ? `(${errors.length})` : ''}</h4>
+      ${errors.length ? '<p class="hint small">点一张即可跳到逐图页，并自动重新运行，方便看框和原始输出。</p>' : '<p class="model-test-report-success">没有发现答案不一致的图片。</p>'}
+      <div>${limitedErrors.map((item, index) => `
+        <button type="button" data-sample-id="${esc(item.sample_id)}">
+          <b>#${index + 1} ${esc(item.reason || '答案不一致')}</b>
+          <span>${esc(modelTestReportLabel(run, item.expected))} → ${esc(modelTestReportLabel(run, item.predicted))}</span>
+          ${run.task_id === 'hero_avatar_detector' && item.expected_count !== undefined
+            ? `<small>人工 ${Number(item.expected_count)} · 模型 ${Number(item.predicted_count)} · 匹配 ${Number(item.matched_count)}</small>`
+            : item.best_iou === undefined ? '' : `<small>IoU ${modelPercent(item.best_iou)}</small>`}
+        </button>`).join('')}</div>
+      ${errors.length > limitedErrors.length ? `<p class="hint small">这里只显示前 ${limitedErrors.length} 张错图。</p>` : ''}
+    </section>`;
+  $$('#model-test-report [data-sample-id]').forEach((button) => {
+    button.onclick = () => openModelTestReportError(button.dataset.sampleId);
+  });
+}
 
 function currentModelTestSample() {
   return modelTestSamples[modelTestIndex] || null;
 }
 
+function expectedDetectionBoxes(sample) {
+  const expected = sample && sample.expected;
+  return expected && Array.isArray(expected.boxes) ? expected.boxes : [];
+}
+
+function addModelTestBox(box, type, label) {
+  const image = $('#model-test-image');
+  const stage = $('#model-test-stage');
+  if (!image.complete || !image.naturalWidth || !box) return;
+  const xywh = box.xywh_norm;
+  if (!Array.isArray(xywh) || xywh.length !== 4) return;
+  const imageRect = image.getBoundingClientRect();
+  const stageRect = stage.getBoundingClientRect();
+  const element = document.createElement('div');
+  element.className = `model-test-box ${type}`;
+  element.style.left = `${imageRect.left - stageRect.left + Number(xywh[0]) * imageRect.width}px`;
+  element.style.top = `${imageRect.top - stageRect.top + Number(xywh[1]) * imageRect.height}px`;
+  element.style.width = `${Number(xywh[2]) * imageRect.width}px`;
+  element.style.height = `${Number(xywh[3]) * imageRect.height}px`;
+  const tag = document.createElement('span');
+  tag.textContent = label;
+  element.appendChild(tag);
+  $('#model-test-detections').appendChild(element);
+}
+
+function renderModelTestDetections() {
+  const root = $('#model-test-detections');
+  root.innerHTML = '';
+  const run = currentModelTestRun();
+  const sample = currentModelTestSample();
+  if (!run || modelRunKind(run) !== 'detect' || !sample) return;
+  expectedDetectionBoxes(sample).forEach((box) =>
+    addModelTestBox(box, 'expected', '训练框'));
+  ((modelTestPrediction && modelTestPrediction.detections) || []).forEach((box) =>
+    addModelTestBox(box, 'predicted', `模型 ${modelPercent(box.conf)}`));
+}
+
+function renderModelTestExpected(sample, run) {
+  const root = $('#model-test-expected');
+  if (!sample) {
+    root.textContent = '--';
+    return;
+  }
+  if (modelRunKind(run) === 'detect') {
+    const expected = sample.expected || {};
+    const found = Boolean(expected.found);
+    const count = expectedDetectionBoxes(sample).length;
+    const objectName = modelDetectionObject(run);
+    const isHeroAvatar = run.task_id === 'hero_avatar_detector';
+    const modeNames = {'3v3': '3V3', '5v5': '5V5', aram: '大乱斗'};
+    const isScoreboard = sample.evaluation_scenario === 'scoreboard';
+    const negativeDetail = isScoreboard
+      ? `${modeNames[sample.evaluation_mode] || '模式看不清'}计分板：不能误报成结算面板`
+      : '这是无框负样本';
+    root.innerHTML = `<div class="model-test-primary-answer ${found ? 'positive' : 'negative'}">` +
+      `${found
+        ? isHeroAvatar ? `应该完整找到 ${count} 个${objectName}` : `应该找到${objectName}`
+        : `不应该找到${objectName}`}</div>` +
+      `<div class="muted small">${found
+        ? `人工框 ${count} 个（图中绿色框）${isHeroAvatar ? '，数量和位置都必须正确' : ''}`
+        : negativeDetail}</div>`;
+    return;
+  }
+  if (run.task_id === 'hero_identity') {
+    root.innerHTML = renderHeroIdentityAnswer(sample.expected, '人工答案');
+    return;
+  }
+  root.innerHTML = `<div class="model-test-primary-answer">${esc(modelLabel(run.task_id, sample.expected))}</div>` +
+    `<div class="muted small">内部标签：${esc(sample.expected)}</div>`;
+}
+
+function normalizedBoxIou(first, second) {
+  const a = first && first.xywh_norm;
+  const b = second && second.xywh_norm;
+  if (!Array.isArray(a) || !Array.isArray(b)) return 0;
+  const ax2 = Number(a[0]) + Number(a[2]);
+  const ay2 = Number(a[1]) + Number(a[3]);
+  const bx2 = Number(b[0]) + Number(b[2]);
+  const by2 = Number(b[1]) + Number(b[3]);
+  const intersection = Math.max(0, Math.min(ax2, bx2) - Math.max(Number(a[0]), Number(b[0]))) *
+    Math.max(0, Math.min(ay2, by2) - Math.max(Number(a[1]), Number(b[1])));
+  const union = Number(a[2]) * Number(a[3]) + Number(b[2]) * Number(b[3]) - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function bestDetectionIou(expected, predicted) {
+  let best = 0;
+  expected.forEach((truth) => predicted.forEach((guess) => {
+    best = Math.max(best, normalizedBoxIou(truth, guess));
+  }));
+  return best;
+}
+
+function detectionMatchSummary(expected, predicted, threshold = 0.5) {
+  const pairs = [];
+  expected.forEach((truth, truthIndex) => predicted.forEach((guess, guessIndex) => {
+    pairs.push({
+      iou: normalizedBoxIou(truth, guess), truthIndex, guessIndex,
+    });
+  }));
+  pairs.sort((left, right) => right.iou - left.iou);
+  const usedTruth = new Set();
+  const usedGuess = new Set();
+  const matched = [];
+  pairs.forEach((pair) => {
+    if (pair.iou < threshold || usedTruth.has(pair.truthIndex) ||
+        usedGuess.has(pair.guessIndex)) return;
+    usedTruth.add(pair.truthIndex);
+    usedGuess.add(pair.guessIndex);
+    matched.push(pair.iou);
+  });
+  return {
+    expectedCount: expected.length,
+    predictedCount: predicted.length,
+    matchedCount: matched.length,
+    meanIou: matched.length
+      ? matched.reduce((total, value) => total + value, 0) / matched.length : 0,
+  };
+}
+
+function renderModelTestComparison(result) {
+  const root = $('#model-test-comparison');
+  const sample = currentModelTestSample();
+  const run = currentModelTestRun();
+  if (!result || !sample || !run) {
+    root.className = 'model-test-empty';
+    root.textContent = '运行后显示结果';
+    return;
+  }
+  let matched = false;
+  let detail = '';
+  if (result.task === 'classify') {
+    matched = String(result.top1 && result.top1.class) === String(sample.expected);
+    detail = `${modelLabel(run.task_id, sample.expected)} → ` +
+      `${modelLabel(run.task_id, result.top1 && result.top1.class)}`;
+  } else {
+    const expectedFound = Boolean(sample.expected && sample.expected.found);
+    matched = expectedFound === Boolean(result.found);
+    if (expectedFound && result.found) {
+      const expectedBoxes = expectedDetectionBoxes(sample);
+      const predictedBoxes = result.detections || [];
+      if (run.task_id === 'hero_avatar_detector') {
+        const summary = detectionMatchSummary(expectedBoxes, predictedBoxes);
+        matched = summary.expectedCount === summary.predictedCount &&
+          summary.expectedCount === summary.matchedCount;
+        detail = `人工 ${summary.expectedCount} 个 · 模型 ${summary.predictedCount} 个 · ` +
+          `位置匹配 ${summary.matchedCount} 个 · 平均 IoU ${modelPercent(summary.meanIou)}`;
+      } else {
+        const iou = bestDetectionIou(expectedBoxes, predictedBoxes);
+        detail = `存在性判断正确 · 最佳框重合度 ${modelPercent(iou)}`;
+        matched = matched && iou >= 0.5;
+      }
+    } else {
+      const objectName = modelDetectionObject(run);
+      detail = expectedFound ? `漏掉了应该存在的${objectName}` :
+        (result.found ? `把负样本误报成了${objectName}` : '负样本判断正确');
+    }
+  }
+  root.className = `model-test-comparison ${matched ? 'matched' : 'mismatched'}`;
+  root.innerHTML = `<b>${matched ? '答案一致' : '答案不一致'}</b><span>${esc(detail)}</span>`;
+}
+
+function renderHeroIdentityAnswer(label, caption = '') {
+  const hero = candidateHeroByLabel(String(label || ''));
+  const name = hero ? hero.name : modelLabel('hero_identity', label);
+  const image = hero && hero.image_url
+    ? `<img src="${esc(hero.image_url)}" alt="${esc(name)}">` : '';
+  return `<div class="model-hero-answer">${image}<div>` +
+    `${caption ? `<small>${esc(caption)}</small>` : ''}` +
+    `<b>${esc(name)}</b><span>${esc(label || '未知')}</span></div></div>`;
+}
+
+function renderClassificationOutput(result, run) {
+  const scores = result.scores || result.top5 || [];
+  const top1 = result.top1 || {};
+  if (run.task_id === 'hero_identity') {
+    return renderHeroIdentityAnswer(top1.class, '模型答案') +
+      `<div class="model-hero-confidence">置信度 <b>${modelPercent(top1.prob)}</b></div>` +
+      `<div class="model-score-list">${scores.map((score) => `
+        <div class="model-score-row">
+          <span>${esc(modelLabel(run.task_id, score.class))}</span>
+          <div><i style="width:${Math.max(0, Math.min(100, Number(score.prob || 0) * 100))}%"></i></div>
+          <b>${modelPercent(score.prob)}</b>
+        </div>`).join('')}</div>`;
+  }
+  return `<div class="model-test-primary-answer">${esc(modelLabel(run.task_id, top1.class))}` +
+    `<strong>${modelPercent(top1.prob)}</strong></div>` +
+    `<div class="model-score-list">${scores.map((score) => `
+      <div class="model-score-row">
+        <span>${esc(modelLabel(run.task_id, score.class))}</span>
+        <div><i style="width:${Math.max(0, Math.min(100, Number(score.prob || 0) * 100))}%"></i></div>
+        <b>${modelPercent(score.prob)}</b>
+      </div>`).join('')}</div>`;
+}
+
+function renderDetectionOutput(result, run) {
+  const detections = result.detections || [];
+  const objectName = modelDetectionObject(run);
+  return `<div class="model-test-primary-answer ${result.found ? 'positive' : 'negative'}">` +
+    `${result.found ? `找到了 ${detections.length} 个${objectName}` : `没有找到${objectName}`}` +
+    `<strong>最高 ${modelPercent(result.raw_top_conf)}</strong></div>` +
+    (detections.length ? `<div class="model-detection-list">${detections.map((item, index) =>
+      `<span>框 ${index + 1} · ${modelPercent(item.conf)}</span>`).join('')}</div>` : '');
+}
+
+function renderModelTestPrediction(result) {
+  const run = currentModelTestRun();
+  modelTestPrediction = result;
+  $('#model-test-output').innerHTML = !result || !run ? '尚未运行' :
+    (result.task === 'classify'
+      ? renderClassificationOutput(result, run) : renderDetectionOutput(result, run));
+  const details = $('#model-test-raw-details');
+  details.classList.toggle('hidden', !result);
+  $('#model-test-raw-output').textContent = result ? JSON.stringify(result, null, 2) : '--';
+  renderModelTestComparison(result);
+  renderModelTestDetections();
+}
+
 function renderModelTestSample() {
   const sample = currentModelTestSample();
+  const run = currentModelTestRun();
   $('#model-test-progress').textContent = modelTestSamples.length
     ? `${modelTestIndex + 1}/${modelTestSamples.length}` : '0/0';
   $('#btn-model-test-prev').disabled = !sample || modelTestIndex <= 0;
   $('#btn-model-test-next').disabled =
     !sample || modelTestIndex >= modelTestSamples.length - 1;
-  $('#model-test-output').textContent = '--';
+  $('#btn-model-test-batch').disabled = !run || !modelTestSamples.length;
+  renderModelTestPrediction(null);
+  $('#model-test-conf-row').classList.toggle('hidden', modelRunKind(run) !== 'detect');
   if (!sample || !sample.has_snapshot_image) {
     $('#model-test-image').removeAttribute('src');
     $('#model-test-expected').textContent = sample
@@ -4499,7 +5615,7 @@ function renderModelTestSample() {
     `/api/model-tests/runs/${encodeURIComponent($('#model-test-run').value)}` +
     `/samples/${encodeURIComponent(sample.sample_id)}/image` +
     `?split=${encodeURIComponent(sample.split)}`;
-  $('#model-test-expected').textContent = JSON.stringify(sample.expected, null, 2);
+  renderModelTestExpected(sample, run);
   $('#btn-model-test-predict').disabled = false;
 }
 
@@ -4512,6 +5628,8 @@ function moveModelTestSample(offset) {
 
 async function loadModelTestSamples() {
   const runId = $('#model-test-run').value;
+  modelTestBatchReport = null;
+  renderModelTestBatchReport();
   if (!runId) {
     modelTestSamples = [];
     renderModelTestSample();
@@ -4519,20 +5637,97 @@ async function loadModelTestSamples() {
   }
   $('#model-test-state').textContent = '正在读取冻结快照…';
   try {
-    const split = $('#model-test-split').value;
+    const run = currentModelTestRun();
+    let split = $('#model-test-split').value;
+    if (split === 'scoreboard_challenge' && run.task_id !== 'result_detector') {
+      split = 'test';
+      $('#model-test-split').value = split;
+    }
     const data = await api(
       `/api/model-tests/runs/${encodeURIComponent(runId)}/samples` +
       `?split=${encodeURIComponent(split)}&limit=1000`);
     modelTestSamples = data.items || [];
     modelTestIndex = 0;
-    const run = modelTestRuns.find((item) => item.id === runId);
     $('#model-test-notes').value = (run && run.validation_notes) || '';
+    const distribution = data.distribution || {};
+    let breakdown = '';
+    if (run.task_id === 'result_detector') {
+      breakdown = ` · 结算 ${distribution.result_panel || 0} · 积分板 ${distribution.scoreboard || 0} · ` +
+        `其他 ${distribution.other_negative || 0}`;
+    } else if (run.task_id === 'hero_avatar_detector') {
+      const screenCounts = modelTestSamples.reduce((counts, sample) => {
+        const key = String(sample.evaluation_scenario || '');
+        counts[key] = (counts[key] || 0) + 1;
+        return counts;
+      }, {});
+      breakdown = ` · HUD ${screenCounts.gameplay_hud || 0} · ` +
+        `积分板 ${screenCounts.scoreboard || 0} · 结算 ${screenCounts.result_page || 0}`;
+    } else if (run.task_id === 'hero_identity') {
+      const heroes = new Set(modelTestSamples.map((sample) => sample.expected));
+      breakdown = ` · 覆盖 ${heroes.size} 位英雄`;
+    } else if (run.task_id === 'player_position') {
+      const positions = new Set(modelTestSamples.map((sample) => sample.expected));
+      const screens = modelTestSamples.reduce((counts, sample) => {
+        const key = String(sample.evaluation_scenario || '');
+        counts[key] = (counts[key] || 0) + 1;
+        return counts;
+      }, {});
+      breakdown = ` · 覆盖 ${positions.size} 个位置 · ` +
+        `积分板 ${screens.scoreboard || 0} · 结算 ${screens.result_page || 0}`;
+    }
+    const sourceName = {
+      test: '固定测试集', val: '验证集', train: '训练集',
+      scoreboard_challenge: '最新计分板难例',
+      post_run_challenge: '训练后新增确认集',
+    }[split] || split;
+    const supplemental = data.is_fixed_snapshot === false
+      ? ` · ${Number(data.new_video_count || 0)} 个新视频 · ` +
+        '随人工确认增长，与固定测试集分开统计' : '';
     $('#model-test-state').textContent =
-      `${split} 共 ${data.total || 0} 张 · 当前验收：` +
-      `${(run && run.validation_status) || 'pending'}`;
+      `${sourceName}共 ${data.total || 0} 张${breakdown}${supplemental} · 当前验收：` +
+      `${modelValidationLabel((run && run.validation_status) || 'pending')}`;
+    renderModelTestSummary();
     renderModelTestSample();
   } catch (error) {
     $('#model-test-state').textContent = '载入失败：' + error.message;
+  }
+}
+
+async function runModelTestBatch() {
+  const runId = $('#model-test-run').value;
+  const run = currentModelTestRun();
+  if (!runId || !run || !modelTestSamples.length) return;
+  const split = $('#model-test-split').value;
+  const button = $('#btn-model-test-batch');
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = '正在测试全部…';
+  $('#model-test-state').textContent =
+    `正在自动测试 ${modelTestSamples.length} 张，完成后会直接生成报告…`;
+  try {
+    modelTestBatchReport = await api(
+      `/api/model-tests/runs/${encodeURIComponent(runId)}/batch`, {
+        method: 'POST',
+        body: JSON.stringify({
+          split,
+          conf_thr: Number($('#model-test-conf').value || 0.25),
+          iou_threshold: 0.5,
+        }),
+      });
+    renderModelTestBatchReport();
+    const report = modelTestBatchReport;
+    $('#model-test-state').textContent =
+      `自动验收完成：${report.correct}/${report.evaluated} 正确，` +
+      `准确率 ${modelPercent(report.accuracy)}` +
+      (report.failed ? `，另有 ${report.failed} 张未完成` : '');
+    $('#model-test-report').scrollIntoView({block: 'start'});
+  } catch (error) {
+    modelTestBatchReport = null;
+    renderModelTestBatchReport();
+    $('#model-test-state').textContent = '自动验收失败：' + error.message;
+  } finally {
+    button.textContent = originalText;
+    button.disabled = !modelTestSamples.length;
   }
 }
 
@@ -4541,6 +5736,7 @@ async function predictModelTestSample() {
   const runId = $('#model-test-run').value;
   if (!sample || !sample.has_snapshot_image || !runId) return;
   $('#model-test-output').textContent = '推理中…';
+  $('#btn-model-test-predict').disabled = true;
   try {
     const result = await api(
       `/api/model-tests/runs/${encodeURIComponent(runId)}/predict`, {
@@ -4551,9 +5747,13 @@ async function predictModelTestSample() {
           conf_thr: Number($('#model-test-conf').value || 0.25),
         }),
       });
-    $('#model-test-output').textContent = JSON.stringify(result, null, 2);
+    renderModelTestPrediction(result);
   } catch (error) {
     $('#model-test-output').textContent = '推理失败：' + error.message;
+    renderModelTestPrediction(null);
+    $('#model-test-output').textContent = '推理失败：' + error.message;
+  } finally {
+    $('#btn-model-test-predict').disabled = false;
   }
 }
 
@@ -4579,36 +5779,65 @@ async function saveModelValidation(status) {
 function renderModelPackageChoices() {
   const root = $('#model-package-runs');
   root.innerHTML = '';
-  Object.entries(MODEL_TASK_NAMES).forEach(([taskId, name]) => {
+  MODEL_PACKAGE_TASKS.forEach((taskId, index) => {
+    const task = modelTask(taskId);
+    const required = MODEL_PACKAGE_REQUIRED_TASKS.includes(taskId);
     const choices = modelTestRuns.filter(
-      (run) => run.task_id === taskId && run.validation_status === 'passed');
-    const row = document.createElement('label');
+      (run) => run.task_id === taskId && run.validation_status === 'passed' &&
+        !(run.evaluation_gaps || []).length);
+    const row = document.createElement('div');
     row.className = 'model-package-choice';
-    const title = document.createElement('span');
-    title.textContent = name;
+    const title = document.createElement('div');
+    title.innerHTML = `<span>${index + 1}</span><b>${esc(task.name)}</b>` +
+      `<small>${required ? '发布必选' : '可选'}</small>`;
     const select = document.createElement('select');
     select.dataset.packageTask = taskId;
-    select.innerHTML = '<option value="">尚未选择</option>' + choices.map((run) =>
+    select.innerHTML = `<option value="">${choices.length ? '请选择通过验收的版本' : '还没有通过验收的版本'}</option>` + choices.map((run) =>
       `<option value="${esc(run.id)}">${esc(run.id)} · ${esc(run.dataset_version_id)}</option>`
     ).join('');
+    if (choices.length) select.value = choices[0].id;
+    select.onchange = refreshModelPackageBuildState;
     row.append(title, select);
     root.appendChild(row);
   });
+  refreshModelPackageBuildState();
+}
+
+function refreshModelPackageBuildState() {
+  const selected = $$('[data-package-task]').filter((select) => select.value);
+  const missing = $$('[data-package-task]').filter((select) =>
+    MODEL_PACKAGE_REQUIRED_TASKS.includes(select.dataset.packageTask) && !select.value)
+    .map((select) => modelTask(select.dataset.packageTask).name);
+  $('#btn-build-model-package').disabled = Boolean(missing.length);
+  $('#model-package-state').textContent = missing.length
+    ? `还缺发布模型：${missing.join('、')}`
+    : `7 个新模型已齐，当前会打包 ${selected.length} 个模型`;
 }
 
 function renderModelPackages(packages) {
   $('#model-package-list').innerHTML = (packages || []).map((item) => {
     const missing = ((item.manifest_json || {}).missing_roles || []).join('、');
-    return `<div class="small"><b>${esc(item.id)}</b> · ${esc(item.status)} · ` +
-      `${esc(item.path)}${missing ? ` · 缺少 ${esc(missing)}` : ''} · ` +
+    const modelCount = Object.keys(
+      (item.manifest_json || {}).models || {}).length;
+    const ready = item.status === 'ready';
+    return `<div class="model-package-item"><div><b>${esc(item.id)}</b>` +
+      `<span class="${ready ? 'ready' : 'incomplete'}">${ready ? '可发布' : '不完整'}</span>` +
+      `${missing
+        ? `<small>缺少 ${esc(missing)}</small>`
+        : `<small>包含 ${modelCount} 个模型及完整追溯信息</small>`}</div>` +
       `<a href="/api/model-packages/${encodeURIComponent(item.id)}/archive">下载 ZIP</a></div>`;
   }).join('') || '<div class="muted small">还没有模型包</div>';
 }
 
 async function buildModelPackage() {
   const runIds = $$('[data-package-task]').map((select) => select.value).filter(Boolean);
-  if (!runIds.length) {
-    $('#model-package-state').textContent = '请至少选择一个验收通过的 run';
+  const selectedTasks = new Set($$('[data-package-task]')
+    .filter((select) => select.value)
+    .map((select) => select.dataset.packageTask));
+  const missing = MODEL_PACKAGE_REQUIRED_TASKS.filter(
+    (taskId) => !selectedTasks.has(taskId));
+  if (missing.length) {
+    $('#model-package-state').textContent = '7 个新模型全部通过验收并选好后才能生成';
     return;
   }
   $('#model-package-state').textContent = '正在校验哈希并组装…';
@@ -4617,10 +5846,8 @@ async function buildModelPackage() {
       method: 'POST', body: JSON.stringify({run_ids: runIds}),
     });
     $('#model-package-state').textContent = result.status === 'ready'
-      ? `已生成 ready 模型包：${result.id}`
-      : `已生成 incomplete 研究包：${result.id}；` +
-        `${result.missing_tasks.length ? `还缺任务 ${result.missing_tasks.join('、')}；` : ''}` +
-        `${Object.keys(result.evaluation_gaps || {}).length ? '固定测试集覆盖仍不足' : ''}`;
+      ? `已生成发布候选包：${result.id}（尚未部署）`
+      : `未达到发布条件：${Object.keys(result.evaluation_gaps || {}).length ? '固定测试集覆盖不足' : '模型不完整'}`;
     const packages = await api('/api/model-packages');
     renderModelPackages(packages.packages);
   } catch (error) {
@@ -4632,19 +5859,21 @@ async function loadModelTesting(preferredRunId = '', loadSamples = true) {
   try {
     const [runsData, packagesData] = await Promise.all([
       api('/api/model-tests/runs'), api('/api/model-packages'),
+      ensureCandidateHeroCatalog().catch(() => []),
     ]);
     modelTestRuns = runsData.runs || [];
     const select = $('#model-test-run');
     const previous = preferredRunId || select.value;
     select.innerHTML = '<option value="">请选择训练结果</option>' +
       modelTestRuns.map((run) =>
-        `<option value="${esc(run.id)}">${esc(MODEL_TASK_NAMES[run.task_id] || run.task_id)} · ` +
-        `${esc(run.id)} · ${esc(run.validation_status)}</option>`
+        `<option value="${esc(run.id)}">${esc(modelTask(run.task_id).name)} · ` +
+        `${esc(run.id)} · ${esc(modelValidationLabel(run.validation_status))}</option>`
       ).join('');
     if (modelTestRuns.some((run) => run.id === previous)) select.value = previous;
     else if (modelTestRuns.length) select.value = modelTestRuns[0].id;
     renderModelPackageChoices();
     renderModelPackages(packagesData.packages);
+    renderModelTestSummary();
     if (loadSamples) await loadModelTestSamples();
   } catch (error) {
     $('#model-test-state').textContent = '模型测试页加载失败：' + error.message;
@@ -4655,12 +5884,15 @@ function bindModelTesting() {
   $('#model-test-run').onchange = loadModelTestSamples;
   $('#model-test-split').onchange = loadModelTestSamples;
   $('#btn-model-test-load').onclick = loadModelTestSamples;
+  $('#btn-model-test-batch').onclick = runModelTestBatch;
   $('#btn-model-test-prev').onclick = () => moveModelTestSample(-1);
   $('#btn-model-test-next').onclick = () => moveModelTestSample(1);
   $('#btn-model-test-predict').onclick = predictModelTestSample;
   $('#btn-model-test-pass').onclick = () => saveModelValidation('passed');
   $('#btn-model-test-fail').onclick = () => saveModelValidation('failed');
   $('#btn-build-model-package').onclick = buildModelPackage;
+  $('#model-test-image').onload = renderModelTestDetections;
+  window.addEventListener('resize', renderModelTestDetections);
 }
 
 // ---------- 训练与模型 ----------
@@ -4673,29 +5905,151 @@ const TRAINING_STATUS_LABELS = {
   interrupted: '服务重启中断',
 };
 
-function trainingCountsText(task) {
+const TRAINING_TASK_GROUPS = [
+  {
+    id: 'timeline',
+    title: '对局解析核心模型',
+    description: '负责找到一局的开始、过程、模式和结算位置。',
+    taskIds: ['match_flow', 'hero_select', 'match_mode', 'result_detector'],
+  },
+  {
+    id: 'heroes',
+    title: '英雄阵容增强模型',
+    description: '只在关键画面按需运行，负责头像位置、英雄身份和主播本人位置。',
+    taskIds: ['hero_avatar_detector', 'hero_identity', 'player_position'],
+  },
+];
+const openTrainingQualityTasks = new Set();
+
+function trainingNumber(value) {
+  return Number(value || 0).toLocaleString('zh-CN');
+}
+
+function trainingCountMetrics(task) {
   const counts = task.counts || {};
+  if (task.id === 'match_flow') {
+    const labels = counts.by_label || {};
+    return [
+      ['有效图片', counts.total], ['对局流程', labels.match_flow],
+      ['非对局', labels.not_match_flow], ['来源视频', counts.videos],
+    ];
+  }
+  if (task.id === 'hero_select') {
+    const labels = counts.by_label || {};
+    return [
+      ['有效图片', counts.total], ['非选择', labels.not_select],
+      ['3V3', labels.select_3v3], ['大乱斗', labels.select_aram],
+      ['5V5', labels.select_5v5], ['来源视频', counts.videos],
+    ];
+  }
+  if (task.id === 'match_mode') {
+    const labels = counts.by_label || {};
+    return [
+      ['有效图片', counts.total], ['3V3', labels['3v3']],
+      ['大乱斗', labels.aram], ['5V5', labels['5v5']],
+      ['来源视频', counts.videos],
+    ];
+  }
+  if (task.id === 'result_detector') {
+    return [
+      ['有效图片', counts.total], ['结算正样本', counts.positive],
+      ['负样本', counts.negative], ['计分板难例', counts.hard_negative],
+      ['来源视频', counts.videos],
+    ];
+  }
+  if (task.id === 'hero_avatar_detector') {
+    const screens = counts.by_screen_type || {};
+    return [
+      ['完整阵容图', counts.total], ['头像框', counts.boxes],
+      ['HUD', screens.gameplay_hud], ['积分板', screens.scoreboard],
+      ['结算界面', screens.result_page], ['来源视频', counts.videos],
+    ];
+  }
+  if (task.id === 'hero_identity') {
+    const screens = counts.by_screen_type || {};
+    return [
+      ['可读头像', counts.total], ['英雄种类', counts.classes],
+      ['HUD', screens.gameplay_hud], ['积分板', screens.scoreboard],
+      ['结算界面', screens.result_page], ['来源视频', counts.videos],
+    ];
+  }
+  if (task.id === 'player_position') {
+    const screens = counts.by_screen_type || {};
+    return [
+      ['有效面板图', counts.total], ['位置类别', counts.classes],
+      ['积分板', screens.scoreboard], ['结算界面', screens.result_page],
+      ['来源视频', counts.videos],
+    ];
+  }
   if (task.id === 'screen_state') {
     const labels = counts.by_label || {};
-    return `非虚荣 ${labels.not_vainglory || 0} · 游戏外 ${labels.out_of_match || 0} · ` +
-      `对局前 ${labels.pre_match || 0} · 对局中 ${labels.in_match || 0} · ` +
-      `天赋 ${labels.talent_select || 0} · 赛后 ${labels.post_match || 0} · ` +
-      `转场 ${labels.transition || 0} · ${counts.videos || 0} 个视频`;
+    return Object.entries(labels).map(([label, value]) => [label, value]);
   }
   if (task.id === 'bp_review') {
     const labels = counts.by_label || {};
-    return `3V3 ${labels.bp_3v3 || 0} · 大乱斗 ${labels.bp_aram || 0} · ` +
-      `5V5 ${labels.bp_5v5 || 0} · 非BP ${labels.not_bp || 0} · ` +
-      `${counts.videos || 0} 个视频`;
+    return Object.entries(labels).map(([label, value]) => [label, value]);
   }
   if (task.id === 'key_screen_review') {
     const labels = counts.by_label || {};
-    return `结算 ${labels.result_page || 0} · 计分板 ${labels.scoreboard || 0} · ` +
-      `其他 ${labels.other || 0} · ${counts.videos || 0} 个视频`;
+    return Object.entries(labels).map(([label, value]) => [label, value]);
   }
-  return `正样本 ${counts.positive || 0} · 负样本 ${counts.negative || 0}` +
-    `${counts.hard_negative == null ? '' : `（计分板 hard negative ${counts.hard_negative}）`} · ` +
-    `${counts.videos || 0} 个视频`;
+  return [
+    ['有效图片', counts.total], ['正样本', counts.positive],
+    ['负样本', counts.negative], ['来源视频', counts.videos],
+  ];
+}
+
+function trainingSupplementalText(task) {
+  const counts = task.counts || {};
+  if (task.id === 'hero_avatar_detector') {
+    const teams = counts.by_team_size || {};
+    return `3 人阵容 ${trainingNumber(teams['3'])} 张 · ` +
+      `5 人阵容 ${trainingNumber(teams['5'])} 张`;
+  }
+  if (task.id === 'hero_identity') {
+    return `小于 24px 的头像 ${trainingNumber(counts.under_24px)} 个 · ` +
+      `小于 48px 的头像 ${trainingNumber(counts.under_48px)} 个`;
+  }
+  if (task.id === 'player_position') {
+    return `HUD ${trainingNumber(counts.excluded_hud)} 张由代码规则处理、不参与训练 · ` +
+      `本人看不清 ${trainingNumber(counts.excluded_unreadable)} 张已排除`;
+  }
+  return trainingSnapshotNote(task.id);
+}
+
+function trainingInputText(task) {
+  const width = Number(task.input_width || task.imgsz || 0);
+  const height = Number(task.input_height || task.imgsz || 0);
+  const kind = task.kind === 'detect' ? '目标检测' : '画面分类';
+  return `${kind} · ${width} × ${height}`;
+}
+
+function trainingDatasetDelta(task) {
+  const delta = task.dataset_delta;
+  if (!delta) {
+    return '<div class="training-dataset-delta empty">' +
+      '<span>训练数据变化</span><b>尚无成功版本</b>' +
+      '<small>首次训练后开始显示新增数据</small></div>';
+  }
+  const corrections = Number(delta.changed || 0);
+  const removed = Number(delta.removed || 0);
+  const newCount = Number(delta.new || 0);
+  const details = [
+    `上次 ${trainingNumber(delta.baseline_total)}`,
+    `当前 ${trainingNumber(delta.current_total)}`,
+    `新视频 ${trainingNumber(delta.new_videos)}`,
+  ];
+  if (corrections) details.push(`改标 ${trainingNumber(corrections)}`);
+  if (removed) details.push(`移除 ${trainingNumber(removed)}`);
+  const byLabel = Object.entries(delta.new_by_label || {})
+    .map(([label, count]) =>
+      `${modelLabel(task.id, label)} ${trainingNumber(count)}`)
+    .join(' · ');
+  return `<div class="training-dataset-delta ${newCount ? 'has-new' : ''}"` +
+    `${byLabel ? ` title="${esc(byLabel)}"` : ''}>` +
+    `<span>距上次训练</span><b>${newCount
+      ? `新增 ${trainingNumber(newCount)}` : '暂无新增'}</b>` +
+    `<small>${esc(details.join(' · '))}</small></div>`;
 }
 
 function trainingSnapshotNote(taskId) {
@@ -4711,43 +6065,125 @@ function trainingSnapshotNote(taskId) {
   return '';
 }
 
+function renderTrainingOverview(tasks, runs) {
+  const root = $('#training-overview');
+  const ready = tasks.filter((task) => task.ready).length;
+  const heroTasks = tasks.filter((task) =>
+    MODEL_PACKAGE_HERO_TASKS.includes(task.id)).length;
+  const coreTasks = tasks.filter((task) =>
+    MODEL_PACKAGE_CORE_TASKS.includes(task.id)).length;
+  const sourceVideos = Math.max(
+    0, ...tasks.map((task) => Number((task.counts || {}).videos || 0)));
+  const active = (runs.runs || []).find((run) => run.id === runs.active_run_id);
+  const activeTask = active ? modelTask(active.task_id).name : '本机算力空闲';
+  const activeDetail = active
+    ? `${Math.round(Number(active.progress || 0) * 100)}% · ` +
+      `${active.current_epoch || 0}/${active.epochs} epochs`
+    : '可以选择任一已就绪模型开始训练';
+  root.innerHTML = `
+    <div><span>训练模型</span><b>${tasks.length}</b><small>${coreTasks} 个核心 + ${heroTasks} 个英雄增强</small></div>
+    <div><span>可以训练</span><b>${ready}/${tasks.length}</b><small>${ready === tasks.length ? '全部达到最低结构要求' : '仍有任务缺少数据'}</small></div>
+    <div><span>数据来源</span><b>${trainingNumber(sourceVideos)}</b><small>个不同视频，按视频隔离切分</small></div>
+    <div><span>当前任务</span><b>${esc(activeTask)}</b><small>${esc(activeDetail)}</small></div>`;
+}
+
+function trainingTaskCard(task, activeRunId) {
+  const reasons = task.blocking_reasons || [];
+  const warnings = task.quality_warnings || [];
+  const metrics = trainingCountMetrics(task);
+  const supplemental = trainingSupplementalText(task);
+  return `
+    <article class="training-task-card ${task.ready ? 'ready' : ''}"
+      data-task-id="${esc(task.id)}">
+      <div class="training-task-heading">
+        <div><h3>${esc(task.name)}</h3><span>${esc(trainingInputText(task))}</span></div>
+        <span class="training-readiness ${task.ready ? 'ready' : 'blocked'}">${task.ready ? '可训练' : '数据不足'}</span>
+      </div>
+      <p class="training-task-description">${esc(task.description)}</p>
+      <div class="training-data-grid">${metrics.map(([label, value]) => `
+        <div><span>${esc(label)}</span><b>${trainingNumber(value)}</b></div>`).join('')}</div>
+      ${supplemental ? `<p class="training-supplemental">${esc(supplemental)}</p>` : ''}
+      ${trainingDatasetDelta(task)}
+      <div class="training-recommendation"><span>建议</span>${esc(task.recommended)}</div>
+      ${reasons.length
+        ? `<div class="blocking">暂不能训练：${esc(reasons.join('；'))}</div>`
+        : warnings.length
+          ? `<details class="training-quality"${openTrainingQualityTasks.has(task.id) ? ' open' : ''}><summary>数据提醒（${warnings.length}）</summary><p>${esc(warnings.join('；'))}</p></details>`
+          : '<div class="small status-done">数据结构达到当前建议量</div>'}
+      <button class="primary training-start" data-task-id="${esc(task.id)}"
+        ${!task.ready || activeRunId ? 'disabled' : ''}>
+        用当前数据开始训练（${task.epochs} epochs）
+      </button>
+    </article>`;
+}
+
 function renderTrainingTasks(tasks, activeRunId) {
   const grid = $('#training-task-grid');
-  grid.innerHTML = '';
-  tasks.forEach((task) => {
-    const reasons = task.blocking_reasons || [];
-    const warnings = task.quality_warnings || [];
-    grid.insertAdjacentHTML('beforeend', `
-      <article class="training-task-card ${task.ready ? 'ready' : ''}">
-        <h3>${esc(task.name)}</h3>
-        <div class="muted small">${esc(task.description)}</div>
-        <div class="task-counts">${esc(trainingCountsText(task))}</div>
-        <div class="muted small">建议量：${esc(task.recommended)}</div>
-        ${trainingSnapshotNote(task.id)
-          ? `<div class="muted small">${esc(trainingSnapshotNote(task.id))}</div>`
-          : ''}
-        ${reasons.length
-          ? `<div class="blocking">暂不能训练：${esc(reasons.join('；'))}</div>`
-          : '<div class="small status-done">已达到最低结构要求，可以训练</div>'}
-        ${!reasons.length && warnings.length
-          ? `<div class="blocking">可以试训，但距离建议量还差：${esc(warnings.join('；'))}</div>`
-          : ''}
-        <button class="primary training-start" data-task-id="${esc(task.id)}"
-          ${!task.ready || activeRunId ? 'disabled' : ''}>
-          用当前数据开始训练（${task.epochs} epochs）
-        </button>
-      </article>`);
+  $$('.training-task-card[data-task-id]').forEach((card) => {
+    const details = card.querySelector('.training-quality');
+    if (!details) return;
+    if (details.open) openTrainingQualityTasks.add(card.dataset.taskId);
+    else openTrainingQualityTasks.delete(card.dataset.taskId);
   });
+  grid.innerHTML = '';
+  const rendered = new Set();
+  TRAINING_TASK_GROUPS.forEach((group) => {
+    const groupTasks = group.taskIds
+      .map((taskId) => tasks.find((task) => task.id === taskId))
+      .filter(Boolean);
+    if (!groupTasks.length) return;
+    groupTasks.forEach((task) => rendered.add(task.id));
+    grid.insertAdjacentHTML('beforeend', `
+      <section class="training-task-group" data-group="${esc(group.id)}">
+        <div class="training-group-heading"><div><h3>${esc(group.title)}</h3>
+          <p>${esc(group.description)}</p></div><span>${groupTasks.length} 个模型</span></div>
+        <div class="training-task-cards">${groupTasks.map((task) =>
+          trainingTaskCard(task, activeRunId)).join('')}</div>
+      </section>`);
+  });
+  const remaining = tasks.filter((task) => !rendered.has(task.id));
+  if (remaining.length) {
+    grid.insertAdjacentHTML('beforeend', `<section class="training-task-group">
+      <div class="training-group-heading"><div><h3>其他训练任务</h3></div></div>
+      <div class="training-task-cards">${remaining.map((task) =>
+        trainingTaskCard(task, activeRunId)).join('')}</div></section>`);
+  }
   $$('.training-start').forEach((button) => {
     button.onclick = () => startTraining(button.dataset.taskId);
   });
 }
 
-function metricSummary(metrics) {
-  const entries = Object.entries(metrics || {}).slice(0, 3);
-  return entries.length
-    ? entries.map(([key, value]) => `${key}=${Number(value).toFixed(3)}`).join(' · ')
-    : '--';
+function trainingMetricItems(metrics) {
+  const names = {
+    'metrics/precision(B)': '精确率',
+    'metrics/recall(B)': '召回率',
+    'metrics/mAP50(B)': 'mAP50',
+    'metrics/mAP50-95(B)': 'mAP50–95',
+    'metrics/accuracy_top1': 'Top-1',
+    'metrics/accuracy_top5': 'Top-5',
+  };
+  return Object.entries(metrics || {}).slice(0, 4).map(([key, value]) => ({
+    label: names[key] || key.replace(/^metrics\//, ''),
+    value: Number(value),
+  })).filter((item) => Number.isFinite(item.value));
+}
+
+function trainingMetricsHtml(metrics) {
+  const items = trainingMetricItems(metrics);
+  if (!items.length) return '<span class="muted">--</span>';
+  return `<div class="training-metrics">${items.map((item) =>
+    `<span><small>${esc(item.label)}</small><b>${item.value.toFixed(3)}</b></span>`
+  ).join('')}</div>`;
+}
+
+function trainingArtifactHtml(run) {
+  const path = String(run.artifact_path || '');
+  if (!path) return '<span class="muted">--</span>';
+  const filename = path.split('/').filter(Boolean).pop() || path;
+  const published = run.published_path
+    ? `<small class="status-done">已有本机测试版本</small>` : '';
+  return `<div class="training-artifact" title="${esc(path)}">` +
+    `<code>${esc(filename)}</code>${published}</div>`;
 }
 
 function renderTrainingRuns(data) {
@@ -4760,33 +6196,33 @@ function renderTrainingRuns(data) {
     const canCancel = ['queued', 'running'].includes(run.status) &&
       run.id === activeRunId;
     const canTest = run.status === 'succeeded' && run.artifact_path;
+    const taskName = modelTask(run.task_id).name;
     tbody.insertAdjacentHTML('beforeend', `
       <tr>
-        <td>${esc(run.task_id)}<br><span class="muted">${esc(run.id)}</span></td>
-        <td>${esc(run.dataset_version_id)}</td>
-        <td class="training-status-${esc(run.status)}">${esc(statusLabel)}
+        <td><div class="training-model-cell"><b>${esc(taskName)}</b>
+          <code title="${esc(run.id)}">${esc(run.id)}</code></div></td>
+        <td><code class="training-snapshot" title="${esc(run.dataset_version_id)}">${esc(run.dataset_version_id)}</code></td>
+        <td><span class="training-status training-status-${esc(run.status)}">${esc(statusLabel)}</span>
           ${run.error ? `<br><span class="small">${esc(run.error)}</span>` : ''}</td>
-        <td><span class="training-progress"><div style="width:${percent}%"></div></span>
-          ${percent}% · ${run.current_epoch || 0}/${run.epochs}</td>
-        <td>${esc(metricSummary(run.metrics_json))}</td>
-        <td>${run.artifact_path ? esc(run.artifact_path) : '--'}
-          ${run.published_path
-            ? `<br><span class="status-done">本机测试：${esc(run.published_path)}</span>`
-            : ''}</td>
+        <td><div class="training-progress-row"><span class="training-progress"><div style="width:${percent}%"></div></span>
+          <b>${percent}%</b></div><small class="muted">${run.current_epoch || 0}/${run.epochs} epochs</small></td>
+        <td>${trainingMetricsHtml(run.metrics_json)}</td>
+        <td>${trainingArtifactHtml(run)}</td>
         <td>
-          <button class="training-log-open" data-run-id="${esc(run.id)}">日志</button>
+          <div class="training-row-actions"><button class="training-log-open" data-run-id="${esc(run.id)}">日志</button>
           ${canCancel
             ? `<button class="training-cancel" data-run-id="${esc(run.id)}">取消</button>`
             : ''}
           ${canTest
             ? `<button class="training-test-run" data-run-id="${esc(run.id)}">进入模型验收</button>`
-            : ''}
+            : ''}</div>
         </td>
       </tr>`);
   });
   if (!(data.runs || []).length) {
     tbody.innerHTML = '<tr><td colspan="7" class="muted">尚无训练记录</td></tr>';
   }
+  $('#training-runs-count').textContent = `${(data.runs || []).length} 条记录`;
   $$('.training-log-open').forEach((button) => {
     button.onclick = () => loadTrainingLog(button.dataset.runId);
   });
@@ -4810,6 +6246,7 @@ async function loadTrainingDashboard() {
       api('/api/training/tasks'),
       api('/api/training/runs'),
     ]);
+    renderTrainingOverview(tasks, runs);
     renderTrainingTasks(tasks, runs.active_run_id);
     renderTrainingRuns(runs);
     if (runs.active_run_id && !trainingPollTimer) {
@@ -4863,19 +6300,27 @@ async function cancelTraining(runId) {
 }
 
 async function loadTrainingLog(runId) {
+  trainingLogRunId = runId;
+  $('#training-log-run').textContent = `${runId} · 最近 200 行`;
+  $('#training-log').textContent = '正在读取日志…';
+  const dialog = $('#training-log-dialog');
+  if (!dialog.open) dialog.showModal();
   try {
     const result = await api(
       `/api/training/runs/${encodeURIComponent(runId)}/log?tail=200`);
     $('#training-log').textContent = result.log || '暂无日志';
-    $('#training-log-box').classList.remove('hidden');
-    $('#training-log-box').open = true;
   } catch (error) {
     $('#training-log').textContent = '日志加载失败：' + error.message;
-    $('#training-log-box').classList.remove('hidden');
   }
 }
 
 $('#btn-training-refresh').onclick = loadTrainingDashboard;
+$('#btn-training-log-refresh').onclick = () => {
+  if (trainingLogRunId) loadTrainingLog(trainingLogRunId);
+};
+$('#btn-training-log-close').onclick = () => {
+  $('#training-log-dialog').close();
+};
 
 // ---------- 工具 ----------
 function esc(s) {

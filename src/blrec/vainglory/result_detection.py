@@ -29,6 +29,7 @@ class OnnxResultPanelDetector:
         confidence_threshold: float = 0.55,
         input_size: int = 640,
         providers: Optional[Sequence[str]] = None,
+        model_version: str = 'result-detector-v1',
     ) -> None:
         if not 0 < confidence_threshold < 1:
             raise ValueError('结算页检测置信度阈值必须在 0 和 1 之间')
@@ -51,6 +52,7 @@ class OnnxResultPanelDetector:
         self._input_name = self._session.get_inputs()[0].name
         self._confidence_threshold = confidence_threshold
         self._input_size = input_size
+        self.model_version = model_version
 
     def detect(self, frame: RgbFrame) -> Optional[ResultPanelDetection]:
         cv2: Any = importlib.import_module('cv2')

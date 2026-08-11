@@ -18,12 +18,13 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    cast,
 )
 
 from loguru import logger
 
 from .catalog import hero_chinese_name
-from .hero_recognition import HeroMatch, SiftHeroRecognizer
+from .hero_recognition import HeroMatch
 from .mode_recognition import AramDetector, AramTalentSelectionDetector
 from .ocr import ResultHeader, ResultOcr, TesseractResultReader, merge_result_headers
 from .result_detection import ResultPanelDetector
@@ -39,6 +40,7 @@ from .sampling import (
 )
 from .stage_classifier import (
     CONTENT_NOT_VAINGLORY,
+    CONTENT_VAINGLORY,
     MODE_3V3,
     MODE_5V5,
     MODE_ARAM,
@@ -51,7 +53,6 @@ from .stage_classifier import (
     STAGE_TRANSITION,
     STAGE_VICTORY_DEFEAT,
     ClassifiedObservation,
-    StageClassifier,
     StagePrediction,
     _confirmed_anchors,
     _pre_match_anchors,
@@ -62,6 +63,7 @@ from .stage_classifier import (
 )
 from .vision import (
     GameplayHud,
+    HeroAvatarDetection,
     HeroFrame,
     PixelRect,
     RecordedPlayer,
@@ -137,6 +139,26 @@ class ResultReader(Protocol):
     ) -> ResultOcr: ...  # noqa: E704
 
 
+class StageFrameClassifier(Protocol):
+    def classify(self, frame: RgbFrame) -> StagePrediction: ...  # noqa: E704
+
+
+class HeroRecognizer(Protocol):
+    def recognize(self, frame: RgbFrame) -> Optional[HeroMatch]: ...  # noqa: E704
+
+
+class HeroAvatarDetector(Protocol):
+    def detect(  # noqa: E704
+        self, frame: RgbFrame
+    ) -> Sequence[HeroAvatarDetection]: ...  # noqa: E704
+
+
+class RecordedPlayerDetector(Protocol):
+    def detect(  # noqa: E704
+        self, frame: RgbFrame, layout: ResultLayout
+    ) -> Optional[RecordedPlayer]: ...  # noqa: E704
+
+
 @dataclass(frozen=True)
 class VideoPart:
     id: int
@@ -152,6 +174,14 @@ class ResultHit:
     layout: ResultLayout
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
     hero_lineup: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ResultBackscan:
+    hit_count: int = 0
+    decoded_frames: int = 0
+    detection_seconds: float = 0.0
+    scanned_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -202,7 +232,14 @@ class ScannedPart:
 
 
 TrainingCandidateTask = Literal[
-    'screen_state', 'bp_review', 'key_screen_review', 'result_detector', 'mode_gate'
+    'screen_state',
+    'bp_review',
+    'key_screen_review',
+    'result_detector',
+    'mode_gate',
+    'match_flow',
+    'hero_select',
+    'match_mode',
 ]
 TrainingCandidateLabel = Literal[
     'not_vainglory',
@@ -224,6 +261,15 @@ TrainingCandidateLabel = Literal[
     'blocked_gate',
     'open_entrance',
     'no_evidence',
+    'match_flow',
+    'not_match_flow',
+    'not_select',
+    'select_3v3',
+    'select_aram',
+    'select_5v5',
+    '3v3',
+    'aram',
+    '5v5',
 ]
 
 
@@ -426,6 +472,451 @@ def _selected_screen_state_candidates(
 
 
 @dataclass(frozen=True)
+class _ModeConflict:
+    segment_start_ms: int
+    at_ms: int
+    predicted_mode: str
+    stable_mode: str
+    confidence: float
+
+
+def _timeline_refinement_windows(
+    observations: Sequence[ClassifiedObservation], *, duration_ms: int
+) -> Tuple[ScanWindow, ...]:
+    ordered = tuple(sorted(observations, key=lambda item: item.at_ms))
+    windows = []
+    for left, right in zip(ordered, ordered[1:]):
+        if left.stage == right.stage and left.content == right.content:
+            continue
+        start_ms = max(0, min(duration_ms, left.at_ms))
+        end_ms = max(start_ms, min(duration_ms, right.at_ms))
+        if end_ms > start_ms:
+            windows.append(ScanWindow(start_ms, end_ms))
+    return tuple(windows)
+
+
+def _model_package_run_modes(
+    observations: Sequence[ClassifiedObservation], *, run_gap_ms: int = 20_000
+) -> Dict[int, str]:
+    smoothed = smooth_stages(observations)
+    segments = _segment_ranges(
+        gameplay_runs(smoothed, maximum_gap_ms=run_gap_ms),
+        _confirmed_anchors(_pre_match_anchors(smoothed), smoothed),
+    )
+    labels = {MODE_3V3: '3v3', MODE_ARAM: 'aram', MODE_5V5: '5v5'}
+    result: Dict[int, str] = {}
+    for segment_start_ms, segment_end_ms in segments:
+        within = tuple(
+            item
+            for item in observations
+            if segment_start_ms <= item.at_ms <= segment_end_ms
+            and item.stage in (STAGE_PRE_MATCH, STAGE_GAMEPLAY, STAGE_RESULT_PAGE)
+        )
+        preferred = tuple(
+            item
+            for item in within
+            if item.stage == STAGE_PRE_MATCH
+            and (item.mode_conf or item.stage_conf) >= 0.5
+        )
+        voting = preferred or tuple(
+            item for item in within if (item.mode_conf or item.stage_conf) >= 0.5
+        )
+        votes: Dict[str, float] = {}
+        for item in voting:
+            label = labels[item.mode]
+            votes[label] = votes.get(label, 0.0) + (item.mode_conf or item.stage_conf)
+        if votes:
+            result[segment_start_ms] = max(votes, key=votes.__getitem__)
+    return result
+
+
+def _model_package_mode_conflicts(
+    observations: Sequence[ClassifiedObservation],
+    segments: Sequence[Tuple[int, int]],
+    run_modes: Dict[int, str],
+) -> Tuple[_ModeConflict, ...]:
+    labels = {MODE_3V3: '3v3', MODE_ARAM: 'aram', MODE_5V5: '5v5'}
+    selected: Dict[Tuple[int, str], _ModeConflict] = {}
+    for segment_start_ms, segment_end_ms in segments:
+        stable_mode = run_modes.get(segment_start_ms, 'unknown')
+        if stable_mode not in {'3v3', 'aram', '5v5'}:
+            continue
+        for item in observations:
+            predicted_mode = labels.get(item.mode)
+            if (
+                not (segment_start_ms <= item.at_ms <= segment_end_ms)
+                or item.stage != STAGE_GAMEPLAY
+                or predicted_mode is None
+                or predicted_mode == stable_mode
+            ):
+                continue
+            conflict = _ModeConflict(
+                segment_start_ms=segment_start_ms,
+                at_ms=item.at_ms,
+                predicted_mode=predicted_mode,
+                stable_mode=stable_mode,
+                confidence=item.mode_conf or item.stage_conf,
+            )
+            key = (segment_start_ms, predicted_mode)
+            previous = selected.get(key)
+            if previous is None or conflict.confidence > previous.confidence:
+                selected[key] = conflict
+    return tuple(sorted(selected.values(), key=lambda item: item.at_ms))
+
+
+def _apply_hud_team_size_evidence(
+    run_modes: Dict[int, str], lineups: Dict[int, Tuple[str, ...]]
+) -> Dict[int, str]:
+    result = dict(run_modes)
+    for segment_start_ms, lineup in lineups.items():
+        if len(lineup) == 10:
+            result[segment_start_ms] = '5v5'
+    return result
+
+
+def _segments_with_gameplay(
+    segments: Sequence[Tuple[int, int]], observations: Sequence[ClassifiedObservation]
+) -> Tuple[Tuple[int, int], ...]:
+    return tuple(
+        (start_ms, end_ms)
+        for start_ms, end_ms in segments
+        if any(
+            start_ms <= item.at_ms <= end_ms and item.stage == STAGE_GAMEPLAY
+            for item in observations
+        )
+    )
+
+
+def _remember_model_package_prediction_candidates(
+    representative: List[TrainingCandidate],
+    borderline: List[TrainingCandidate],
+    result_candidates: List[TrainingCandidate],
+    *,
+    prediction: StagePrediction,
+    timed: TimedFrame,
+    model_package_id: str,
+    result_model_version: str,
+    selection_context: str,
+) -> None:
+    stage_name = {
+        STAGE_PRE_MATCH: 'hero_select',
+        STAGE_GAMEPLAY: 'gameplay',
+        STAGE_RESULT_PAGE: 'result_page',
+        STAGE_OUT_OF_MATCH: 'out_of_match',
+        STAGE_TRANSITION: 'transition',
+    }.get(prediction.stage, str(prediction.stage))
+    mode_name = prediction.match_mode_label or {
+        MODE_3V3: '3v3',
+        MODE_ARAM: 'aram',
+        MODE_5V5: '5v5',
+    }.get(prediction.mode, 'unknown')
+    segment_start_ms = max(0, timed.at_ms - 30_000)
+    if prediction.match_flow_label in {'match_flow', 'not_match_flow'}:
+        flow_label = cast(TrainingCandidateLabel, prediction.match_flow_label)
+        for target, prefer_lower, reason in (
+            (representative, False, '{}的高置信正负代表帧'.format(selection_context)),
+            (borderline, True, '{}的低置信困难帧'.format(selection_context)),
+        ):
+            _remember_training_candidate(
+                target,
+                task='match_flow',
+                suggested_label=flow_label,
+                at_ms=timed.at_ms,
+                segment_start_ms=segment_start_ms,
+                frame=timed.frame,
+                model_version=model_package_id,
+                suggestion_confidence=prediction.match_flow_conf,
+                stage_class=stage_name,
+                stage_confidence=prediction.stage_conf,
+                mode_class=mode_name,
+                mode_confidence=prediction.match_mode_conf,
+                selection_reason=reason,
+                minimum_gap_ms=60_000,
+                maximum_per_label=5 if not prefer_lower else 2,
+                prefer_lower_confidence=prefer_lower,
+                separate_modes=flow_label == 'match_flow',
+            )
+    if prediction.hero_select_label in {
+        'not_select',
+        'select_3v3',
+        'select_aram',
+        'select_5v5',
+    }:
+        select_label = cast(TrainingCandidateLabel, prediction.hero_select_label)
+        _remember_training_candidate(
+            representative,
+            task='hero_select',
+            suggested_label=select_label,
+            at_ms=timed.at_ms,
+            segment_start_ms=segment_start_ms,
+            frame=timed.frame,
+            model_version=model_package_id,
+            suggestion_confidence=prediction.hero_select_conf,
+            stage_class=stage_name,
+            stage_confidence=prediction.stage_conf,
+            mode_class=mode_name,
+            mode_confidence=prediction.match_mode_conf,
+            selection_reason='{}的英雄选择正类与代表性负类'.format(selection_context),
+            minimum_gap_ms=20_000 if select_label != 'not_select' else 90_000,
+            maximum_per_label=6 if select_label != 'not_select' else 4,
+        )
+        _remember_training_candidate(
+            borderline,
+            task='hero_select',
+            suggested_label=select_label,
+            at_ms=timed.at_ms,
+            segment_start_ms=segment_start_ms,
+            frame=timed.frame,
+            model_version=model_package_id,
+            suggestion_confidence=prediction.hero_select_conf,
+            stage_class=stage_name,
+            stage_confidence=prediction.stage_conf,
+            mode_class=mode_name,
+            mode_confidence=prediction.match_mode_conf,
+            selection_reason='{}的英雄选择低置信困难帧'.format(selection_context),
+            minimum_gap_ms=60_000,
+            maximum_per_label=2,
+            prefer_lower_confidence=True,
+        )
+    if prediction.match_mode_label in {'3v3', 'aram', '5v5'}:
+        mode_label = cast(TrainingCandidateLabel, prediction.match_mode_label)
+        _remember_training_candidate(
+            representative,
+            task='match_mode',
+            suggested_label=mode_label,
+            at_ms=timed.at_ms,
+            segment_start_ms=segment_start_ms,
+            frame=timed.frame,
+            model_version=model_package_id,
+            suggestion_confidence=prediction.match_mode_conf,
+            stage_class=stage_name,
+            stage_confidence=prediction.stage_conf,
+            mode_class=mode_name,
+            mode_confidence=prediction.match_mode_conf,
+            selection_reason='{}的模式代表帧'.format(selection_context),
+            minimum_gap_ms=60_000,
+            maximum_per_label=5,
+        )
+        _remember_training_candidate(
+            borderline,
+            task='match_mode',
+            suggested_label=mode_label,
+            at_ms=timed.at_ms,
+            segment_start_ms=segment_start_ms,
+            frame=timed.frame,
+            model_version=model_package_id,
+            suggestion_confidence=prediction.match_mode_conf,
+            stage_class=stage_name,
+            stage_confidence=prediction.stage_conf,
+            mode_class=mode_name,
+            mode_confidence=prediction.match_mode_conf,
+            selection_reason='{}的模式低置信困难帧'.format(selection_context),
+            minimum_gap_ms=90_000,
+            maximum_per_label=2,
+            prefer_lower_confidence=True,
+        )
+    if prediction.stage in {STAGE_PRE_MATCH, STAGE_GAMEPLAY, STAGE_OUT_OF_MATCH}:
+        _remember_training_candidate(
+            result_candidates,
+            task='result_detector',
+            suggested_label='no_result_panel',
+            at_ms=timed.at_ms,
+            segment_start_ms=segment_start_ms,
+            frame=timed.frame,
+            model_version=result_model_version,
+            suggestion_confidence=max(
+                prediction.match_flow_conf,
+                prediction.hero_select_conf,
+                prediction.match_mode_conf,
+            ),
+            stage_class=stage_name,
+            stage_confidence=prediction.stage_conf,
+            mode_class=mode_name,
+            mode_confidence=prediction.match_mode_conf,
+            selection_reason='{}的结算检测代表性负样本'.format(selection_context),
+            minimum_gap_ms=90_000,
+            maximum_per_label=3,
+            separate_modes=True,
+        )
+
+
+def _candidate_segment_start(
+    at_ms: int,
+    *,
+    focus_ms: Optional[int],
+    segments: Sequence[Tuple[int, int]],
+    maximum_result_delay_ms: int = 180_000,
+) -> Optional[int]:
+    reference_ms = at_ms if focus_ms is None else focus_ms
+    eligible = tuple(
+        (start_ms, end_ms)
+        for start_ms, end_ms in segments
+        if start_ms <= at_ms <= end_ms + maximum_result_delay_ms
+    )
+    if not eligible:
+        return None
+    return min(
+        eligible, key=lambda item: (abs(item[1] - reference_ms), abs(item[1] - at_ms))
+    )[0]
+
+
+def _cap_training_candidate_timestamps(
+    candidates: Sequence[TrainingCandidate], *, maximum_timestamps: int
+) -> Tuple[TrainingCandidate, ...]:
+    if maximum_timestamps < 1:
+        raise ValueError('training candidate timestamp limit must be positive')
+    by_task: Dict[str, List[TrainingCandidate]] = {}
+    for candidate in candidates:
+        by_task.setdefault(candidate.task, []).append(candidate)
+    indexes = {task: 0 for task in by_task}
+    selected_times: Set[int] = set()
+    while len(selected_times) < maximum_timestamps:
+        added = False
+        for task, values in by_task.items():
+            while indexes[task] < len(values):
+                candidate = values[indexes[task]]
+                indexes[task] += 1
+                if candidate.at_ms in selected_times:
+                    continue
+                selected_times.add(candidate.at_ms)
+                added = True
+                break
+            if len(selected_times) >= maximum_timestamps:
+                break
+        if not added:
+            break
+    return tuple(
+        candidate for candidate in candidates if candidate.at_ms in selected_times
+    )
+
+
+def _selected_model_package_candidates(
+    conflicts: Sequence[TrainingCandidate],
+    representative: Sequence[TrainingCandidate],
+    borderline: Sequence[TrainingCandidate],
+    result_candidates: Sequence[TrainingCandidate],
+    result_borderline: Sequence[TrainingCandidate],
+    key_screen_candidates: Sequence[TrainingCandidate],
+) -> Tuple[TrainingCandidate, ...]:
+    selected: List[TrainingCandidate] = list(conflicts)
+    for mode in ('3v3', 'aram', '5v5', 'unknown'):
+        remaining = 3 - len(selected)
+        if remaining <= 0:
+            break
+        selected.extend(
+            [
+                item
+                for item in representative
+                if item.task == 'match_flow'
+                and item.suggested_label == 'match_flow'
+                and item.mode_class == mode
+            ][:remaining]
+        )
+    selections = (
+        ('match_flow', 'not_match_flow', 3),
+        ('hero_select', 'not_select', 3),
+        ('hero_select', 'select_3v3', 3),
+        ('hero_select', 'select_aram', 3),
+        ('hero_select', 'select_5v5', 3),
+        ('match_mode', '3v3', 3),
+        ('match_mode', 'aram', 3),
+        ('match_mode', '5v5', 3),
+    )
+    selected.extend(
+        candidate
+        for task, label, maximum in selections
+        for candidate in [
+            item
+            for item in representative
+            if item.task == task and item.suggested_label == label
+        ][:maximum]
+    )
+    selected.extend(
+        candidate
+        for label, maximum in (('result_panel', 6), ('no_result_panel', 4))
+        for candidate in [
+            item for item in result_candidates if item.suggested_label == label
+        ][:maximum]
+    )
+    selected.extend(
+        candidate
+        for task, label in (
+            ('match_flow', 'match_flow'),
+            ('match_flow', 'not_match_flow'),
+            ('hero_select', 'not_select'),
+            ('hero_select', 'select_3v3'),
+            ('hero_select', 'select_aram'),
+            ('hero_select', 'select_5v5'),
+            ('match_mode', '3v3'),
+            ('match_mode', 'aram'),
+            ('match_mode', '5v5'),
+        )
+        for candidate in [
+            item
+            for item in borderline
+            if item.task == task and item.suggested_label == label
+        ][:1]
+    )
+    selected.extend(result_borderline[:2])
+    selected.extend(
+        [
+            item
+            for item in key_screen_candidates
+            if item.task == 'result_detector' and item.suggested_label == 'result_panel'
+        ][:3]
+    )
+    selected.extend(
+        [
+            item
+            for item in key_screen_candidates
+            if item.suggested_label == 'result_page'
+        ][:3]
+    )
+    return tuple(selected[:60])
+
+
+def _high_quality_training_jpeg(frame: RgbFrame) -> bytes:
+    attempts = ((1_920, 90), (1_600, 88), (1_280, 85), (960, 82), (720, 78))
+    last_payload = b''
+    for maximum_width, quality in attempts:
+        last_payload = jpeg_bytes(frame, maximum_width=maximum_width, quality=quality)
+        if len(last_payload) <= 1_000_000:
+            return last_payload
+    raise RuntimeError('high-resolution training JPEG exceeds 1 MB')
+
+
+@dataclass(frozen=True)
+class TimelinePoint:
+    target_ms: int
+    at_ms: int
+    sample_source: str
+    stage: int
+    stage_confidence: float
+    match_flow_label: str = ''
+    match_flow_confidence: float = 0.0
+    hero_select_label: str = ''
+    hero_select_confidence: float = 0.0
+    match_mode_label: str = ''
+    match_mode_confidence: float = 0.0
+    result_confidence: float = 0.0
+
+
+@dataclass(frozen=True)
+class TimelineSegment:
+    start_ms: int
+    end_ms: int
+    mode: str
+
+
+@dataclass(frozen=True)
+class ResultScanWindow:
+    start_ms: int
+    end_ms: int
+    mode: str
+    focus_ms: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class DenseScanResult:
     scanned_part: ScannedPart
     decoded_frames: int
@@ -435,12 +926,26 @@ class DenseScanResult:
     detection_seconds: float
     total_seconds: float
     training_candidates: Tuple[TrainingCandidate, ...] = ()
+    model_package_id: str = ''
+    timeline_points: Tuple[TimelinePoint, ...] = ()
+    timeline_segments: Tuple[TimelineSegment, ...] = ()
+    result_windows: Tuple[ResultScanWindow, ...] = ()
+    keyframe_frames: int = 0
+    seek_fill_frames: int = 0
 
 
 @dataclass(frozen=True)
 class AnalysisStatus:
     stage: Literal[
-        'probing', 'coarse_scan', 'fine_scan', 'ocr_waiting', 'ocr_recognition'
+        'probing',
+        'coarse_scan',
+        'fine_scan',
+        'ocr_waiting',
+        'ocr_recognition',
+        'timeline_scan',
+        'timeline_analysis',
+        'result_scan',
+        'candidate_upload',
     ]
     detail: str
     elapsed_seconds: float
@@ -454,6 +959,9 @@ class AnalysisStatus:
     total_candidates: int = 0
     rejected_candidates: int = 0
     recognized_matches: int = 0
+    model_package_id: str = ''
+    keyframe_frames: int = 0
+    seek_fill_frames: int = 0
 
 
 def classify_match_kind(
@@ -750,10 +1258,12 @@ class VaingloryVideoAnalyzer:
         *,
         sampler: Optional[FfmpegSampler] = None,
         result_reader: Optional[ResultReader] = None,
-        hero_recognizer: Optional[SiftHeroRecognizer] = None,
+        hero_recognizer: Optional[HeroRecognizer] = None,
+        hero_avatar_detector: Optional[HeroAvatarDetector] = None,
+        recorded_player_detector: Optional[RecordedPlayerDetector] = None,
         aram_detector: Optional[AramDetector] = None,
         result_panel_detector: Optional[ResultPanelDetector] = None,
-        stage_classifier: Optional[StageClassifier] = None,
+        stage_classifier: Optional[StageFrameClassifier] = None,
         minimum_match_seconds: int = 60,
     ) -> None:
         if minimum_match_seconds < 0:
@@ -761,6 +1271,8 @@ class VaingloryVideoAnalyzer:
         self._sampler = sampler or FfmpegSampler()
         self._result_reader = result_reader or TesseractResultReader()
         self._hero_recognizer = hero_recognizer
+        self._hero_avatar_detector = hero_avatar_detector
+        self._recorded_player_detector = recorded_player_detector
         self._aram_detector = aram_detector or AramTalentSelectionDetector()
         self._result_panel_detector = result_panel_detector
         self._stage_classifier = stage_classifier
@@ -1798,6 +2310,124 @@ class VaingloryVideoAnalyzer:
             )
         return result, tuple(training_candidates[:60])
 
+    def _scan_result_backwards(
+        self,
+        path: str,
+        *,
+        start_ms: int,
+        end_ms: int,
+        hits: List[ResultHit],
+        cancelled: Optional[Callable[[], bool]],
+        training_candidates: Optional[List[TrainingCandidate]],
+        result_candidates: Optional[List[TrainingCandidate]] = None,
+        borderline_candidates: Optional[List[TrainingCandidate]] = None,
+        key_screen_reason: str,
+        detector_reason: str,
+        chunk_ms: int = 45_000,
+    ) -> _ResultBackscan:
+        if end_ms <= start_ms:
+            return _ResultBackscan()
+        cursor_ms = end_ms
+        decoded_frames = 0
+        detection_seconds = 0.0
+        scanned_ms = 0
+        while cursor_ms > start_ms:
+            window = ScanWindow(
+                start_ms=max(start_ms, cursor_ms - chunk_ms), end_ms=cursor_ms
+            )
+            scanned_ms += window.end_ms - window.start_ms
+            window_hits = 0
+            for timed in self._sampler.fine_frames(path, window):
+                self._raise_if_cancelled(cancelled)
+                decoded_frames += 1
+                detection_started = time.monotonic()
+                layout = self._detect_result_layout(timed.frame)
+                detection_seconds += time.monotonic() - detection_started
+                if layout is None:
+                    continue
+                hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
+                window_hits += 1
+                model_version = str(
+                    getattr(
+                        self._result_panel_detector,
+                        'model_version',
+                        'result-detector-v1',
+                    )
+                )
+                if training_candidates is not None:
+                    _remember_training_candidate(
+                        training_candidates,
+                        task='key_screen_review',
+                        suggested_label='result_page',
+                        at_ms=timed.at_ms,
+                        segment_start_ms=start_ms,
+                        frame=timed.frame,
+                        model_version=model_version,
+                        suggestion_confidence=layout.confidence,
+                        stage_class='result_page',
+                        stage_confidence=layout.confidence,
+                        selection_reason=key_screen_reason,
+                        minimum_gap_ms=15_000,
+                        maximum_per_label=12,
+                    )
+                detector_target = (
+                    result_candidates
+                    if result_candidates is not None
+                    else training_candidates
+                )
+                if detector_target is not None:
+                    _remember_training_candidate(
+                        detector_target,
+                        task='result_detector',
+                        suggested_label='result_panel',
+                        at_ms=timed.at_ms,
+                        segment_start_ms=start_ms,
+                        frame=timed.frame,
+                        model_version=model_version,
+                        suggestion_confidence=layout.confidence,
+                        stage_class='result_page',
+                        stage_confidence=layout.confidence,
+                        selection_reason=detector_reason,
+                        minimum_gap_ms=15_000,
+                        maximum_per_label=8,
+                        suggested_boxes=(
+                            _result_panel_training_box(timed.frame, layout),
+                        ),
+                    )
+                if borderline_candidates is not None:
+                    _remember_training_candidate(
+                        borderline_candidates,
+                        task='result_detector',
+                        suggested_label='result_panel',
+                        at_ms=timed.at_ms,
+                        segment_start_ms=start_ms,
+                        frame=timed.frame,
+                        model_version=model_version,
+                        suggestion_confidence=layout.confidence,
+                        stage_class='result_page',
+                        stage_confidence=layout.confidence,
+                        selection_reason='结算检测低置信边界命中，供人工复核',
+                        minimum_gap_ms=15_000,
+                        maximum_per_label=6,
+                        suggested_boxes=(
+                            _result_panel_training_box(timed.frame, layout),
+                        ),
+                        prefer_lower_confidence=True,
+                    )
+            if window_hits:
+                return _ResultBackscan(
+                    hit_count=window_hits,
+                    decoded_frames=decoded_frames,
+                    detection_seconds=detection_seconds,
+                    scanned_ms=scanned_ms,
+                )
+            cursor_ms = window.start_ms
+        return _ResultBackscan(
+            decoded_frames=decoded_frames,
+            detection_seconds=detection_seconds,
+            scanned_ms=scanned_ms,
+        )
+
     def _exit_regression(
         self,
         path: str,
@@ -1806,6 +2436,7 @@ class VaingloryVideoAnalyzer:
         *,
         cancelled: Optional[Callable[[], bool]] = None,
         training_candidates: Optional[List[TrainingCandidate]] = None,
+        strict_gameplay_exit: bool = False,
     ) -> int:
         """退出信号回归扫描。
 
@@ -1820,11 +2451,20 @@ class VaingloryVideoAnalyzer:
         smoothed = smooth_stages(observations)
         anchors = _confirmed_anchors(_pre_match_anchors(smoothed), smoothed)
         runs = gameplay_runs(smoothed)
-        in_match_stages = (STAGE_GAMEPLAY, STAGE_PRE_MATCH, STAGE_TALENT_SELECT)
+        in_match_stages = (
+            (STAGE_GAMEPLAY,)
+            if strict_gameplay_exit
+            else (STAGE_GAMEPLAY, STAGE_PRE_MATCH, STAGE_TALENT_SELECT)
+        )
         exit_frames = []
         for index, item in enumerate(observations):
             is_exit = (
-                item.stage in (STAGE_OUT_OF_MATCH, STAGE_TRANSITION)
+                item.stage
+                in (
+                    (STAGE_OUT_OF_MATCH,)
+                    if strict_gameplay_exit
+                    else (STAGE_OUT_OF_MATCH, STAGE_TRANSITION)
+                )
                 or item.content == CONTENT_NOT_VAINGLORY
             )
             if not is_exit or index == 0:
@@ -1859,45 +2499,28 @@ class VaingloryVideoAnalyzer:
             scan_end = exit_item.at_ms
             if scan_end <= scan_start:
                 continue
-            if has_confirmed_anchor and any(
+            if (strict_gameplay_exit or has_confirmed_anchor) and any(
                 scan_start <= hit.at_ms <= scan_end for hit in hits
             ):
                 continue
-            regression_hits = 0
-            for timed in self._sampler.fine_frames(
-                path, ScanWindow(start_ms=scan_start, end_ms=scan_end)
-            ):
-                self._raise_if_cancelled(cancelled)
-                layout = self._detect_result_layout(timed.frame)
-                if layout is not None:
-                    hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
-                    regression_hits += 1
-                    if training_candidates is not None:
-                        _remember_training_candidate(
-                            training_candidates,
-                            task='key_screen_review',
-                            suggested_label='result_page',
-                            at_ms=timed.at_ms,
-                            segment_start_ms=scan_start,
-                            frame=timed.frame,
-                            model_version='result-detector-v1',
-                            suggestion_confidence=layout.confidence,
-                            stage_class='result_page',
-                            stage_confidence=layout.confidence,
-                            selection_reason=(
-                                'worker 退出回归扫描命中，保留为结算页复核候选'
-                            ),
-                            minimum_gap_ms=15_000,
-                            maximum_per_label=12,
-                        )
-            added += regression_hits
+            regression = self._scan_result_backwards(
+                path,
+                start_ms=scan_start,
+                end_ms=scan_end,
+                hits=hits,
+                cancelled=cancelled,
+                training_candidates=training_candidates,
+                key_screen_reason=('worker 退出回归扫描命中，保留为结算页复核候选'),
+                detector_reason='退出回归命中，预填结算面板框',
+            )
+            added += regression.hit_count
             logger.info(
                 'Vainglory regression scan: exit_at_ms={} scan_start_ms={} '
                 'scan_end_ms={} hits={}',
                 exit_item.at_ms,
                 scan_start,
                 scan_end,
-                regression_hits,
+                regression.hit_count,
             )
         return added
 
@@ -1923,8 +2546,7 @@ class VaingloryVideoAnalyzer:
         added = 0
         for seg_start, seg_end in segments:
             tail_start = seg_end - 40_000
-            tail_end = seg_end + 25_000
-            if any(tail_start <= hit.at_ms <= tail_end for hit in hits):
+            if any(seg_start <= hit.at_ms <= seg_end + 25_000 for hit in hits):
                 continue
             anchor_ms = next(
                 (
@@ -1938,34 +2560,17 @@ class VaingloryVideoAnalyzer:
             scan_end = tail_start
             if scan_end <= scan_start:
                 continue
-            regression_hits = 0
-            for timed in self._sampler.fine_frames(
-                path, ScanWindow(start_ms=scan_start, end_ms=scan_end)
-            ):
-                self._raise_if_cancelled(cancelled)
-                layout = self._detect_result_layout(timed.frame)
-                if layout is not None:
-                    hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
-                    regression_hits += 1
-                    if training_candidates is not None:
-                        _remember_training_candidate(
-                            training_candidates,
-                            task='key_screen_review',
-                            suggested_label='result_page',
-                            at_ms=timed.at_ms,
-                            segment_start_ms=scan_start,
-                            frame=timed.frame,
-                            model_version='result-detector-v1',
-                            suggestion_confidence=layout.confidence,
-                            stage_class='result_page',
-                            stage_confidence=layout.confidence,
-                            selection_reason=(
-                                'worker 段尾回归扫描命中，保留为结算页复核候选'
-                            ),
-                            minimum_gap_ms=15_000,
-                            maximum_per_label=12,
-                        )
-            added += regression_hits
+            regression = self._scan_result_backwards(
+                path,
+                start_ms=scan_start,
+                end_ms=scan_end,
+                hits=hits,
+                cancelled=cancelled,
+                training_candidates=training_candidates,
+                key_screen_reason=('worker 段尾回归扫描命中，保留为结算页复核候选'),
+                detector_reason='段尾回归命中，预填结算面板框',
+            )
+            added += regression.hit_count
             logger.info(
                 'Vainglory tail regression scan: seg_start_ms={} seg_end_ms={} '
                 'anchor_ms={} scan_start_ms={} scan_end_ms={} hits={}',
@@ -1974,7 +2579,7 @@ class VaingloryVideoAnalyzer:
                 anchor_ms,
                 scan_start,
                 scan_end,
-                regression_hits,
+                regression.hit_count,
             )
         return added
 
@@ -1990,17 +2595,39 @@ class VaingloryVideoAnalyzer:
     ) -> DenseScanResult:
         assert self._stage_classifier is not None
         classifier = self._stage_classifier
+        model_package_id = str(getattr(classifier, 'model_version', ''))
+        using_model_package = bool(model_package_id and model_package_id != 'multi-v2')
+        timeline_stage = 'timeline_scan' if using_model_package else 'coarse_scan'
+        result_stage = 'result_scan' if using_model_package else 'fine_scan'
+        result_model_version = str(
+            getattr(
+                self._result_panel_detector,
+                'model_version',
+                model_package_id or 'result-detector-v1',
+            )
+        )
         scan_started = time.monotonic()
         probe_started = time.monotonic()
         profile = self._sampler.probe(part.path)
         probe_seconds = time.monotonic() - probe_started
         classify_started = time.monotonic()
         observations: List[ClassifiedObservation] = []
+        timeline_points: List[TimelinePoint] = []
         screen_state_candidates: List[TrainingCandidate] = []
         key_screen_candidates: List[TrainingCandidate] = []
         result_detector_candidates: List[TrainingCandidate] = []
         borderline_result_candidates: List[TrainingCandidate] = []
         mode_gate_candidates: List[TrainingCandidate] = []
+        package_conflict_candidates: List[TrainingCandidate] = []
+        package_candidates: List[TrainingCandidate] = []
+        package_borderline_candidates: List[TrainingCandidate] = []
+        full_frame_cache: Dict[int, RgbFrame] = {}
+        keyframe_frames = 0
+        seek_fill_frames = 0
+        coarse_interval_seconds = max(
+            1, int(getattr(self._sampler, 'coarse_interval_seconds', 5))
+        )
+        run_gap_ms = max(20_000, coarse_interval_seconds * 1_000 + 15_000)
         next_progress = 0.01
         next_status_progress = 0.1
         logger.info(
@@ -2011,14 +2638,23 @@ class VaingloryVideoAnalyzer:
         self._emit_status(
             status_callback,
             AnalysisStatus(
-                stage='coarse_scan',
-                detail='开始每 5 秒取一帧分类粗扫整段视频',
+                stage=cast(Any, timeline_stage),
+                detail=(
+                    '开始关键帧优先的 {} 秒新模型时间线扫描'.format(
+                        coarse_interval_seconds
+                    )
+                    if using_model_package
+                    else '开始每 5 秒取一帧分类粗扫整段视频'
+                ),
                 elapsed_seconds=time.monotonic() - scan_started,
+                model_package_id=model_package_id,
             ),
         )
         for timed in self._sampler.classify_frames(part.path):
             self._raise_if_cancelled(cancelled)
             prediction = classifier.classify(timed.frame)
+            keyframe_frames += int(timed.sample_source == 'keyframe')
+            seek_fill_frames += int(timed.sample_source == 'seek_fill')
             observations.append(
                 ClassifiedObservation(
                     at_ms=timed.at_ms,
@@ -2026,33 +2662,57 @@ class VaingloryVideoAnalyzer:
                     stage_conf=prediction.stage_conf,
                     mode=prediction.mode,
                     content=prediction.content,
+                    mode_conf=prediction.mode_conf,
+                )
+            )
+            timeline_points.append(
+                TimelinePoint(
+                    target_ms=(
+                        timed.at_ms if timed.target_ms is None else timed.target_ms
+                    ),
+                    at_ms=timed.at_ms,
+                    sample_source=timed.sample_source,
+                    stage=prediction.stage,
+                    stage_confidence=prediction.stage_conf,
+                    match_flow_label=prediction.match_flow_label,
+                    match_flow_confidence=prediction.match_flow_conf,
+                    hero_select_label=prediction.hero_select_label,
+                    hero_select_confidence=prediction.hero_select_conf,
+                    match_mode_label=prediction.match_mode_label,
+                    match_mode_confidence=prediction.match_mode_conf,
+                    result_confidence=prediction.result_conf,
                 )
             )
             screen_state_label = _screen_state_candidate_label(prediction)
-            _remember_training_candidate(
-                screen_state_candidates,
-                task='screen_state',
-                suggested_label=screen_state_label,
-                at_ms=timed.at_ms,
-                segment_start_ms=max(0, timed.at_ms - 30_000),
-                frame=timed.frame,
-                model_version='multi-v2',
-                suggestion_confidence=(
-                    prediction.content_conf
-                    if screen_state_label == 'not_vainglory'
-                    else min(prediction.content_conf, prediction.stage_conf)
-                ),
-                stage_class=screen_state_label,
-                stage_confidence=prediction.stage_conf,
-                mode_class={MODE_3V3: '3v3', MODE_ARAM: 'aram', MODE_5V5: '5v5'}.get(
-                    prediction.mode, str(prediction.mode)
-                ),
-                mode_confidence=prediction.mode_conf,
-                selection_reason='worker 低频粗扫代表帧，供画面状态人工复核',
-                minimum_gap_ms=60_000,
-                maximum_per_label=_SCREEN_STATE_CANDIDATE_LIMITS[screen_state_label],
-                separate_modes=screen_state_label == 'in_match',
-            )
+            if not using_model_package:
+                _remember_training_candidate(
+                    screen_state_candidates,
+                    task='screen_state',
+                    suggested_label=screen_state_label,
+                    at_ms=timed.at_ms,
+                    segment_start_ms=max(0, timed.at_ms - 30_000),
+                    frame=timed.frame,
+                    model_version='multi-v2',
+                    suggestion_confidence=(
+                        prediction.content_conf
+                        if screen_state_label == 'not_vainglory'
+                        else min(prediction.content_conf, prediction.stage_conf)
+                    ),
+                    stage_class=screen_state_label,
+                    stage_confidence=prediction.stage_conf,
+                    mode_class={
+                        MODE_3V3: '3v3',
+                        MODE_ARAM: 'aram',
+                        MODE_5V5: '5v5',
+                    }.get(prediction.mode, str(prediction.mode)),
+                    mode_confidence=prediction.mode_conf,
+                    selection_reason='worker 低频粗扫代表帧，供画面状态人工复核',
+                    minimum_gap_ms=60_000,
+                    maximum_per_label=_SCREEN_STATE_CANDIDATE_LIMITS[
+                        screen_state_label
+                    ],
+                    separate_modes=screen_state_label == 'in_match',
+                )
             key_screen_label: Optional[TrainingCandidateLabel] = None
             key_screen_reason = ''
             key_screen_limit = 0
@@ -2078,7 +2738,7 @@ class VaingloryVideoAnalyzer:
                 )
                 key_screen_limit = 6
                 key_screen_gap_ms = 60_000
-            if key_screen_label is not None:
+            if not using_model_package and key_screen_label is not None:
                 _remember_training_candidate(
                     key_screen_candidates,
                     task='key_screen_review',
@@ -2104,7 +2764,10 @@ class VaingloryVideoAnalyzer:
                     minimum_gap_ms=key_screen_gap_ms,
                     maximum_per_label=key_screen_limit,
                 )
-            if prediction.stage in (STAGE_SCOREBOARD, STAGE_VICTORY_DEFEAT):
+            if not using_model_package and prediction.stage in (
+                STAGE_SCOREBOARD,
+                STAGE_VICTORY_DEFEAT,
+            ):
                 _remember_training_candidate(
                     result_detector_candidates,
                     task='result_detector',
@@ -2132,9 +2795,10 @@ class VaingloryVideoAnalyzer:
                     minimum_gap_ms=60_000,
                     maximum_per_label=6,
                 )
-            if prediction.stage == STAGE_GAMEPLAY and prediction.mode in (
-                MODE_3V3,
-                MODE_ARAM,
+            if (
+                not using_model_package
+                and prediction.stage == STAGE_GAMEPLAY
+                and prediction.mode in (MODE_3V3, MODE_ARAM)
             ):
                 _remember_training_candidate(
                     mode_gate_candidates,
@@ -2155,17 +2819,41 @@ class VaingloryVideoAnalyzer:
                     minimum_gap_ms=120_000,
                     maximum_per_label=6,
                 )
+            if using_model_package:
+                _remember_model_package_prediction_candidates(
+                    package_candidates,
+                    package_borderline_candidates,
+                    result_detector_candidates,
+                    prediction=prediction,
+                    timed=timed,
+                    model_package_id=model_package_id,
+                    result_model_version=result_model_version,
+                    selection_context='新模型一级时间线',
+                )
             if debug_writer is not None:
                 debug_writer.write(
                     json.dumps(
                         {
                             'at_ms': timed.at_ms,
+                            'target_ms': (
+                                timed.at_ms
+                                if timed.target_ms is None
+                                else timed.target_ms
+                            ),
+                            'sample_source': timed.sample_source,
                             'content': prediction.content,
                             'content_conf': round(prediction.content_conf, 4),
                             'stage': prediction.stage,
                             'stage_conf': round(prediction.stage_conf, 4),
                             'mode': prediction.mode,
                             'mode_conf': round(prediction.mode_conf, 4),
+                            'match_flow_label': prediction.match_flow_label,
+                            'match_flow_conf': round(prediction.match_flow_conf, 4),
+                            'hero_select_label': prediction.hero_select_label,
+                            'hero_select_conf': round(prediction.hero_select_conf, 4),
+                            'match_mode_label': prediction.match_mode_label,
+                            'match_mode_conf': round(prediction.match_mode_conf, 4),
+                            'result_conf': round(prediction.result_conf, 4),
                         },
                         ensure_ascii=False,
                     )
@@ -2200,43 +2888,213 @@ class VaingloryVideoAnalyzer:
                 self._emit_status(
                     status_callback,
                     AnalysisStatus(
-                        stage='coarse_scan',
-                        detail='分类粗扫 {}% · 已采样 {} 帧'.format(
-                            min(100, round(ratio * 100)), len(observations)
+                        stage=cast(Any, timeline_stage),
+                        detail=(
+                            '新模型时间线 {}% · {} 帧（关键帧 {}／补帧 {}）'.format(
+                                min(100, round(ratio * 100)),
+                                len(observations),
+                                keyframe_frames,
+                                seek_fill_frames,
+                            )
+                            if using_model_package
+                            else '分类粗扫 {}% · 已采样 {} 帧'.format(
+                                min(100, round(ratio * 100)), len(observations)
+                            )
                         ),
                         elapsed_seconds=time.monotonic() - scan_started,
                         coarse_frames=len(observations),
+                        model_package_id=model_package_id,
+                        keyframe_frames=keyframe_frames,
+                        seek_fill_frames=seek_fill_frames,
                     ),
                 )
                 while next_status_progress <= ratio:
                     next_status_progress += 0.1
+        if using_model_package and coarse_interval_seconds > 5:
+            refinement_windows = _timeline_refinement_windows(
+                observations, duration_ms=profile.duration_ms
+            )
+            for refinement_window in refinement_windows:
+                self._raise_if_cancelled(cancelled)
+                for timed in self._sampler.classify_window_frames(
+                    part.path, refinement_window, interval_seconds=5
+                ):
+                    self._raise_if_cancelled(cancelled)
+                    prediction = classifier.classify(timed.frame)
+                    keyframe_frames += int(timed.sample_source == 'keyframe')
+                    seek_fill_frames += int(timed.sample_source == 'seek_fill')
+                    observations.append(
+                        ClassifiedObservation(
+                            at_ms=timed.at_ms,
+                            stage=prediction.stage,
+                            stage_conf=prediction.stage_conf,
+                            mode=prediction.mode,
+                            content=prediction.content,
+                            mode_conf=prediction.mode_conf,
+                        )
+                    )
+                    timeline_points.append(
+                        TimelinePoint(
+                            target_ms=(
+                                timed.at_ms
+                                if timed.target_ms is None
+                                else timed.target_ms
+                            ),
+                            at_ms=timed.at_ms,
+                            sample_source=timed.sample_source,
+                            stage=prediction.stage,
+                            stage_confidence=prediction.stage_conf,
+                            match_flow_label=prediction.match_flow_label,
+                            match_flow_confidence=prediction.match_flow_conf,
+                            hero_select_label=prediction.hero_select_label,
+                            hero_select_confidence=prediction.hero_select_conf,
+                            match_mode_label=prediction.match_mode_label,
+                            match_mode_confidence=prediction.match_mode_conf,
+                            result_confidence=prediction.result_conf,
+                        )
+                    )
+                    _remember_model_package_prediction_candidates(
+                        package_candidates,
+                        package_borderline_candidates,
+                        result_detector_candidates,
+                        prediction=prediction,
+                        timed=timed,
+                        model_package_id=model_package_id,
+                        result_model_version=result_model_version,
+                        selection_context='新模型边界局部复核',
+                    )
+            observations = list(
+                {
+                    item.at_ms: item
+                    for item in sorted(observations, key=lambda value: value.at_ms)
+                }.values()
+            )
+            timeline_points = list(
+                {
+                    item.at_ms: item
+                    for item in sorted(timeline_points, key=lambda value: value.at_ms)
+                }.values()
+            )
         classify_seconds = time.monotonic() - classify_started
         self._emit_status(
             status_callback,
             AnalysisStatus(
-                stage='coarse_scan',
-                detail='分类采样完成，正在确认对局段与模式',
+                stage=cast(
+                    Any, 'timeline_analysis' if using_model_package else 'coarse_scan'
+                ),
+                detail=(
+                    '新模型扫描完成，正在平滑时间线并推断结算候选区间'
+                    if using_model_package
+                    else '分类采样完成，正在确认对局段与模式'
+                ),
                 elapsed_seconds=time.monotonic() - scan_started,
                 coarse_frames=len(observations),
+                model_package_id=model_package_id,
+                keyframe_frames=keyframe_frames,
+                seek_fill_frames=seek_fill_frames,
             ),
         )
-        run_modes, training_candidates = self._probe_run_modes(
-            part.path, observations, cancelled=cancelled
-        )
-        windows = list(
-            build_classified_windows(
-                observations, duration_ms=profile.duration_ms, run_modes=run_modes
+        if using_model_package:
+            run_modes = _model_package_run_modes(observations, run_gap_ms=run_gap_ms)
+            training_candidates: Tuple[TrainingCandidate, ...] = ()
+        else:
+            run_modes, training_candidates = self._probe_run_modes(
+                part.path, observations, cancelled=cancelled
             )
-        )
         smoothed = smooth_stages(observations)
         anchor_segments = _segment_ranges(
-            gameplay_runs(smoothed),
+            gameplay_runs(smoothed, maximum_gap_ms=run_gap_ms),
             _confirmed_anchors(_pre_match_anchors(smoothed), smoothed),
         )
+        anchor_segments = _segments_with_gameplay(anchor_segments, smoothed)
         segment_anchors = _confirmed_anchors(_pre_match_anchors(smoothed), smoothed)
+        initial_mode_conflicts = (
+            _model_package_mode_conflicts(observations, anchor_segments, run_modes)
+            if using_model_package
+            else ()
+        )
+        segment_hud_lineups = (
+            self._recognize_segment_hud_lineups(
+                part.path,
+                observations,
+                anchor_segments,
+                run_modes,
+                cancelled=cancelled,
+                frame_cache=full_frame_cache,
+                mode_conflicts=initial_mode_conflicts,
+            )
+            if using_model_package
+            else {}
+        )
+        if using_model_package:
+            run_modes = _apply_hud_team_size_evidence(run_modes, segment_hud_lineups)
+            mode_conflicts = _model_package_mode_conflicts(
+                observations, anchor_segments, run_modes
+            )
+            for conflict in mode_conflicts:
+                self._raise_if_cancelled(cancelled)
+                try:
+                    frame = full_frame_cache.get(conflict.at_ms)
+                    if frame is None:
+                        frame = self._sampler.frame_at(part.path, conflict.at_ms)
+                        full_frame_cache[conflict.at_ms] = frame
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(
+                        'Vainglory mode conflict frame skipped: at_ms={} error={!r}',
+                        conflict.at_ms,
+                        error,
+                    )
+                    continue
+                lineup = segment_hud_lineups.get(conflict.segment_start_ms, ())
+                _remember_training_candidate(
+                    package_conflict_candidates,
+                    task='match_mode',
+                    suggested_label=cast(
+                        TrainingCandidateLabel, conflict.predicted_mode
+                    ),
+                    at_ms=conflict.at_ms,
+                    segment_start_ms=conflict.segment_start_ms,
+                    frame=frame,
+                    model_version=model_package_id,
+                    suggestion_confidence=conflict.confidence,
+                    stage_class='gameplay',
+                    stage_confidence=next(
+                        (
+                            item.stage_conf
+                            for item in observations
+                            if item.at_ms == conflict.at_ms
+                        ),
+                        0,
+                    ),
+                    mode_class=conflict.predicted_mode,
+                    mode_confidence=conflict.confidence,
+                    selection_reason=(
+                        '单帧模式 {} 与整局稳定模式 {} 冲突{}，优先人工复核'.format(
+                            conflict.predicted_mode,
+                            conflict.stable_mode,
+                            (
+                                '；附近完整画面识别到 10 个 HUD 英雄位置'
+                                if len(lineup) == 10
+                                else ''
+                            ),
+                        )
+                    ),
+                    minimum_gap_ms=30_000,
+                    maximum_per_label=6,
+                    separate_modes=True,
+                )
+        windows = list(
+            build_classified_windows(
+                observations,
+                duration_ms=profile.duration_ms,
+                run_gap_ms=run_gap_ms,
+                run_modes=run_modes,
+                skip_open_ended=using_model_package,
+            )
+        )
         logger.info(
             'Vainglory classify pass completed: part_id={} frames={} '
-            'gameplay_frames={} result_signal_frames={} windows={} '
+            'gameplay_frames={} result_signal_frames={} windows={} hud_lineups={} '
             'classify_seconds={:.3f}',
             part.id,
             len(observations),
@@ -2246,20 +3104,32 @@ class VaingloryVideoAnalyzer:
                 for item in observations
             ),
             len(windows),
+            len(segment_hud_lineups),
             classify_seconds,
         )
         self._emit_status(
             status_callback,
             AnalysisStatus(
-                stage='coarse_scan',
-                detail='分类完成：识别 {} 个对局段，生成 {} 个精扫区间'.format(
-                    len(anchor_segments), len(windows)
+                stage=cast(
+                    Any, 'timeline_analysis' if using_model_package else 'coarse_scan'
+                ),
+                detail=(
+                    '时间线完成：识别 {} 个对局段，生成 {} 个结算精扫区间'.format(
+                        len(anchor_segments), len(windows)
+                    )
+                    if using_model_package
+                    else '分类完成：识别 {} 个对局段，生成 {} 个精扫区间'.format(
+                        len(anchor_segments), len(windows)
+                    )
                 ),
                 elapsed_seconds=time.monotonic() - scan_started,
                 coarse_frames=len(observations),
                 gameplay_runs=len(anchor_segments),
                 result_windows=len(windows),
                 total_windows=len(windows),
+                model_package_id=model_package_id,
+                keyframe_frames=keyframe_frames,
+                seek_fill_frames=seek_fill_frames,
             ),
         )
         hits: List[ResultHit] = []
@@ -2278,101 +3148,59 @@ class VaingloryVideoAnalyzer:
         self._emit_status(
             status_callback,
             AnalysisStatus(
-                stage='fine_scan',
+                stage=cast(Any, result_stage),
                 detail='开始用 4 FPS 精扫 {} 个结算区间'.format(len(windows)),
                 elapsed_seconds=time.monotonic() - scan_started,
                 coarse_frames=len(observations),
                 gameplay_runs=len(anchor_segments),
                 result_windows=len(windows),
                 total_windows=len(windows),
+                model_package_id=model_package_id,
+                keyframe_frames=keyframe_frames,
+                seek_fill_frames=seek_fill_frames,
             ),
         )
         for window_index, window in enumerate(windows, 1):
             self._raise_if_cancelled(cancelled)
-            scan_window = ScanWindow(
-                start_ms=window.start_ms, end_ms=window.end_ms, view_context='unknown'
+            backscan = self._scan_result_backwards(
+                part.path,
+                start_ms=window.start_ms,
+                end_ms=window.end_ms,
+                hits=hits,
+                cancelled=cancelled,
+                training_candidates=key_screen_candidates,
+                result_candidates=result_detector_candidates,
+                borderline_candidates=borderline_result_candidates,
+                key_screen_reason=('worker 结算检测模型命中，保留为结算页复核候选'),
+                detector_reason='worker 检测命中，预填结算面板框供人工修正',
+                chunk_ms=(
+                    15_000
+                    if using_model_package
+                    else max(1, window.end_ms - window.start_ms)
+                ),
             )
-            for timed in self._sampler.fine_frames(part.path, scan_window):
-                self._raise_if_cancelled(cancelled)
-                decoded_frames += 1
-                detection_started = time.monotonic()
-                layout = self._detect_result_layout(timed.frame)
-                detection_seconds += time.monotonic() - detection_started
-                if layout is not None:
-                    hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
-                    _remember_training_candidate(
-                        key_screen_candidates,
-                        task='key_screen_review',
-                        suggested_label='result_page',
-                        at_ms=timed.at_ms,
-                        segment_start_ms=window.start_ms,
-                        frame=timed.frame,
-                        model_version='result-detector-v1',
-                        suggestion_confidence=layout.confidence,
-                        stage_class='result_page',
-                        stage_confidence=layout.confidence,
-                        selection_reason=(
-                            'worker 结算检测模型命中，保留为结算页复核候选'
-                        ),
-                        minimum_gap_ms=15_000,
-                        maximum_per_label=12,
-                    )
-                    _remember_training_candidate(
-                        result_detector_candidates,
-                        task='result_detector',
-                        suggested_label='result_panel',
-                        at_ms=timed.at_ms,
-                        segment_start_ms=window.start_ms,
-                        frame=timed.frame,
-                        model_version='result-detector-v1',
-                        suggestion_confidence=layout.confidence,
-                        stage_class='result_page',
-                        stage_confidence=layout.confidence,
-                        selection_reason='worker 检测命中，预填结算面板框供人工修正',
-                        minimum_gap_ms=15_000,
-                        maximum_per_label=8,
-                        suggested_boxes=(
-                            _result_panel_training_box(timed.frame, layout),
-                        ),
-                    )
-                    _remember_training_candidate(
-                        borderline_result_candidates,
-                        task='result_detector',
-                        suggested_label='result_panel',
-                        at_ms=timed.at_ms,
-                        segment_start_ms=window.start_ms,
-                        frame=timed.frame,
-                        model_version='result-detector-v1',
-                        suggestion_confidence=layout.confidence,
-                        stage_class='result_page',
-                        stage_confidence=layout.confidence,
-                        selection_reason=('worker 结算检测低置信边界命中，供人工复核'),
-                        minimum_gap_ms=15_000,
-                        maximum_per_label=6,
-                        suggested_boxes=(
-                            _result_panel_training_box(timed.frame, layout),
-                        ),
-                        prefer_lower_confidence=True,
-                    )
-            scanned_window_ms += window.end_ms - window.start_ms
+            decoded_frames += backscan.decoded_frames
+            detection_seconds += backscan.detection_seconds
+            scanned_window_ms += backscan.scanned_ms
             logger.info(
                 'Vainglory guided fine scan window completed: part_id={} '
                 'window={}/{} start_ms={} end_ms={} mode={} '
-                'hits_so_far={}',
+                'scanned_ms={} hits_so_far={}',
                 part.id,
                 window_index,
                 len(windows),
                 window.start_ms,
                 window.end_ms,
                 window.mode,
+                backscan.scanned_ms,
                 len(collapse_result_hits(hits)),
             )
             if progress is not None:
-                progress(0.6 + scanned_window_ms / max(1, total_window_ms) * 0.4)
+                progress(0.6 + window_index / max(1, len(windows)) * 0.4)
             self._emit_status(
                 status_callback,
                 AnalysisStatus(
-                    stage='fine_scan',
+                    stage=cast(Any, result_stage),
                     detail='精扫 {}/{} · 累计找到 {} 个结算画面'.format(
                         window_index, len(windows), len(collapse_result_hits(hits))
                     ),
@@ -2383,12 +3211,15 @@ class VaingloryVideoAnalyzer:
                     current_window=window_index,
                     total_windows=len(windows),
                     candidate_count=len(collapse_result_hits(hits)),
+                    model_package_id=model_package_id,
+                    keyframe_frames=keyframe_frames,
+                    seek_fill_frames=seek_fill_frames,
                 ),
             )
         self._emit_status(
             status_callback,
             AnalysisStatus(
-                stage='fine_scan',
+                stage=cast(Any, result_stage),
                 detail='区间精扫完成，正在做段尾与退出回归补漏',
                 elapsed_seconds=time.monotonic() - scan_started,
                 coarse_frames=len(observations),
@@ -2397,12 +3228,30 @@ class VaingloryVideoAnalyzer:
                 current_window=len(windows),
                 total_windows=len(windows),
                 candidate_count=len(collapse_result_hits(hits)),
+                model_package_id=model_package_id,
+                keyframe_frames=keyframe_frames,
+                seek_fill_frames=seek_fill_frames,
             ),
         )
         tail_regression_added = self._tail_regression(
             part.path,
             hits,
-            anchor_segments,
+            (
+                tuple(
+                    (start_ms, end_ms)
+                    for start_ms, end_ms in anchor_segments
+                    if any(
+                        item.at_ms > end_ms
+                        and (
+                            item.content != CONTENT_VAINGLORY
+                            or item.stage in (STAGE_OUT_OF_MATCH, STAGE_TRANSITION)
+                        )
+                        for item in smoothed
+                    )
+                )
+                if using_model_package
+                else anchor_segments
+            ),
             segment_anchors,
             cancelled=cancelled,
             training_candidates=key_screen_candidates,
@@ -2419,6 +3268,7 @@ class VaingloryVideoAnalyzer:
             hits,
             cancelled=cancelled,
             training_candidates=key_screen_candidates,
+            strict_gameplay_exit=using_model_package,
         )
         if exit_regression_added:
             logger.info(
@@ -2428,78 +3278,102 @@ class VaingloryVideoAnalyzer:
             )
         fine_seconds = time.monotonic() - fine_started
         candidates = list(collapse_result_hits(hits, maximum_gap_ms=5_000))
-        candidate_entries: List[Tuple[int, str]] = []
+        candidate_entries: List[Tuple[int, str, Tuple[str, ...]]] = []
         for candidate in candidates:
             matching_windows = tuple(
                 item
                 for item in windows
                 if item.start_ms <= candidate.at_ms < item.end_ms
             )
-            matched_window = matching_windows[0] if matching_windows else None
+            matched_window = (
+                min(
+                    matching_windows,
+                    key=lambda item: abs(
+                        candidate.at_ms
+                        - (candidate.at_ms if item.focus_ms is None else item.focus_ms)
+                    ),
+                )
+                if matching_windows
+                else None
+            )
+            candidate_segment_start_ms = _candidate_segment_start(
+                candidate.at_ms,
+                focus_ms=(None if matched_window is None else matched_window.focus_ms),
+                segments=anchor_segments,
+            )
             candidate_entries.append(
                 (
                     candidate.at_ms,
                     'unknown' if matched_window is None else matched_window.mode,
+                    (
+                        ()
+                        if candidate_segment_start_ms is None
+                        else segment_hud_lineups.get(candidate_segment_start_ms, ())
+                    ),
                 )
             )
         for manual_at_ms in part.manual_candidate_times_ms:
             if 0 <= manual_at_ms < profile.duration_ms and not any(
                 abs(candidate_at_ms - manual_at_ms) <= 5_000
-                for candidate_at_ms, _mode in candidate_entries
+                for candidate_at_ms, _mode, _lineup in candidate_entries
             ):
-                candidate_entries.append((manual_at_ms, 'unknown'))
+                manual_segment_start_ms = _candidate_segment_start(
+                    manual_at_ms, focus_ms=manual_at_ms, segments=anchor_segments
+                )
+                candidate_entries.append(
+                    (
+                        manual_at_ms,
+                        'unknown',
+                        (
+                            ()
+                            if manual_segment_start_ms is None
+                            else segment_hud_lineups.get(manual_segment_start_ms, ())
+                        ),
+                    )
+                )
         candidate_entries.sort(key=lambda item: item[0])
         candidate_times_ms = [item[0] for item in candidate_entries]
         candidate_modes = [item[1] for item in candidate_entries]
-        total_seconds = time.monotonic() - scan_started
-        logger.info(
-            'Vainglory cascade scan completed: part_id={} classify_frames={} '
-            'decoded_frames={} result_frames={} windows={} candidates={} '
-            'probe_seconds={:.3f} classify_seconds={:.3f} '
-            'detection_seconds={:.3f} total_seconds={:.3f}',
-            part.id,
-            len(observations),
-            decoded_frames,
-            len(hits),
-            len(windows),
-            len(candidate_times_ms),
-            probe_seconds,
-            classify_seconds,
-            detection_seconds,
-            total_seconds,
-        )
-        self._emit_status(
-            status_callback,
-            AnalysisStatus(
-                stage='fine_scan',
-                detail='级联扫描完成：{} 个区间得到 {} 个结算候选'.format(
-                    len(windows), len(candidate_times_ms)
+        candidate_lineups = [item[2] for item in candidate_entries]
+        if using_model_package:
+            selected_training_candidates: Sequence[TrainingCandidate] = (
+                _selected_model_package_candidates(
+                    package_conflict_candidates,
+                    package_candidates,
+                    package_borderline_candidates,
+                    result_detector_candidates,
+                    borderline_result_candidates,
+                    key_screen_candidates,
+                )
+            )
+            selected_training_candidates = _cap_training_candidate_timestamps(
+                selected_training_candidates, maximum_timestamps=24
+            )
+            self._emit_status(
+                status_callback,
+                AnalysisStatus(
+                    stage='candidate_upload',
+                    detail='正在回取 {} 个原分辨率训练素材时间点'.format(
+                        len({item.at_ms for item in selected_training_candidates})
+                    ),
+                    elapsed_seconds=time.monotonic() - scan_started,
+                    coarse_frames=len(observations),
+                    gameplay_runs=len(anchor_segments),
+                    result_windows=len(windows),
+                    candidate_count=len(selected_training_candidates),
+                    model_package_id=model_package_id,
+                    keyframe_frames=keyframe_frames,
+                    seek_fill_frames=seek_fill_frames,
                 ),
-                elapsed_seconds=total_seconds,
-                coarse_frames=len(observations),
-                gameplay_runs=len(anchor_segments),
-                result_windows=len(windows),
-                current_window=len(windows),
-                total_windows=len(windows),
-                candidate_count=len(candidate_times_ms),
-            ),
-        )
-        scanned_part = ScannedPart(
-            video_duration_ms=profile.duration_ms,
-            candidate_times_ms=tuple(candidate_times_ms),
-            candidate_view_contexts=tuple('unknown' for _ in candidate_times_ms),
-            candidate_hero_lineups=tuple(() for _ in candidate_times_ms),
-            candidate_modes=tuple(candidate_modes),
-        )
-        return DenseScanResult(
-            scanned_part=scanned_part,
-            decoded_frames=decoded_frames,
-            result_frames=len(hits),
-            probe_seconds=probe_seconds,
-            decode_seconds=classify_seconds + fine_seconds,
-            detection_seconds=detection_seconds,
-            total_seconds=total_seconds,
-            training_candidates=tuple(
+            )
+            selected_training_candidates = self._refresh_training_candidate_images(
+                part.path,
+                selected_training_candidates,
+                cancelled=cancelled,
+                frame_cache=full_frame_cache,
+            )
+        else:
+            selected_training_candidates = (
                 _selected_screen_state_candidates(screen_state_candidates)
                 + [
                     candidate
@@ -2534,7 +3408,81 @@ class VaingloryVideoAnalyzer:
                 ]
                 + list(borderline_result_candidates[:3])
                 + list(mode_gate_candidates[:6])
-            )[:80],
+            )[:80]
+        total_seconds = time.monotonic() - scan_started
+        logger.info(
+            'Vainglory cascade scan completed: part_id={} classify_frames={} '
+            'decoded_frames={} result_frames={} windows={} candidates={} '
+            'probe_seconds={:.3f} classify_seconds={:.3f} '
+            'detection_seconds={:.3f} total_seconds={:.3f}',
+            part.id,
+            len(observations),
+            decoded_frames,
+            len(hits),
+            len(windows),
+            len(candidate_times_ms),
+            probe_seconds,
+            classify_seconds,
+            detection_seconds,
+            total_seconds,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage=cast(
+                    Any, 'candidate_upload' if using_model_package else 'fine_scan'
+                ),
+                detail=(
+                    '扫描完成：{} 个区间得到 {} 个结算候选，整理训练素材'.format(
+                        len(windows), len(candidate_times_ms)
+                    )
+                    if using_model_package
+                    else '级联扫描完成：{} 个区间得到 {} 个结算候选'.format(
+                        len(windows), len(candidate_times_ms)
+                    )
+                ),
+                elapsed_seconds=total_seconds,
+                coarse_frames=len(observations),
+                gameplay_runs=len(anchor_segments),
+                result_windows=len(windows),
+                current_window=len(windows),
+                total_windows=len(windows),
+                candidate_count=len(candidate_times_ms),
+                model_package_id=model_package_id,
+                keyframe_frames=keyframe_frames,
+                seek_fill_frames=seek_fill_frames,
+            ),
+        )
+        scanned_part = ScannedPart(
+            video_duration_ms=profile.duration_ms,
+            candidate_times_ms=tuple(candidate_times_ms),
+            candidate_view_contexts=tuple('unknown' for _ in candidate_times_ms),
+            candidate_hero_lineups=tuple(candidate_lineups),
+            candidate_modes=tuple(candidate_modes),
+        )
+        return DenseScanResult(
+            scanned_part=scanned_part,
+            decoded_frames=decoded_frames,
+            result_frames=len(hits),
+            probe_seconds=probe_seconds,
+            decode_seconds=classify_seconds + fine_seconds,
+            detection_seconds=detection_seconds,
+            total_seconds=total_seconds,
+            training_candidates=tuple(selected_training_candidates),
+            model_package_id=model_package_id,
+            timeline_points=tuple(timeline_points),
+            timeline_segments=tuple(
+                TimelineSegment(start_ms, end_ms, run_modes.get(start_ms, 'unknown'))
+                for start_ms, end_ms in anchor_segments
+            ),
+            result_windows=tuple(
+                ResultScanWindow(
+                    window.start_ms, window.end_ms, window.mode, window.focus_ms
+                )
+                for window in windows
+            ),
+            keyframe_frames=keyframe_frames,
+            seek_fill_frames=seek_fill_frames,
         )
 
     def recognize_scanned_part(
@@ -3464,7 +4412,13 @@ class VaingloryVideoAnalyzer:
             raise _ResultEvidenceRejected(recognized)
         heroes_started = time.monotonic()
         heroes = self._recognize_heroes(frame, layout, nearby_frames=hero_frames)
-        recorded_player = detect_recorded_player(frame, layout)
+        recorded_player = (
+            None
+            if self._recorded_player_detector is None
+            else self._recorded_player_detector.detect(frame, layout)
+        )
+        if recorded_player is None:
+            recorded_player = detect_recorded_player(frame, layout)
         if self._hero_recognizer is not None and (
             any(not hero.label for hero in heroes) or recorded_player is None
         ):
@@ -3668,6 +4622,9 @@ class VaingloryVideoAnalyzer:
         *,
         nearby_frames: Sequence[RgbFrame] = (),
     ) -> Tuple[AnalyzedHero, ...]:
+        detected = self._recognize_detected_result_heroes(frame, layout)
+        if detected is not None:
+            return detected
         variants = [
             (
                 0.0,
@@ -3737,6 +4694,238 @@ class VaingloryVideoAnalyzer:
                 confidence=0 if match is None else match.confidence,
             )
             for hero, match in resolved
+        )
+
+    def _recognize_detected_result_heroes(
+        self, frame: RgbFrame, layout: ResultLayout
+    ) -> Optional[Tuple[AnalyzedHero, ...]]:
+        if self._hero_avatar_detector is None or self._hero_recognizer is None:
+            return None
+        expected = layout.team_size * 2
+        detections = sorted(
+            self._hero_avatar_detector.detect(frame),
+            key=lambda item: item.confidence,
+            reverse=True,
+        )
+        if len(detections) < expected:
+            logger.info(
+                'Vainglory avatar detector incomplete; using layout fallback: '
+                'detected={} expected={}',
+                len(detections),
+                expected,
+            )
+            return None
+        selected = sorted(
+            detections[:expected],
+            key=lambda item: (item.rect.left + item.rect.right) / 2,
+        )
+        left = selected[: layout.team_size]
+        right = selected[layout.team_size :]
+        if (
+            not left
+            or not right
+            or max(item.rect.left for item in left)
+            >= min(item.rect.right for item in right)
+        ):
+            return None
+        ordered = tuple(
+            (side, slot, detection)
+            for side, values in (
+                ('left', sorted(left, key=lambda item: item.rect.top)),
+                ('right', sorted(right, key=lambda item: item.rect.top)),
+            )
+            for slot, detection in enumerate(values, 1)
+        )
+        heroes = []
+        recognized_count = 0
+        for side, slot, detection in ordered:
+            hero_frame = frame.crop(detection.rect)
+            match = self._hero_recognizer.recognize(hero_frame)
+            if match is not None:
+                recognized_count += 1
+            heroes.append(
+                AnalyzedHero(
+                    side=cast(TeamSide, side),
+                    slot=slot,
+                    fingerprint=hero_fingerprint(hero_frame),
+                    thumbnail_png=png_bytes(hero_frame),
+                    label='' if match is None else match.label,
+                    confidence=(
+                        0
+                        if match is None
+                        else min(match.confidence, detection.confidence)
+                    ),
+                )
+            )
+        if recognized_count < expected - 1:
+            logger.info(
+                'Vainglory detected avatar identities incomplete; using layout '
+                'fallback: recognized={} expected={}',
+                recognized_count,
+                expected,
+            )
+            return None
+        logger.info(
+            'Vainglory avatar and identity models recognized lineup: '
+            'recognized={}/{}',
+            recognized_count,
+            expected,
+        )
+        return tuple(heroes)
+
+    def _recognize_detected_hud_lineup(
+        self, frame: RgbFrame, *, team_size: TeamSize
+    ) -> Tuple[str, ...]:
+        if self._hero_avatar_detector is None or self._hero_recognizer is None:
+            return ()
+        expected = team_size * 2
+        detections = sorted(
+            self._hero_avatar_detector.detect(frame),
+            key=lambda item: item.confidence,
+            reverse=True,
+        )
+        if len(detections) < expected:
+            return ()
+        selected = sorted(
+            detections[:expected],
+            key=lambda item: (item.rect.left + item.rect.right) / 2,
+        )
+        sides = (selected[:team_size], selected[team_size:])
+        labels = []
+        for values in sides:
+            for detection in sorted(
+                values, key=lambda item: (item.rect.left + item.rect.right) / 2
+            ):
+                match = self._hero_recognizer.recognize(frame.crop(detection.rect))
+                labels.append('' if match is None else match.label)
+        if sum(bool(label) for label in labels) < team_size:
+            return ()
+        return tuple(labels)
+
+    def _recognize_segment_hud_lineups(
+        self,
+        path: str,
+        observations: Sequence[ClassifiedObservation],
+        segments: Sequence[Tuple[int, int]],
+        run_modes: Dict[int, str],
+        *,
+        cancelled: Optional[Callable[[], bool]],
+        frame_cache: Dict[int, RgbFrame],
+        mode_conflicts: Sequence[_ModeConflict] = (),
+    ) -> Dict[int, Tuple[str, ...]]:
+        if self._hero_avatar_detector is None or self._hero_recognizer is None:
+            return {}
+        result: Dict[int, Tuple[str, ...]] = {}
+        for segment_start_ms, segment_end_ms in segments:
+            mode = run_modes.get(segment_start_ms, 'unknown')
+            if mode not in {'3v3', 'aram', '5v5'}:
+                continue
+            conflicts = tuple(
+                item
+                for item in mode_conflicts
+                if item.segment_start_ms == segment_start_ms
+            )
+            team_sizes: Tuple[TeamSize, ...] = (
+                (5, cast(TeamSize, 5 if mode == '5v5' else 3))
+                if mode != '5v5'
+                and any(
+                    item.predicted_mode == '5v5' or item.stable_mode == '5v5'
+                    for item in conflicts
+                )
+                else (cast(TeamSize, 5 if mode == '5v5' else 3),)
+            )
+            team_sizes = tuple(dict.fromkeys(team_sizes))
+            gameplay_times = tuple(
+                item.at_ms
+                for item in observations
+                if segment_start_ms <= item.at_ms <= segment_end_ms
+                and item.stage == STAGE_GAMEPLAY
+            )
+            if not gameplay_times:
+                continue
+            retry_times = [
+                nearby_ms
+                for conflict in conflicts
+                for nearby_ms in (
+                    conflict.at_ms,
+                    conflict.at_ms - 5_000,
+                    conflict.at_ms + 5_000,
+                )
+                if segment_start_ms <= nearby_ms <= segment_end_ms
+            ]
+            retry_times.append(gameplay_times[0])
+            retry_at_ms = next(
+                (
+                    at_ms
+                    for at_ms in gameplay_times[1:]
+                    if at_ms - gameplay_times[0] >= 60_000
+                ),
+                None,
+            )
+            if retry_at_ms is not None:
+                retry_times.append(retry_at_ms)
+            for at_ms in dict.fromkeys(retry_times):
+                self._raise_if_cancelled(cancelled)
+                try:
+                    frame = frame_cache.get(at_ms)
+                    if frame is None:
+                        frame = self._sampler.frame_at(path, at_ms)
+                        frame_cache[at_ms] = frame
+                    lineup = next(
+                        (
+                            value
+                            for team_size in team_sizes
+                            for value in (
+                                self._recognize_detected_hud_lineup(
+                                    frame, team_size=team_size
+                                ),
+                            )
+                            if value
+                        ),
+                        (),
+                    )
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(
+                        'Vainglory HUD lineup probe failed: at_ms={} error={!r}',
+                        at_ms,
+                        error,
+                    )
+                    continue
+                if lineup:
+                    result[segment_start_ms] = lineup
+                    break
+        return result
+
+    def _refresh_training_candidate_images(
+        self,
+        path: str,
+        candidates: Sequence[TrainingCandidate],
+        *,
+        cancelled: Optional[Callable[[], bool]],
+        frame_cache: Dict[int, RgbFrame],
+    ) -> Tuple[TrainingCandidate, ...]:
+        payloads: Dict[int, bytes] = {}
+        for at_ms in dict.fromkeys(candidate.at_ms for candidate in candidates):
+            self._raise_if_cancelled(cancelled)
+            try:
+                frame = frame_cache.get(at_ms)
+                if frame is None:
+                    frame = self._sampler.frame_at(path, at_ms)
+                    frame_cache[at_ms] = frame
+                payloads[at_ms] = _high_quality_training_jpeg(frame)
+            except Exception as error:  # noqa: BLE001
+                logger.warning(
+                    'Vainglory high-resolution training frame skipped: '
+                    'at_ms={} error={!r}',
+                    at_ms,
+                    error,
+                )
+        return tuple(
+            replace(
+                candidate,
+                image_jpeg=payloads.get(candidate.at_ms, candidate.image_jpeg),
+            )
+            for candidate in candidates
         )
 
     def _recognize_nearby_heroes(
@@ -4099,7 +5288,12 @@ class VaingloryVideoAnalyzer:
         layout = self._detect_result_layout(frame)
         if layout is None:
             raise ValueError('保存的图片不是可识别的结算画面')
-        return detect_recorded_player(frame, layout)
+        detected = (
+            None
+            if self._recorded_player_detector is None
+            else self._recorded_player_detector.detect(frame, layout)
+        )
+        return detected or detect_recorded_player(frame, layout)
 
     def _recognize_hero_variant(
         self,

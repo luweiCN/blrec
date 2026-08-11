@@ -88,6 +88,50 @@ class TrainingReviewTestCase(unittest.TestCase):
 
 
 class TestLegacyMigration(TrainingReviewTestCase):
+    def test_old_review_saved_after_migration_is_mirrored_to_unified_truth(self):
+        training_review.migrate_legacy_training_reviews(self.conn)
+        bp_frame = self.frame(30)
+        key_frame = self.frame(31)
+        db.upsert_bp_review_item(
+            self.conn,
+            frame_id=bp_frame,
+            model_version='multi-v2',
+            suggested_label='bp_3v3',
+            suggestion_confidence=0.8,
+            stage_class='pre_match',
+            stage_confidence=0.9,
+            pre_match_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.8,
+            mode_margin=0.7,
+            selection_reason='测试候选',
+            priority=100,
+            raw_prediction={'task': 'multi'},
+        )
+        db.review_bp_item(self.conn, frame_id=bp_frame, label='bp_3v3')
+        training_review.mirror_confirmed_bp_review(self.conn, bp_frame)
+        db.upsert_key_screen_review_item(
+            self.conn,
+            frame_id=key_frame,
+            model_version='multi-v2',
+            suggested_label='scoreboard',
+            suggestion_confidence=0.8,
+            selection_reason='测试候选',
+            raw_prediction={'task': 'multi'},
+        )
+        db.review_key_screen_item(self.conn, frame_id=key_frame, label='scoreboard')
+        training_review.mirror_confirmed_key_screen_review(self.conn, key_frame)
+
+        bp_item = db.get_training_review_item(self.conn, bp_frame)
+        key_item = db.get_training_review_item(self.conn, key_frame)
+        self.assertEqual(bp_item['hero_select_label'], 'select_3v3')
+        self.assertEqual(bp_item['hero_select_variant'], 'bp')
+        self.assertEqual(bp_item['review_status'], 'confirmed')
+        self.assertEqual(key_item['hero_layout_label'], None)
+        self.assertEqual(key_item['match_flow_label'], 'match_flow')
+        self.assertEqual(key_item['result_panel_label'], 'no_result_panel')
+        self.assertEqual(key_item['review_status'], 'confirmed')
+
     def test_old_human_labels_are_reused_without_deleting_old_boxes(self):
         gameplay = self.frame(1)
         shop = self.frame(2)
@@ -129,6 +173,7 @@ class TestLegacyMigration(TrainingReviewTestCase):
         self.assertEqual(rows[shop]['match_mode_label'], 'unreadable')
         self.assertEqual(rows[select]['match_flow_label'], 'not_match_flow')
         self.assertEqual(rows[select]['hero_select_label'], 'select_5v5')
+        self.assertEqual(rows[select]['hero_select_variant'], 'bp')
         self.assertEqual(rows[result]['result_panel_label'], 'result_panel')
         self.assertEqual(rows[lobby]['hero_select_label'], 'not_select')
         self.assertEqual(len(db.get_boxes(self.conn, shop)), 1)
@@ -140,10 +185,7 @@ class TestLegacyMigration(TrainingReviewTestCase):
             self.conn, round_id='round-1', name='旧光栅标注', active=True
         )
         db.add_mode_gate_round_video(
-            self.conn,
-            round_id='round-1',
-            video_id=self.video_id,
-            expected_mode='aram',
+            self.conn, round_id='round-1', video_id=self.video_id, expected_mode='aram'
         )
         db.save_mode_gate_annotation(
             self.conn,
@@ -163,8 +205,363 @@ class TestLegacyMigration(TrainingReviewTestCase):
         )
         self.assertEqual(len(gate['boxes']), 1)
 
+    def test_same_legacy_result_event_only_needs_one_review(self):
+        frame_ids = [self.frame(index) for index in (1, 2, 3)]
+        event_id = db.create_event(
+            self.conn, self.video_id, 1_000, 3_000, kind='candidate'
+        )
+        db.assign_event(self.conn, frame_ids, event_id)
+        for frame_id in frame_ids:
+            db.save_annotation(
+                self.conn,
+                frame_id,
+                {
+                    'content_family': 'vainglory',
+                    'game_context': 'post_match',
+                    'screen_type': 'result_page',
+                    'game_mode': '3v3',
+                },
+                status='complete',
+            )
+            db.save_box(self.conn, frame_id, 'result_panel', 0.1, 0.2, 0.8, 0.6)
+
+        training_review.migrate_legacy_training_reviews(self.conn)
+
+        items = db.list_training_review_items(self.conn, status='missing_player')
+        stats = db.training_review_stats(self.conn)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['result_group_size'], 3)
+        self.assertEqual(stats['missing_player_hero'], 1)
+
+    def test_legacy_hero_queue_groups_by_match_and_screen_type(self):
+        first_gameplay = self.frame(1)
+        second_gameplay = self.frame(2)
+        scoreboard = self.frame(3)
+        next_select = self.frame(4)
+        next_gameplay = self.frame(5)
+        values = [
+            (first_gameplay, 'in_match', 'gameplay', '3v3'),
+            (second_gameplay, 'in_match', 'gameplay', '3v3'),
+            (scoreboard, 'in_match', 'scoreboard', '3v3'),
+            (next_select, 'pre_match', 'hero_select_bp', '3v3'),
+            (next_gameplay, 'in_match', 'gameplay', '3v3'),
+        ]
+        for frame_id, context, screen_type, mode in values:
+            db.save_annotation(
+                self.conn,
+                frame_id,
+                {
+                    'content_family': 'vainglory',
+                    'game_context': context,
+                    'screen_type': screen_type,
+                    'game_mode': mode,
+                },
+                status='complete',
+            )
+        training_review.migrate_legacy_training_reviews(self.conn)
+
+        items = db.list_legacy_hero_review_items(self.conn)
+        gameplay_items = db.list_legacy_hero_review_items(
+            self.conn, streamer='测试主播', screen_type='gameplay_hud'
+        )
+        stats = db.legacy_hero_review_stats(self.conn)
+
+        self.assertEqual(len(items), 3)
+        self.assertEqual(len(gameplay_items), 2)
+        self.assertEqual(
+            sorted(item['legacy_hero_group_size'] for item in gameplay_items), [1, 2]
+        )
+        self.assertTrue(
+            all(
+                item['legacy_hero_screen_type'] == 'gameplay_hud'
+                for item in gameplay_items
+            )
+        )
+        self.assertEqual(stats['remaining_groups'], 3)
+        self.assertEqual(stats['remaining_frames'], 4)
+        self.assertEqual(stats['by_streamer'][0]['streamer'], '测试主播')
+
+        representative = next(
+            item for item in gameplay_items if item['legacy_hero_group_size'] == 2
+        )
+        slots = [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.1 + slot * 0.05,
+                    'y': 0.1 if side == 'left' else 0.3,
+                    'w': 0.04,
+                    'h': 0.04,
+                },
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+        db.replace_training_review_hero_layout(
+            self.conn,
+            frame_id=representative['frame_id'],
+            screen_type='gameplay_hud',
+            team_size=3,
+            method='manual-circle-v1',
+            slots=slots,
+        )
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=representative['frame_id'],
+            labels=[
+                {
+                    'side': value['side'],
+                    'slot': value['slot'],
+                    'hero_label': 'hero-{}'.format(index),
+                }
+                for index, value in enumerate(slots)
+            ],
+            allowed_labels={'hero-{}'.format(index) for index in range(len(slots))},
+        )
+
+        remaining = db.list_legacy_hero_review_items(
+            self.conn, screen_type='gameplay_hud'
+        )
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]['legacy_hero_group_size'], 1)
+
 
 class TestTrainingReviewStorage(TrainingReviewTestCase):
+    def test_review_queue_prioritizes_aram_evidence(self):
+        normal = self.frame(1)
+        inferred_aram = self.frame(2)
+        aram_select = self.frame(3)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=normal,
+            source_type='worker',
+            source_id='normal',
+            source_created_at=300,
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=inferred_aram,
+            source_type='worker',
+            source_id='inferred-aram',
+            suggestions={'match_mode': {'label': 'aram', 'confidence': 0.8}},
+            source_created_at=200,
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=aram_select,
+            source_type='worker',
+            source_id='aram-select',
+            suggestions={'hero_select': {'label': 'select_aram', 'confidence': 0.8}},
+            source_created_at=100,
+        )
+
+        pending = db.list_training_review_items(self.conn, status='pending')
+        needs_review = db.list_training_review_items(self.conn, status='needs_review')
+
+        self.assertEqual(
+            [item['frame_id'] for item in pending], [aram_select, inferred_aram, normal]
+        )
+        self.assertEqual(
+            [item['frame_id'] for item in needs_review],
+            [aram_select, inferred_aram, normal],
+        )
+
+    def test_review_queue_uses_source_time_then_video_offset(self):
+        earlier_offset = self.frame(1)
+        older_source = self.frame(2)
+        later_offset = self.frame(3)
+        for frame_id, source_created_at, at_ms in (
+            (earlier_offset, 200, 1_000),
+            (older_source, 100, 9_000),
+            (later_offset, 200, 2_000),
+        ):
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id=f'source-{frame_id}',
+                metadata={'at_ms': at_ms},
+                source_created_at=source_created_at,
+            )
+
+        pending = db.list_training_review_items(self.conn, status='pending')
+
+        self.assertEqual(
+            [item['frame_id'] for item in pending],
+            [later_offset, earlier_offset, older_source],
+        )
+
+    def test_review_queue_prioritizes_frames_from_confirmed_aram_video(self):
+        confirmed = self.frame(1)
+        same_video = self.frame(2)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=confirmed,
+            source_type='worker',
+            source_id='confirmed-aram',
+        )
+        db.save_training_review(
+            self.conn,
+            frame_id=confirmed,
+            match_flow_label='match_flow',
+            match_mode_label='aram',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label='none',
+            status='confirmed',
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=same_video,
+            source_type='worker',
+            source_id='same-video',
+            source_created_at=100,
+        )
+
+        unrelated_video = db.upsert_video(
+            self.conn,
+            remote_path='/nas/unrelated.flv',
+            streamer='其他主播',
+            room_id='2',
+            filename='unrelated.flv',
+            duration_seconds=100,
+            size_bytes=1,
+        )
+        unrelated_path = self.root / 'unrelated.jpg'
+        unrelated_path.write_bytes(b'unrelated-frame')
+        unrelated = db.add_frames(
+            self.conn,
+            unrelated_video,
+            [
+                {
+                    'timestamp_ms': 1_000,
+                    'width': 1280,
+                    'height': 720,
+                    'sha256': 'f' * 64,
+                    'phash': '',
+                    'frame_path': str(unrelated_path),
+                    'thumb_path': '',
+                    'strategy': 'test',
+                    'model_source': '',
+                    'model_confidence': None,
+                }
+            ],
+        )[0]
+        db.add_training_review_source(
+            self.conn,
+            frame_id=unrelated,
+            source_type='worker',
+            source_id='unrelated',
+            source_created_at=200,
+        )
+
+        pending = db.list_training_review_items(self.conn, status='pending')
+
+        self.assertEqual(
+            [item['frame_id'] for item in pending], [same_video, unrelated]
+        )
+
+    def test_hero_select_variant_is_saved_and_validated(self):
+        frame_id = self.frame(1)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='part-1:1000:hero-select',
+        )
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='not_match_flow',
+            match_mode_label=None,
+            hero_select_label='select_3v3',
+            hero_select_variant='blind',
+            result_panel_label='no_result_panel',
+            hero_layout_label='none',
+            status='confirmed',
+        )
+
+        self.assertEqual(reviewed['hero_select_variant'], 'blind')
+
+        with self.assertRaisesRegex(ValueError, '英雄选择类型'):
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='not_match_flow',
+                match_mode_label=None,
+                hero_select_label='not_select',
+                hero_select_variant='bp',
+                result_panel_label='no_result_panel',
+                hero_layout_label='none',
+                status='confirmed',
+            )
+
+        with self.assertRaisesRegex(ValueError, '大乱斗'):
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='not_match_flow',
+                match_mode_label=None,
+                hero_select_label='select_aram',
+                hero_select_variant='bp',
+                result_panel_label='no_result_panel',
+                hero_layout_label='none',
+                status='confirmed',
+            )
+
+    def test_hero_select_visibility_is_saved_and_only_applies_to_selection(self):
+        frame_id = self.frame(1)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='part-1:1000:hero-select-visibility',
+        )
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='not_match_flow',
+            match_mode_label=None,
+            hero_select_label='select_aram',
+            hero_select_variant='random',
+            hero_select_visibility='occluded',
+            result_panel_label='no_result_panel',
+            hero_layout_label='none',
+            status='confirmed',
+        )
+
+        self.assertEqual(reviewed['hero_select_visibility'], 'occluded')
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='not_match_flow',
+            match_mode_label=None,
+            hero_select_label='not_select',
+            hero_select_visibility='occluded',
+            result_panel_label='no_result_panel',
+            hero_layout_label='none',
+            status='confirmed',
+        )
+        self.assertIsNone(reviewed['hero_select_visibility'])
+
+        with self.assertRaisesRegex(ValueError, '英雄选择画面状态无效'):
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='not_match_flow',
+                match_mode_label=None,
+                hero_select_label='select_3v3',
+                hero_select_variant='blind',
+                hero_select_visibility='covered',
+                result_panel_label='no_result_panel',
+                hero_layout_label='none',
+                status='confirmed',
+            )
+
     def test_unreviewed_and_explicit_negative_are_distinct(self):
         frame_id = self.frame(1)
         db.add_training_review_source(
@@ -250,14 +647,19 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             match_mode_label='unreadable',
             hero_select_label='not_select',
             result_panel_label='result_panel',
+            panel_render_state='translucent',
             ocr_usable='no',
             result_occlusion='occluded',
             occluder_types=[
-                'system_device_ui', 'game_ui', 'platform_ui', 'ad_watermark'
+                'system_device_ui',
+                'game_ui',
+                'platform_ui',
+                'ad_watermark',
             ],
             status='confirmed',
         )
 
+        self.assertEqual(reviewed['panel_render_state'], 'translucent')
         self.assertEqual(reviewed['ocr_usable'], 'no')
         self.assertEqual(reviewed['result_occlusion'], 'occluded')
         self.assertEqual(
@@ -272,15 +674,67 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             match_mode_label=None,
             hero_select_label='not_select',
             result_panel_label='no_result_panel',
+            panel_render_state='translucent',
             ocr_usable='no',
             result_occlusion='occluded',
             occluder_types=['platform_ui'],
             status='confirmed',
         )
 
+        self.assertEqual(reviewed['panel_render_state'], 'clear')
         self.assertEqual(reviewed['ocr_usable'], 'yes')
         self.assertEqual(reviewed['result_occlusion'], 'none')
         self.assertEqual(reviewed['occluder_types'], [])
+
+    def test_scoreboard_can_be_marked_as_translucent(self):
+        frame_id = self.frame(1)
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='unreadable',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label='scoreboard',
+            panel_render_state='translucent',
+            status='partial',
+        )
+
+        self.assertEqual(reviewed['panel_render_state'], 'translucent')
+
+    def test_hud_can_be_marked_as_translucent(self):
+        frame_id = self.frame(1)
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='unreadable',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label='gameplay_hud',
+            panel_render_state='translucent',
+            status='partial',
+        )
+
+        self.assertEqual(reviewed['panel_render_state'], 'translucent')
+
+    def test_panel_render_state_rejects_unknown_values(self):
+        frame_id = self.frame(1)
+
+        with self.assertRaisesRegex(ValueError, '面板显示状态无效'):
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='match_flow',
+                match_mode_label='unreadable',
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+                hero_layout_label='scoreboard',
+                panel_render_state='blurred',
+                status='partial',
+            )
 
     def test_hero_select_and_result_panel_cannot_both_be_positive(self):
         frame_id = self.frame(1)
@@ -315,9 +769,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
     def test_confirmed_result_without_player_returns_to_review_queue(self):
         result_frame = self.frame(1)
         pending_frame = self.frame(2)
-        db.save_box(
-            self.conn, result_frame, 'result_panel', 0.1, 0.2, 0.8, 0.6
-        )
+        db.save_box(self.conn, result_frame, 'result_panel', 0.1, 0.2, 0.8, 0.6)
         db.save_training_review(
             self.conn,
             frame_id=result_frame,
@@ -334,22 +786,15 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             source_id='part-1:2000:pending',
         )
 
-        missing = db.list_training_review_items(
-            self.conn, status='missing_player'
-        )
-        needs_review = db.list_training_review_items(
-            self.conn, status='needs_review'
-        )
+        missing = db.list_training_review_items(self.conn, status='missing_player')
+        needs_review = db.list_training_review_items(self.conn, status='needs_review')
 
         self.assertEqual([item['frame_id'] for item in missing], [result_frame])
         self.assertTrue(missing[0]['needs_player_hero_review'])
         self.assertEqual(
-            [item['frame_id'] for item in needs_review],
-            [result_frame, pending_frame],
+            [item['frame_id'] for item in needs_review], [result_frame, pending_frame]
         )
-        self.assertEqual(db.training_review_stats(self.conn)[
-            'missing_player_hero'
-        ], 1)
+        self.assertEqual(db.training_review_stats(self.conn)['missing_player_hero'], 1)
 
         slots = [
             {
@@ -377,11 +822,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             self.conn,
             frame_id=result_frame,
             labels=[
-                {
-                    'side': slot['side'],
-                    'slot': slot['slot'],
-                    'hero_label': 'Adagio',
-                }
+                {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
                 for slot in slots
             ],
             allowed_labels={'Adagio'},
@@ -404,9 +845,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
         )
         reviewed = db.get_training_review_item(self.conn, result_frame)
         self.assertFalse(reviewed['needs_player_hero_review'])
-        self.assertEqual(db.training_review_stats(self.conn)[
-            'missing_player_hero'
-        ], 0)
+        self.assertEqual(db.training_review_stats(self.conn)['missing_player_hero'], 0)
 
     def test_confirmed_scoreboard_without_player_returns_to_review_queue(self):
         frame_id = self.frame(3)
@@ -431,11 +870,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             for slot in range(1, 4)
         ]
         labels = [
-            {
-                'side': slot['side'],
-                'slot': slot['slot'],
-                'hero_label': 'Adagio',
-            }
+            {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
             for slot in slots
         ]
         db.replace_training_review_hero_layout(
@@ -447,10 +882,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             slots=slots,
         )
         db.save_training_review_hero_lineup(
-            self.conn,
-            frame_id=frame_id,
-            labels=labels,
-            allowed_labels={'Adagio'},
+            self.conn, frame_id=frame_id, labels=labels, allowed_labels={'Adagio'}
         )
         db.save_training_review(
             self.conn,
@@ -463,10 +895,20 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             status='confirmed',
         )
 
-        missing = db.list_training_review_items(
-            self.conn, status='missing_player'
-        )
+        missing = db.list_training_review_items(self.conn, status='missing_player')
         self.assertEqual([item['frame_id'] for item in missing], [frame_id])
+
+        unreadable = db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=labels,
+            allowed_labels={'Adagio'},
+            player_status='unreadable',
+        )
+        self.assertEqual(unreadable['player_status'], 'unreadable')
+        self.assertEqual(
+            db.list_training_review_items(self.conn, status='missing_player'), []
+        )
 
         db.save_training_review_hero_lineup(
             self.conn,
@@ -503,10 +945,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
                 'match_flow': {'label': 'match_flow', 'confidence': 0.9},
                 'match_mode': {'label': 'aram', 'confidence': 0.7},
                 'hero_select': {'label': 'not_select', 'confidence': 0.9},
-                'result_panel': {
-                    'label': 'no_result_panel',
-                    'confidence': 0.8,
-                },
+                'result_panel': {'label': 'no_result_panel', 'confidence': 0.8},
             },
             'suggested_boxes': [],
             'model_outputs': [{'model_version': 'multi-v2'}],
@@ -522,18 +961,14 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         nas = FakeNas(image)
         item = self.unified_item(image)
 
-        result = worker_candidates.sync_worker_candidates(
-            self.conn, nas, [item]
-        )
+        result = worker_candidates.sync_worker_candidates(self.conn, nas, [item])
 
         self.assertEqual(result['inserted'], 1)
         self.assertEqual(result['downloaded'], 1)
         rows = db.list_training_review_items(self.conn, status='pending')
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]['match_flow_label'])
-        self.assertEqual(
-            rows[0]['suggestions']['match_flow']['label'], 'match_flow'
-        )
+        self.assertEqual(rows[0]['suggestions']['match_flow']['label'], 'match_flow')
         self.assertEqual(rows[0]['source_count'], 1)
 
     def test_confirmed_unified_labels_are_pushed_as_one_sidecar(self):
@@ -542,8 +977,9 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         worker_candidates.sync_worker_candidates(
             self.conn, nas, [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(
-            self.conn, status='pending')[0]['frame_id']
+        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
+            'frame_id'
+        ]
         db.save_training_review(
             self.conn,
             frame_id=frame_id,
@@ -563,6 +999,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         self.assertEqual(
             review['result_quality'],
             {
+                'panel_render_state': 'clear',
                 'ocr_usable': 'yes',
                 'result_occlusion': 'none',
                 'occluder_types': [],
@@ -572,14 +1009,63 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         source = db.get_training_review_item(self.conn, frame_id)['sources'][0]
         self.assertEqual(source['sync_state'], 'clean')
 
+    def test_hero_select_variant_round_trips_through_nas_sidecar(self):
+        image = self.candidate_image()
+        nas = ReviewNas(image)
+        worker_candidates.sync_worker_candidates(
+            self.conn, nas, [self.unified_item(image)]
+        )
+        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
+            'frame_id'
+        ]
+        db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='not_match_flow',
+            match_mode_label=None,
+            hero_select_label='select_5v5',
+            hero_select_variant='bp',
+            hero_select_visibility='occluded',
+            result_panel_label='no_result_panel',
+            hero_layout_label='none',
+            status='confirmed',
+        )
+
+        pushed = worker_candidates.push_training_review_reviews(self.conn, nas)
+        review = nas.reviews[0][1]
+        self.assertEqual(pushed['reviews_pushed'], 1)
+        self.assertEqual(review['labels']['hero_select_variant'], 'bp')
+        self.assertEqual(review['labels']['hero_select_visibility'], 'occluded')
+
+        with self.conn:
+            self.conn.execute(
+                'UPDATE training_review_items SET hero_select_variant=NULL, '
+                'hero_select_visibility=NULL, '
+                "review_status='pending' WHERE frame_id = ?",
+                (frame_id,),
+            )
+            self.conn.execute(
+                "UPDATE training_review_sources SET sync_state='clean', "
+                "remote_review_hash='' WHERE frame_id = ?",
+                (frame_id,),
+            )
+
+        pulled = worker_candidates.pull_training_review_reviews(self.conn, [review])
+
+        self.assertEqual(pulled['reviews_pulled'], 1)
+        restored = db.get_training_review_item(self.conn, frame_id)
+        self.assertEqual(restored['hero_select_variant'], 'bp')
+        self.assertEqual(restored['hero_select_visibility'], 'occluded')
+
     def test_confirmed_hero_circles_and_labels_are_pushed_with_sidecar(self):
         image = self.candidate_image()
         nas = ReviewNas(image)
         worker_candidates.sync_worker_candidates(
             self.conn, nas, [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(
-            self.conn, status='pending')[0]['frame_id']
+        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
+            'frame_id'
+        ]
         slots = [
             {
                 'side': side,
@@ -606,11 +1092,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
             self.conn,
             frame_id=frame_id,
             labels=[
-                {
-                    'side': slot['side'],
-                    'slot': slot['slot'],
-                    'hero_label': 'Adagio',
-                }
+                {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
                 for slot in slots
             ],
             allowed_labels={'Adagio'},
@@ -632,21 +1114,17 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
 
         self.assertEqual(result['reviews_pushed'], 1)
         review = nas.reviews[0][1]
-        self.assertEqual(
-            review['labels']['hero_layout_label'], 'gameplay_hud'
-        )
+        self.assertEqual(review['labels']['hero_layout_label'], 'gameplay_hud')
         self.assertEqual(review['hero_lineup']['team_size'], 3)
         self.assertEqual(len(review['hero_lineup']['slots']), 6)
-        self.assertEqual(
-            review['hero_lineup']['slots'][0]['hero_label'], 'Adagio'
-        )
+        self.assertEqual(review['hero_lineup']['slots'][0]['hero_label'], 'Adagio')
         self.assertEqual(review['hero_lineup']['player_side'], 'left')
         self.assertEqual(review['hero_lineup']['player_slot'], 1)
+        self.assertEqual(review['hero_lineup']['player_status'], 'identified')
 
         with self.conn:
             self.conn.execute(
-                'DELETE FROM training_review_hero_slots WHERE frame_id = ?',
-                (frame_id,),
+                'DELETE FROM training_review_hero_slots WHERE frame_id = ?', (frame_id,)
             )
             self.conn.execute(
                 'DELETE FROM training_review_hero_lineups WHERE frame_id = ?',
@@ -665,22 +1143,17 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
                 (frame_id,),
             )
 
-        pulled = worker_candidates.pull_training_review_reviews(
-            self.conn, [review]
-        )
+        pulled = worker_candidates.pull_training_review_reviews(self.conn, [review])
 
         self.assertEqual(pulled['reviews_pulled'], 1)
         restored = db.get_training_review_item(self.conn, frame_id)
         self.assertEqual(restored['hero_layout_label'], 'gameplay_hud')
-        restored_lineup = db.get_training_review_hero_lineup(
-            self.conn, frame_id
-        )
+        restored_lineup = db.get_training_review_hero_lineup(self.conn, frame_id)
         self.assertEqual(restored_lineup['review_status'], 'confirmed')
-        self.assertEqual(
-            restored_lineup['slots'][0]['confirmed_label'], 'Adagio'
-        )
+        self.assertEqual(restored_lineup['slots'][0]['confirmed_label'], 'Adagio')
         self.assertEqual(restored_lineup['player_side'], 'left')
         self.assertEqual(restored_lineup['player_slot'], 1)
+        self.assertEqual(restored_lineup['player_status'], 'identified')
 
     def test_remote_unified_review_does_not_overwrite_dirty_local_labels(self):
         image = self.candidate_image()
@@ -688,8 +1161,9 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         worker_candidates.sync_worker_candidates(
             self.conn, nas, [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(
-            self.conn, status='pending')[0]['frame_id']
+        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
+            'frame_id'
+        ]
         db.save_training_review(
             self.conn,
             frame_id=frame_id,
@@ -715,9 +1189,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
             'reviewed_at': '2026-08-09T12:00:00',
         }
 
-        result = worker_candidates.pull_training_review_reviews(
-            self.conn, [remote]
-        )
+        result = worker_candidates.pull_training_review_reviews(self.conn, [remote])
 
         self.assertEqual(result['review_conflicts'], 1)
         item = db.get_training_review_item(self.conn, frame_id)
@@ -729,8 +1201,9 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         worker_candidates.sync_worker_candidates(
             self.conn, FakeNas(image), [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(
-            self.conn, status='pending')[0]['frame_id']
+        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
+            'frame_id'
+        ]
         remote = {
             'schema_version': 2,
             'source_ids': ['part-7:12000:test'],
@@ -744,6 +1217,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
             },
             'result_box': {'x': 0.1, 'y': 0.2, 'w': 0.8, 'h': 0.6},
             'result_quality': {
+                'panel_render_state': 'translucent',
                 'ocr_usable': 'no',
                 'result_occlusion': 'occluded',
                 'occluder_types': ['system_device_ui'],
@@ -752,14 +1226,13 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
             'reviewed_at': '2026-08-09T12:00:00',
         }
 
-        result = worker_candidates.pull_training_review_reviews(
-            self.conn, [remote]
-        )
+        result = worker_candidates.pull_training_review_reviews(self.conn, [remote])
 
         self.assertEqual(result['reviews_pulled'], 1)
         item = db.get_training_review_item(self.conn, frame_id)
         self.assertEqual(item['result_panel_label'], 'result_panel')
         self.assertIn('result_panel', item['boxes'])
+        self.assertEqual(item['panel_render_state'], 'translucent')
         self.assertEqual(item['ocr_usable'], 'no')
         self.assertEqual(item['result_occlusion'], 'occluded')
         self.assertEqual(item['occluder_types'], ['system_device_ui'])
@@ -773,6 +1246,16 @@ class ResultArchiveNas:
     def read_result_frame(self, _relative_path: str) -> bytes:
         self.downloads += 1
         return self.content
+
+
+class MultipleResultArchiveNas:
+    def __init__(self, content_by_path):
+        self.content_by_path = content_by_path
+        self.downloads = 0
+
+    def read_result_frame(self, relative_path: str) -> bytes:
+        self.downloads += 1
+        return self.content_by_path[relative_path]
 
 
 class TestResultArchiveImport(TrainingReviewTestCase):
@@ -794,6 +1277,7 @@ class TestResultArchiveImport(TrainingReviewTestCase):
                 'anchor_name': '测试主播',
                 'room_id': 123,
                 'title': '测试直播',
+                'session_started_at': 1_765_000_000,
             }
         ]
 
@@ -826,24 +1310,61 @@ class TestResultArchiveImport(TrainingReviewTestCase):
         self.assertEqual(
             items[0]['suggestions']['result_panel']['label'], 'result_panel'
         )
+        self.assertEqual(items[0]['suggestions']['match_flow']['label'], 'match_flow')
+        self.assertEqual(items[0]['suggestions']['match_mode']['label'], '3v3')
         self.assertEqual(
-            items[0]['suggestions']['match_flow']['label'], 'match_flow'
+            items[0]['sources'][0]['metadata']['suggested_boxes'][0]['w'], 0.8
         )
-        self.assertEqual(
-            items[0]['suggestions']['match_mode']['label'], '3v3'
-        )
-        self.assertEqual(
-            items[0]['sources'][0]['metadata']['suggested_boxes'][0]['w'],
-            0.8,
-        )
+        self.assertEqual(items[0]['sources'][0]['source_created_at'], 1_765_000_000)
 
         candidates[0]['hero_slot_count'] = 8
         result_archive.sync_result_archive(self.conn, nas, candidates)
         updated = db.list_training_review_items(self.conn, status='pending')[0]
-        self.assertEqual(
-            updated['suggestions']['match_mode']['label'], '5v5'
-        )
+        self.assertEqual(updated['suggestions']['match_mode']['label'], '5v5')
         self.assertEqual(nas.downloads, 1)
+
+    def test_duplicate_match_records_import_one_result_candidate(self):
+        paths = {}
+        for name, color in (('first.png', (30, 60, 90)), ('second.png', (31, 61, 91))):
+            buffer = io.BytesIO()
+            Image.new('RGB', (64, 36), color).save(buffer, format='PNG')
+            paths[name] = buffer.getvalue()
+        nas = MultipleResultArchiveNas(paths)
+        common = {
+            'session_id': 9,
+            'part_id': 11,
+            'part_index': 2,
+            'duration_seconds': 900,
+            'game_mode': '3v3',
+            'hero_slot_count': 6,
+            'confidence': 0.87,
+            'anchor_name': '测试主播',
+            'room_id': 123,
+            'title': '测试直播',
+        }
+        candidates = [
+            {
+                **common,
+                'match_id': 42,
+                'result_at_ms': 900_000,
+                'result_frame_path': 'first.png',
+            },
+            {
+                **common,
+                'match_id': 43,
+                'result_at_ms': 900_250,
+                'result_frame_path': 'second.png',
+            },
+        ]
+
+        result = result_archive.sync_result_archive(self.conn, nas, candidates)
+
+        self.assertEqual(result['inserted'], 1)
+        self.assertEqual(result['duplicates_skipped'], 1)
+        self.assertEqual(nas.downloads, 1)
+        self.assertEqual(
+            len(db.list_training_review_items(self.conn, status='pending')), 1
+        )
 
 
 if __name__ == '__main__':

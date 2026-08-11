@@ -18,6 +18,8 @@
     <string>4</string>
     <string>--execution-provider</string>
     <string>coreml</string>
+    <string>--model-package</string>
+    <string>__WORKER_MODEL_PACKAGE_DIR__</string>
     <string>--cache-dir</string>
     <string>__WORKER_CACHE_DIR__</string>
     <string>--concurrency</string>

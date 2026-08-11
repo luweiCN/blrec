@@ -225,6 +225,10 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             row['name']
             for row in await database.fetchall('PRAGMA table_info(vainglory_scan_jobs)')
         }
+        vainglory_part_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(vainglory_part_jobs)')
+        }
         vainglory_archive_columns = {
             row['name']
             for row in await database.fetchall(
@@ -243,6 +247,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         }
         assert 'cancellation_generation' in session_columns
         assert 'stats_included' in vainglory_scan_columns
+        assert 'analysis_summary_json' in vainglory_part_columns
         assert {
             'content_classification',
             'classification_reason',

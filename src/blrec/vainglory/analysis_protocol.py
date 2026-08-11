@@ -37,6 +37,9 @@ _TRAINING_CANDIDATE_LABELS = {
     'key_screen_review': {'result_page', 'scoreboard', 'other'},
     'result_detector': {'result_panel', 'no_result_panel'},
     'mode_gate': {'blocked_gate', 'open_entrance', 'no_evidence'},
+    'match_flow': {'match_flow', 'not_match_flow'},
+    'hero_select': {'not_select', 'select_3v3', 'select_aram', 'select_5v5'},
+    'match_mode': {'3v3', 'aram', '5v5'},
 }
 
 

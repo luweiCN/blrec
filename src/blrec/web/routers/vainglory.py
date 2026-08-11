@@ -90,6 +90,41 @@ class AnalysisWorkerHeartbeatRequest(ApiModel):
     runtime_status: Optional[Dict[str, Any]] = None
 
 
+class AnalysisTimelineSegmentRequest(ApiModel):
+    start_ms: int = Field(..., ge=0)
+    end_ms: int = Field(..., ge=0)
+    mode: str = Field('unknown', max_length=32)
+
+
+class AnalysisResultWindowRequest(ApiModel):
+    start_ms: int = Field(..., ge=0)
+    end_ms: int = Field(..., ge=0)
+    focus_ms: Optional[int] = Field(None, ge=0)
+    mode: str = Field('unknown', max_length=32)
+
+
+class AnalysisWorkerSummaryRequest(ApiModel):
+    schema_version: Literal[1]
+    pipeline: str = Field(..., min_length=1, max_length=40)
+    model_package_id: str = Field('', max_length=100)
+    sampled_frames: int = Field(0, ge=0)
+    keyframe_frames: int = Field(0, ge=0)
+    seek_fill_frames: int = Field(0, ge=0)
+    decoded_result_frames: int = Field(0, ge=0)
+    result_hit_frames: int = Field(0, ge=0)
+    result_candidate_count: int = Field(0, ge=0)
+    hud_lineup_candidate_count: int = Field(0, ge=0)
+    timeline_counts: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    timeline_segments: List[AnalysisTimelineSegmentRequest] = Field(
+        default_factory=list, max_items=100
+    )
+    result_windows: List[AnalysisResultWindowRequest] = Field(
+        default_factory=list, max_items=100
+    )
+    training_candidate_counts: Dict[str, int] = Field(default_factory=dict)
+    timings_seconds: Dict[str, float] = Field(default_factory=dict)
+
+
 class AnalysisWorkerCompleteRequest(ApiModel):
     kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
     item_id: int = Field(..., ge=1)
@@ -98,6 +133,7 @@ class AnalysisWorkerCompleteRequest(ApiModel):
     heroes: List[Dict[str, Any]] = Field(default_factory=list)
     recorded_player: Optional[Dict[str, Any]] = None
     training_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    analysis_summary: Optional[AnalysisWorkerSummaryRequest] = None
 
 
 class AnalysisWorkerFailureRequest(ApiModel):
@@ -808,6 +844,11 @@ async def complete_analysis_work(
                 decode_matches(payload.matches),
                 candidate_count=payload.candidate_count,
                 training_candidates=training_candidates,
+                analysis_summary=(
+                    None
+                    if payload.analysis_summary is None
+                    else payload.analysis_summary.dict(by_alias=True)
+                ),
             )
         elif payload.kind == 'match_rerun':
             if len(payload.matches) != 1:

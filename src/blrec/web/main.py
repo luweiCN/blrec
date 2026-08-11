@@ -362,6 +362,9 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                 'totalCandidates': value.total_candidates,
                 'rejectedCandidates': value.rejected_candidates,
                 'recognizedMatches': value.recognized_matches,
+                'modelPackageId': value.model_package_id,
+                'keyframeFrames': value.keyframe_frames,
+                'seekFillFrames': value.seek_fill_frames,
                 'bvid': value.bvid,
                 'archivePage': value.archive_page,
                 'localVideoAvailable': value.local_video_available,
@@ -410,6 +413,7 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                     'matchPreviews': [
                         match_preview(preview) for preview in value.match_previews
                     ],
+                    'analysisSummary': value.analysis_summary,
                 }
                 for value in queue_status.recent_completions
             ],

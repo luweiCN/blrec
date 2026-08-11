@@ -43,6 +43,14 @@ class StagePrediction:
     stage_conf: float
     mode: int
     mode_conf: float
+    model_version: str = 'multi-v2'
+    match_flow_label: str = ''
+    match_flow_conf: float = 0.0
+    hero_select_label: str = ''
+    hero_select_conf: float = 0.0
+    match_mode_label: str = ''
+    match_mode_conf: float = 0.0
+    result_conf: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,7 @@ class ClassifiedObservation:
     stage_conf: float
     mode: int
     content: int
+    mode_conf: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -173,6 +182,7 @@ def smooth_stages(
                 stage_conf=min(observation.stage_conf, counts[stage] / len(neighbors)),
                 mode=observation.mode,
                 content=observation.content,
+                mode_conf=observation.mode_conf,
             )
         )
     return tuple(result)
@@ -329,6 +339,7 @@ def build_classified_windows(
     result_signal_pad_ms: int = 8_000,
     run_gap_ms: int = 20_000,
     run_modes: Optional[Dict[int, str]] = None,
+    skip_open_ended: bool = False,
 ) -> Tuple[ClassifiedResultWindow, ...]:
     if duration_ms <= 0:
         raise ValueError('video duration must be positive')
@@ -364,6 +375,15 @@ def build_classified_windows(
             for item in smoothed
             if item.at_ms > end_ms and item.at_ms <= end_ms + result_after_ms
         )
+        if skip_open_ended and not any(
+            item.at_ms > end_ms
+            and (
+                item.content != CONTENT_VAINGLORY
+                or item.stage in (STAGE_OUT_OF_MATCH, STAGE_TRANSITION)
+            )
+            for item in smoothed
+        ):
+            continue
         result_signals = tuple(
             item for item in following if item.stage in _STAGE_RESULT_SIGNALS
         )

@@ -33,13 +33,25 @@ blrec-analysis-worker run \
   --server http://192.168.50.24:2234 \
   --token-file /path/to/worker-token \
   --ocr-url http://127.0.0.1:18080 \
+  --model-package /path/to/unpacked/vg-vision-package \
   --execution-provider coreml
 ```
+
+`--model-package` 也可以通过 `BLREC_VISION_MODEL_PACKAGE` 指定。Worker 启动时会
+校验包状态、七个模型角色、类别顺序和每个 ONNX 的 SHA-256；不完整、未验收或被
+修改的模型包会直接拒绝加载，不会悄悄混用新旧模型。
+
+版本化模型包使用 `timeline-v2` 管线：一级时间线默认每 60 秒做一次关键帧粗扫，
+只在对局内／外状态发生变化的两个粗扫点之间补做 5 秒局部扫描。FFmpeg 跳过
+普通帧并保留源时间戳；结算检测不会跟着一级扫描逐帧
+运行，而只在时间线推断
+出的疑似结束窗口内以 4 FPS 扫描。最终选中的训练候选会回到原视频取高分辨率帧，
+低分辨率时间线图不直接作为主要训练素材。
 
 `deploy/macos/` 提供 launchd 模板。Worker 只通过版本化 HTTP 分析协议领任务和
 回传结果；缓存、日志与 token 均位于源码目录之外。
 
-新增候选任务同时改变共享分析协议，所以正式启用这批采样逻辑时需要先更新兼容
-新候选格式的 NAS Server，再更新 MacBook Pro Worker。只在 Vision Lab 中新增
-标注或训练模型，不需要更新 NAS。新模型通过验收并生成完整模型包后，仍需后续
-Worker 模型包加载器和影子管线接入；生成 ZIP 本身不等于已经部署。
+新管线会回传可选的模型包、关键帧／补帧、时间线分段、结算窗口和候选统计，所以
+正式启用时需要先更新兼容这些字段的 NAS Server，再更新 MacBook Pro Worker。
+旧 Worker 不发送新字段时仍能继续工作。只在 Vision Lab 中新增标注或重新训练，
+不需要更新 NAS；生成模型包 ZIP 本身也不等于已经部署。

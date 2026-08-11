@@ -209,6 +209,53 @@ class TestDetectionSplit(unittest.TestCase):
         self.assertEqual(split['val'], [1])
         self.assertEqual(split['test'], [])
 
+    def test_fixed_test_set_keeps_each_available_scoreboard_mode(self):
+        required = {'scoreboard', 'scoreboard:3v3', 'scoreboard:5v5', 'scoreboard:aram'}
+        samples = []
+        for video_id in range(1, 13):
+            samples.append(
+                {
+                    'video_id': video_id,
+                    'label': 'no_result_panel',
+                    'evaluation_groups': ['other_negative'],
+                }
+            )
+        for offset, mode in enumerate(('3v3', '5v5', 'aram')):
+            for duplicate in range(3):
+                samples.append(
+                    {
+                        'video_id': 20 + offset * 3 + duplicate,
+                        'label': 'no_result_panel',
+                        'evaluation_groups': ['scoreboard', f'scoreboard:{mode}'],
+                    }
+                )
+        for video_id in range(40, 46):
+            samples.append(
+                {
+                    'video_id': video_id,
+                    'label': 'result_panel',
+                    'evaluation_groups': ['result_panel'],
+                }
+            )
+
+        split = export.split_detection_by_video(
+            samples,
+            label_field='label',
+            positive_label='result_panel',
+            evaluation_group_field='evaluation_groups',
+            required_test_groups=tuple(sorted(required)),
+        )
+
+        for split_name in ('train', 'test'):
+            present = {
+                group
+                for sample in samples
+                if sample['video_id'] in split[split_name]
+                for group in sample['evaluation_groups']
+            }
+            self.assertTrue(required <= present)
+        self.assertFalse(set(split['train']) & set(split['test']))
+
 
 class TestUnifiedTrainingSnapshots(unittest.TestCase):
     def setUp(self):
@@ -229,21 +276,31 @@ class TestUnifiedTrainingSnapshots(unittest.TestCase):
         return db.add_frames(
             self.conn,
             video_id,
-            [{
-                'timestamp_ms': index * 1000,
-                'width': 1280,
-                'height': 720,
-                'sha256': f'{index + 1000:064x}',
-                'phash': '',
-                'frame_path': str(path),
-                'thumb_path': '',
-                'strategy': 'test',
-                'model_source': '',
-                'model_confidence': None,
-            }],
+            [
+                {
+                    'timestamp_ms': index * 1000,
+                    'width': 1280,
+                    'height': 720,
+                    'sha256': f'{index + 1000:064x}',
+                    'phash': '',
+                    'frame_path': str(path),
+                    'thumb_path': '',
+                    'strategy': 'test',
+                    'model_source': '',
+                    'model_confidence': None,
+                }
+            ],
         )[0]
 
-    def _save(self, frame_id, flow, mode, select, result='no_result_panel'):
+    def _save(
+        self,
+        frame_id,
+        flow,
+        mode,
+        select,
+        result='no_result_panel',
+        panel_render_state='clear',
+    ):
         db.add_training_review_source(
             self.conn,
             frame_id=frame_id,
@@ -259,6 +316,7 @@ class TestUnifiedTrainingSnapshots(unittest.TestCase):
             match_mode_label=mode,
             hero_select_label=select,
             result_panel_label=result,
+            panel_render_state=panel_render_state,
             status='confirmed',
         )
 
@@ -276,21 +334,24 @@ class TestUnifiedTrainingSnapshots(unittest.TestCase):
             )
             for mode in ('3v3', 'aram', '5v5'):
                 self._save(
-                    self._frame(video_id, index),
-                    'match_flow', mode, 'not_select')
+                    self._frame(video_id, index), 'match_flow', mode, 'not_select'
+                )
                 index += 1
             for select in ('select_3v3', 'select_aram', 'select_5v5'):
-                self._save(
-                    self._frame(video_id, index),
-                    'not_match_flow', None, select)
+                self._save(self._frame(video_id, index), 'not_match_flow', None, select)
                 index += 1
             self._save(
-                self._frame(video_id, index),
-                'not_match_flow', None, 'not_select')
+                self._frame(video_id, index), 'not_match_flow', None, 'not_select'
+            )
             index += 1
             self._save(
                 self._frame(video_id, index),
-                'match_flow', 'unreadable', 'not_select', 'result_panel')
+                'match_flow',
+                'unreadable',
+                'not_select',
+                'result_panel',
+                'translucent',
+            )
             index += 1
 
         snapshots = {
@@ -299,17 +360,157 @@ class TestUnifiedTrainingSnapshots(unittest.TestCase):
         }
 
         self.assertEqual(
-            snapshots['match_flow']['by_label'],
-            {'match_flow': 8, 'not_match_flow': 8},
+            snapshots['match_flow']['by_label'], {'match_flow': 8, 'not_match_flow': 8}
         )
         self.assertEqual(
-            set(snapshots['match_mode']['by_label']), {'3v3', 'aram', '5v5'})
+            set(snapshots['match_mode']['by_label']), {'3v3', 'aram', '5v5'}
+        )
         self.assertEqual(
             set(snapshots['hero_select']['by_label']),
             {'not_select', 'select_3v3', 'select_aram', 'select_5v5'},
         )
         self.assertEqual(snapshots['result_detector']['positive'], 2)
         self.assertEqual(snapshots['result_detector']['negative'], 14)
+        detector_samples = [
+            json.loads(line)
+            for line in (Path(snapshots['result_detector']['dir']) / 'samples.jsonl')
+            .read_text(encoding='utf-8')
+            .splitlines()
+        ]
+        self.assertEqual(
+            {
+                sample['panel_render_state']
+                for sample in detector_samples
+                if sample['detector_label'] == 'result_panel'
+            },
+            {'translucent'},
+        )
+
+    def test_same_result_event_exports_one_representative(self):
+        index = 100
+        for video_number in (1, 2):
+            video_id = db.upsert_video(
+                self.conn,
+                remote_path=f'/nas/result-{video_number}.flv',
+                streamer=str(video_number),
+                room_id=str(video_number),
+                filename=f'result-{video_number}.flv',
+                duration_seconds=100,
+                size_bytes=1,
+            )
+            result_frames = [
+                self._frame(video_id, index),
+                self._frame(video_id, index + 1),
+            ]
+            event_id = db.create_event(
+                self.conn, video_id, index * 1_000, (index + 1) * 1_000
+            )
+            db.assign_event(self.conn, result_frames, event_id)
+            for frame_id in result_frames:
+                self._save(
+                    frame_id, 'match_flow', 'unreadable', 'not_select', 'result_panel'
+                )
+            self._save(
+                self._frame(video_id, index + 2), 'not_match_flow', None, 'not_select'
+            )
+            index += 10
+
+        flow = training.export_snapshot(self.conn, 'match_flow')
+        detector = training.export_snapshot(self.conn, 'result_detector')
+
+        self.assertEqual(flow['by_label'], {'match_flow': 2, 'not_match_flow': 2})
+        self.assertEqual(detector['positive'], 2)
+        self.assertEqual(detector['negative'], 2)
+
+    def test_result_detector_keeps_scoreboards_through_cap_and_split(self):
+        index = 1
+        for video_number in range(1, 13):
+            video_id = db.upsert_video(
+                self.conn,
+                remote_path=f'/nas/other-{video_number}.flv',
+                streamer=str(video_number),
+                room_id=str(video_number),
+                filename=f'other-{video_number}.flv',
+                duration_seconds=100,
+                size_bytes=1,
+            )
+            self._save(
+                self._frame(video_id, index), 'not_match_flow', None, 'not_select'
+            )
+            index += 1
+
+        for mode_index, mode in enumerate(('3v3', '5v5', 'aram')):
+            for duplicate in range(3):
+                video_number = 20 + mode_index * 3 + duplicate
+                video_id = db.upsert_video(
+                    self.conn,
+                    remote_path=f'/nas/scoreboard-{video_number}.flv',
+                    streamer=str(video_number),
+                    room_id=str(video_number),
+                    filename=f'scoreboard-{video_number}.flv',
+                    duration_seconds=100,
+                    size_bytes=1,
+                )
+                frame_id = self._frame(video_id, index)
+                db.save_annotation(
+                    self.conn,
+                    frame_id,
+                    {
+                        'content_family': 'vainglory',
+                        'game_context': 'in_match',
+                        'screen_type': 'scoreboard',
+                        'game_mode': mode,
+                    },
+                    status='complete',
+                )
+                self._save(frame_id, 'match_flow', mode, 'not_select')
+                index += 1
+
+        for video_number in range(40, 46):
+            video_id = db.upsert_video(
+                self.conn,
+                remote_path=f'/nas/result-{video_number}.flv',
+                streamer=str(video_number),
+                room_id=str(video_number),
+                filename=f'result-{video_number}.flv',
+                duration_seconds=100,
+                size_bytes=1,
+            )
+            self._save(
+                self._frame(video_id, index),
+                'match_flow',
+                'unreadable',
+                'not_select',
+                'result_panel',
+            )
+            index += 1
+
+        detector = export.export_result_detector(
+            self.conn, max_negatives=9, version='result-detector-scoreboards'
+        )
+        samples = [
+            json.loads(line)
+            for line in (Path(detector['dir']) / 'samples.jsonl')
+            .read_text(encoding='utf-8')
+            .splitlines()
+        ]
+
+        self.assertEqual(detector['negative'], 9)
+        self.assertEqual(detector['by_evaluation_group']['scoreboard'], 9)
+        self.assertEqual(
+            set(detector['by_split_evaluation_group']['test']),
+            {
+                'result_panel',
+                'scoreboard',
+                'scoreboard:3v3',
+                'scoreboard:5v5',
+                'scoreboard:aram',
+            },
+        )
+        self.assertFalse(
+            {sample['video_id'] for sample in samples if sample['split'] == 'train'}
+            & {sample['video_id'] for sample in samples if sample['split'] == 'test'}
+        )
 
 
 if __name__ == '__main__':

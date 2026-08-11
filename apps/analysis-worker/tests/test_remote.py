@@ -9,7 +9,10 @@ from blrec_analysis_worker.remote import RemoteAnalysisWorker
 
 from blrec.vainglory.analyzer import (
     DenseScanResult,
+    ResultScanWindow,
     ScannedPart,
+    TimelinePoint,
+    TimelineSegment,
     TrainingCandidate,
     TrainingCandidateBox,
     VideoPart,
@@ -203,6 +206,25 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
             scanned = super().scan_part_cascade(part, **kwargs)
             return replace(
                 scanned,
+                model_package_id='vision-package-v1',
+                timeline_points=(
+                    TimelinePoint(
+                        target_ms=0,
+                        at_ms=400,
+                        sample_source='keyframe',
+                        stage=3,
+                        stage_confidence=0.9,
+                        match_flow_label='match_flow',
+                        match_flow_confidence=0.9,
+                        hero_select_label='not_select',
+                        hero_select_confidence=0.8,
+                        match_mode_label='3v3',
+                        match_mode_confidence=0.85,
+                    ),
+                ),
+                timeline_segments=(TimelineSegment(0, 20_000, '3v3'),),
+                result_windows=(ResultScanWindow(15_000, 30_000, '3v3', 20_000),),
+                keyframe_frames=1,
                 training_candidates=(
                     TrainingCandidate(
                         at_ms=12_000,
@@ -242,6 +264,13 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
     assert candidate['suggested_label'] == 'result_panel'
     assert candidate['suggested_boxes'][0]['type'] == 'result_panel'
     assert candidate['image_jpeg']
+    summary = clients[0].completed_payloads[0]['analysisSummary']
+    assert summary['modelPackageId'] == 'vision-package-v1'
+    assert summary['keyframeFrames'] == 1
+    assert summary['timelineSegments'] == [
+        {'startMs': 0, 'endMs': 20_000, 'mode': '3v3'}
+    ]
+    assert summary['trainingCandidateCounts'] == {'result_detector': 1}
 
 
 def test_worker_reports_unusable_video_as_structured_failure(tmp_path: Path) -> None:

@@ -13,10 +13,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from . import config, db, export
+from . import classification_preprocessing, config, db, export
 
 PROGRESS_PREFIX = '@@BLREC_TRAIN_PROGRESS@@'
 RESULT_PREFIX = '@@BLREC_TRAIN_RESULT@@'
+
+_CLASSIFICATION_INPUT = {
+    'imgsz': classification_preprocessing.CLASSIFICATION_INPUT_WIDTH,
+    'input_width': classification_preprocessing.CLASSIFICATION_INPUT_WIDTH,
+    'input_height': classification_preprocessing.CLASSIFICATION_INPUT_HEIGHT,
+}
 
 TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
     'match_flow': {
@@ -24,7 +30,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'kind': 'classify',
         'description': '低频判断当前画面是否属于一局比赛流程；看不清的样本不训练。',
         'epochs': 60,
-        'imgsz': 224,
+        **_CLASSIFICATION_INPUT,
         'base_model': 'yolov8n-cls.pt',
         'publish_name': 'match-flow-classifier-current.onnx',
         'recommended': '对局与非对局各至少 300 张，并覆盖多位主播和不同设备。',
@@ -35,10 +41,48 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'kind': 'classify',
         'description': '识别非英雄选择、3V3、大乱斗和 5V5 英雄选择界面。',
         'epochs': 60,
-        'imgsz': 224,
+        **_CLASSIFICATION_INPUT,
         'base_model': 'yolov8n-cls.pt',
         'publish_name': 'hero-select-classifier-current.onnx',
         'recommended': '三种英雄选择各至少 100 张，非英雄选择至少 300 张。',
+        'active': True,
+    },
+    'hero_avatar_detector': {
+        'name': '英雄头像位置检测',
+        'kind': 'detect',
+        'description': '在 HUD、积分板和结算界面中定位 6 个或 10 个英雄头像。',
+        'epochs': 100,
+        'imgsz': 960,
+        'base_model': 'yolov8n.pt',
+        'publish_name': 'hero-avatar-detector-current.onnx',
+        'recommended': '三类画面各至少 100 张，重点覆盖高分辨率 HUD 和不同设备。',
+        'active': True,
+    },
+    'hero_identity': {
+        'name': '英雄头像身份识别',
+        'kind': 'classify',
+        'description': '对已定位的单个头像判断是哪位英雄；看不清的头像不训练。',
+        'epochs': 80,
+        'imgsz': 160,
+        'input_width': 160,
+        'input_height': 160,
+        'base_model': 'yolov8n-cls.pt',
+        'publish_name': 'hero-identity-classifier-current.onnx',
+        'recommended': '57 位英雄均需覆盖，每位建议至少 50 个可读头像。',
+        'active': True,
+    },
+    'player_position': {
+        'name': '主播本人位置识别',
+        'kind': 'classify',
+        'description': (
+            '查看完整积分板或结算界面，判断主播本人位于哪一队、第几个头像；'
+            'HUD 不进入训练。'
+        ),
+        'epochs': 60,
+        **_CLASSIFICATION_INPUT,
+        'base_model': 'yolov8n-cls.pt',
+        'publish_name': 'player-position-classifier-current.onnx',
+        'recommended': '8 个有效位置各至少 30 张，并覆盖多位主播和不同设备。',
         'active': True,
     },
     'match_mode': {
@@ -46,7 +90,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'kind': 'classify',
         'description': '只对能看出地图的对局画面判断 3V3、大乱斗或 5V5。',
         'epochs': 60,
-        'imgsz': 224,
+        **_CLASSIFICATION_INPUT,
         'base_model': 'yolov8n-cls.pt',
         'publish_name': 'match-mode-classifier-current.onnx',
         'recommended': '每种模式至少 200 张，并覆盖地图区域、设备和遮挡差异。',
@@ -57,7 +101,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'kind': 'classify',
         'description': '构建非虚荣、游戏外、对局前、对局中、天赋、赛后和转场时间线。',
         'epochs': 60,
-        'imgsz': 224,
+        **_CLASSIFICATION_INPUT,
         'base_model': 'yolov8n-cls.pt',
         'publish_name': 'screen-state-classifier-current.onnx',
         'recommended': '每类至少 100 张并覆盖多个视频；对局中样本会自动限量。',
@@ -68,7 +112,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'kind': 'classify',
         'description': '识别 3V3、大乱斗、5V5 BP，并排除匹配确认等非 BP 画面。',
         'epochs': 60,
-        'imgsz': 224,
+        **_CLASSIFICATION_INPUT,
         'base_model': 'yolov8n-cls.pt',
         'publish_name': 'bp-classifier-current.onnx',
         'recommended': '每种 BP 至少 100 张，非 BP 至少 200 张，并覆盖多个主播。',
@@ -79,7 +123,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'kind': 'classify',
         'description': '区分赛后结算页、对局中计分板和其他易混淆画面。',
         'epochs': 60,
-        'imgsz': 224,
+        **_CLASSIFICATION_INPUT,
         'base_model': 'yolov8n-cls.pt',
         'publish_name': 'key-screen-classifier-current.onnx',
         'recommended': '结算页和计分板各 100 张以上，其他 hard negative 300 张以上。',
@@ -262,9 +306,7 @@ def _videos_by_label(
 def _training_review_labels(
     conn: Any, *, column: str, allowed: List[str]
 ) -> Dict[int, str]:
-    if column not in {
-        'match_flow_label', 'match_mode_label', 'hero_select_label'
-    }:
+    if column not in {'match_flow_label', 'match_mode_label', 'hero_select_label'}:
         raise ValueError('未知统一复核标签列')
     labels: Dict[int, str] = {}
     rows = conn.execute(
@@ -275,11 +317,317 @@ def _training_review_labels(
         f'AND r.{column} IS NOT NULL'
     ).fetchall()
     accepted = set(allowed)
+    duplicate_results = db.training_review_duplicate_result_frame_ids(conn)
     for row in rows:
+        if int(row['frame_id']) in duplicate_results:
+            continue
         label = str(row['label'])
         if label in accepted and Path(row['frame_path']).is_file():
             labels[int(row['frame_id'])] = label
     return labels
+
+
+def _result_detector_member_samples(
+    conn: Any, *, max_negatives: int = 1_500
+) -> List[Dict[str, Any]]:
+    """按下一次结算检测快照的优先级返回确定成员，不写导出目录。"""
+    members: Dict[int, Dict[str, Any]] = {}
+    rows = conn.execute(
+        'SELECT a.frame_id, a.screen_type, a.game_mode, f.video_id, '
+        'f.sha256, f.frame_path '
+        'FROM annotations a JOIN frames f ON f.id = a.frame_id '
+        "WHERE a.annotation_status = 'complete'"
+    ).fetchall()
+    for raw_row in rows:
+        row = dict(raw_row)
+        if not Path(row['frame_path']).is_file():
+            continue
+        frame_id = int(row['frame_id'])
+        box = db.get_boxes(conn, frame_id).get('result_panel')
+        if row['screen_type'] == 'result_page':
+            if not isinstance(box, dict):
+                continue
+            label = 'result_panel'
+        else:
+            label = 'no_result_panel'
+            box = None
+        members[frame_id] = {
+            **row,
+            'sample_id': f'f{frame_id:08d}',
+            'label': label,
+            'box': box,
+            'label_source': 'existing_human_annotation',
+            'scoreboard': row['screen_type'] in {'scoreboard', 'death_scoreboard'},
+        }
+
+    candidate_rows = conn.execute(
+        'SELECT c.frame_id, c.confirmed_label, c.boxes_json, f.video_id, '
+        'f.sha256, f.frame_path, a.screen_type, a.game_mode '
+        'FROM worker_candidate_items c '
+        'JOIN frames f ON f.id = c.frame_id '
+        'LEFT JOIN annotations a ON a.frame_id = f.id '
+        "WHERE c.task = 'result_detector' "
+        "AND c.review_status = 'confirmed' "
+        'AND c.confirmed_label IS NOT NULL '
+        "AND c.visual_condition != 'unreadable'"
+    ).fetchall()
+    for raw_row in candidate_rows:
+        row = dict(raw_row)
+        if not Path(row['frame_path']).is_file():
+            continue
+        label = str(row['confirmed_label'])
+        if label not in {'result_panel', 'no_result_panel'}:
+            continue
+        boxes = json.loads(row['boxes_json'] or '[]')
+        result_box = next(
+            (
+                box
+                for box in boxes
+                if isinstance(box, dict)
+                and (not box.get('type') or box.get('type') == 'result_panel')
+            ),
+            None,
+        )
+        if label == 'result_panel' and result_box is None:
+            continue
+        frame_id = int(row['frame_id'])
+        members[frame_id] = {
+            **row,
+            'sample_id': f'f{frame_id:08d}',
+            'label': label,
+            'box': result_box if label == 'result_panel' else None,
+            'label_source': 'worker_candidate_confirmed',
+            'scoreboard': row['screen_type'] in {'scoreboard', 'death_scoreboard'},
+        }
+
+    unified_rows = conn.execute(
+        'SELECT r.frame_id, r.result_panel_label, r.hero_layout_label, '
+        'r.match_mode_label, f.video_id, f.sha256, f.frame_path, '
+        'a.screen_type, a.game_mode '
+        'FROM training_review_items r '
+        'JOIN frames f ON f.id = r.frame_id '
+        'LEFT JOIN annotations a ON a.frame_id = f.id '
+        "WHERE r.review_status = 'confirmed' "
+        'AND r.result_panel_label IS NOT NULL'
+    ).fetchall()
+    for raw_row in unified_rows:
+        row = dict(raw_row)
+        frame_id = int(row['frame_id'])
+        label = str(row['result_panel_label'])
+        if label == 'unreadable' or not Path(row['frame_path']).is_file():
+            members.pop(frame_id, None)
+            continue
+        box = db.get_boxes(conn, frame_id).get('result_panel')
+        if label == 'result_panel' and not isinstance(box, dict):
+            members.pop(frame_id, None)
+            continue
+        members[frame_id] = {
+            **row,
+            'sample_id': f'f{frame_id:08d}',
+            'label': label,
+            'box': box if label == 'result_panel' else None,
+            'label_source': 'training_review_confirmed',
+            'scoreboard': (
+                row['hero_layout_label'] == 'scoreboard'
+                or row['screen_type'] in {'scoreboard', 'death_scoreboard'}
+            ),
+        }
+
+    for frame_id in db.training_review_duplicate_result_frame_ids(conn):
+        if members.get(frame_id, {}).get('label') == 'result_panel':
+            members.pop(frame_id, None)
+    positives = [
+        sample for sample in members.values() if sample['label'] == 'result_panel'
+    ]
+    negatives = [
+        sample for sample in members.values() if sample['label'] == 'no_result_panel'
+    ]
+    if max_negatives > 0 and len(negatives) > max_negatives:
+        negatives = sorted(
+            negatives,
+            key=lambda sample: (
+                (
+                    0
+                    if sample['scoreboard']
+                    else (
+                        1
+                        if sample['label_source']
+                        in {'training_review_confirmed', 'worker_candidate_confirmed'}
+                        else 2
+                    )
+                ),
+                str(sample.get('sha256') or sample['sample_id']),
+            ),
+        )[:max_negatives]
+    return positives + negatives
+
+
+def _current_task_members(conn: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
+    samples: List[Dict[str, Any]] = []
+    if task_id in export.UNIFIED_CLASSIFICATION_LABELS:
+        labels = _training_review_labels(
+            conn,
+            column={
+                'match_flow': 'match_flow_label',
+                'match_mode': 'match_mode_label',
+                'hero_select': 'hero_select_label',
+            }[task_id],
+            allowed=list(export.UNIFIED_CLASSIFICATION_LABELS[task_id]),
+        )
+        if labels:
+            placeholders = ','.join('?' for _ in labels)
+            rows = conn.execute(
+                f'SELECT id AS frame_id, video_id FROM frames '
+                f'WHERE id IN ({placeholders})',
+                tuple(labels),
+            ).fetchall()
+            samples = [
+                {
+                    'sample_id': f'f{int(row["frame_id"]):08d}',
+                    'video_id': int(row['video_id']),
+                    'label': labels[int(row['frame_id'])],
+                }
+                for row in rows
+            ]
+    elif task_id == 'result_detector':
+        samples = _result_detector_member_samples(conn)
+    elif task_id in {'hero_avatar_detector', 'hero_identity'}:
+        lineups = export._confirmed_hero_lineup_samples(conn)
+        if task_id == 'hero_avatar_detector':
+            samples = [
+                {
+                    'sample_id': str(lineup['sample_id']),
+                    'video_id': int(lineup['video_id']),
+                    'label': str(lineup['hero_screen_type']),
+                    'avatar_boxes': [slot['crop'] for slot in lineup['hero_slots']],
+                }
+                for lineup in lineups
+            ]
+        else:
+            for lineup in lineups:
+                for slot in lineup['hero_slots']:
+                    label = str(slot['confirmed_label'] or '')
+                    if not label or label == 'unreadable':
+                        continue
+                    samples.append(
+                        {
+                            'sample_id': 'f{:08d}-{}-{}'.format(
+                                int(lineup['frame_id']), slot['side'], slot['slot']
+                            ),
+                            'video_id': int(lineup['video_id']),
+                            'label': label,
+                            'crop': slot['crop'],
+                        }
+                    )
+    elif task_id == 'player_position':
+        samples = export.confirmed_player_position_samples(conn)
+    else:
+        return {}
+    return {
+        str(sample['sample_id']): {
+            'video_id': int(sample['video_id']),
+            'label': str(sample.get('label') or ''),
+            'signature': _task_member_signature(task_id, sample),
+        }
+        for sample in samples
+    }
+
+
+def _rounded_box(box: Any) -> Any:
+    if not isinstance(box, dict):
+        return None
+    try:
+        return [round(float(box[key]), 6) for key in ('x', 'y', 'w', 'h')]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _task_member_signature(task_id: str, sample: Dict[str, Any]) -> str:
+    value: Any = str(sample.get('label') or sample.get('detector_label') or '')
+    if task_id == 'result_detector':
+        value = {
+            'label': value,
+            'box': _rounded_box(
+                sample.get('box') or (sample.get('boxes') or {}).get('result_panel')
+            ),
+        }
+    elif task_id == 'hero_avatar_detector':
+        boxes = sample.get('avatar_boxes') or []
+        value = {
+            'screen_type': str(
+                sample.get('label') or sample.get('hero_screen_type') or ''
+            ),
+            'boxes': sorted(
+                (box for box in (_rounded_box(box) for box in boxes) if box),
+                key=lambda box: tuple(box),
+            ),
+        }
+    elif task_id == 'hero_identity':
+        value = {'label': value, 'crop': _rounded_box(sample.get('crop'))}
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _latest_dataset_delta(conn: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    run = conn.execute(
+        'SELECT r.id, r.dataset_version_id, d.manifest_path '
+        'FROM training_runs r '
+        'JOIN dataset_versions d ON d.id = r.dataset_version_id '
+        "WHERE r.task_id = ? AND r.status = 'succeeded' "
+        'ORDER BY r.created_at DESC, r.id DESC LIMIT 1',
+        (task_id,),
+    ).fetchone()
+    if run is None:
+        return None
+    manifest = Path(str(run['manifest_path']))
+    if not manifest.is_file():
+        return None
+    baseline: Dict[str, Dict[str, Any]] = {}
+    with manifest.open(encoding='utf-8') as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            sample_id = str(sample.get('sample_id') or '')
+            if not sample_id:
+                continue
+            baseline[sample_id] = {
+                'video_id': int(sample.get('video_id') or 0),
+                'label': str(sample.get('label') or sample.get('detector_label') or ''),
+                'signature': _task_member_signature(task_id, sample),
+            }
+    current = _current_task_members(conn, task_id)
+    baseline_ids = set(baseline)
+    current_ids = set(current)
+    new_ids = current_ids - baseline_ids
+    removed_ids = baseline_ids - current_ids
+    changed_ids = {
+        sample_id
+        for sample_id in baseline_ids & current_ids
+        if baseline[sample_id]['signature'] != current[sample_id]['signature']
+    }
+    baseline_videos = {int(sample['video_id']) for sample in baseline.values()}
+    new_by_label: Dict[str, int] = {}
+    for sample_id in new_ids:
+        label = str(current[sample_id]['label'])
+        new_by_label[label] = new_by_label.get(label, 0) + 1
+    return {
+        'run_id': str(run['id']),
+        'dataset_version_id': str(run['dataset_version_id']),
+        'baseline_total': len(baseline),
+        'current_total': len(current),
+        'new': len(new_ids),
+        'removed': len(removed_ids),
+        'changed': len(changed_ids),
+        'net': len(current) - len(baseline),
+        'new_videos': len(
+            {
+                int(current[sample_id]['video_id'])
+                for sample_id in new_ids
+                if int(current[sample_id]['video_id']) not in baseline_videos
+            }
+        ),
+        'new_by_label': dict(sorted(new_by_label.items())),
+    }
 
 
 def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
@@ -290,8 +638,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             'match_mode': 'match_mode_label',
             'hero_select': 'hero_select_label',
         }[task_id]
-        labels = _training_review_labels(
-            conn, column=column, allowed=required)
+        labels = _training_review_labels(conn, column=column, allowed=required)
         counts = _classification_summary(labels, required)
         counts['videos_by_label'] = _videos_by_label(conn, labels, required)
         video_count = _video_count_for_frames(conn, list(labels))
@@ -385,18 +732,26 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             label = str(row['result_panel_label'])
             if label == 'unreadable' or not Path(row['frame_path']).is_file():
                 detector_labels.pop(frame_id, None)
-            elif label == 'result_panel' and not conn.execute(
-                "SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = 'result_panel'",
-                (frame_id,),
-            ).fetchone():
+            elif (
+                label == 'result_panel'
+                and not conn.execute(
+                    'SELECT 1 FROM boxes WHERE frame_id = ? '
+                    "AND box_type = 'result_panel'",
+                    (frame_id,),
+                ).fetchone()
+            ):
                 detector_labels.pop(frame_id, None)
             else:
                 detector_labels[frame_id] = label
+        for frame_id in db.training_review_duplicate_result_frame_ids(conn):
+            if detector_labels.get(frame_id) == 'result_panel':
+                detector_labels.pop(frame_id, None)
         positive = sum(
-            1 for value in detector_labels.values() if value == 'result_panel')
+            1 for value in detector_labels.values() if value == 'result_panel'
+        )
         negative = sum(
-            1 for value in detector_labels.values()
-            if value == 'no_result_panel')
+            1 for value in detector_labels.values() if value == 'no_result_panel'
+        )
         hard_negative = int(
             conn.execute(
                 'SELECT COUNT(*) FROM annotations a '
@@ -413,6 +768,131 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             'hard_negative': hard_negative,
         }
         video_count = _video_count_for_frames(conn, list(detector_labels))
+    elif task_id == 'hero_avatar_detector':
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                'SELECT lineup.frame_id, lineup.screen_type, lineup.team_size, '
+                'f.video_id, f.frame_path, COUNT(slot.slot) AS slot_count '
+                'FROM training_review_hero_lineups lineup '
+                'JOIN training_review_hero_slots slot '
+                'ON slot.frame_id = lineup.frame_id '
+                'JOIN frames f ON f.id = lineup.frame_id '
+                "WHERE lineup.review_status = 'confirmed' "
+                'GROUP BY lineup.frame_id '
+                'HAVING COUNT(slot.slot) = lineup.team_size * 2'
+            ).fetchall()
+            if Path(row['frame_path']).is_file()
+        ]
+        counts = {
+            'total': len(rows),
+            'positive': len(rows),
+            'boxes': sum(int(row['slot_count']) for row in rows),
+            'by_screen_type': {
+                screen_type: sum(row['screen_type'] == screen_type for row in rows)
+                for screen_type in ('gameplay_hud', 'scoreboard', 'result_page')
+            },
+            'by_team_size': {
+                str(team_size): sum(int(row['team_size']) == team_size for row in rows)
+                for team_size in (3, 5)
+            },
+        }
+        video_count = len({int(row['video_id']) for row in rows})
+    elif task_id == 'hero_identity':
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                'SELECT slot.confirmed_label, slot.crop_w, slot.crop_h, '
+                'lineup.screen_type, f.video_id, f.width, f.height, f.frame_path '
+                'FROM training_review_hero_slots slot '
+                'JOIN training_review_hero_lineups lineup '
+                'ON lineup.frame_id = slot.frame_id '
+                'JOIN frames f ON f.id = slot.frame_id '
+                "WHERE lineup.review_status = 'confirmed' "
+                "AND COALESCE(slot.confirmed_label, '') NOT IN ('', 'unreadable')"
+            ).fetchall()
+            if Path(row['frame_path']).is_file()
+        ]
+        labels = sorted({str(row['confirmed_label']) for row in rows})
+        counts = {
+            'total': len(rows),
+            'classes': len(labels),
+            'by_label': {
+                label: sum(row['confirmed_label'] == label for row in rows)
+                for label in labels
+            },
+            'videos_by_label': {
+                label: len(
+                    {
+                        int(row['video_id'])
+                        for row in rows
+                        if row['confirmed_label'] == label
+                    }
+                )
+                for label in labels
+            },
+            'by_screen_type': {
+                screen_type: sum(row['screen_type'] == screen_type for row in rows)
+                for screen_type in ('gameplay_hud', 'scoreboard', 'result_page')
+            },
+            'under_24px': sum(
+                min(
+                    float(row['crop_w']) * int(row['width']),
+                    float(row['crop_h']) * int(row['height']),
+                )
+                < 24
+                for row in rows
+            ),
+            'under_48px': sum(
+                min(
+                    float(row['crop_w']) * int(row['width']),
+                    float(row['crop_h']) * int(row['height']),
+                )
+                < 48
+                for row in rows
+            ),
+        }
+        video_count = len({int(row['video_id']) for row in rows})
+    elif task_id == 'player_position':
+        rows = export.confirmed_player_position_samples(conn)
+        counts = {
+            'total': len(rows),
+            'classes': len({str(row['label']) for row in rows}),
+            'by_label': {
+                label: sum(row['label'] == label for row in rows)
+                for label in export.PLAYER_POSITION_LABELS
+            },
+            'videos_by_label': {
+                label: len(
+                    {int(row['video_id']) for row in rows if row['label'] == label}
+                )
+                for label in export.PLAYER_POSITION_LABELS
+            },
+            'by_screen_type': {
+                screen_type: sum(row['hero_screen_type'] == screen_type for row in rows)
+                for screen_type in ('scoreboard', 'result_page')
+            },
+            'by_team_size': {
+                str(team_size): sum(int(row['team_size']) == team_size for row in rows)
+                for team_size in (3, 5)
+            },
+            'excluded_unreadable': int(
+                conn.execute(
+                    'SELECT COUNT(*) FROM training_review_hero_lineups '
+                    "WHERE review_status = 'confirmed' "
+                    "AND screen_type IN ('scoreboard', 'result_page') "
+                    "AND player_status = 'unreadable'"
+                ).fetchone()[0]
+            ),
+            'excluded_hud': int(
+                conn.execute(
+                    'SELECT COUNT(*) FROM training_review_hero_lineups '
+                    "WHERE review_status = 'confirmed' "
+                    "AND screen_type = 'gameplay_hud'"
+                ).fetchone()[0]
+            ),
+        }
+        video_count = len({int(row['video_id']) for row in rows})
     else:
         raise ValueError(f'未知训练任务: {task_id}')
     counts['videos'] = video_count
@@ -442,6 +922,37 @@ def _blocking_reasons(task_id: str, counts: Dict[str, Any]) -> List[str]:
                 reasons.append(f'{name}至少需要 2 张有效图片')
             elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
                 reasons.append(f'{name}至少需要来自 2 个不同视频')
+    elif task_id == 'hero_avatar_detector':
+        if int(counts.get('total', 0)) < 2:
+            reasons.append('至少需要 2 张完整人工头像布局')
+        for screen_type, name in {
+            'gameplay_hud': 'HUD',
+            'scoreboard': '积分板',
+            'result_page': '结算界面',
+        }.items():
+            if int(counts.get('by_screen_type', {}).get(screen_type, 0)) < 2:
+                reasons.append(f'{name}至少需要 2 张完整人工头像布局')
+    elif task_id == 'hero_identity':
+        if int(counts.get('classes', 0)) < 2:
+            reasons.append('至少需要 2 位不同英雄')
+        for label, count in counts.get('by_label', {}).items():
+            if int(count) < 2:
+                reasons.append(f'{label}至少需要 2 个可读头像')
+            elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
+                reasons.append(f'{label}至少需要来自 2 个不同视频')
+    elif task_id == 'player_position':
+        names = {
+            label: '{}队第 {} 位'.format(
+                '左' if label.startswith('left') else '右', label[-1]
+            )
+            for label in export.PLAYER_POSITION_LABELS
+        }
+        for label in export.PLAYER_POSITION_LABELS:
+            count = int(counts.get('by_label', {}).get(label, 0))
+            if count < 2:
+                reasons.append(f'{names[label]}至少需要 2 张有效图片')
+            elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
+                reasons.append(f'{names[label]}至少需要来自 2 个不同视频')
     elif task_id == 'screen_state':
         labels = counts.get('by_label', {})
         names = {
@@ -497,11 +1008,7 @@ def _quality_warnings(task_id: str, counts: Dict[str, Any]) -> List[str]:
         }
     elif task_id == 'match_mode':
         values = counts.get('by_label', {})
-        targets = {
-            '3v3': ('3V3', 200),
-            'aram': ('大乱斗', 200),
-            '5v5': ('5V5', 200),
-        }
+        targets = {'3v3': ('3V3', 200), 'aram': ('大乱斗', 200), '5v5': ('5V5', 200)}
     elif task_id == 'hero_select':
         values = counts.get('by_label', {})
         targets = {
@@ -536,6 +1043,33 @@ def _quality_warnings(task_id: str, counts: Dict[str, Any]) -> List[str]:
             'scoreboard': ('计分板', 100),
             'other': ('其他画面', 300),
         }
+    elif task_id == 'hero_avatar_detector':
+        values = counts.get('by_screen_type', {})
+        targets = {
+            'gameplay_hud': ('HUD', 100),
+            'scoreboard': ('积分板', 100),
+            'result_page': ('结算界面', 100),
+        }
+    elif task_id == 'hero_identity':
+        values = counts.get('by_label', {})
+        return [
+            f'{label} {int(value)}/50'
+            for label, value in sorted(
+                values.items(), key=lambda item: (int(item[1]), item[0])
+            )
+            if int(value) < 50
+        ]
+    elif task_id == 'player_position':
+        values = counts.get('by_label', {})
+        return [
+            '{}队第 {} 位 {}/30'.format(
+                '左' if label.startswith('left') else '右',
+                label[-1],
+                int(values.get(label, 0)),
+            )
+            for label in export.PLAYER_POSITION_LABELS
+            if int(values.get(label, 0)) < 30
+        ]
     elif task_id == 'mode_gate':
         values = counts
         targets = {'positive': ('有光栅', 100), 'negative': ('开放入口', 100)}
@@ -553,9 +1087,7 @@ def _quality_warnings(task_id: str, counts: Dict[str, Any]) -> List[str]:
     ]
 
 
-def task_summaries(
-    conn: Any, *, include_legacy: bool = False
-) -> List[Dict[str, Any]]:
+def task_summaries(conn: Any, *, include_legacy: bool = False) -> List[Dict[str, Any]]:
     summaries = []
     for task_id, definition in TRAINING_TASKS.items():
         if not include_legacy and not definition.get('active', True):
@@ -568,6 +1100,7 @@ def task_summaries(
                 'id': task_id,
                 **definition,
                 'counts': counts,
+                'dataset_delta': _latest_dataset_delta(conn, task_id),
                 'ready': not reasons,
                 'blocking_reasons': reasons,
                 'quality_warnings': warnings,
@@ -591,12 +1124,34 @@ def export_snapshot(conn: Any, task_id: str) -> Dict[str, Any]:
         return export.export_result_detector(
             conn, include_negatives=True, max_negatives=1_500
         )
+    if task_id == 'hero_avatar_detector':
+        return export.export_hero_avatar_detector(conn)
+    if task_id == 'hero_identity':
+        return export.export_hero_identity_classifier(conn)
+    if task_id == 'player_position':
+        return export.export_player_position_classifier(conn)
     raise ValueError(f'未知训练任务: {task_id}')
 
 
 def new_run_id(task_id: str) -> str:
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     return '{}-{}-{}'.format(task_id.replace('_', '-'), stamp, uuid4().hex[:6])
+
+
+def interrupted_run_checkpoint(run: Dict[str, Any]) -> Path:
+    if run.get('status') != 'interrupted':
+        raise ValueError('只有已中断的训练才能从断点恢复')
+    checkpoint = (
+        config.WORK_DIR
+        / 'training-runs'
+        / str(run.get('id') or '')
+        / 'ultralytics'
+        / 'weights'
+        / 'last.pt'
+    )
+    if not checkpoint.is_file() or checkpoint.stat().st_size <= 0:
+        raise FileNotFoundError('中断训练没有可用的 last.pt 断点')
+    return checkpoint
 
 
 class TrainingManager:
@@ -671,6 +1226,9 @@ class TrainingManager:
         definition = TRAINING_TASKS[run['task_id']]
         dataset_dir = Path(dataset['manifest_path']).parent
         run_dir = config.WORK_DIR / 'training-runs' / run_id
+        resume_checkpoint = (
+            interrupted_run_checkpoint(run) if run['status'] == 'interrupted' else None
+        )
         run_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = run_dir / 'model.onnx'
         log_path = Path(run['log_path'])
@@ -696,6 +1254,17 @@ class TrainingManager:
             '--imgsz',
             str(definition['imgsz']),
         ]
+        if definition['kind'] == 'classify':
+            command.extend(
+                [
+                    '--input-width',
+                    str(definition['input_width']),
+                    '--input-height',
+                    str(definition['input_height']),
+                ]
+            )
+        if resume_checkpoint is not None:
+            command.extend(['--resume-checkpoint', str(resume_checkpoint)])
         metrics: Dict[str, Any] = {}
         try:
             if run_id in self._cancelled:
@@ -703,7 +1272,14 @@ class TrainingManager:
                     run_id, status='cancelled', finished_at=db.now(), error='用户取消'
                 )
                 return
-            self._update(run_id, status='running', started_at=db.now(), error='')
+            running_values: Dict[str, Any] = {
+                'status': 'running',
+                'error': '',
+                'finished_at': None,
+            }
+            if resume_checkpoint is None:
+                running_values['started_at'] = db.now()
+            self._update(run_id, **running_values)
             environment = dict(os.environ)
             environment['PYTHONUNBUFFERED'] = '1'
             with log_path.open('a', encoding='utf-8') as log_handle:

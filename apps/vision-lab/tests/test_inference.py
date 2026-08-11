@@ -1,4 +1,5 @@
 """inference.py 单元测试:类别顺序、概率归一化、检测输出解析。"""
+
 import sys
 import unittest
 from pathlib import Path
@@ -7,25 +8,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np
+from labeler import classification_preprocessing, inference
 from PIL import Image
-
-from labeler import inference
 
 
 class TestClasses(unittest.TestCase):
     def test_stage_classes_are_alpha_sorted(self):
-        self.assertEqual(inference.STAGE_CLASSES,
-                         sorted(inference.STAGE_CLASSES))
+        self.assertEqual(inference.STAGE_CLASSES, sorted(inference.STAGE_CLASSES))
 
     def test_mode_classes_are_alpha_sorted(self):
-        self.assertEqual(inference.MODE_CLASSES,
-                         sorted(inference.MODE_CLASSES))
+        self.assertEqual(inference.MODE_CLASSES, sorted(inference.MODE_CLASSES))
 
     def test_all_classes_have_labels(self):
         for c in inference.STAGE_CLASSES:
             self.assertIn(c, inference.STAGE_LABELS)
         for c in inference.MODE_CLASSES:
             self.assertIn(c, inference.MODE_LABELS)
+
+    def test_player_position_has_all_supported_output_labels(self):
+        self.assertEqual(
+            inference.PLAYER_POSITION_CLASSES,
+            ['left1', 'left2', 'left3', 'left4', 'left5', 'right1', 'right2', 'right3'],
+        )
+        for value in inference.PLAYER_POSITION_CLASSES:
+            self.assertIn(value, inference.PLAYER_POSITION_LABELS)
 
 
 class TestProbNormalization(unittest.TestCase):
@@ -56,7 +62,44 @@ class TestClassificationPreprocessing(unittest.TestCase):
 
         self.assertEqual(tensor.shape, (1, 3, 224, 224))
         self.assertAlmostEqual(
-            float(tensor[0, 0, 0, 0]), (1.0 - 0.485) / 0.229, places=4)
+            float(tensor[0, 0, 0, 0]), (1.0 - 0.485) / 0.229, places=4
+        )
+
+    def test_letterbox_keeps_both_horizontal_edges_of_a_four_three_image(self):
+        pixels = np.zeros((300, 400, 3), dtype=np.uint8)
+        pixels[:, 0] = (255, 0, 0)
+        pixels[:, -1] = (0, 0, 255)
+        image = Image.fromarray(pixels)
+
+        prepared = classification_preprocessing.aspect_fit_letterbox(image)
+        output = np.asarray(prepared)
+
+        self.assertEqual(prepared.size, (512, 288))
+        self.assertGreater(int(output[144, 64, 0]), 200)
+        self.assertEqual(int(output[144, 64, 2]), 0)
+        self.assertGreater(int(output[144, 447, 2]), 200)
+        self.assertEqual(int(output[144, 447, 0]), 0)
+        self.assertTupleEqual(tuple(output[144, 0]), (114, 114, 114))
+
+    def test_new_classifier_tensor_is_fixed_sixteen_nine(self):
+        image = Image.new('RGB', (1024, 768), (255, 255, 255))
+
+        tensor = inference._classification_tensor(
+            image, 512, input_width=512, input_height=288, resize='aspect_fit_letterbox'
+        )
+
+        self.assertEqual(tensor.shape, (1, 3, 288, 512))
+
+    def test_preprocessing_metadata_records_full_frame_training_rule(self):
+        metadata = classification_preprocessing.preprocessing_metadata()
+
+        self.assertEqual(metadata['input'], {'width': 512, 'height': 288})
+        self.assertEqual(metadata['preprocessing']['resize'], 'aspect_fit_letterbox')
+        self.assertTrue(metadata['preprocessing']['preserve_full_image'])
+        self.assertEqual(
+            metadata['preprocessing']['training_augmentation']['pad_color'],
+            'random_neutral',
+        )
 
 
 class TestDetectParse(unittest.TestCase):

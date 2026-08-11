@@ -15,8 +15,13 @@ from .nas import NasClient
 
 _LABELS_BY_TASK = {
     'screen_state': {
-        'not_vainglory', 'out_of_match', 'pre_match', 'in_match',
-        'talent_select', 'post_match', 'transition',
+        'not_vainglory',
+        'out_of_match',
+        'pre_match',
+        'in_match',
+        'talent_select',
+        'post_match',
+        'transition',
     },
     'bp_review': {'bp_3v3', 'bp_aram', 'bp_5v5', 'not_bp'},
     'key_screen_review': {'result_page', 'scoreboard', 'other'},
@@ -45,8 +50,7 @@ def _validate(item: Mapping[str, Any]) -> Dict[str, Any]:
             raise ValueError('统一 worker 候选缺少模型建议')
         normalized_suggestions = db.validate_training_suggestions(suggestions)
         sha256 = str(item.get('image_sha256', '')).lower()
-        if len(sha256) != 64 or any(
-                char not in '0123456789abcdef' for char in sha256):
+        if len(sha256) != 64 or any(char not in '0123456789abcdef' for char in sha256):
             raise ValueError('worker 候选 SHA-256 无效')
         at_ms = int(item.get('at_ms', -1))
         if at_ms < 0:
@@ -130,28 +134,27 @@ def _legacy_suggestions(item: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
         }[label]
         result['hero_select'] = {'label': select, 'confidence': confidence}
         if label != 'not_bp':
-            result['match_flow'] = {
-                'label': 'not_match_flow', 'confidence': confidence
-            }
+            result['match_flow'] = {'label': 'not_match_flow', 'confidence': confidence}
             result['result_panel'] = {
-                'label': 'no_result_panel', 'confidence': confidence
+                'label': 'no_result_panel',
+                'confidence': confidence,
             }
     elif task == 'key_screen_review':
         if label == 'result_page':
             result['match_flow'] = {'label': 'match_flow', 'confidence': confidence}
-            result['result_panel'] = {
-                'label': 'result_panel', 'confidence': confidence
-            }
+            result['result_panel'] = {'label': 'result_panel', 'confidence': confidence}
         elif label == 'scoreboard':
             result['match_flow'] = {'label': 'match_flow', 'confidence': confidence}
             result['match_mode'] = {'label': 'unreadable', 'confidence': confidence}
             result['hero_select'] = {'label': 'not_select', 'confidence': confidence}
             result['result_panel'] = {
-                'label': 'no_result_panel', 'confidence': confidence
+                'label': 'no_result_panel',
+                'confidence': confidence,
             }
         else:
             result['result_panel'] = {
-                'label': 'no_result_panel', 'confidence': confidence
+                'label': 'no_result_panel',
+                'confidence': confidence,
             }
     elif task == 'result_detector':
         result['result_panel'] = {'label': label, 'confidence': confidence}
@@ -161,7 +164,8 @@ def _legacy_suggestions(item: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
             result['match_mode'] = {'label': mode, 'confidence': confidence}
             result['hero_select'] = {'label': 'not_select', 'confidence': confidence}
             result['result_panel'] = {
-                'label': 'no_result_panel', 'confidence': confidence
+                'label': 'no_result_panel',
+                'confidence': confidence,
             }
     return result
 
@@ -273,8 +277,7 @@ def sync_worker_candidates(
                                 'thumb_path': image_info['thumb_path'],
                                 'strategy': 'worker_candidate',
                                 'model_source': str(
-                                    item.get('model_version')
-                                    or 'worker-unified-v3'
+                                    item.get('model_version') or 'worker-unified-v3'
                                 ),
                                 'model_confidence': item['suggestion_confidence'],
                             }
@@ -302,7 +305,8 @@ def sync_worker_candidates(
                 )
                 result['inserted' if was_inserted else 'updated'] += 1
                 task_counts = result['by_task'].setdefault(
-                    item['task'], {'inserted': 0, 'updated': 0})
+                    item['task'], {'inserted': 0, 'updated': 0}
+                )
                 task_counts['inserted' if was_inserted else 'updated'] += 1
                 result['processed'] += 1
                 if progress is not None:
@@ -320,14 +324,12 @@ def sync_worker_candidates(
                     stage_class=stage_class,
                     stage_confidence=item['stage_confidence'],
                     pre_match_confidence=(
-                        item['stage_confidence']
-                        if stage_class == 'pre_match' else 0.0
+                        item['stage_confidence'] if stage_class == 'pre_match' else 0.0
                     ),
                     mode_class=str(item.get('mode_class', 'unknown')),
                     mode_confidence=item['mode_confidence'],
                     mode_margin=0.0,
-                    selection_reason=str(
-                        item.get('selection_reason', 'worker 候选')),
+                    selection_reason=str(item.get('selection_reason', 'worker 候选')),
                     priority=100 + (1 - item['suggestion_confidence']) * 10,
                     raw_prediction={**item, 'source': 'macbook_worker'},
                 )
@@ -339,15 +341,19 @@ def sync_worker_candidates(
                     suggested_label=item['suggested_label'],
                     suggestion_confidence=item['suggestion_confidence'],
                     selection_reason=str(
-                        item.get('selection_reason', 'worker 关键画面候选')),
+                        item.get('selection_reason', 'worker 关键画面候选')
+                    ),
                     priority=100 + (1 - item['suggestion_confidence']) * 10,
                     raw_prediction={**item, 'source': 'macbook_worker'},
                 )
             else:
-                was_inserted = conn.execute(
-                    'SELECT 1 FROM worker_candidate_items WHERE source_id = ?',
-                    (item['source_id'],),
-                ).fetchone() is None
+                was_inserted = (
+                    conn.execute(
+                        'SELECT 1 FROM worker_candidate_items WHERE source_id = ?',
+                        (item['source_id'],),
+                    ).fetchone()
+                    is None
+                )
             generic_inserted = db.upsert_worker_candidate(
                 conn,
                 source_id=item['source_id'],
@@ -384,8 +390,7 @@ def sync_worker_candidates(
                     f'FROM {table} WHERE frame_id = ?',
                     (frame_id,),
                 ).fetchone()
-                candidate = db.get_worker_candidate_by_source(
-                    conn, item['source_id'])
+                candidate = db.get_worker_candidate_by_source(conn, item['source_id'])
                 if (
                     generic_inserted
                     and prior_review is not None
@@ -397,11 +402,13 @@ def sync_worker_candidates(
                         candidate_id=int(candidate['id']),
                         label=prior_review['confirmed_label'],
                         visual_condition=str(
-                            prior_review['visual_condition'] or 'clear'),
+                            prior_review['visual_condition'] or 'clear'
+                        ),
                     )
             result['inserted' if was_inserted else 'updated'] += 1
             task_counts = result['by_task'].setdefault(
-                item['task'], {'inserted': 0, 'updated': 0})
+                item['task'], {'inserted': 0, 'updated': 0}
+            )
             task_counts['inserted' if was_inserted else 'updated'] += 1
         except Exception as error:  # noqa: BLE001
             result['failed'] += 1
@@ -420,22 +427,23 @@ def _review_hash(review: Mapping[str, Any]) -> str:
 
 
 def _mirror_specialized_review(
-        conn: Any, item: Mapping[str, Any], label: Optional[str],
-        visual_condition: str) -> None:
+    conn: Any, item: Mapping[str, Any], label: Optional[str], visual_condition: str
+) -> None:
     task = str(item['task'])
     frame_id = int(item['frame_id'])
     if task == 'bp_review':
         db.review_bp_item(
-            conn, frame_id=frame_id, label=label,
-            visual_condition=visual_condition)
+            conn, frame_id=frame_id, label=label, visual_condition=visual_condition
+        )
     elif task == 'key_screen_review':
         db.review_key_screen_item(
-            conn, frame_id=frame_id, label=label,
-            visual_condition=visual_condition)
+            conn, frame_id=frame_id, label=label, visual_condition=visual_condition
+        )
 
 
 def pull_worker_candidate_reviews(
-        conn: Any, reviews: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    conn: Any, reviews: Sequence[Mapping[str, Any]]
+) -> Dict[str, int]:
     """合并 NAS 复核；本地未回传改动永远不会被远端静默覆盖。"""
     result = {'reviews_pulled': 0, 'review_conflicts': 0, 'reviews_ignored': 0}
     for raw in reviews:
@@ -603,9 +611,7 @@ def pull_training_review_reviews(
                     box['w'],
                     box['h'],
                 )
-            if hero_layout_label in {
-                'gameplay_hud', 'scoreboard', 'result_page'
-            }:
+            if hero_layout_label in {'gameplay_hud', 'scoreboard', 'result_page'}:
                 raw_lineup = raw.get('hero_lineup')
                 if not isinstance(raw_lineup, dict):
                     raise ValueError('远端英雄阵容无效')
@@ -646,6 +652,7 @@ def pull_training_review_reviews(
                         if isinstance(slot, dict)
                     ],
                     allowed_labels=hero_review.allowed_hero_labels(),
+                    player_status=raw_lineup.get('player_status'),
                     player_side=raw_lineup.get('player_side'),
                     player_slot=raw_lineup.get('player_slot'),
                 )
@@ -655,12 +662,15 @@ def pull_training_review_reviews(
                 match_flow_label=labels.get('match_flow_label'),
                 match_mode_label=labels.get('match_mode_label'),
                 hero_select_label=labels.get('hero_select_label'),
+                hero_select_variant=labels.get('hero_select_variant'),
+                hero_select_visibility=labels.get('hero_select_visibility'),
                 result_panel_label=result_label,
                 hero_layout_label=hero_layout_label,
-                ocr_usable=str(result_quality.get('ocr_usable') or 'yes'),
-                result_occlusion=str(
-                    result_quality.get('result_occlusion') or 'none'
+                panel_render_state=str(
+                    result_quality.get('panel_render_state') or 'clear'
                 ),
+                ocr_usable=str(result_quality.get('ocr_usable') or 'yes'),
+                result_occlusion=str(result_quality.get('result_occlusion') or 'none'),
                 occluder_types=result_quality.get('occluder_types') or [],
                 status=status,
                 notes=str(raw.get('notes') or ''),
@@ -721,6 +731,7 @@ def push_training_review_reviews(conn: Any, nas: NasClient) -> Dict[str, int]:
             hero_lineup = {
                 'screen_type': lineup['screen_type'],
                 'team_size': int(lineup['team_size']),
+                'player_status': lineup['player_status'],
                 'player_side': lineup['player_side'],
                 'player_slot': lineup['player_slot'],
                 'slots': [
@@ -748,12 +759,15 @@ def push_training_review_reviews(conn: Any, nas: NasClient) -> Dict[str, int]:
                     'match_flow_label',
                     'match_mode_label',
                     'hero_select_label',
+                    'hero_select_variant',
+                    'hero_select_visibility',
                     'result_panel_label',
                     'hero_layout_label',
                 )
             },
             'result_box': result_box,
             'result_quality': {
+                'panel_render_state': item['panel_render_state'],
                 'ocr_usable': item['ocr_usable'],
                 'result_occlusion': item['result_occlusion'],
                 'occluder_types': item['occluder_types'],
