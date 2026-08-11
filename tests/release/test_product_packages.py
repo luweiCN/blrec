@@ -134,6 +134,8 @@ def test_worker_and_dashboard_release_workflows_are_independent() -> None:
 
     assert "tags: ['worker-v*.*.*']" in worker
     assert 'apps/analysis-worker' in worker
+    assert 'dist/shared-core' in worker
+    assert 'python -m build --wheel' in worker
     assert 'docker/build-push-action' not in worker
     assert "tags: ['dashboard-v*.*.*']" in dashboard
     assert 'apps/public-dashboard' in dashboard
