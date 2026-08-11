@@ -680,6 +680,7 @@ class _WorkerConfiguration:
     prefix: str
     poll_seconds: int
     retry_seconds: int
+    publish_static_data: bool = True
     api_url: Optional[str] = None
     result_frames: Path = Path('/result-frames')
     public_data_base_url: str = 'https://vg.luwei.host/data'
@@ -694,7 +695,7 @@ def _required_environment(name: str) -> str:
 
 def _publish(
     configuration: _WorkerConfiguration, now: datetime, *, force: bool = False
-) -> DashboardPublicationResult:
+) -> Optional[DashboardPublicationResult]:
     network_settings = load_network_settings(configuration.settings)
     route_manager = NetworkRouteManager(lambda: network_settings)
     store = OssDashboardStore(
@@ -707,11 +708,13 @@ def _publish(
         route_manager=route_manager,
     )
     api_client: Optional[DashboardApiClient] = None
+    result: Optional[DashboardPublicationResult] = None
     api_result = None
     try:
-        result = publish_dashboard_once(
-            configuration.database, configuration.state, store, now=now, force=force
-        )
+        if configuration.publish_static_data:
+            result = publish_dashboard_once(
+                configuration.database, configuration.state, store, now=now, force=force
+            )
         if configuration.api_url:
             api_client = DashboardApiClient(
                 base_url=configuration.api_url,
@@ -730,20 +733,29 @@ def _publish(
         if api_client is not None:
             api_client.close()
         store.close()
-    LOGGER.info(
-        'publication=%s date=%s snapshot=%s source_last_match_id=%s '
-        'source_match_count=%s uploaded_bytes=%s purpose=dashboard_publish '
-        'interface=%s source_address=%s role=%s',
-        'published' if result.published else 'current',
-        result.publication_date.isoformat(),
-        result.snapshot_id,
-        result.source_last_match_id,
-        result.source_match_count,
-        result.uploaded_bytes,
-        store.selection.interface_name or 'system-default',
-        store.selection.source_address or 'system-default',
-        store.selection.role,
-    )
+    if result is None:
+        LOGGER.info(
+            'static_json=disabled purpose=dashboard_publish interface=%s '
+            'source_address=%s role=%s',
+            store.selection.interface_name or 'system-default',
+            store.selection.source_address or 'system-default',
+            store.selection.role,
+        )
+    else:
+        LOGGER.info(
+            'publication=%s date=%s snapshot=%s source_last_match_id=%s '
+            'source_match_count=%s uploaded_bytes=%s purpose=dashboard_publish '
+            'interface=%s source_address=%s role=%s',
+            'published' if result.published else 'current',
+            result.publication_date.isoformat(),
+            result.snapshot_id,
+            result.source_last_match_id,
+            result.source_match_count,
+            result.uploaded_bytes,
+            store.selection.interface_name or 'system-default',
+            store.selection.source_address or 'system-default',
+            store.selection.role,
+        )
     if api_result is not None:
         LOGGER.info(
             'api_sync=%s batch=%s matches=%s removed=%s image_bytes=%s '
@@ -793,8 +805,20 @@ def _environment_int(name: str, default: int) -> int:
         raise DashboardPublishError('{} 必须是整数'.format(name)) from exc
 
 
+def _environment_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().casefold()
+    if normalized in {'1', 'true', 'yes', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'off'}:
+        return False
+    raise DashboardPublishError('{} 必须是布尔值'.format(name))
+
+
 def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='定时检查并发布虚荣排行榜 JSON')
+    parser = argparse.ArgumentParser(description='定时同步虚荣排行榜数据')
     parser.add_argument('--once', action='store_true', help='只检查并发布一次')
     parser.add_argument(
         '--force',
@@ -824,6 +848,9 @@ def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument('--prefix', default=os.environ.get('OSS_PREFIX', 'data'))
     parser.add_argument(
         '--api-url', default=os.environ.get('DASHBOARD_API_URL') or None
+    )
+    parser.set_defaults(
+        publish_static_data=_environment_bool('DASHBOARD_STATIC_JSON_ENABLED', True)
     )
     parser.add_argument(
         '--result-frames',
@@ -862,6 +889,10 @@ def main() -> None:
         raise DashboardPublishError('重试间隔必须大于 0')
     if arguments.force and not arguments.once:
         raise DashboardPublishError('--force 必须与 --once 同时使用')
+    if arguments.force and not arguments.publish_static_data:
+        raise DashboardPublishError('--force 只适用于静态 JSON 发布')
+    if not arguments.publish_static_data and not arguments.api_url:
+        raise DashboardPublishError('关闭静态 JSON 后必须配置排行榜 API')
     configuration = _WorkerConfiguration(
         database=arguments.database,
         settings=arguments.settings,
@@ -871,6 +902,7 @@ def main() -> None:
         prefix=arguments.prefix,
         poll_seconds=arguments.poll_seconds,
         retry_seconds=arguments.retry_seconds,
+        publish_static_data=arguments.publish_static_data,
         api_url=arguments.api_url,
         result_frames=arguments.result_frames,
         public_data_base_url=arguments.public_data_base_url,

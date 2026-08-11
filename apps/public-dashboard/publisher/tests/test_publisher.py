@@ -2,6 +2,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from blrec_dashboard_publisher import publisher
@@ -411,3 +412,76 @@ def test_worker_checks_again_after_fifteen_minutes(
         publisher._worker_loop(configuration)
 
     assert delays == [15 * 60]
+
+
+def test_worker_can_sync_api_without_republishing_static_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selection = SimpleNamespace(
+        interface_name=None, source_address=None, role='system-default'
+    )
+
+    class Store:
+        def __init__(self) -> None:
+            self.selection = selection
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class ApiClient:
+        def __init__(self) -> None:
+            self.selection = selection
+            self.closed = False
+
+        def post_batch(self, _key: str, _content: bytes):
+            return {'status': 'applied'}
+
+        def close(self) -> None:
+            self.closed = True
+
+    store = Store()
+    api_client = ApiClient()
+    monkeypatch.setenv('ALIBABA_CLOUD_ACCESS_KEY_ID', 'id')
+    monkeypatch.setenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', 'secret')
+    monkeypatch.setenv('DASHBOARD_API_TOKEN', 'token')
+    monkeypatch.setattr(publisher, 'load_network_settings', lambda _path: object())
+    monkeypatch.setattr(publisher, 'NetworkRouteManager', lambda _loader: object())
+    monkeypatch.setattr(publisher, 'OssDashboardStore', lambda **_kwargs: store)
+    monkeypatch.setattr(publisher, 'DashboardApiClient', lambda **_kwargs: api_client)
+    monkeypatch.setattr(
+        publisher,
+        'publish_dashboard_once',
+        lambda *_args, **_kwargs: pytest.fail('static JSON should stay unchanged'),
+    )
+    monkeypatch.setattr(
+        publisher,
+        'sync_dashboard_api_once',
+        lambda **_kwargs: SimpleNamespace(
+            synced=True,
+            batch_id='batch-1',
+            match_count=1,
+            removed_match_count=0,
+            uploaded_image_bytes=0,
+        ),
+    )
+    configuration = publisher._WorkerConfiguration(
+        database=tmp_path / 'database.sqlite3',
+        settings=tmp_path / 'settings.toml',
+        state=tmp_path / 'state',
+        endpoint='https://example.invalid',
+        bucket='bucket',
+        prefix='data',
+        poll_seconds=15 * 60,
+        retry_seconds=15 * 60,
+        api_url='https://vg-api.example',
+        publish_static_data=False,
+    )
+
+    result = publisher._publish(
+        configuration, datetime(2026, 8, 11, 10, 15, tzinfo=SHANGHAI)
+    )
+
+    assert result is None
+    assert store.closed is True
+    assert api_client.closed is True

@@ -1,4 +1,4 @@
-# 群晖排行榜数据 worker
+# 群晖排行榜数据同步 worker
 
 此 worker 是独立 Compose 项目 `blrec-dashboard`。它只读挂载 BLREC 配置目录，
 不会重建、切换或停止正在录制的 `blrec-next` 容器。
@@ -59,31 +59,29 @@ docker compose --project-name blrec-dashboard \
 docker inspect blrec-next
 docker inspect blrec-dashboard-publisher
 docker logs --tail 100 blrec-dashboard-publisher
-curl -fsS https://vg.luwei.host/data/manifest.json
-curl -fsS https://vg.luwei.host/data/trends.json
+curl -fsS https://vg-api.luwei.host/v1/health
+curl -fsS https://vg-api.luwei.host/v1/matches/summary
+curl -fsS https://vg-api.luwei.host/v1/dashboard >/dev/null
 ```
 
-日志应出现 `publication=published` 或 `publication=current`，并包含
-`purpose=dashboard_publish`、所选网卡、源地址、数据源进度和上传字节数。首次
-发布后再次以 `--once` 运行应显示当天已发布且上传字节为 0。
-
-启用 API 后还应出现 `api_sync=synced` 或 `api_sync=current`。失败批次会留在
+生产配置下日志应出现 `static_json=disabled`，以及 `api_sync=synced` 或
+`api_sync=current`，并包含 `purpose=dashboard_publish`、所选网卡、源地址、
+数据源进度和上传字节数。失败批次会留在
 `/state/api-outbox/`，容器重启后会使用相同幂等键重试；API 确认后才更新本地
 水位，因此不会因超时而重复创建对局。
 
-常驻 worker 每 15 分钟按时间顺序重新计算一次内容版本；数据库内容没有变化时
-不会上传快照、趋势或 manifest。历史对局补录后会插回原始时间位置，并从最早受
-影响的赛季重新计算到当前赛季。
+常驻 worker 每 15 分钟检查一次源数据；数据库内容没有变化时不会发送写入批次。
+历史对局补录会按原始直播时间写入，服务端再从历史对局开始重算段位与全部榜单。
+旧的静态 manifest、趋势和快照不再更新，但会继续作为前端的故障回退。
 
 worker 从现有 `settings.toml` 读取网络分工。旧配置尚无
 `network.dashboard_publish` 时会继承 `network.upload` 的固定线路；后续可在
 BLREC 网络管理页单独修改“排行榜数据发布”。固定线路会同时绑定源地址和该
 网卡 DNS；未选网卡时使用并记录系统默认网卡。
 
-## 人工重算当天数据
+## 人工检查一次数据
 
-算法升级或数据修正后需要在同一天重新发布时，先停掉常驻 worker，避免单例锁
-阻止一次性任务，再显式使用 `--force`：
+需要立即检查源数据时，先停掉常驻 worker，避免单例锁阻止一次性任务，再运行：
 
 ```bash
 docker compose --project-name blrec-dashboard \
@@ -91,15 +89,14 @@ docker compose --project-name blrec-dashboard \
   -f compose.yml stop dashboard-publisher
 docker compose --project-name blrec-dashboard \
   --env-file publisher.env \
-  -f compose.yml run --rm dashboard-publisher --once --force
+  -f compose.yml run --rm dashboard-publisher --once
 docker compose --project-name blrec-dashboard \
   --env-file publisher.env \
   -f compose.yml up -d dashboard-publisher
 ```
 
-`--force` 只允许与 `--once` 同用。它会忽略本地当天待发布快照并重新读取
-SQLite，并替换当天趋势点，但仍执行源数据水位防回退、不可变快照优先、趋势
-数据优先和 manifest 最后提交校验；常驻任务检测到内容变化后也会自动更新当天数据。
+没有数据变化时这次检查会直接跳过 API 写入。评分或榜单算法更新由 API 发布触发，
+不需要重新上传源对局。
 
 ## 停止与回滚
 

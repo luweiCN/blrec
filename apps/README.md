@@ -18,7 +18,7 @@ API、数据格式或版本化模型产物完成，不得通过读取另一个�
 - Vision Lab 冻结数据集并产出不可变模型包；Analysis Worker 显式安装模型包。
 - Analysis Worker 通过版本化分析协议从 BLREC Server 领任务、回传结果，不直连生产库。
 - Browser Extension 只通过受限 HTTP API 访问 BLREC Server，构建时不读取管理端资源。
-- Public Dashboard Publisher 只读生产 SQLite 并生成快照；公开站点只读取已发布 JSON。
+- Public Dashboard Publisher 只读生产 SQLite，并把规范化对局增量写入独立 API；公开站点从 API 读取榜单与分页对局，OSS JSON 只保留为故障回退。
 
 `src/blrec/vainglory/` 保留 Server 与 Worker 都要理解的分析领域对象、算法核心和
 HTTP 协议编解码；产品运行入口、依赖、模型、静态资源和发布配置归各自 `apps/`

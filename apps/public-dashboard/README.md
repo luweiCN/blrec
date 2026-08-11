@@ -17,7 +17,8 @@ blrec-dashboard-export \
 `public-data/avatars/` 是包含真实榜单及玩家头像的本地生成产物，已被 Git
 忽略。导出器使用 SQLite 只读事务，不会修改正在更新的业务数据库；JSON
 生成完成后，会按玩家绑定的直播间从 B 站公开接口同步头像并压缩为 256px
-JPEG。临时离线导出时可以追加 `--skip-player-avatars`。
+JPEG。该导出仅用于本地预览或应急恢复；临时离线导出时可以追加
+`--skip-player-avatars`。
 
 开发与验证：
 
@@ -30,13 +31,15 @@ npm run build
 ```
 
 生产构建位于 `dist/`。本地 `public-data/` 有快照时，构建可用于完整预览；
-GitHub 的生产发布会拒绝上传其中的 `/data/`，只更新页面和静态资源。日常数据
-发布会更新 `/data/manifest.json`、`/data/trends.json` 并新增不可变快照；趋势
-文件只保存最近 30 次发布的排名与榜单分，不依赖旧页面结构。现有玩家头像与
-访问统计由各自独立链路维护，无需重新发布站点代码。
+GitHub 的生产发布会拒绝上传其中的 `/data/`，只更新页面和静态资源。线上榜单、
+趋势和对局由 `https://vg-api.luwei.host/v1` 提供；完整对局采用分页接口，首页
+响应不再携带全部对局。原 `/data/manifest.json`、`trends.json` 和最后一份静态
+快照继续保留为 API 故障时的只读回退，不再随日常数据变化更新。玩家头像、
+结算图与访问统计仍由各自独立链路维护。
 
-生产环境已将页面和数据拆成独立发布链路。GitHub Actions 只发布页面文件，
-NAS worker 每天生成并发布排行榜 JSON；工程化配置、权限边界和恢复流程见
+生产环境已将页面、API 与数据同步拆成独立链路。GitHub Actions 分别发布页面
+和 ECS API；NAS worker 每 15 分钟检查 SQLite，内容变化时只向 API 增量写入，
+并把结算图写入 OSS；工程化配置、权限边界和恢复流程见
 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 正式静态站点、Publisher Python 包和 Publisher 镜像只由 GitHub Actions 构建。

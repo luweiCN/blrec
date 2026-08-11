@@ -15,6 +15,7 @@ services:
       DASHBOARD_STATE: /state
       DASHBOARD_RESULT_FRAMES: /result-frames
       DASHBOARD_API_URL: ${DASHBOARD_API_URL:-https://vg-api.luwei.host}
+      DASHBOARD_STATIC_JSON_ENABLED: ${DASHBOARD_STATIC_JSON_ENABLED:-false}
       DASHBOARD_PUBLIC_DATA_BASE_URL: ${DASHBOARD_PUBLIC_DATA_BASE_URL:-https://vg.luwei.host/data}
       OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
       OSS_BUCKET: luwei-vainglory
