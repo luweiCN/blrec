@@ -352,8 +352,8 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
     version_row = connection.execute(
         'SELECT COALESCE(MAX(version),0) FROM schema_migrations'
     ).fetchone()
-    if version_row is None or int(version_row[0]) < 64:
-        raise sqlite3.DatabaseError('dashboard source database requires schema 64+')
+    if version_row is None or int(version_row[0]) < 67:
+        raise sqlite3.DatabaseError('dashboard source database requires schema 67+')
 
 
 def _player_metadata(
@@ -397,6 +397,40 @@ def _player_metadata(
         if alias.casefold() != str(player['name']).casefold():
             aliases.setdefault(player_id, []).append(alias)
     return players, aliases
+
+
+def _live_rooms_by_player(
+    connection: sqlite3.Connection,
+) -> Mapping[int, List[Mapping[str, Any]]]:
+    values: Dict[int, List[Mapping[str, Any]]] = {}
+    seen_rooms: Set[int] = set()
+    rows = connection.execute(
+        'SELECT room.player_id,session.room_id,session.title,'
+        'COALESCE(session.live_start_time,session.started_at) AS live_started_at '
+        'FROM recording_sessions session '
+        'JOIN vainglory_player_rooms room ON room.room_id=session.room_id '
+        "WHERE session.source_kind='live' AND session.state='open' "
+        'AND session.live_end_time IS NULL AND session.ended_at IS NULL '
+        'AND session.room_id>0 '
+        'ORDER BY session.room_id,live_started_at DESC,session.id DESC'
+    ).fetchall()
+    for row in rows:
+        room_id = int(row['room_id'])
+        if room_id in seen_rooms:
+            continue
+        seen_rooms.add(room_id)
+        player_id = int(row['player_id'])
+        started_at = datetime.fromtimestamp(
+            int(row['live_started_at']), tz=timezone.utc
+        )
+        values.setdefault(player_id, []).append(
+            {
+                'roomId': room_id,
+                'title': str(row['title'] or ''),
+                'startedAt': _utc_iso(started_at),
+            }
+        )
+    return values
 
 
 def _match_played_at(row: Mapping[str, Any]) -> int:
@@ -745,6 +779,7 @@ def build_dashboard_api_source(
     if generated_at.tzinfo is None:
         raise ValueError('dashboard API source time must include a timezone')
     players, aliases = _player_metadata(connection)
+    live_rooms = _live_rooms_by_player(connection)
     rows = _match_rows(connection)
     lineups = _lineups_by_match(connection, rows)
     publications = _publications_by_session(connection, rows)
@@ -771,6 +806,7 @@ def build_dashboard_api_source(
                 'initial': name[:1],
                 'roomLabel': _room_label(list(metadata['rooms'])),
                 'roomIds': list(metadata['rooms']),
+                'liveRooms': list(live_rooms.get(player_id, ())),
                 'aliases': list(aliases.get(player_id, ())),
                 'avatarUrl': None,
             }

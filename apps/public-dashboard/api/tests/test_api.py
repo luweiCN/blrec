@@ -158,6 +158,61 @@ def test_dashboard_waits_for_first_publication(tmp_path: Path) -> None:
         'detail': 'dashboard is waiting for its first publication'
     }
 
+    live_rooms = client.get('/v1/live-rooms')
+    assert live_rooms.status_code == 503
+    assert live_rooms.json() == {
+        'detail': 'live rooms are waiting for their first publication'
+    }
+
+
+def test_live_rooms_follow_ingested_player_status(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    live_payload = batch([])
+    live_payload['players'][0]['liveRooms'] = [
+        {'roomId': 123456, 'title': '今晚三排上分', 'startedAt': '2026-08-11T11:30:00Z'}
+    ]
+
+    assert ingest(client, live_payload, 'player-live').status_code == 200
+    response = client.get('/v1/live-rooms')
+
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == (
+        'public, max-age=15, stale-while-revalidate=30'
+    )
+    assert response.json() == {
+        'schemaVersion': 1,
+        'updatedAt': '2026-08-11T00:00:00Z',
+        'rooms': [
+            {
+                'roomId': 123456,
+                'playerId': 7,
+                'title': '今晚三排上分',
+                'startedAt': '2026-08-11T11:30:00Z',
+            }
+        ],
+    }
+    not_modified = client.get(
+        '/v1/live-rooms', headers={'If-None-Match': response.headers['etag']}
+    )
+    assert not_modified.status_code == 304
+
+    offline_payload = batch([])
+    offline_payload['generatedAt'] = '2026-08-11T12:00:00Z'
+    assert ingest(client, offline_payload, 'player-offline').status_code == 200
+    assert client.get('/v1/live-rooms').json()['rooms'] == []
+
+
+def test_live_room_must_belong_to_the_player(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    payload = batch([])
+    payload['players'][0]['liveRooms'] = [
+        {'roomId': 999999, 'title': '不属于该玩家', 'startedAt': '2026-08-11T11:30:00Z'}
+    ]
+
+    response = ingest(client, payload, 'invalid-live-room')
+
+    assert response.status_code == 422
+
 
 def test_dashboard_is_materialized_from_server_matches_without_embedding_archive(
     tmp_path: Path,
@@ -465,5 +520,6 @@ def test_schema_uses_foreign_keys_and_player_match_index(tmp_path: Path) -> None
 
     assert 'dashboard_state' in tables
     assert 'dashboard_trend_publications' in tables
+    assert 'player_live_rooms' in tables
     assert 'matches_player_played_idx' in indexes
     assert any('matches_player_played_idx' in str(row) for row in plan)

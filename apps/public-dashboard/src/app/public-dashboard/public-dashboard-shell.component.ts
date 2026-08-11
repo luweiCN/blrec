@@ -10,6 +10,7 @@ import { Router } from '@angular/router';
 import { seasonOption } from './public-dashboard.data';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { DashboardModeService } from './dashboard-mode.service';
+import { PlayerLiveStatusService } from './player-live-status.service';
 import { SiteAnalyticsService } from './site-analytics.service';
 import { SiteStatsState } from './site-stats.models';
 import { SiteStatsService } from './site-stats.service';
@@ -31,6 +32,7 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
     private readonly router: Router,
     private readonly siteAnalytics: SiteAnalyticsService,
     private readonly siteStats: SiteStatsService,
+    private readonly playerLiveStatus: PlayerLiveStatusService,
     private readonly changeDetector: ChangeDetectorRef,
   ) {}
 
@@ -48,6 +50,7 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.destroyed = true;
+    this.playerLiveStatus.stop();
     this.siteAnalytics.stop();
   }
 
@@ -89,6 +92,9 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
     this.changeDetector.markForCheck();
     await loading;
     if (!this.destroyed) {
+      if (this.data.state.kind === 'ready') {
+        this.playerLiveStatus.start();
+      }
       this.changeDetector.markForCheck();
     }
   }

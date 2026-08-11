@@ -139,6 +139,38 @@ async def test_dashboard_source_revision_tracks_only_relevant_changes(
         )
 
         await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,live_start_time) '
+            "VALUES(1,100,'100:live','open',3,3)"
+        )
+        assert (
+            await database.scalar(
+                'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+            )
+            == 4
+        )
+
+        await database.execute(
+            'UPDATE recording_sessions SET live_end_time=4 WHERE id=1'
+        )
+        assert (
+            await database.scalar(
+                'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+            )
+            == 5
+        )
+
+        await database.execute(
+            "UPDATE recording_sessions SET cover_url='unrelated' WHERE id=1"
+        )
+        assert (
+            await database.scalar(
+                'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+            )
+            == 5
+        )
+
+        await database.execute(
             "INSERT INTO event_journal("
             "id,event_type,room_id,payload_json,occurred_at) "
             "VALUES('unrelated','test',1,'{}',1)"
@@ -147,7 +179,7 @@ async def test_dashboard_source_revision_tracks_only_relevant_changes(
             await database.scalar(
                 'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
             )
-            == 3
+            == 5
         )
     finally:
         await database.close()

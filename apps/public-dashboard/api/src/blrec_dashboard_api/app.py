@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import re
 from typing import Literal, Optional
 
@@ -16,6 +17,7 @@ from .models import IngestBatch
 from .service import (
     IdempotencyConflict,
     apply_ingest_batch,
+    get_live_rooms,
     get_match,
     get_match_summary,
     list_matches,
@@ -114,6 +116,30 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
         etag = '"{}"'.format(revision)
         headers = {
             'Cache-Control': 'public, max-age=60, stale-while-revalidate=300',
+            'ETag': etag,
+        }
+        if if_none_match == etag:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(content=document, headers=headers)
+
+    @app.get('/v1/live-rooms')
+    def live_rooms(
+        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match')
+    ) -> Response:
+        document = get_live_rooms(active_settings.database_path)
+        if document is None:
+            raise HTTPException(
+                status_code=503,
+                detail='live rooms are waiting for their first publication',
+            )
+        revision = hashlib.sha256(
+            json.dumps(
+                document, ensure_ascii=False, sort_keys=True, separators=(',', ':')
+            ).encode('utf-8')
+        ).hexdigest()
+        etag = '"{}"'.format(revision)
+        headers = {
+            'Cache-Control': 'public, max-age=15, stale-while-revalidate=30',
             'ETag': etag,
         }
         if if_none_match == etag:

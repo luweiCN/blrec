@@ -67,8 +67,22 @@ def _upsert_player(
             (player.id,),
         ).fetchall()
     )
+    existing_live_rooms = tuple(
+        (int(row['room_id']), str(row['title']), str(row['started_at']))
+        for row in connection.execute(
+            'SELECT room_id,title,started_at FROM player_live_rooms '
+            'WHERE player_id=? ORDER BY room_id',
+            (player.id,),
+        ).fetchall()
+    )
     room_ids = tuple(sorted(player.room_ids))
     aliases = tuple(sorted(player.aliases))
+    live_rooms = tuple(
+        sorted(
+            (live_room.room_id, live_room.title, _utc_iso(live_room.started_at))
+            for live_room in player.live_rooms
+        )
+    )
     avatar_url = None if player.avatar_url is None else str(player.avatar_url)
     changed = (
         existing is None
@@ -78,6 +92,7 @@ def _upsert_player(
         or existing['avatar_url'] != avatar_url
         or existing_rooms != room_ids
         or existing_aliases != aliases
+        or existing_live_rooms != live_rooms
     )
     affected_player_ids = {
         int(row['player_id'])
@@ -111,7 +126,45 @@ def _upsert_player(
         'INSERT INTO player_aliases(player_id,alias) VALUES(?,?)',
         ((player.id, alias) for alias in aliases),
     )
+    connection.executemany(
+        'INSERT INTO player_live_rooms('
+        'player_id,room_id,title,started_at,updated_at) VALUES(?,?,?,?,?)',
+        (
+            (player.id, room_id, title, started_at, now)
+            for room_id, title, started_at in live_rooms
+        ),
+    )
     return affected_player_ids
+
+
+def get_live_rooms(database_path: Path) -> Optional[Dict[str, Any]]:
+    connection = connect_database(database_path)
+    try:
+        state = connection.execute(
+            'SELECT generated_at FROM dashboard_state WHERE singleton_id=1'
+        ).fetchone()
+        if state is None:
+            return None
+        rooms = connection.execute(
+            'SELECT live.room_id,live.player_id,live.title,live.started_at '
+            'FROM player_live_rooms live '
+            'ORDER BY live.started_at DESC,live.room_id'
+        ).fetchall()
+        return {
+            'schemaVersion': 1,
+            'updatedAt': str(state['generated_at']),
+            'rooms': [
+                {
+                    'roomId': int(room['room_id']),
+                    'playerId': int(room['player_id']),
+                    'title': str(room['title']),
+                    'startedAt': str(room['started_at']),
+                }
+                for room in rooms
+            ],
+        }
+    finally:
+        connection.close()
 
 
 def _delete_unreferenced_players(

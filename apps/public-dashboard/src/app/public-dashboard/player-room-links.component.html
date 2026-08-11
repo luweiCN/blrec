@@ -1,10 +1,32 @@
 <span *ngIf="roomIds.length === 0" class="room-fallback">{{ fallbackLabel }}</span>
 <ng-container *ngFor="let roomId of roomIds; let last = last; trackBy: trackRoom">
-  <a
-    [href]="roomUrl(roomId)"
-    target="_blank"
-    rel="noopener noreferrer"
-    [attr.aria-label]="'打开 B 站直播间 ' + roomId"
-  >直播间 {{ roomId }}</a>
+  <span class="room-link-wrap">
+    <ng-container *ngIf="liveRoom(roomId) as live; else offlineRoom">
+      <a
+        class="room-link is-live"
+        [href]="roomUrl(roomId)"
+        target="_blank"
+        rel="noopener noreferrer"
+        [attr.aria-label]="roomAriaLabel(roomId, live)"
+        [title]="live.title || '正在直播'"
+      >
+        <span class="live-dot" aria-hidden="true"></span>
+        <strong>直播中</strong>
+        <span>直播间 {{ roomId }}</span>
+      </a>
+      <small *ngIf="showLiveTitle && live.title" class="live-title">
+        {{ live.title }}
+      </small>
+    </ng-container>
+    <ng-template #offlineRoom>
+      <a
+        class="room-link"
+        [href]="roomUrl(roomId)"
+        target="_blank"
+        rel="noopener noreferrer"
+        [attr.aria-label]="roomAriaLabel(roomId, null)"
+      >直播间 {{ roomId }}</a>
+    </ng-template>
+  </span>
   <span *ngIf="!last" class="room-separator" aria-hidden="true">/</span>
 </ng-container>

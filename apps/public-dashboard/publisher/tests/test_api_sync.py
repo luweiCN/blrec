@@ -201,6 +201,36 @@ def test_sync_sends_removed_match_ids(tmp_path: Path) -> None:
     assert requests[1]['removedMatchIds'] == [10]
 
 
+def test_sync_publishes_live_status_changes_without_a_new_match(tmp_path: Path) -> None:
+    database = tmp_path / 'source.sqlite3'
+    sqlite3.connect(database).close()
+    current = source([])
+    current['players'][0]['liveRooms'] = [
+        {'roomId': 123, 'title': '正在直播', 'startedAt': '2026-08-11T10:00:00Z'}
+    ]
+    requests: List[Mapping[str, Any]] = []
+
+    def post_batch(_key: str, content: bytes) -> Mapping[str, Any]:
+        requests.append(json.loads(content))
+        return {'status': 'applied'}
+
+    arguments = {
+        'database_path': database,
+        'state_directory': tmp_path / 'state',
+        'result_frame_directory': tmp_path / 'frames',
+        'public_data_base_url': 'https://vg.luwei.host/data',
+        'image_store': FakeImageStore(),
+        'post_batch': post_batch,
+    }
+    sync_dashboard_api_once(**arguments, source_builder=lambda _connection: current)
+    current['players'][0]['liveRooms'] = []
+    sync_dashboard_api_once(**arguments, source_builder=lambda _connection: current)
+
+    assert requests[0]['players'][0]['liveRooms'][0]['roomId'] == 123
+    assert requests[1]['players'][0]['liveRooms'] == []
+    assert requests[1]['matches'] == []
+
+
 def test_sync_rejects_result_frames_outside_the_mounted_directory(
     tmp_path: Path,
 ) -> None:

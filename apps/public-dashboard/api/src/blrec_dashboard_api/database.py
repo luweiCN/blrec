@@ -7,7 +7,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Iterator
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 
 def connect_database(path: Path) -> sqlite3.Connection:

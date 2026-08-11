@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import AnyHttpUrl, BaseModel, Field, root_validator, validator
 
@@ -12,12 +12,25 @@ class StrictModel(BaseModel):
         extra = 'forbid'
 
 
+class IngestLiveRoom(StrictModel):
+    room_id: int = Field(alias='roomId', gt=0)
+    title: str = Field(max_length=240)
+    started_at: datetime = Field(alias='startedAt')
+
+    @validator('started_at')
+    def started_at_has_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError('live room startedAt must include a timezone')
+        return value
+
+
 class IngestPlayer(StrictModel):
     id: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=80)
     initial: str = Field(min_length=1, max_length=4)
     room_label: str = Field(alias='roomLabel', max_length=120)
     room_ids: List[int] = Field(alias='roomIds')
+    live_rooms: List[IngestLiveRoom] = Field(default_factory=list, alias='liveRooms')
     aliases: List[str]
     avatar_url: Optional[AnyHttpUrl] = Field(default=None, alias='avatarUrl')
 
@@ -40,6 +53,17 @@ class IngestPlayer(StrictModel):
         if len({alias.casefold() for alias in value}) != len(value):
             raise ValueError('player aliases must be unique')
         return value
+
+    @root_validator
+    def live_rooms_belong_to_player(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        room_ids = set(values.get('room_ids') or [])
+        live_rooms = values.get('live_rooms') or []
+        live_room_ids = [room.room_id for room in live_rooms]
+        if len(live_room_ids) != len(set(live_room_ids)):
+            raise ValueError('player live room IDs must be unique')
+        if not set(live_room_ids).issubset(room_ids):
+            raise ValueError('player live rooms must belong to player room IDs')
+        return values
 
 
 class IngestMatchPlayer(StrictModel):

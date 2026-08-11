@@ -197,6 +197,45 @@ async def seed_publication(
 
 
 @pytest.mark.asyncio
+async def test_dashboard_api_source_tracks_active_bound_live_rooms(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_player(database, 10, '主播', 100)
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,live_start_time,state,started_at,'
+            'title,source_kind) '
+            "VALUES(1,100,'100:live',1000,'open',1001,'今晚三排','live')"
+        )
+
+        live_source = await database.read(
+            lambda connection: build_dashboard_api_source(
+                connection, now=datetime(2026, 8, 11, 22, tzinfo=SHANGHAI)
+            )
+        )
+
+        assert live_source['players'][0]['liveRooms'] == [
+            {'roomId': 100, 'title': '今晚三排', 'startedAt': '1970-01-01T00:16:40Z'}
+        ]
+
+        await database.execute(
+            "UPDATE recording_sessions SET live_end_time=1100,state='closed',"
+            'ended_at=1100 WHERE id=1'
+        )
+        offline_source = await database.read(
+            lambda connection: build_dashboard_api_source(
+                connection, now=datetime(2026, 8, 11, 22, tzinfo=SHANGHAI)
+            )
+        )
+        assert offline_source['players'][0]['liveRooms'] == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()

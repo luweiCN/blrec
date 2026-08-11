@@ -118,3 +118,8 @@ jobs:
             --retry 5 --retry-all-errors --retry-delay 3 \
             --output /dev/null \
             https://vg-api.luwei.host/v1/matches/summary
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 30 \
+            --retry 5 --retry-all-errors --retry-delay 3 \
+            --output /dev/null \
+            https://vg-api.luwei.host/v1/live-rooms
