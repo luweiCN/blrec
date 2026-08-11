@@ -25,6 +25,20 @@ export interface DashboardMatchPage {
   readonly total: number;
 }
 
+export interface DashboardMatchSummaryQuery {
+  readonly seasonKey: SeasonKey;
+  readonly mode: ModeFilter;
+  readonly playerId?: number;
+}
+
+export interface DashboardMatchSummary {
+  readonly matches: number;
+  readonly wins: number;
+  readonly players: number;
+  readonly averageDurationSeconds: number;
+  readonly replays: number;
+}
+
 @Injectable({ providedIn: 'root' })
 export class DashboardMatchApiService {
   get enabled(): boolean {
@@ -73,6 +87,37 @@ export class DashboardMatchApiService {
       return null;
     }
   }
+
+  async summary(
+    query: DashboardMatchSummaryQuery,
+  ): Promise<DashboardMatchSummary | null> {
+    if (!this.enabled) {
+      return null;
+    }
+    const parameters = new URLSearchParams();
+    if (query.seasonKey !== 'all-time') {
+      parameters.set('season', query.seasonKey);
+    }
+    if (query.mode !== 'all') {
+      parameters.set('mode', query.mode);
+    }
+    if (query.playerId !== undefined) {
+      parameters.set('playerId', String(query.playerId));
+    }
+    const baseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
+    const suffix = parameters.toString();
+    const url = `${baseUrl}/matches/summary${suffix === '' ? '' : `?${suffix}`}`;
+    try {
+      const response = await fetch(url, { cache: 'no-cache' });
+      if (!response.ok) {
+        throw new Error(`match summary API returned ${response.status}`);
+      }
+      return parseMatchSummary(await response.json());
+    } catch (error: unknown) {
+      console.warn('Unable to load match summary from dashboard API', error);
+      return null;
+    }
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -101,5 +146,27 @@ function parseMatchPage(value: unknown): DashboardMatchPage {
     page: value['page'],
     pageSize: value['pageSize'],
     total: value['total'],
+  };
+}
+
+function parseMatchSummary(value: unknown): DashboardMatchSummary {
+  if (
+    !isRecord(value) ||
+    !isNonNegativeInteger(value['matches']) ||
+    !isNonNegativeInteger(value['wins']) ||
+    value['wins'] > value['matches'] ||
+    !isNonNegativeInteger(value['players']) ||
+    !isNonNegativeInteger(value['averageDurationSeconds']) ||
+    !isNonNegativeInteger(value['replays']) ||
+    value['replays'] > value['matches']
+  ) {
+    throw new Error('match summary API returned an unsupported response');
+  }
+  return {
+    matches: value['matches'],
+    wins: value['wins'],
+    players: value['players'],
+    averageDurationSeconds: value['averageDurationSeconds'],
+    replays: value['replays'],
   };
 }

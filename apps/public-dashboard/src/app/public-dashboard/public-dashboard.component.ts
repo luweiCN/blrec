@@ -6,6 +6,7 @@ import {
 } from '@angular/core';
 import { Subscription } from 'rxjs';
 
+import { DashboardMatchApiService } from './dashboard-match-api.service';
 import { DashboardModeService } from './dashboard-mode.service';
 import { filterDashboardMatches } from './public-dashboard.matches';
 import {
@@ -68,11 +69,14 @@ export class PublicDashboardComponent implements OnDestroy {
   activeMode: ModeFilter;
 
   private readonly modeSubscription: Subscription;
+  private apiRecentMatches: readonly DashboardMatch[] | null = null;
+  private recentRequestSequence = 0;
 
   constructor(
     private readonly data: DashboardDataService,
+    private readonly matchApi: DashboardMatchApiService,
     dashboardMode: DashboardModeService,
-    changeDetector: ChangeDetectorRef,
+    private readonly changeDetector: ChangeDetectorRef,
   ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
     this.activeMode = dashboardMode.mode;
@@ -81,11 +85,14 @@ export class PublicDashboardComponent implements OnDestroy {
         return;
       }
       this.activeMode = mode;
-      changeDetector.markForCheck();
+      void this.loadRecentMatches();
+      this.changeDetector.markForCheck();
     });
+    void this.loadRecentMatches();
   }
 
   ngOnDestroy(): void {
+    this.recentRequestSequence += 1;
     this.modeSubscription.unsubscribe();
   }
 
@@ -132,6 +139,9 @@ export class PublicDashboardComponent implements OnDestroy {
   }
 
   get selectedRecentMatches(): readonly DashboardMatch[] {
+    if (this.apiRecentMatches !== null) {
+      return this.apiRecentMatches;
+    }
     const player = this.selectedPlayer;
     if (player === undefined) {
       return [];
@@ -272,5 +282,31 @@ export class PublicDashboardComponent implements OnDestroy {
 
   trackResult(index: number, _result: MatchResult): number {
     return index;
+  }
+
+  private async loadRecentMatches(): Promise<void> {
+    if (!this.matchApi.enabled) {
+      return;
+    }
+    const player = this.selectedPlayer;
+    if (player === undefined) {
+      this.apiRecentMatches = [];
+      return;
+    }
+    const sequence = ++this.recentRequestSequence;
+    const page = await this.matchApi.list({
+      page: 1,
+      pageSize: 3,
+      seasonKey: this.activeSeason,
+      mode: this.activeMode,
+      playerId: player.id,
+      query: '',
+      heroes: [],
+    });
+    if (sequence !== this.recentRequestSequence) {
+      return;
+    }
+    this.apiRecentMatches = page?.items ?? null;
+    this.changeDetector.markForCheck();
   }
 }

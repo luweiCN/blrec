@@ -1,4 +1,5 @@
 import { DashboardDataService } from './public-dashboard-data.service';
+import { environment } from '../../environments/environment';
 import {
   DashboardManifest,
   DashboardTrends,
@@ -38,6 +39,52 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('DashboardDataService', () => {
+  const originalApiBaseUrl = environment.apiBaseUrl;
+
+  afterEach(() => {
+    environment.apiBaseUrl = originalApiBaseUrl;
+  });
+
+  it('loads the server materialized dashboard before static publications', async () => {
+    environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
+    const fetchSpy = spyOn(window, 'fetch').and.returnValue(
+      Promise.resolve(
+        jsonResponse({
+          snapshot: { ...TEST_DASHBOARD_SNAPSHOT, matches: [] },
+          trends: TRENDS,
+        }),
+      ),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('ready');
+    expect(service.snapshot.matches).toEqual([]);
+    expect(service.trends).toBe(TRENDS);
+    expect(fetchSpy.calls.allArgs()).toEqual([
+      ['https://vg-api.luwei.host/v1/dashboard', { cache: 'no-cache' }],
+    ]);
+  });
+
+  it('falls back to the last static publication when the API is unavailable', async () => {
+    environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
+    spyOn(console, 'warn');
+    const fetchSpy = spyOn(window, 'fetch').and.returnValues(
+      Promise.reject(new Error('API unavailable')),
+      Promise.resolve(jsonResponse(MANIFEST)),
+      Promise.resolve(jsonResponse(TEST_DASHBOARD_SNAPSHOT)),
+      Promise.resolve(jsonResponse(TRENDS)),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('ready');
+    expect(service.snapshot.snapshotId).toBe(TEST_DASHBOARD_SNAPSHOT.snapshotId);
+    expect(fetchSpy.calls.argsFor(1)[0]).toBe('data/manifest.json');
+  });
+
   it('loads the manifest before its immutable snapshot', async () => {
     const fetchSpy = spyOn(window, 'fetch').and.returnValues(
       Promise.resolve(jsonResponse(MANIFEST)),

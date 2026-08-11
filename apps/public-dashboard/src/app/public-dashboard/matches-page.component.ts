@@ -6,6 +6,10 @@ import {
 } from '@angular/core';
 import { Subscription } from 'rxjs';
 
+import {
+  DashboardMatchApiService,
+  DashboardMatchSummary,
+} from './dashboard-match-api.service';
 import { DashboardModeService } from './dashboard-mode.service';
 import { modeLabel, seasonOption } from './public-dashboard.data';
 import { DashboardDataService } from './public-dashboard-data.service';
@@ -31,11 +35,14 @@ export class MatchesPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
   private readonly modeSubscription: Subscription;
+  private apiSummary: DashboardMatchSummary | null = null;
+  private summaryRequestSequence = 0;
 
   constructor(
     readonly data: DashboardDataService,
+    private readonly matchApi: DashboardMatchApiService,
     dashboardMode: DashboardModeService,
-    changeDetector: ChangeDetectorRef,
+    private readonly changeDetector: ChangeDetectorRef,
   ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
     this.activeMode = dashboardMode.mode;
@@ -44,11 +51,14 @@ export class MatchesPageComponent implements OnDestroy {
         return;
       }
       this.activeMode = mode;
-      changeDetector.markForCheck();
+      void this.loadSummary();
+      this.changeDetector.markForCheck();
     });
+    void this.loadSummary();
   }
 
   ngOnDestroy(): void {
+    this.summaryRequestSequence += 1;
     this.modeSubscription.unsubscribe();
   }
 
@@ -74,18 +84,34 @@ export class MatchesPageComponent implements OnDestroy {
   }
 
   get wins(): number {
-    return this.matches.filter((match) => match.result === 'W').length;
+    return (
+      this.apiSummary?.wins ??
+      this.matches.filter((match) => match.result === 'W').length
+    );
+  }
+
+  get matchCount(): number {
+    return this.apiSummary?.matches ?? this.matches.length;
   }
 
   get playerCount(): number {
-    return new Set(this.matches.map((match) => match.playerId)).size;
+    return (
+      this.apiSummary?.players ??
+      new Set(this.matches.map((match) => match.playerId)).size
+    );
   }
 
   get replayCount(): number {
-    return this.matches.filter((match) => match.replay !== undefined).length;
+    return (
+      this.apiSummary?.replays ??
+      this.matches.filter((match) => match.replay !== undefined).length
+    );
   }
 
   get averageDuration(): number {
+    if (this.apiSummary !== null) {
+      return this.apiSummary.averageDurationSeconds;
+    }
     return this.matches.length === 0
       ? 0
       : Math.round(
@@ -98,6 +124,7 @@ export class MatchesPageComponent implements OnDestroy {
 
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
+    void this.loadSummary();
   }
 
   modeName(): string {
@@ -109,5 +136,21 @@ export class MatchesPageComponent implements OnDestroy {
       return '—';
     }
     return `${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, '0')}秒`;
+  }
+
+  private async loadSummary(): Promise<void> {
+    if (!this.matchApi.enabled) {
+      return;
+    }
+    const sequence = ++this.summaryRequestSequence;
+    const summary = await this.matchApi.summary({
+      seasonKey: this.activeSeason,
+      mode: this.activeMode,
+    });
+    if (sequence !== this.summaryRequestSequence) {
+      return;
+    }
+    this.apiSummary = summary;
+    this.changeDetector.markForCheck();
   }
 }

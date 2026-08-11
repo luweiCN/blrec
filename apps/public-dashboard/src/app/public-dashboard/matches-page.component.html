@@ -27,12 +27,12 @@
   <section class="match-summary-grid" aria-label="对局数据总览">
     <article>
       <span>已收录对局</span>
-      <strong>{{ matches.length | number: "1.0-0" }}</strong>
+      <strong>{{ matchCount | number: "1.0-0" }}</strong>
       <small>{{ selectedSeason.shortLabel }} · {{ modeName() }}</small>
     </article>
     <article>
       <span>主播胜 / 负</span>
-      <strong>{{ wins }} / {{ matches.length - wins }}</strong>
+      <strong>{{ wins }} / {{ matchCount - wins }}</strong>
       <small>按录像中被跟踪玩家计算</small>
     </article>
     <article>

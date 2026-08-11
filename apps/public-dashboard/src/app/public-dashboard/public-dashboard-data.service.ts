@@ -31,7 +31,8 @@ export type DashboardLoadState =
   | { readonly kind: 'loading' }
   | {
       readonly kind: 'ready';
-      readonly manifest: DashboardManifest;
+      readonly source: 'api' | 'static';
+      readonly manifest: DashboardManifest | null;
       readonly snapshot: DashboardSnapshot;
       readonly trends: DashboardTrends | null;
     }
@@ -58,6 +59,27 @@ export class DashboardDataService {
 
   async load(): Promise<void> {
     this.state = { kind: 'loading' };
+    const apiBaseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
+    if (apiBaseUrl !== '') {
+      try {
+        const document = parseDashboardApiDocument(
+          await fetchJson(`${apiBaseUrl}/dashboard`, 'no-cache'),
+        );
+        this.state = {
+          kind: 'ready',
+          source: 'api',
+          manifest: null,
+          snapshot: document.snapshot,
+          trends: document.trends,
+        };
+        return;
+      } catch (error: unknown) {
+        console.warn(
+          'Unable to load dashboard API, falling back to static data',
+          error,
+        );
+      }
+    }
     try {
       const baseUrl = environment.dataBaseUrl.replace(/\/+$/u, '');
       const manifest = parseManifest(
@@ -73,7 +95,13 @@ export class DashboardDataService {
         throw new Error('dashboard manifest and snapshot do not match');
       }
       const trends = await loadTrends(baseUrl, snapshot.snapshotId);
-      this.state = { kind: 'ready', manifest, snapshot, trends };
+      this.state = {
+        kind: 'ready',
+        source: 'static',
+        manifest,
+        snapshot,
+        trends,
+      };
     } catch (error: unknown) {
       console.error('Unable to load dashboard data', error);
       this.state = {
@@ -82,6 +110,25 @@ export class DashboardDataService {
       };
     }
   }
+}
+
+function parseDashboardApiDocument(value: unknown): {
+  readonly snapshot: DashboardSnapshot;
+  readonly trends: DashboardTrends;
+} {
+  if (!isObject(value)) {
+    throw new Error('dashboard API returned an unsupported response');
+  }
+  const snapshot = parseSnapshot(value['snapshot']);
+  const trends = parseTrends(value['trends']);
+  if (
+    !trends.publications.some(
+      (publication) => publication.snapshotId === snapshot.snapshotId,
+    )
+  ) {
+    throw new Error('dashboard API snapshot and trends do not match');
+  }
+  return { snapshot, trends };
 }
 
 export function initializeDashboardData(
