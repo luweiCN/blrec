@@ -6,6 +6,7 @@ on:
     paths:
       - apps/public-dashboard/api/**
       - apps/public-dashboard/publisher/src/blrec_dashboard_publisher/rating.py
+      - apps/public-dashboard/publisher/src/blrec_dashboard_publisher/snapshot.py
       - .github/workflows/deploy-public-dashboard-api.yml
   workflow_dispatch:
 
@@ -53,6 +54,7 @@ jobs:
           python -m pytest
           apps/public-dashboard/api/tests
           apps/public-dashboard/publisher/tests/test_rating.py
+          apps/public-dashboard/publisher/tests/test_snapshot.py
 
       - name: Build offline release
         shell: bash
@@ -107,3 +109,13 @@ jobs:
             --connect-timeout 10 --max-time 30 \
             --retry 5 --retry-all-errors --retry-delay 3 \
             https://vg-api.luwei.host/v1/health
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 30 \
+            --retry 5 --retry-all-errors --retry-delay 3 \
+            --output /dev/null \
+            https://vg-api.luwei.host/v1/dashboard
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 30 \
+            --retry 5 --retry-all-errors --retry-delay 3 \
+            --output /dev/null \
+            https://vg-api.luwei.host/v1/matches/summary

@@ -15,6 +15,7 @@ from blrec_dashboard_publisher.rating import (
 )
 from pypinyin import Style, lazy_pinyin
 
+from .dashboard import refresh_dashboard_state
 from .database import connect_database
 from .models import IngestBatch, IngestMatch, IngestMatchTeam, IngestPlayer
 
@@ -408,6 +409,7 @@ def apply_ingest_batch(
             else 0
         )
         _delete_unreferenced_players(connection, tuple(changed_player_ids))
+        refresh_dashboard_state(connection, generated_at=batch.generated_at)
         connection.execute(
             'INSERT INTO ingestion_batches('
             'idempotency_key,payload_sha256,source_last_match_id,match_count,'
@@ -667,5 +669,46 @@ def get_match(
         return _row_match(
             connection, row, rating_scope=rating_scope, rating_season=rating_season
         )
+    finally:
+        connection.close()
+
+
+def get_match_summary(
+    database_path: Path,
+    *,
+    season: Optional[str],
+    mode: Optional[str],
+    player_id: Optional[int],
+) -> Dict[str, int]:
+    conditions = ' WHERE 1=1'
+    parameters: List[Any] = []
+    if season is not None:
+        conditions += ' AND season_key=?'
+        parameters.append(season)
+    if mode is not None:
+        conditions += ' AND mode=?'
+        parameters.append(mode)
+    if player_id is not None:
+        conditions += ' AND player_id=?'
+        parameters.append(player_id)
+    connection = connect_database(database_path)
+    try:
+        row = connection.execute(
+            'SELECT COUNT(*) AS matches,'
+            "COALESCE(SUM(CASE result WHEN 'W' THEN 1 ELSE 0 END),0) AS wins,"
+            'COUNT(DISTINCT player_id) AS players,'
+            'COALESCE(ROUND(AVG(duration_seconds)),0) AS average_duration,'
+            'COALESCE(SUM(CASE WHEN replay_url IS NOT NULL THEN 1 ELSE 0 END),0) '
+            'AS replays FROM matches' + conditions,
+            parameters,
+        ).fetchone()
+        assert row is not None
+        return {
+            'matches': int(row['matches']),
+            'wins': int(row['wins']),
+            'players': int(row['players']),
+            'averageDurationSeconds': int(row['average_duration']),
+            'replays': int(row['replays']),
+        }
     finally:
         connection.close()

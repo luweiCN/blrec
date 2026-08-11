@@ -139,6 +139,12 @@ class IngestBatch(StrictModel):
     matches: List[IngestMatch]
     removed_match_ids: List[int] = Field(alias='removedMatchIds')
 
+    @validator('generated_at')
+    def generated_at_has_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError('batch generatedAt must include a timezone')
+        return value
+
     @root_validator
     def identifiers_are_unique(cls, values: dict) -> dict:
         players = values.get('players') or []

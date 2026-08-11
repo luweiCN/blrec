@@ -27,6 +27,7 @@ release="$releases_root/$release_id"
 current_link="$application_root/current"
 next_link="$application_root/.current-$release_id"
 database_root=/var/lib/blrec-dashboard-api
+database_backup_root="$database_root/backups"
 nginx_available="/etc/nginx/sites-available/vg-api.luwei.host-$release_id"
 nginx_enabled=/etc/nginx/sites-enabled/vg-api.luwei.host
 nginx_next="/etc/nginx/sites-enabled/.vg-api.luwei.host-$release_id"
@@ -37,6 +38,8 @@ if ! id blrec-dashboard-api >/dev/null 2>&1; then
 fi
 install -d -m 0755 -o root -g root "$application_root" "$releases_root"
 install -d -m 0750 -o blrec-dashboard-api -g blrec-dashboard-api "$database_root"
+install -d -m 0750 -o blrec-dashboard-api -g blrec-dashboard-api \
+  "$database_backup_root"
 
 if [[ -e "$release" ]]; then
   echo "API release identifier already exists" >&2
@@ -74,6 +77,48 @@ fi
   "${publisher_wheels[0]}" "${api_wheels[0]}"
 
 chown -R root:root "$release"
+
+set -a
+# shellcheck disable=SC1091
+source /etc/blrec-dashboard-api/api.env
+set +a
+database_path="${DASHBOARD_API_DATABASE_PATH:-$database_root/dashboard.sqlite3}"
+if [[ "$database_path" != "$database_root/"* ]]; then
+  echo "API database path must stay below $database_root" >&2
+  exit 1
+fi
+if [[ -e "$database_path" ]]; then
+  if [[ ! -f "$database_path" || -L "$database_path" ]]; then
+    echo "API database path is not a regular file" >&2
+    exit 1
+  fi
+  database_backup="$database_backup_root/dashboard-$release_id.sqlite3"
+  "$release/venv/bin/python" - "$database_path" "$database_backup" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+backup_path = Path(sys.argv[2])
+source = sqlite3.connect(f'file:{source_path}?mode=ro', uri=True, timeout=30)
+backup = sqlite3.connect(backup_path, timeout=30)
+try:
+    source_check = source.execute('PRAGMA quick_check').fetchone()
+    if source_check != ('ok',):
+        raise RuntimeError(f'source database quick_check failed: {source_check!r}')
+    source.backup(backup)
+    backup_check = backup.execute('PRAGMA quick_check').fetchone()
+    if backup_check != ('ok',):
+        raise RuntimeError(f'backup database quick_check failed: {backup_check!r}')
+finally:
+    backup.close()
+    source.close()
+if not backup_path.is_file() or backup_path.stat().st_size == 0:
+    raise RuntimeError('API database backup is empty')
+PY
+  chown blrec-dashboard-api:blrec-dashboard-api "$database_backup"
+  chmod 0640 "$database_backup"
+fi
 
 verify_unit="/tmp/blrec-dashboard-api-$release_id.service"
 sed "s#/opt/blrec-dashboard-api/current#$release#g" \

@@ -136,6 +136,106 @@ def test_match_list_waits_for_first_publication(tmp_path: Path) -> None:
     assert published.json()['total'] == 0
 
 
+def test_dashboard_waits_for_first_publication(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    response = client.get('/v1/dashboard')
+
+    assert response.status_code == 503
+    assert response.json() == {
+        'detail': 'dashboard is waiting for its first publication'
+    }
+
+
+def test_dashboard_is_materialized_from_server_matches_without_embedding_archive(
+    tmp_path: Path,
+) -> None:
+    client = make_client(tmp_path)
+    payload = batch([match(1, played_at='2026-06-01T12:00:00Z', result='W')])
+
+    assert ingest(client, payload).status_code == 200
+    response = client.get('/v1/dashboard')
+
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == (
+        'public, max-age=60, stale-while-revalidate=300'
+    )
+    assert response.headers['etag'].startswith('"')
+    document = response.json()
+    snapshot = document['snapshot']
+    trends = document['trends']
+    assert snapshot['sourceLastMatchId'] == 1
+    assert snapshot['sourceMatchCount'] == 1
+    assert snapshot['currentSeasonKey'] == '2026-summer'
+    assert snapshot['matches'] == []
+    summer = snapshot['standings']['2026-summer']
+    player = summer['players'][0]
+    assert player['id'] == 7
+    assert player['modes']['3v3']['matches'] == 1
+    assert player['modes']['3v3']['wins'] == 1
+    assert player['modes']['3v3']['ratingScore'] is not None
+    assert player['modes']['3v3']['ratingForecast'] is not None
+    hero = next(value for value in summer['heroes'] if value['id'] == '剑圣')
+    assert hero['modes']['3v3'] == {'matches': 1, 'wins': 1, 'players': 1}
+    assert trends['publications'][-1]['snapshotId'] == snapshot['snapshotId']
+    assert trends['publications'][-1]['publicationDate'] == '2026-08-11'
+
+    not_modified = client.get(
+        '/v1/dashboard', headers={'If-None-Match': response.headers['etag']}
+    )
+    assert not_modified.status_code == 304
+
+
+def test_dashboard_backfill_replaces_same_day_trend_after_chronological_replay(
+    tmp_path: Path,
+) -> None:
+    client = make_client(tmp_path)
+    recent = match(2, played_at='2026-06-02T12:00:00Z', result='W')
+    historical = match(1, played_at='2026-06-01T12:00:00Z', result='L')
+
+    assert ingest(client, batch([recent]), 'recent').status_code == 200
+    before = client.get('/v1/dashboard').json()
+    assert ingest(client, batch([historical]), 'historical').status_code == 200
+    after = client.get('/v1/dashboard').json()
+
+    before_player = before['snapshot']['standings']['2026-summer']['players'][0]
+    after_player = after['snapshot']['standings']['2026-summer']['players'][0]
+    assert after['snapshot']['snapshotId'] != before['snapshot']['snapshotId']
+    assert after_player['modes']['3v3']['matches'] == 2
+    assert after_player['modes']['3v3']['wins'] == 1
+    assert (
+        after_player['modes']['3v3']['ratingScore']
+        != before_player['modes']['3v3']['ratingScore']
+    )
+    assert len(after['trends']['publications']) == 1
+    assert (
+        after['trends']['publications'][0]['snapshotId']
+        == after['snapshot']['snapshotId']
+    )
+
+
+def test_match_summary_is_filtered_and_precomputed_on_server(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    payload = batch(
+        [
+            match(1, played_at='2026-06-01T12:00:00Z', result='W'),
+            match(2, played_at='2026-06-02T12:00:00Z', result='L'),
+        ]
+    )
+    assert ingest(client, payload).status_code == 200
+
+    response = client.get('/v1/matches/summary?season=2026-summer&mode=3v3')
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'matches': 2,
+        'wins': 1,
+        'players': 1,
+        'averageDurationSeconds': 907,
+        'replays': 2,
+    }
+
+
 def test_ingest_removes_unreferenced_players_missing_from_source(
     tmp_path: Path,
 ) -> None:
@@ -279,6 +379,12 @@ def test_schema_uses_foreign_keys_and_player_match_index(tmp_path: Path) -> None
     client.get('/v1/health')
     connection = sqlite3.connect(tmp_path / 'dashboard.sqlite3')
     try:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
         indexes = {
             row[1]
             for row in connection.execute("PRAGMA index_list('matches')").fetchall()
@@ -292,5 +398,7 @@ def test_schema_uses_foreign_keys_and_player_match_index(tmp_path: Path) -> None
     finally:
         connection.close()
 
+    assert 'dashboard_state' in tables
+    assert 'dashboard_trend_publications' in tables
     assert 'matches_player_played_idx' in indexes
     assert any('matches_player_played_idx' in str(row) for row in plan)

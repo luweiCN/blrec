@@ -46,13 +46,20 @@ __all__ = (
     'DashboardExportResult',
     'build_dashboard_api_source',
     'build_dashboard_snapshot',
+    'build_dashboard_snapshot_from_records',
     'export_dashboard_files',
 )
 
 
 SHANGHAI = timezone(timedelta(hours=8))
 PUBLIC_MODES = ('all', '3v3', 'brawl', '5v5')
-RAW_MODE_TO_PUBLIC = {'3v3': '3v3', '5v5': '5v5', 'aram': 'brawl', 'other': 'brawl'}
+RAW_MODE_TO_PUBLIC = {
+    '3v3': '3v3',
+    '5v5': '5v5',
+    'aram': 'brawl',
+    'other': 'brawl',
+    'brawl': 'brawl',
+}
 SEASON_NAMES = {'spring': '春季赛', 'summer': '夏季赛', 'autumn': '秋季赛'}
 HERO_SYNERGY_MIN_MATCHES = 5
 HERO_SYNERGY_PRIOR_MATCHES = 5
@@ -900,7 +907,7 @@ def _room_label(rooms: List[int]) -> str:
 
 
 def _standings_for_rows(
-    rows: List[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
     players: Mapping[int, Mapping[str, Any]],
     aliases: Mapping[int, List[str]],
     lineups: Mapping[int, List[Mapping[str, Any]]],
@@ -1005,13 +1012,41 @@ def build_dashboard_snapshot(
     generated_at = now or datetime.now(timezone.utc)
     if generated_at.tzinfo is None:
         raise ValueError('dashboard snapshot time must include a timezone')
-    current_season = _season_for(generated_at)
     players, aliases = _player_metadata(connection)
     rows = _match_rows(connection)
     lineups = _lineups_by_match(connection, rows)
     publications = _publications_by_session(connection, rows)
     publication_parts = _publication_parts(connection, publications)
     public_matches = _public_matches(rows, lineups, publications, publication_parts)
+
+    return build_dashboard_snapshot_from_records(
+        players=players,
+        aliases=aliases,
+        rows=rows,
+        lineups=lineups,
+        public_matches=public_matches,
+        generated_at=generated_at,
+    )
+
+
+def build_dashboard_snapshot_from_records(
+    *,
+    players: Mapping[int, Mapping[str, Any]],
+    aliases: Mapping[int, List[str]],
+    rows: Sequence[Mapping[str, Any]],
+    lineups: Mapping[int, List[Mapping[str, Any]]],
+    public_matches: Sequence[Mapping[str, Any]],
+    generated_at: datetime,
+) -> Mapping[str, Any]:
+    """Build the public ranking document from normalized match records.
+
+    Both the NAS exporter and the public API use this pure aggregation boundary so
+    season inheritance, hero statistics, forecasts, and tie-break rules cannot
+    drift while the dashboard moves away from static publications.
+    """
+    if generated_at.tzinfo is None:
+        raise ValueError('dashboard snapshot time must include a timezone')
+    current_season = _season_for(generated_at)
 
     seasons_by_key: Dict[str, _Season] = {current_season.key: current_season}
     rows_by_season: Dict[str, List[Mapping[str, Any]]] = {}
@@ -1075,7 +1110,7 @@ def build_dashboard_snapshot(
             }
         ],
         'standings': standings,
-        'matches': public_matches,
+        'matches': list(public_matches),
     }
     content_revision = hashlib.sha256(
         _json_bytes(

@@ -6,12 +6,20 @@ import re
 from typing import Literal, Optional
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from .dashboard import ensure_dashboard_state, get_dashboard_document
 from .database import database_session, initialize_database
 from .models import IngestBatch
-from .service import IdempotencyConflict, apply_ingest_batch, get_match, list_matches
+from .service import (
+    IdempotencyConflict,
+    apply_ingest_batch,
+    get_match,
+    get_match_summary,
+    list_matches,
+)
 from .settings import ApiSettings
 
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,128}$')
@@ -45,6 +53,7 @@ def _hero_filters(value: str) -> tuple[str, ...]:
 def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
     active_settings = settings or ApiSettings.from_environment()
     initialize_database(active_settings.database_path)
+    ensure_dashboard_state(active_settings.database_path)
     app = FastAPI(
         title='BLREC Vainglory Dashboard API',
         version='1.0.0',
@@ -92,6 +101,25 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
                 detail='idempotency key was already used for another payload',
             ) from error
 
+    @app.get('/v1/dashboard')
+    def dashboard(
+        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match')
+    ) -> Response:
+        current = get_dashboard_document(active_settings.database_path)
+        if current is None:
+            raise HTTPException(
+                status_code=503, detail='dashboard is waiting for its first publication'
+            )
+        document, revision = current
+        etag = '"{}"'.format(revision)
+        headers = {
+            'Cache-Control': 'public, max-age=60, stale-while-revalidate=300',
+            'ETag': etag,
+        }
+        if if_none_match == etag:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(content=document, headers=headers)
+
     @app.get('/v1/matches')
     def matches(
         page: int = Query(default=1, ge=1),
@@ -132,6 +160,30 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
             heroes=_hero_filters(heroes),
             rating_scope=rating_scope,
             rating_season=rating_season,
+        )
+
+    @app.get('/v1/matches/summary')
+    def match_summary(
+        season: Optional[str] = Query(
+            default=None, regex=r'^(all-time|\d{4}-(spring|summer|autumn))$'
+        ),
+        mode: Optional[Literal['3v3', 'brawl', '5v5']] = None,
+        player_id: Optional[int] = Query(default=None, alias='playerId', gt=0),
+    ) -> dict:
+        with database_session(active_settings.database_path) as connection:
+            initialized = connection.execute(
+                'SELECT 1 FROM ingestion_batches LIMIT 1'
+            ).fetchone()
+        if initialized is None:
+            raise HTTPException(
+                status_code=503,
+                detail='match archive is waiting for its first publication',
+            )
+        return get_match_summary(
+            active_settings.database_path,
+            season=None if season == 'all-time' else season,
+            mode=mode,
+            player_id=player_id,
         )
 
     @app.get('/v1/matches/{match_id}')
