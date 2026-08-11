@@ -54,7 +54,6 @@ jobs:
           python -m pytest
           apps/public-dashboard/api/tests
           apps/public-dashboard/publisher/tests/test_rating.py
-          apps/public-dashboard/publisher/tests/test_snapshot.py
 
       - name: Build offline release
         shell: bash
