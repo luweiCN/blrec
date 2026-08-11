@@ -70,6 +70,16 @@ interface TrendChartPoint extends PlayerTrendPoint {
   readonly y: number;
   readonly xPercent: number;
   readonly yPercent: number;
+  readonly displayScore: number;
+  readonly displayDelta: number | null;
+}
+
+type TrendRangeKey = 'recent-7' | 'recent-30' | 'all';
+
+interface TrendRangeOption {
+  readonly key: TrendRangeKey;
+  readonly label: string;
+  readonly limit: number | null;
 }
 
 type PlayerPromotionGoal =
@@ -101,6 +111,11 @@ const TREND_CHART_WIDTH = 640;
 const TREND_CHART_HEIGHT = 180;
 const TREND_CHART_PADDING_X = 18;
 const TREND_CHART_PADDING_Y = 18;
+const TREND_RANGE_OPTIONS: readonly TrendRangeOption[] = [
+  { key: 'recent-7', label: '近 7 次', limit: 7 },
+  { key: 'recent-30', label: '近 30 次', limit: 30 },
+  { key: 'all', label: '全部', limit: null },
+];
 
 @Component({
   selector: 'app-player-detail-page',
@@ -110,6 +125,7 @@ const TREND_CHART_PADDING_Y = 18;
     './leaderboard-profile-page.scss',
     './player-rank-showcase.scss',
     './player-rating-forecast.scss',
+    './player-rating-trend.scss',
     './player-hero-table.scss',
     './leaderboard-profile-responsive.scss',
   ],
@@ -119,6 +135,8 @@ export class PlayerDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
   activeHeroSort: PlayerHeroSort = 'proficiency';
+  activeTrendRange: TrendRangeKey = 'recent-30';
+  readonly trendRangeOptions = TREND_RANGE_OPTIONS;
   readonly heroGoldPerMinute = heroGoldPerMinute;
   readonly displayScore = displayScoreForRatingScore;
   readonly heroKda = heroKda;
@@ -319,11 +337,30 @@ export class PlayerDetailPageComponent implements OnDestroy {
     return delta < 0 ? 'down' : 'same';
   }
 
-  get trendChartPoints(): readonly TrendChartPoint[] {
+  get visibleTrendPoints(): readonly PlayerTrendPoint[] {
     const points = this.playerTrend.points;
+    const limit =
+      TREND_RANGE_OPTIONS.find(
+        (option) => option.key === this.activeTrendRange,
+      )?.limit ?? null;
+    return limit === null ? points : points.slice(-limit);
+  }
+
+  get trendPublicationSummary(): string {
+    const total = this.playerTrend.points.length;
+    const visible = this.visibleTrendPoints.length;
+    return visible === total
+      ? `共 ${total} 次数据发布`
+      : `显示 ${visible} / ${total} 次数据发布`;
+  }
+
+  get trendChartPoints(): readonly TrendChartPoint[] {
+    const allPoints = this.playerTrend.points;
+    const points = this.visibleTrendPoints;
     if (points.length === 0) {
       return [];
     }
+    const startIndex = allPoints.length - points.length;
     const scores = points.map((point) => point.ratingScore);
     const minimum = Math.min(...scores);
     const maximum = Math.max(...scores);
@@ -348,6 +385,14 @@ export class PlayerDetailPageComponent implements OnDestroy {
         y,
         xPercent: (x / TREND_CHART_WIDTH) * 100,
         yPercent: (y / TREND_CHART_HEIGHT) * 100,
+        displayScore: displayScoreForRatingScore(point.ratingScore) ?? 0,
+        displayDelta:
+          startIndex + index === 0
+            ? null
+            : displayScoreForRatingDelta(
+                point.ratingScore -
+                  allPoints[startIndex + index - 1].ratingScore,
+              ),
       };
     });
   }
@@ -359,26 +404,27 @@ export class PlayerDetailPageComponent implements OnDestroy {
   }
 
   get trendMinimumScore(): number | null {
-    const scores = this.playerTrend.points.map(
+    const scores = this.visibleTrendPoints.map(
       (point) => displayScoreForRatingScore(point.ratingScore) ?? 0,
     );
     return scores.length === 0 ? null : Math.min(...scores);
   }
 
   get trendMaximumScore(): number | null {
-    const scores = this.playerTrend.points.map(
+    const scores = this.visibleTrendPoints.map(
       (point) => displayScoreForRatingScore(point.ratingScore) ?? 0,
     );
     return scores.length === 0 ? null : Math.max(...scores);
   }
 
   get trendFirstDate(): string {
-    return this.formatTrendDate(this.playerTrend.points[0]?.publicationDate);
+    return this.formatTrendDate(this.visibleTrendPoints[0]?.publicationDate);
   }
 
   get trendLastDate(): string {
     return this.formatTrendDate(
-      this.playerTrend.points[this.playerTrend.points.length - 1]?.publicationDate,
+      this.visibleTrendPoints[this.visibleTrendPoints.length - 1]
+        ?.publicationDate,
     );
   }
 
@@ -447,6 +493,10 @@ export class PlayerDetailPageComponent implements OnDestroy {
     this.activeHeroSort = sort;
   }
 
+  selectTrendRange(range: TrendRangeKey): void {
+    this.activeTrendRange = range;
+  }
+
   heroImage(heroName: string): string {
     return heroImage(heroName);
   }
@@ -471,10 +521,21 @@ export class PlayerDetailPageComponent implements OnDestroy {
     return `${Number(month)}月${Number(day)}日`;
   }
 
-  trendPointLabel(point: PlayerTrendPoint): string {
-    const score = displayScoreForRatingScore(point.ratingScore);
-    const scoreLabel = score?.toLocaleString('zh-CN') ?? '暂无排位分';
-    return `${this.formatTrendDate(point.publicationDate)}：${scoreLabel}，第 ${point.rank} 名`;
+  trendPointLabel(point: TrendChartPoint): string {
+    const scoreLabel = point.displayScore.toLocaleString('zh-CN');
+    const changeLabel = this.trendPointDeltaText(point);
+    return `${this.formatTrendDate(point.publicationDate)}，排位分 ${scoreLabel}，第 ${point.rank} 名，${changeLabel}`;
+  }
+
+  trendPointDeltaText(point: TrendChartPoint): string {
+    const delta = point.displayDelta;
+    if (delta === null) {
+      return '首次记录';
+    }
+    if (delta === 0) {
+      return '较前次持平';
+    }
+    return `较前次 ${delta > 0 ? '+' : '−'}${Math.abs(delta).toLocaleString('zh-CN')}`;
   }
 
   trackMode(_index: number, mode: ModeBreakdown): ModeFilter {
@@ -495,6 +556,10 @@ export class PlayerDetailPageComponent implements OnDestroy {
 
   trackTrendPoint(_index: number, point: TrendChartPoint): string {
     return point.publicationDate;
+  }
+
+  trackTrendRange(_index: number, option: TrendRangeOption): TrendRangeKey {
+    return option.key;
   }
 
   trackPromotionGoal(

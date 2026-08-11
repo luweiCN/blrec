@@ -1,0 +1,143 @@
+.rating-trend-heading-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+
+  & > span {
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+    text-align: right;
+  }
+}
+
+.profile-hero-sort.trend-range-filter {
+  min-height: 34px;
+
+  button {
+    padding: 0 10px;
+    font-size: var(--type-caption);
+  }
+}
+
+.trend-point {
+  position: absolute;
+  z-index: 1;
+  display: block;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+
+  &::before {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 9px;
+    height: 9px;
+    border: 2px solid var(--cyan);
+    border-radius: 50%;
+    background: var(--surface-1);
+    content: "";
+    transform: translate(-50%, -50%);
+  }
+
+  &:hover,
+  &:focus {
+    z-index: 3;
+
+    &::before {
+      width: 13px;
+      height: 13px;
+      background: var(--cyan);
+      box-shadow: 0 0 0 4px var(--cyan-wash);
+    }
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  &.current::before {
+    width: 11px;
+    height: 11px;
+    border-color: var(--gold);
+    background: var(--gold);
+  }
+
+  &.current:hover::before,
+  &.current:focus::before {
+    width: 14px;
+    height: 14px;
+    box-shadow: 0 0 0 4px oklch(78% 0.16 83 / 0.12);
+  }
+}
+
+.trend-point-tooltip {
+  position: absolute;
+  bottom: calc(50% + 12px);
+  left: 50%;
+  display: grid;
+  gap: 3px;
+  width: max-content;
+  min-width: 142px;
+  padding: 9px 10px;
+  visibility: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--ink-soft);
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  transform: translateX(-50%);
+
+  &.below {
+    top: calc(50% + 12px);
+    bottom: auto;
+  }
+
+  &.align-start {
+    left: 50%;
+    transform: none;
+  }
+
+  &.align-end {
+    right: 50%;
+    left: auto;
+    transform: none;
+  }
+
+  strong {
+    color: var(--ink);
+    font-size: var(--type-label);
+    font-variant-numeric: tabular-nums;
+  }
+
+  span,
+  small {
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+    font-weight: 650;
+    white-space: nowrap;
+  }
+
+  small.up {
+    color: var(--cyan);
+  }
+
+  small.down {
+    color: var(--rose);
+  }
+}
+
+.trend-point:hover .trend-point-tooltip,
+.trend-point:focus .trend-point-tooltip {
+  visibility: visible;
+  opacity: 1;
+}

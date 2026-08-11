@@ -24,6 +24,7 @@ import {
 import {
   DashboardMatch,
   DashboardMatchPlayer,
+  DashboardMatchRating,
   ModeFilter,
   PlayerStanding,
   SeasonKey,
@@ -291,6 +292,16 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
 
   formatDuration(seconds: number): string {
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  }
+
+  matchRatingAriaLabel(rating: DashboardMatchRating): string {
+    const change =
+      rating.scoreDelta > 0
+        ? `增加 ${rating.scoreDelta}`
+        : rating.scoreDelta < 0
+          ? `减少 ${Math.abs(rating.scoreDelta)}`
+          : '不变';
+    return `排位分从 ${rating.scoreBefore} 变为 ${rating.scoreAfter}，本局${change}`;
   }
 
   matchAriaLabel(match: DashboardMatch): string {

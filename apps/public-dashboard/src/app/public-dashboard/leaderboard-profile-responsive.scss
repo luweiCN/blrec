@@ -167,11 +167,24 @@
 @media (max-width: 620px) {
   .rating-trend-card > header {
     display: block;
+  }
+
+  .rating-trend-heading-actions {
+    gap: 10px;
+    width: 100%;
+    margin-top: 14px;
+    justify-items: stretch;
 
     & > span {
-      display: block;
-      margin-top: 7px;
       text-align: left;
+    }
+  }
+
+  .profile-hero-sort.trend-range-filter {
+    width: 100%;
+
+    button {
+      flex: 1;
     }
   }
 

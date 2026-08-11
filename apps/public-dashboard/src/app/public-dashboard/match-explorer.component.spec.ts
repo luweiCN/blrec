@@ -155,9 +155,9 @@ describe('MatchExplorerComponent', () => {
           scope: '3v3',
           seasonKey: '2026-summer',
           matchNumber: 12,
-          scoreBefore: 700,
-          scoreDelta: 11,
-          scoreAfter: 711,
+          scoreBefore: 2058,
+          scoreDelta: 6,
+          scoreAfter: 2064,
           provisional: false,
           modelVersion: 3,
         },
@@ -166,7 +166,13 @@ describe('MatchExplorerComponent', () => {
     fixture.detectChanges();
     const row = fixture.nativeElement as HTMLElement;
     expect(row.textContent).toContain('蓝 40.9K');
-    expect(row.textContent).toContain('本局 +11');
+    expect(row.textContent).toContain('2,058');
+    expect(row.textContent).toContain('→');
+    expect(row.textContent).toContain('2,064');
+    expect(row.textContent).toContain('本局 +6');
+    expect(
+      row.querySelector('.match-rating-change')?.getAttribute('aria-label'),
+    ).toBe('排位分从 2058 变为 2064，本局增加 6');
 
     (row.querySelector('.match-row-detail-hitbox') as HTMLButtonElement).click();
     fixture.detectChanges();

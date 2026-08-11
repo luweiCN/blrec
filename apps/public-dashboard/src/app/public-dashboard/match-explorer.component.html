@@ -161,7 +161,17 @@
               class="match-rating-change"
               [class.positive]="rating.scoreDelta > 0"
               [class.negative]="rating.scoreDelta < 0"
-            >本局 {{ rating.scoreDelta > 0 ? "+" : "" }}{{ rating.scoreDelta }}</small>
+              [attr.aria-label]="matchRatingAriaLabel(rating)"
+            >
+              <span class="match-rating-transition" aria-hidden="true">
+                <span>{{ rating.scoreBefore | number: "1.0-0" }}</span>
+                <span class="match-rating-arrow">→</span>
+                <span class="match-rating-after">{{ rating.scoreAfter | number: "1.0-0" }}</span>
+              </span>
+              <span class="match-rating-delta" aria-hidden="true">
+                本局 {{ rating.scoreDelta > 0 ? "+" : "" }}{{ rating.scoreDelta }}
+              </span>
+            </small>
           </span>
 
           <span class="match-row-meta">

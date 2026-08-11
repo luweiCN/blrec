@@ -12,7 +12,7 @@ from blrec_dashboard_publisher.snapshot import build_dashboard_snapshot_from_rec
 from .database import connect_database
 
 _TREND_MODES = ('all', '3v3', 'brawl', '5v5')
-_MAX_TREND_PUBLICATIONS = 30
+_MAX_TREND_PUBLICATIONS = 180
 
 
 def _json_text(value: Mapping[str, Any]) -> str:

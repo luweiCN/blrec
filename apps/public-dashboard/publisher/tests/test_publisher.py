@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -349,25 +349,26 @@ def test_force_publication_replaces_the_same_day_trend_point(tmp_path: Path) -> 
     assert publication['standings']['2026-summer']['3v3'][0]['ratingScore'] == 625
 
 
-def test_trend_history_keeps_the_latest_thirty_publications(tmp_path: Path) -> None:
+def test_trend_history_keeps_the_latest_180_publications(tmp_path: Path) -> None:
     store = FakeStore()
     arguments = (tmp_path / 'database.sqlite3', tmp_path / 'state', store)
+    start = datetime(2026, 1, 1, 0, 5, tzinfo=SHANGHAI)
 
-    for day in range(1, 32):
+    for offset in range(181):
         publish_dashboard_once(
             *arguments,
-            now=datetime(2026, 7, day, 0, 5, tzinfo=SHANGHAI),
+            now=start + timedelta(days=offset),
             exporter=Exporter(
-                snapshot_id='snapshot-{:02d}'.format(day),
-                source_last_match_id=day,
-                players=[trend_player(7, 600 + day, day, day // 2)],
+                snapshot_id='snapshot-{:03d}'.format(offset),
+                source_last_match_id=offset + 1,
+                players=[trend_player(7, 600 + offset, offset + 1, (offset + 1) // 2)],
             ),
         )
 
     trends = json.loads(store.trends)
-    assert len(trends['publications']) == 30
-    assert trends['publications'][0]['publicationDate'] == '2026-07-02'
-    assert trends['publications'][-1]['publicationDate'] == '2026-07-31'
+    assert len(trends['publications']) == 180
+    assert trends['publications'][0]['publicationDate'] == '2026-01-02'
+    assert trends['publications'][-1]['publicationDate'] == '2026-06-30'
 
 
 def test_trends_are_committed_before_the_manifest(tmp_path: Path) -> None:

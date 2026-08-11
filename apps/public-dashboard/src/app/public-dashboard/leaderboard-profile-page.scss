@@ -343,25 +343,6 @@
   vector-effect: non-scaling-stroke;
 }
 
-.trend-point {
-  position: absolute;
-  display: block;
-  width: 9px;
-  height: 9px;
-  border: 2px solid var(--cyan);
-  border-radius: 50%;
-  background: var(--surface-1);
-  pointer-events: auto;
-  transform: translate(-50%, -50%);
-
-  &.current {
-    width: 11px;
-    height: 11px;
-    border-color: var(--gold);
-    background: var(--gold);
-  }
-}
-
 .trend-point-layer {
   position: absolute;
   top: 0;

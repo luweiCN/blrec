@@ -298,14 +298,23 @@
       class="profile-card rating-trend-card"
       aria-labelledby="player-rating-trend-title"
     >
-      <header>
+      <header class="rating-trend-heading">
         <div>
           <p>评分变化</p>
           <h2 id="player-rating-trend-title">排位分趋势</h2>
         </div>
-        <span>
-          最近 {{ playerTrend.points.length }} 次数据发布 · {{ modeLabel() }}
-        </span>
+        <div class="rating-trend-heading-actions">
+          <span>{{ trendPublicationSummary }} · {{ modeLabel() }}</span>
+          <div class="profile-hero-sort trend-range-filter" role="group" aria-label="趋势时间范围">
+            <button
+              *ngFor="let option of trendRangeOptions; trackBy: trackTrendRange"
+              type="button"
+              [class.active]="activeTrendRange === option.key"
+              [attr.aria-pressed]="activeTrendRange === option.key"
+              (click)="selectTrendRange(option.key)"
+            >{{ option.label }}</button>
+          </div>
+        </div>
       </header>
 
       <div *ngIf="playerTrend.current as current; else noRatingTrend" class="rating-trend-layout">
@@ -350,17 +359,30 @@
                 ></polyline>
               </svg>
               <div class="trend-point-layer">
-                <span
+                <button
                   *ngFor="let point of trendChartPoints; let pointIndex = index; trackBy: trackTrendPoint"
+                  type="button"
                   class="trend-point"
                   [class.current]="pointIndex === trendChartPoints.length - 1"
                   [style.left.%]="point.xPercent"
                   [style.top.%]="point.yPercent"
-                  role="img"
                   [attr.aria-label]="trendPointLabel(point)"
-                  [title]="trendPointLabel(point)"
                 >
-                </span>
+                  <span
+                    class="trend-point-tooltip"
+                    [class.below]="point.yPercent < 38"
+                    [class.align-start]="point.xPercent < 18"
+                    [class.align-end]="point.xPercent > 82"
+                    aria-hidden="true"
+                  >
+                    <strong>{{ point.displayScore | number: "1.0-0" }}</strong>
+                    <span>{{ formatTrendDate(point.publicationDate) }} · 第 {{ point.rank }} 名</span>
+                    <small
+                      [class.up]="point.displayDelta !== null && point.displayDelta > 0"
+                      [class.down]="point.displayDelta !== null && point.displayDelta < 0"
+                    >{{ trendPointDeltaText(point) }}</small>
+                  </span>
+                </button>
               </div>
               <div
                 class="rating-trend-axis"

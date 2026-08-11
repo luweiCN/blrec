@@ -500,12 +500,42 @@ summary {
   }
 
   .match-rating-change {
+    display: flex;
+    gap: 7px;
+    align-items: baseline;
+    justify-content: center;
+    font-variant-numeric: tabular-nums;
+
+    .match-rating-transition {
+      display: inline-flex;
+      gap: 4px;
+      align-items: baseline;
+      color: var(--ink-muted);
+    }
+
+    .match-rating-arrow {
+      color: var(--line);
+    }
+
+    .match-rating-after {
+      color: var(--ink-soft);
+      font-weight: 760;
+    }
+
+    .match-rating-delta {
+      font-weight: 740;
+    }
+
     &.positive {
-      color: var(--cyan);
+      .match-rating-delta {
+        color: var(--cyan);
+      }
     }
 
     &.negative {
-      color: var(--rose);
+      .match-rating-delta {
+        color: var(--rose);
+      }
     }
   }
 }

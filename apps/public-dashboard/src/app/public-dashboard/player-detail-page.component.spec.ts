@@ -15,6 +15,7 @@ import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { DashboardDataService } from './public-dashboard-data.service';
+import { DashboardTrends } from './public-dashboard.models';
 import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 import {
   TEST_DASHBOARD_SNAPSHOT,
@@ -25,8 +26,16 @@ describe('PlayerDetailPageComponent', () => {
   let fixture: ComponentFixture<PlayerDetailPageComponent>;
   let component: PlayerDetailPageComponent;
   let dashboardMode: DashboardModeService;
+  let dashboardData: {
+    snapshot: typeof TEST_DASHBOARD_SNAPSHOT;
+    trends: DashboardTrends;
+  };
 
   beforeEach(async () => {
+    dashboardData = {
+      snapshot: TEST_DASHBOARD_SNAPSHOT,
+      trends: TEST_DASHBOARD_TRENDS,
+    };
     await TestBed.configureTestingModule({
       declarations: [
         PlayerDetailPageComponent,
@@ -42,10 +51,7 @@ describe('PlayerDetailPageComponent', () => {
       providers: [
         {
           provide: DashboardDataService,
-          useValue: {
-            snapshot: TEST_DASHBOARD_SNAPSHOT,
-            trends: TEST_DASHBOARD_TRENDS,
-          },
+          useValue: dashboardData,
         },
         {
           provide: ActivatedRoute,
@@ -123,10 +129,14 @@ describe('PlayerDetailPageComponent', () => {
     ).map((element) => element.textContent ?? '');
     expect(heroLinks.some((value) => value.includes('凯恩'))).toBeTrue();
     expect(page.querySelectorAll('.trend-point').length).toBe(3);
-    expect(page.querySelector('.trend-point')?.tagName).toBe('SPAN');
+    expect(page.querySelector('.trend-point')?.tagName).toBe('BUTTON');
     expect(
       (page.querySelector('.trend-point') as HTMLElement).style.left,
     ).toContain('%');
+    expect(page.querySelector('.trend-point-tooltip')?.textContent).toContain(
+      '2,016',
+    );
+    expect(page.querySelectorAll('.trend-range-filter button').length).toBe(3);
     expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
       '+18',
     );
@@ -153,6 +163,69 @@ describe('PlayerDetailPageComponent', () => {
     expect(component.performance.matches).toBe(46);
   });
 
+  it('shows thirty trend points by default and filters long histories', () => {
+    const endDate = new Date(Date.UTC(2026, 7, 3));
+    dashboardData.trends = {
+      schemaVersion: 1,
+      updatedAt: TEST_DASHBOARD_SNAPSHOT.generatedAt,
+      publications: Array.from({ length: 40 }, (_, index) => {
+        const publicationDate = new Date(
+          endDate.getTime() - (39 - index) * 24 * 60 * 60 * 1_000,
+        )
+          .toISOString()
+          .slice(0, 10);
+        const standing = {
+          playerId: 1,
+          rank: 40 - index,
+          ratingScore: 640 + index,
+        };
+        return {
+          snapshotId:
+            index === 39
+              ? TEST_DASHBOARD_SNAPSHOT.snapshotId
+              : `trend-${index}`,
+          publicationDate,
+          sourceLastMatchId: 12_000 + index,
+          standings: {
+            '2026-summer': {
+              all: [standing],
+              '3v3': [standing],
+              brawl: [],
+              '5v5': [],
+            },
+          },
+        };
+      }),
+    };
+    fixture.destroy();
+    fixture = TestBed.createComponent(PlayerDetailPageComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(component.visibleTrendPoints.length).toBe(30);
+    expect(fixture.nativeElement.querySelectorAll('.trend-point').length).toBe(
+      30,
+    );
+    expect(
+      fixture.nativeElement.querySelector('.rating-trend-heading-actions')
+        ?.textContent,
+    ).toContain('显示 30 / 40 次数据发布');
+
+    const rangeButtons = fixture.nativeElement.querySelectorAll(
+      '.trend-range-filter button',
+    ) as NodeListOf<HTMLButtonElement>;
+    rangeButtons[0].click();
+    fixture.detectChanges();
+    expect(component.visibleTrendPoints.length).toBe(7);
+    expect(fixture.nativeElement.querySelectorAll('.trend-point').length).toBe(
+      7,
+    );
+
+    rangeButtons[2].click();
+    fixture.detectChanges();
+    expect(component.visibleTrendPoints.length).toBe(40);
+  });
+
   it('sorts the hero pool by usage, win rate or KDA', () => {
     component.selectHeroSort('usage');
     const matches = component.heroPool.map((record) => record.usage.matches);
@@ -175,7 +248,7 @@ describe('PlayerDetailPageComponent', () => {
 
   it('renders four hero-pool sort options', () => {
     const buttons = fixture.nativeElement.querySelectorAll(
-      '.profile-hero-sort button',
+      '.profile-table-heading-actions .profile-hero-sort button',
     ) as NodeListOf<HTMLButtonElement>;
 
     expect(buttons.length).toBe(4);

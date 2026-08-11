@@ -27,6 +27,8 @@ import {
   SeasonOption,
 } from './public-dashboard.models';
 
+const MAX_TREND_PUBLICATIONS = 180;
+
 export type DashboardLoadState =
   | { readonly kind: 'loading' }
   | {
@@ -540,7 +542,7 @@ function parseTrends(value: unknown): DashboardTrends {
     value['schemaVersion'] !== 1 ||
     typeof value['updatedAt'] !== 'string' ||
     !Array.isArray(value['publications']) ||
-    value['publications'].length > 30 ||
+    value['publications'].length > MAX_TREND_PUBLICATIONS ||
     !value['publications'].every(isTrendPublication)
   ) {
     throw new Error('dashboard trends have an unsupported format');
