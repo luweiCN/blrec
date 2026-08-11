@@ -7,7 +7,7 @@ import unicodedata
 from datetime import timezone
 from itertools import groupby
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from blrec_dashboard_publisher.rating import (
     RATING_MODEL_VERSION,
@@ -48,7 +48,48 @@ def _utc_iso(value: Any) -> str:
 
 def _upsert_player(
     connection: sqlite3.Connection, player: IngestPlayer, now: int
-) -> None:
+) -> Set[int]:
+    existing = connection.execute(
+        'SELECT name,initial,room_label,avatar_url FROM players WHERE player_id=?',
+        (player.id,),
+    ).fetchone()
+    existing_rooms = tuple(
+        int(row['room_id'])
+        for row in connection.execute(
+            'SELECT room_id FROM player_rooms WHERE player_id=? ORDER BY room_id',
+            (player.id,),
+        ).fetchall()
+    )
+    existing_aliases = tuple(
+        str(row['alias'])
+        for row in connection.execute(
+            'SELECT alias FROM player_aliases WHERE player_id=? ORDER BY alias',
+            (player.id,),
+        ).fetchall()
+    )
+    room_ids = tuple(sorted(player.room_ids))
+    aliases = tuple(sorted(player.aliases))
+    avatar_url = None if player.avatar_url is None else str(player.avatar_url)
+    changed = (
+        existing is None
+        or str(existing['name']) != player.name
+        or str(existing['initial']) != player.initial
+        or str(existing['room_label']) != player.room_label
+        or existing['avatar_url'] != avatar_url
+        or existing_rooms != room_ids
+        or existing_aliases != aliases
+    )
+    affected_player_ids = {
+        int(row['player_id'])
+        for room_id in room_ids
+        for row in connection.execute(
+            'SELECT player_id FROM player_rooms WHERE room_id=? AND player_id<>?',
+            (room_id, player.id),
+        ).fetchall()
+    }
+    if not changed and not affected_player_ids:
+        return set()
+    affected_player_ids.add(player.id)
     connection.execute(
         'INSERT INTO players('
         'player_id,name,initial,room_label,avatar_url,updated_at'
@@ -56,17 +97,10 @@ def _upsert_player(
         'name=excluded.name,initial=excluded.initial,'
         'room_label=excluded.room_label,avatar_url=excluded.avatar_url,'
         'updated_at=excluded.updated_at',
-        (
-            player.id,
-            player.name,
-            player.initial,
-            player.room_label,
-            None if player.avatar_url is None else str(player.avatar_url),
-            now,
-        ),
+        (player.id, player.name, player.initial, player.room_label, avatar_url, now),
     )
     connection.execute('DELETE FROM player_rooms WHERE player_id=?', (player.id,))
-    for room_id in player.room_ids:
+    for room_id in room_ids:
         connection.execute('DELETE FROM player_rooms WHERE room_id=?', (room_id,))
         connection.execute(
             'INSERT INTO player_rooms(player_id,room_id) VALUES(?,?)',
@@ -75,8 +109,9 @@ def _upsert_player(
     connection.execute('DELETE FROM player_aliases WHERE player_id=?', (player.id,))
     connection.executemany(
         'INSERT INTO player_aliases(player_id,alias) VALUES(?,?)',
-        ((player.id, alias) for alias in player.aliases),
+        ((player.id, alias) for alias in aliases),
     )
+    return affected_player_ids
 
 
 def _delete_unreferenced_players(
@@ -126,13 +161,19 @@ def _insert_team(
     )
 
 
-def _upsert_match(connection: sqlite3.Connection, match: IngestMatch, now: int) -> bool:
+def _upsert_match(
+    connection: sqlite3.Connection, match: IngestMatch, now: int
+) -> Tuple[bool, Set[int]]:
     revision = _match_revision(match)
     existing = connection.execute(
-        'SELECT revision_sha256 FROM matches WHERE source_match_id=?', (match.id,)
+        'SELECT revision_sha256,player_id FROM matches WHERE source_match_id=?',
+        (match.id,),
     ).fetchone()
     if existing is not None and str(existing['revision_sha256']) == revision:
-        return False
+        return False, set()
+    affected_player_ids = {match.player_id}
+    if existing is not None:
+        affected_player_ids.add(int(existing['player_id']))
     replay_kind = None if match.replay is None else match.replay.kind
     replay_url = None if match.replay is None else str(match.replay.url)
     image_url = None if match.result_image is None else str(match.result_image.url)
@@ -182,7 +223,7 @@ def _upsert_match(connection: sqlite3.Connection, match: IngestMatch, now: int) 
     connection.execute(
         'DELETE FROM removed_matches WHERE source_match_id=?', (match.id,)
     )
-    return True
+    return True, affected_player_ids
 
 
 def _normalize_search(value: str) -> str:
@@ -297,11 +338,22 @@ def _insert_rating_timeline(
     return final.ability, final.evidence
 
 
-def _recompute_ratings(connection: sqlite3.Connection) -> int:
-    connection.execute('DELETE FROM rating_events')
+def _recompute_ratings(
+    connection: sqlite3.Connection, player_ids: Iterable[int]
+) -> int:
+    parameters = tuple(sorted(set(player_ids)))
+    if not parameters:
+        return 0
+    placeholders = ','.join('?' for _ in parameters)
+    connection.execute(
+        'DELETE FROM rating_events WHERE player_id IN ({})'.format(placeholders),
+        parameters,
+    )
     all_rows = connection.execute(
         'SELECT source_match_id,player_id,season_key,mode,result,played_at_epoch '
-        'FROM matches ORDER BY player_id,played_at_epoch,source_match_id'
+        'FROM matches WHERE player_id IN ({}) '
+        'ORDER BY player_id,played_at_epoch,source_match_id'.format(placeholders),
+        parameters,
     ).fetchall()
     inserted = 0
     for player_id, player_group in groupby(
@@ -369,12 +421,20 @@ def apply_ingest_batch(
                 'ratingEventCount': 0,
             }
 
-        changed_player_ids = {player.id for player in batch.players}
+        current_player_ids = {player.id for player in batch.players}
+        changed_player_ids: Set[int] = set()
         for player in batch.players:
-            _upsert_player(connection, player, now)
+            changed_player_ids.update(_upsert_player(connection, player, now))
 
-        changed_match_ids = set()
+        changed_match_ids: Set[int] = set()
+        rating_player_ids: Set[int] = set()
         for removed_match_id in batch.removed_match_ids:
+            removed = connection.execute(
+                'SELECT player_id FROM matches WHERE source_match_id=?',
+                (removed_match_id,),
+            ).fetchone()
+            if removed is not None:
+                rating_player_ids.add(int(removed['player_id']))
             connection.execute(
                 'DELETE FROM match_search WHERE match_id=?', (removed_match_id,)
             )
@@ -388,8 +448,10 @@ def apply_ingest_batch(
                 (removed_match_id, now),
             )
         for match in batch.matches:
-            if _upsert_match(connection, match, now):
+            changed, affected_player_ids = _upsert_match(connection, match, now)
+            if changed:
                 changed_match_ids.add(match.id)
+                rating_player_ids.update(affected_player_ids)
 
         if changed_player_ids:
             placeholders = ','.join('?' for _ in changed_player_ids)
@@ -404,11 +466,11 @@ def apply_ingest_batch(
             )
         _rebuild_match_search(connection, changed_match_ids)
         rating_event_count = (
-            _recompute_ratings(connection)
-            if changed_match_ids or batch.removed_match_ids
+            _recompute_ratings(connection, rating_player_ids)
+            if rating_player_ids
             else 0
         )
-        _delete_unreferenced_players(connection, tuple(changed_player_ids))
+        _delete_unreferenced_players(connection, tuple(current_player_ids))
         refresh_dashboard_state(connection, generated_at=batch.generated_at)
         connection.execute(
             'INSERT INTO ingestion_batches('

@@ -103,6 +103,18 @@ def batch(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def player(player_id: int, name: str) -> Dict[str, Any]:
+    return {
+        'id': player_id,
+        'name': name,
+        'initial': name[:1],
+        'roomLabel': '直播间 {}'.format(120000 + player_id),
+        'roomIds': [120000 + player_id],
+        'aliases': [],
+        'avatarUrl': None,
+    }
+
+
 def make_client(tmp_path: Path) -> TestClient:
     settings = ApiSettings(
         database_path=tmp_path / 'dashboard.sqlite3',
@@ -315,6 +327,59 @@ def test_historical_backfill_replays_exact_rating_ledger(tmp_path: Path) -> None
         after_backfill['rating']['scoreAfter']
         != before_backfill['rating']['scoreAfter']
     )
+
+
+def test_new_match_replays_only_the_affected_players_rating_history(
+    tmp_path: Path,
+) -> None:
+    client = make_client(tmp_path)
+    first = match(1, played_at='2026-06-01T12:00:00Z', result='W')
+    second = {**match(2, played_at='2026-06-01T13:00:00Z', result='L'), 'playerId': 8}
+    initial = batch([first, second])
+    initial['players'] = [player(7, '茉莉'), player(8, '小王子')]
+    assert ingest(client, initial, 'initial-two-players').status_code == 200
+
+    database_path = tmp_path / 'dashboard.sqlite3'
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.executescript(
+            '''
+            CREATE TABLE rating_delete_audit(player_id INTEGER NOT NULL);
+            CREATE TRIGGER audit_rating_event_delete
+            BEFORE DELETE ON rating_events
+            BEGIN
+                INSERT INTO rating_delete_audit(player_id) VALUES(OLD.player_id);
+            END;
+            '''
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    third = match(3, played_at='2026-06-02T12:00:00Z', result='W')
+    update = batch([third])
+    update['players'] = [player(7, '茉莉'), player(8, '小王子')]
+    response = ingest(client, update, 'player-seven-update')
+
+    assert response.status_code == 200
+    connection = sqlite3.connect(database_path)
+    try:
+        deleted_player_ids = {
+            int(row[0])
+            for row in connection.execute(
+                'SELECT player_id FROM rating_delete_audit'
+            ).fetchall()
+        }
+        player_eight_events = int(
+            connection.execute(
+                'SELECT COUNT(*) FROM rating_events WHERE player_id=?', (8,)
+            ).fetchone()[0]
+        )
+    finally:
+        connection.close()
+
+    assert deleted_player_ids == {7}
+    assert player_eight_events > 0
 
 
 def test_match_search_is_segmented_and_supports_pinyin_title_and_players(
