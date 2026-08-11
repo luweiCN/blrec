@@ -73,7 +73,26 @@
         <span class="status-prefix">最后同步 </span>{{ lastUpdatedLabel }}
       </span>
     </p>
+    <p *ngIf="data.state.kind === 'loading'" class="data-status loading">
+      <span aria-hidden="true"></span>
+      <span>数据载入中</span>
+    </p>
   </header>
+
+  <section
+    *ngIf="data.state.kind === 'loading'"
+    class="dashboard-loading"
+    aria-label="正在加载排行榜"
+    aria-busy="true"
+  >
+    <div class="dashboard-loading-hero" aria-hidden="true"></div>
+    <div class="dashboard-loading-grid" aria-hidden="true">
+      <span></span><span></span><span></span><span></span>
+    </div>
+    <div class="dashboard-loading-table" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span>
+    </div>
+  </section>
 
   <router-outlet *ngIf="data.state.kind === 'ready'"></router-outlet>
 
@@ -85,7 +104,7 @@
     <p>DATA UNAVAILABLE</p>
     <h1>排行榜数据暂时没有加载成功</h1>
     <p>{{ data.state.message }}</p>
-    <button type="button" (click)="data.load()">重新加载</button>
+    <button type="button" (click)="reloadDashboard()">重新加载</button>
   </section>
 
   <footer id="method">

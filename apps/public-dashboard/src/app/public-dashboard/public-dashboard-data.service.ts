@@ -131,12 +131,6 @@ function parseDashboardApiDocument(value: unknown): {
   return { snapshot, trends };
 }
 
-export function initializeDashboardData(
-  service: DashboardDataService,
-): () => Promise<void> {
-  return () => service.load();
-}
-
 async function fetchJson(
   url: string,
   cache: RequestCache,

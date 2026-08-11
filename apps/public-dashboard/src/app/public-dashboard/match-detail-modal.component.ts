@@ -6,12 +6,17 @@ import {
   EventEmitter,
   HostListener,
   Input,
+  OnInit,
   OnDestroy,
   Output,
   ViewChild,
 } from '@angular/core';
 
-import { heroImage, modeLabel } from './public-dashboard.data';
+import {
+  formatEconomy,
+  heroImage,
+  modeLabel,
+} from './public-dashboard.data';
 import { heroDisplayName } from './public-dashboard.hero-names';
 import {
   DashboardMatch,
@@ -25,15 +30,23 @@ import {
   styleUrls: ['./match-detail-modal.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class MatchDetailModalComponent implements AfterViewInit, OnDestroy {
+export class MatchDetailModalComponent
+  implements OnInit, AfterViewInit, OnDestroy
+{
   @Input() match!: DashboardMatch;
   @Input() streamerName = '主播';
+  @Input() initialImageExpanded = false;
   @Output() readonly closeModal = new EventEmitter<void>();
   @ViewChild('dialog') private dialog?: ElementRef<HTMLElement>;
   @ViewChild('closeButton') private closeButton?: ElementRef<HTMLButtonElement>;
+  imageExpanded = false;
 
   private readonly restoreFocusTo = document.activeElement as HTMLElement | null;
   private readonly previousBodyOverflow = document.body.style.overflow;
+
+  ngOnInit(): void {
+    this.imageExpanded = this.initialImageExpanded;
+  }
 
   ngAfterViewInit(): void {
     document.body.style.overflow = 'hidden';
@@ -49,6 +62,10 @@ export class MatchDetailModalComponent implements AfterViewInit, OnDestroy {
   onDocumentKeydown(event: KeyboardEvent): void {
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (this.imageExpanded) {
+        this.closeImage();
+        return;
+      }
       this.close();
       return;
     }
@@ -85,6 +102,20 @@ export class MatchDetailModalComponent implements AfterViewInit, OnDestroy {
     }
   }
 
+  openImage(): void {
+    this.imageExpanded = true;
+  }
+
+  closeImage(): void {
+    this.imageExpanded = false;
+  }
+
+  onImageBackdropClick(event: MouseEvent): void {
+    if (event.target === event.currentTarget) {
+      this.closeImage();
+    }
+  }
+
   heroImage(heroName: string): string {
     return heroImage(heroName);
   }
@@ -95,6 +126,10 @@ export class MatchDetailModalComponent implements AfterViewInit, OnDestroy {
 
   modeName(): string {
     return modeLabel(this.match.mode);
+  }
+
+  formatEconomy(value: number | null): string {
+    return formatEconomy(value);
   }
 
   teamResult(team: DashboardMatchTeam): string {

@@ -35,6 +35,7 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   ) {}
 
   ngOnInit(): void {
+    void this.loadDashboard();
     this.siteAnalytics.start();
     void this.siteStats.load().then((state) => {
       if (this.destroyed) {
@@ -77,5 +78,18 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
       minute: '2-digit',
       hour12: false,
     }).format(new Date(snapshot.generatedAt));
+  }
+
+  reloadDashboard(): void {
+    void this.loadDashboard();
+  }
+
+  private async loadDashboard(): Promise<void> {
+    const loading = this.data.load();
+    this.changeDetector.markForCheck();
+    await loading;
+    if (!this.destroyed) {
+      this.changeDetector.markForCheck();
+    }
   }
 }

@@ -1,4 +1,8 @@
-<section class="match-explorer" aria-labelledby="match-explorer-title">
+<section
+  class="match-explorer"
+  aria-labelledby="match-explorer-title"
+  [attr.aria-busy]="isRefreshing"
+>
   <header class="match-explorer-heading">
     <div>
       <h2 id="match-explorer-title">{{ title }}</h2>
@@ -78,15 +82,25 @@
     </button>
   </div>
 
-  <ol *ngIf="pageMatches.length > 0; else noMatches" class="match-list">
+  <div *ngIf="loadError as message" class="match-load-error" role="alert">
+    <span>{{ message }}</span>
+    <button type="button" (click)="retryApiPage()">重新加载</button>
+  </div>
+
+  <div *ngIf="isInitialLoading" class="match-list-loading" aria-label="正在加载对局">
+    <span *ngFor="let row of loadingRows" aria-hidden="true"></span>
+  </div>
+
+  <ol *ngIf="!isInitialLoading && pageMatches.length > 0; else noMatches" class="match-list" [class.refreshing]="isRefreshing">
     <li *ngFor="let match of pageMatches; trackBy: trackMatch">
       <div class="match-row-shell">
-        <button
-          type="button"
-          class="match-row"
-          [attr.aria-label]="matchAriaLabel(match)"
-          (click)="openMatch(match)"
-        >
+        <div class="match-row">
+          <button
+            type="button"
+            class="match-row-detail-hitbox"
+            [attr.aria-label]="matchAriaLabel(match)"
+            (click)="openMatch(match)"
+          ></button>
           <span class="match-outcome" [class.loss]="match.result === 'L'">
             <strong>{{ match.result === "W" ? "胜" : "负" }}</strong>
             <small>{{ modeName(match.mode) }}</small>
@@ -94,7 +108,13 @@
 
           <span class="match-time">
             <strong>{{ formatDate(match.playedAt) }}</strong>
-            <small>{{ playerName(match.playerId) }} · {{ formatDuration(match.durationSeconds) }}</small>
+            <small>
+              <a
+                class="match-player-link"
+                [routerLink]="['/players', match.playerId]"
+              >{{ playerName(match.playerId) }}</a>
+              <span aria-hidden="true"> · </span>{{ formatDuration(match.durationSeconds) }}
+            </small>
             <small *ngIf="match.streamTitle" class="match-stream-title" [title]="match.streamTitle">
               {{ match.streamTitle }}
             </small>
@@ -132,37 +152,51 @@
               <span class="orange">{{ match.enemy.kills === null ? "—" : match.enemy.kills }}</span>
             </strong>
             <small>
-              <span class="teal">蓝 {{ match.ally.economy === null ? "—" : (match.ally.economy | number: "1.0-0") }}</span>
+              <span class="teal">蓝 {{ formatEconomy(match.ally.economy) }}</span>
               <span> · </span>
-              <span class="orange">红 {{ match.enemy.economy === null ? "—" : (match.enemy.economy | number: "1.0-0") }}</span>
+              <span class="orange">红 {{ formatEconomy(match.enemy.economy) }}</span>
             </small>
+            <small
+              *ngIf="match.rating as rating"
+              class="match-rating-change"
+              [class.positive]="rating.scoreDelta > 0"
+              [class.negative]="rating.scoreDelta < 0"
+            >本局 {{ rating.scoreDelta > 0 ? "+" : "" }}{{ rating.scoreDelta }}</small>
           </span>
 
           <span class="match-row-meta">
-            <span *ngIf="match.rating as rating" [class.positive]="rating.scoreDelta > 0" [class.negative]="rating.scoreDelta < 0">
-              {{ rating.scoreDelta > 0 ? "+" : "" }}{{ rating.scoreDelta }}
-            </span>
-            <span>{{ match.resultImage ? "含战绩图" : "详情" }}</span>
+            <span>详情</span>
           </span>
-        </button>
+        </div>
 
-        <a
-          *ngIf="match.replay as replay; else replayUnavailable"
-          class="match-replay-link available"
-          [href]="replay.url"
-          target="_blank"
-          rel="noopener noreferrer"
-          (click)="$event.stopPropagation()"
-        >回放</a>
-        <ng-template #replayUnavailable>
-          <span class="match-replay-link disabled" aria-label="暂无公开回放">回放</span>
-        </ng-template>
+        <div class="match-row-actions" aria-label="对局资源">
+          <a
+            *ngIf="match.replay as replay; else replayUnavailable"
+            class="match-replay-link available"
+            [href]="replay.url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >回放</a>
+          <ng-template #replayUnavailable>
+            <span class="match-replay-link disabled" aria-label="暂无公开回放">回放</span>
+          </ng-template>
+
+          <button
+            *ngIf="match.resultImage; else resultImageUnavailable"
+            type="button"
+            class="match-image-link available"
+            (click)="openResultImage(match)"
+          >战绩</button>
+          <ng-template #resultImageUnavailable>
+            <span class="match-image-link disabled" aria-label="暂无战绩图">战绩</span>
+          </ng-template>
+        </div>
       </div>
     </li>
   </ol>
 
   <ng-template #noMatches>
-    <div class="match-empty">
+    <div *ngIf="!isInitialLoading" class="match-empty">
       <strong>没有找到符合条件的对局</strong>
       <p>可以减少阵容英雄，或尝试其他玩家名称与拼音。</p>
       <button *ngIf="hasLocalFilters" type="button" (click)="clearFilters()">
@@ -186,5 +220,6 @@
   *ngIf="selectedMatch as match"
   [match]="match"
   [streamerName]="playerName(match.playerId)"
+  [initialImageExpanded]="expandSelectedResultImage"
   (closeModal)="closeMatch()"
 ></app-match-detail-modal>

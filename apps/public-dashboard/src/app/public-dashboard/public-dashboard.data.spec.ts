@@ -4,6 +4,7 @@ import {
   getPlayerRankings,
   getPlayerTrend,
   getRankMovement,
+  formatEconomy,
   heroGoldPerMinute,
   heroKda,
   heroPeerComparisonText,
@@ -28,6 +29,12 @@ function withPerformance(
 }
 
 describe('public dashboard player rankings', () => {
+  it('formats match economy in the same compact form as the game', () => {
+    expect(formatEconomy(40_900)).toBe('40.9K');
+    expect(formatEconomy(33_000)).toBe('33.0K');
+    expect(formatEconomy(null)).toBe('—');
+  });
+
   it('includes low samples and sorts by rating instead of raw win rate', () => {
     const sourcePlayers =
       TEST_DASHBOARD_SNAPSHOT.standings['2026-summer'].players;

@@ -36,7 +36,11 @@
   }
 
   .match-row-shell {
-    grid-template-columns: minmax(0, 1fr) 72px;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .match-row-actions {
+    grid-template-columns: repeat(2, 60px);
   }
 
   .match-row {
@@ -92,7 +96,13 @@
   }
 
   .match-row-shell {
-    grid-template-columns: minmax(0, 1fr) 58px;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .match-row-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    min-height: 42px;
+    border-top: 1px solid var(--line-soft);
   }
 
   .match-row {
@@ -128,7 +138,13 @@
     display: none;
   }
 
-  .match-replay-link {
+  .match-score .match-rating-change {
+    display: block;
+    font-weight: 720;
+  }
+
+  .match-replay-link,
+  .match-image-link {
     font-size: var(--type-caption);
   }
 

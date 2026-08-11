@@ -58,7 +58,7 @@ describe('MatchesPageComponent', () => {
 
     expect(page.querySelectorAll('.match-summary-grid article').length).toBe(4);
     expect(component.matches.length).toBe(12);
-    expect(page.querySelectorAll('.match-row').length).toBe(10);
+    expect(page.querySelectorAll('.match-row').length).toBe(12);
     expect(page.textContent).toContain('按直播中的实际发生时间');
   });
 

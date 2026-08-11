@@ -169,6 +169,10 @@ export function winRate(value: {
   return value.matches === 0 ? 0 : value.wins / value.matches;
 }
 
+export function formatEconomy(value: number | null): string {
+  return value === null ? '—' : `${(value / 1000).toFixed(1)}K`;
+}
+
 export function getPlayerRankings(
   snapshot: DashboardSnapshot,
   season: SeasonKey,

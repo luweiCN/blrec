@@ -9,7 +9,9 @@
     <header class="match-modal-header">
       <div>
         <p>{{ modeName() }} · {{ formatDate(match.playedAt) }}</p>
-        <h2 id="match-detail-title">{{ streamerName }}的对局详情</h2>
+        <h2 id="match-detail-title">
+          <a [routerLink]="['/players', match.playerId]" (click)="close()">{{ streamerName }}</a>的对局详情
+        </h2>
         <span *ngIf="match.streamTitle" class="match-modal-stream-title">
           {{ match.streamTitle }}
         </span>
@@ -40,21 +42,6 @@
       </div>
     </div>
 
-    <section *ngIf="match.rating as rating" class="match-rating-ledger" aria-label="本局排位分变化">
-      <div>
-        <span>赛前</span>
-        <strong>{{ rating.scoreBefore | number: "1.0-0" }}</strong>
-      </div>
-      <div class="match-rating-delta" [class.loss]="rating.scoreDelta < 0">
-        <span>本局{{ match.result === "W" ? "胜利" : "失败" }}</span>
-        <strong>{{ rating.scoreDelta > 0 ? "+" : "" }}{{ rating.scoreDelta }}</strong>
-      </div>
-      <div>
-        <span>赛后</span>
-        <strong>{{ rating.scoreAfter | number: "1.0-0" }}</strong>
-      </div>
-    </section>
-
     <div class="match-team-columns">
       <section
         *ngFor="let team of [match.ally, match.enemy]"
@@ -65,7 +52,7 @@
         <header>
           <strong>{{ teamLabel(team) }} · {{ teamResult(team) }}</strong>
           <span>
-            经济 {{ team.economy === null ? "—" : (team.economy | number: "1.0-0") }}
+            经济 {{ formatEconomy(team.economy) }}
           </span>
         </header>
         <ol>
@@ -90,7 +77,7 @@
               <span>K / D / A</span>
             </div>
             <div class="match-player-economy">
-              <strong>{{ player.economy === null ? "—" : (player.economy | number: "1.0-0") }}</strong>
+              <strong>{{ formatEconomy(player.economy) }}</strong>
               <span>经济</span>
             </div>
             <div class="match-player-last-hits">
@@ -107,14 +94,19 @@
         <strong>战绩结算图</strong>
         <span>点击图片可查看原尺寸</span>
       </figcaption>
-      <a [href]="resultImage.url" target="_blank" rel="noopener noreferrer">
+      <button
+        type="button"
+        class="match-result-thumbnail"
+        aria-label="放大战绩结算图"
+        (click)="openImage()"
+      >
         <img
           [src]="resultImage.url"
           [width]="resultImage.width"
           [height]="resultImage.height"
           [alt]="streamerName + '本局战绩结算图'"
         />
-      </a>
+      </button>
     </figure>
 
     <footer class="match-modal-footer">
@@ -127,4 +119,19 @@
       >{{ replay.kind === "match" ? "本局回放" : "整场录播" }}</a>
     </footer>
   </section>
+
+  <div
+    *ngIf="imageExpanded && match.resultImage as resultImage"
+    class="match-image-lightbox"
+    aria-label="放大的战绩结算图"
+    (mousedown)="onImageBackdropClick($event)"
+  >
+    <button type="button" aria-label="关闭战绩图" (click)="closeImage()">×</button>
+    <img
+      [src]="resultImage.url"
+      [width]="resultImage.width"
+      [height]="resultImage.height"
+      [alt]="streamerName + '本局战绩结算图'"
+    />
+  </div>
 </div>

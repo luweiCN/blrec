@@ -65,4 +65,22 @@ describe('DashboardMatchApiService', () => {
 
     expect(summary).toBeNull();
   });
+
+  it('rejects a failed match list request so the page can show an error state', async () => {
+    spyOn(window, 'fetch').and.returnValue(
+      Promise.resolve({ ok: false, status: 503 } as Response),
+    );
+    const service = new DashboardMatchApiService();
+
+    await expectAsync(
+      service.list({
+        page: 1,
+        pageSize: 20,
+        seasonKey: '2026-summer',
+        mode: '3v3',
+        query: '',
+        heroes: [],
+      }),
+    ).toBeRejectedWithError(/503/u);
+  });
 });

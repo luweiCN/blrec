@@ -47,9 +47,9 @@ export class DashboardMatchApiService {
 
   async list(
     query: DashboardMatchPageQuery,
-  ): Promise<DashboardMatchPage | null> {
+  ): Promise<DashboardMatchPage> {
     if (!this.enabled) {
-      return null;
+      throw new Error('match API is disabled');
     }
     const parameters = new URLSearchParams({
       page: String(query.page),
@@ -73,19 +73,14 @@ export class DashboardMatchApiService {
       parameters.set('heroes', query.heroes.join(','));
     }
     const baseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
-    try {
-      const response = await fetch(
-        `${baseUrl}/matches?${parameters.toString()}`,
-        { cache: 'no-store' },
-      );
-      if (!response.ok) {
-        throw new Error(`match API returned ${response.status}`);
-      }
-      return parseMatchPage(await response.json());
-    } catch (error: unknown) {
-      console.warn('Unable to load matches from dashboard API', error);
-      return null;
+    const response = await fetch(
+      `${baseUrl}/matches?${parameters.toString()}`,
+      { cache: 'no-store' },
+    );
+    if (!response.ok) {
+      throw new Error(`match API returned ${response.status}`);
     }
+    return parseMatchPage(await response.json());
   }
 
   async summary(

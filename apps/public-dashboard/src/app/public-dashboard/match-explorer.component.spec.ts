@@ -1,8 +1,14 @@
 import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { RouterTestingModule } from '@angular/router/testing';
 
+import {
+  DashboardMatchApiService,
+  DashboardMatchPage,
+} from './dashboard-match-api.service';
 import { MatchDetailModalComponent } from './match-detail-modal.component';
 import { MatchExplorerComponent } from './match-explorer.component';
+import { DashboardMatch } from './public-dashboard.models';
 import {
   TEST_DASHBOARD_MATCHES,
   TEST_DASHBOARD_SNAPSHOT,
@@ -11,11 +17,22 @@ import {
 describe('MatchExplorerComponent', () => {
   let fixture: ComponentFixture<MatchExplorerComponent>;
   let component: MatchExplorerComponent;
+  let matchApi: {
+    enabled: boolean;
+    list: jasmine.Spy<(query: unknown) => Promise<DashboardMatchPage>>;
+  };
 
   beforeEach(async () => {
+    matchApi = {
+      enabled: false,
+      list: jasmine.createSpy('list'),
+    };
     await TestBed.configureTestingModule({
       declarations: [MatchDetailModalComponent, MatchExplorerComponent],
-      imports: [CommonModule],
+      imports: [CommonModule, RouterTestingModule],
+      providers: [
+        { provide: DashboardMatchApiService, useValue: matchApi },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(MatchExplorerComponent);
@@ -28,14 +45,24 @@ describe('MatchExplorerComponent', () => {
     fixture.detectChanges();
   });
 
-  it('shows ten matches per page in live-time order', () => {
+  it('shows twenty matches per page in live-time order', () => {
+    const matches: readonly DashboardMatch[] = Array.from(
+      { length: 25 },
+      (_, index) => ({
+        ...TEST_DASHBOARD_MATCHES[index % TEST_DASHBOARD_MATCHES.length],
+        id: 2_000 - index,
+        playedAt: new Date(Date.UTC(2026, 7, 10, 20, -index)).toISOString(),
+      }),
+    );
+    fixture.componentRef.setInput('matches', matches);
+    fixture.detectChanges();
     const page = fixture.nativeElement as HTMLElement;
 
-    expect(component.filteredMatches.length).toBe(12);
-    expect(component.pageMatches.length).toBe(10);
-    expect(page.querySelectorAll('.match-row').length).toBe(10);
+    expect(component.filteredMatches.length).toBe(25);
+    expect(component.pageMatches.length).toBe(20);
+    expect(page.querySelectorAll('.match-row').length).toBe(20);
     expect(component.pageMatches[0].playedAt).toBe(
-      TEST_DASHBOARD_MATCHES[0].playedAt,
+      matches[0].playedAt,
     );
 
     const nextButton = page.querySelector(
@@ -45,8 +72,8 @@ describe('MatchExplorerComponent', () => {
     fixture.detectChanges();
 
     expect(component.page).toBe(2);
-    expect(component.pageMatches.length).toBe(2);
-    expect(page.querySelectorAll('.match-row').length).toBe(2);
+    expect(component.pageMatches.length).toBe(5);
+    expect(page.querySelectorAll('.match-row').length).toBe(5);
   });
 
   it('combines player and lineup filters and resets pagination', () => {
@@ -68,7 +95,7 @@ describe('MatchExplorerComponent', () => {
 
   it('opens one accessible match detail dialog from a row', () => {
     const row = fixture.nativeElement.querySelector(
-      '.match-row',
+      '.match-row-detail-hitbox',
     ) as HTMLButtonElement;
     row.click();
     fixture.detectChanges();
@@ -79,5 +106,97 @@ describe('MatchExplorerComponent', () => {
     expect(dialog).not.toBeNull();
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     expect(dialog.textContent).toContain('对局详情');
+  });
+
+  it('links the associated player without opening the match dialog', () => {
+    const playerLink = fixture.nativeElement.querySelector(
+      '.match-player-link',
+    ) as HTMLAnchorElement;
+
+    expect(playerLink.getAttribute('href')).toBe(
+      `/players/${TEST_DASHBOARD_MATCHES[0].playerId}`,
+    );
+  });
+
+  it('shows replay and result-image actions outside the detail hit area', () => {
+    fixture.componentRef.setInput('matches', [
+      {
+        ...TEST_DASHBOARD_MATCHES[0],
+        resultImage: {
+          url: 'https://vg.luwei.host/data/match-images/001/1200-0123456789abcdef.webp',
+          width: 1600,
+          height: 900,
+        },
+      },
+      TEST_DASHBOARD_MATCHES[1],
+    ]);
+    fixture.detectChanges();
+    const page = fixture.nativeElement as HTMLElement;
+
+    expect(page.querySelectorAll('.match-replay-link').length).toBe(2);
+    expect(page.querySelectorAll('.match-image-link').length).toBe(2);
+    expect(page.querySelectorAll('.match-image-link.available').length).toBe(1);
+    expect(page.querySelectorAll('.match-image-link.disabled').length).toBe(1);
+    expect(page.querySelector('.match-row')?.textContent).not.toContain(
+      '含战绩图',
+    );
+  });
+
+  it('uses compact economy and expands the result image from its thumbnail', () => {
+    fixture.componentRef.setInput('matches', [
+      {
+        ...TEST_DASHBOARD_MATCHES[0],
+        resultImage: {
+          url: 'https://vg.luwei.host/data/match-images/001/1200-0123456789abcdef.webp',
+          width: 1600,
+          height: 900,
+        },
+        rating: {
+          scope: '3v3',
+          seasonKey: '2026-summer',
+          matchNumber: 12,
+          scoreBefore: 700,
+          scoreDelta: 11,
+          scoreAfter: 711,
+          provisional: false,
+          modelVersion: 3,
+        },
+      },
+    ]);
+    fixture.detectChanges();
+    const row = fixture.nativeElement as HTMLElement;
+    expect(row.textContent).toContain('蓝 40.9K');
+    expect(row.textContent).toContain('本局 +11');
+
+    (row.querySelector('.match-row-detail-hitbox') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(row.textContent).not.toContain('赛前');
+    expect(row.textContent).not.toContain('赛后');
+    expect(row.textContent).toContain('16.5K');
+
+    (row.querySelector('.match-result-thumbnail') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(row.querySelector('.match-image-lightbox')).not.toBeNull();
+  });
+
+  it('shows a local loading skeleton while the API page is pending', async () => {
+    let resolvePage!: (page: DashboardMatchPage) => void;
+    const pending = new Promise<DashboardMatchPage>((resolve) => {
+      resolvePage = resolve;
+    });
+    matchApi.enabled = true;
+    matchApi.list.and.returnValue(pending);
+    component.ngOnChanges();
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('.match-list-loading'),
+    ).not.toBeNull();
+
+    resolvePage({ items: [], page: 1, pageSize: 20, total: 0 });
+    await pending;
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.match-list-loading')).toBeNull();
   });
 });

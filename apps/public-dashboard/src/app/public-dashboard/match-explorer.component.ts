@@ -11,7 +11,11 @@ import {
   DashboardMatchApiService,
   DashboardMatchPage,
 } from './dashboard-match-api.service';
-import { heroImage, modeLabel } from './public-dashboard.data';
+import {
+  formatEconomy,
+  heroImage,
+  modeLabel,
+} from './public-dashboard.data';
 import { heroDisplayName } from './public-dashboard.hero-names';
 import {
   currentMatchStreak,
@@ -25,7 +29,17 @@ import {
   SeasonKey,
 } from './public-dashboard.models';
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 20;
+
+type MatchPageState =
+  | { readonly kind: 'local' }
+  | { readonly kind: 'loading'; readonly page: DashboardMatchPage | null }
+  | { readonly kind: 'ready'; readonly page: DashboardMatchPage }
+  | {
+      readonly kind: 'error';
+      readonly page: DashboardMatchPage | null;
+      readonly message: string;
+    };
 
 @Component({
   selector: 'app-match-explorer',
@@ -49,7 +63,9 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   selectedHeroes: readonly string[] = [];
   page = 1;
   selectedMatch: DashboardMatch | null = null;
-  private apiPage: DashboardMatchPage | null = null;
+  expandSelectedResultImage = false;
+  requestState: MatchPageState = { kind: 'local' };
+  readonly loadingRows = Array.from({ length: 6 }, (_, index) => index);
   private requestSequence = 0;
   private searchTimer?: ReturnType<typeof setTimeout>;
 
@@ -61,6 +77,7 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   ngOnChanges(): void {
     this.page = 1;
     this.selectedMatch = null;
+    this.expandSelectedResultImage = false;
     this.trimHeroSelection();
     void this.loadApiPage();
   }
@@ -73,8 +90,9 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   }
 
   get filteredMatches(): readonly DashboardMatch[] {
-    if (this.apiPage !== null) {
-      return this.apiPage.items;
+    const apiPage = this.apiPage;
+    if (apiPage !== null) {
+      return apiPage.items;
     }
     return filterDashboardMatches(this.matches, this.players, {
       seasonKey: this.seasonKey,
@@ -86,8 +104,9 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   }
 
   get pageMatches(): readonly DashboardMatch[] {
-    if (this.apiPage !== null) {
-      return this.apiPage.items;
+    const apiPage = this.apiPage;
+    if (apiPage !== null) {
+      return apiPage.items;
     }
     const start = (this.page - 1) * PAGE_SIZE;
     return this.filteredMatches.slice(start, start + PAGE_SIZE);
@@ -100,6 +119,20 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
 
   get totalMatches(): number {
     return this.apiPage?.total ?? this.filteredMatches.length;
+  }
+
+  get isInitialLoading(): boolean {
+    return this.requestState.kind === 'loading' && this.requestState.page === null;
+  }
+
+  get isRefreshing(): boolean {
+    return this.requestState.kind === 'loading';
+  }
+
+  get loadError(): string | null {
+    return this.requestState.kind === 'error'
+      ? this.requestState.message
+      : null;
   }
 
   get heroOptions(): readonly string[] {
@@ -208,10 +241,21 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
 
   openMatch(match: DashboardMatch): void {
     this.selectedMatch = match;
+    this.expandSelectedResultImage = false;
+  }
+
+  openResultImage(match: DashboardMatch): void {
+    this.selectedMatch = match;
+    this.expandSelectedResultImage = true;
   }
 
   closeMatch(): void {
     this.selectedMatch = null;
+    this.expandSelectedResultImage = false;
+  }
+
+  retryApiPage(): void {
+    void this.loadApiPage();
   }
 
   playerName(playerId: number): string {
@@ -228,6 +272,10 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
 
   modeName(mode: ModeFilter): string {
     return modeLabel(mode);
+  }
+
+  formatEconomy(value: number | null): string {
+    return formatEconomy(value);
   }
 
   formatDate(value: string): string {
@@ -282,27 +330,52 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
 
   private async loadApiPage(): Promise<void> {
     if (!this.matchApi.enabled) {
+      this.requestState = { kind: 'local' };
       return;
     }
     const sequence = ++this.requestSequence;
-    const response = await this.matchApi.list({
-      page: this.page,
-      pageSize: PAGE_SIZE,
-      seasonKey: this.seasonKey,
-      mode: this.mode,
-      playerId: this.fixedPlayerId,
-      query: this.playerQuery,
-      heroes: this.selectedHeroes,
-    });
+    const stalePage = this.apiPage;
+    this.requestState = { kind: 'loading', page: stalePage };
+    this.changeDetector.markForCheck();
+    let response: DashboardMatchPage;
+    try {
+      response = await this.matchApi.list({
+        page: this.page,
+        pageSize: PAGE_SIZE,
+        seasonKey: this.seasonKey,
+        mode: this.mode,
+        playerId: this.fixedPlayerId,
+        query: this.playerQuery,
+        heroes: this.selectedHeroes,
+      });
+    } catch (error: unknown) {
+      if (sequence !== this.requestSequence) {
+        return;
+      }
+      console.warn('Unable to load matches from dashboard API', error);
+      this.requestState = {
+        kind: 'error',
+        page: stalePage,
+        message: '实时对局暂时没有加载成功，请稍后重试。',
+      };
+      this.changeDetector.markForCheck();
+      return;
+    }
     if (sequence !== this.requestSequence) {
       return;
     }
-    this.apiPage = response;
-    if (response !== null && this.page > this.pageCount) {
+    this.requestState = { kind: 'ready', page: response };
+    if (this.page > this.pageCount) {
       this.page = this.pageCount;
       void this.loadApiPage();
       return;
     }
     this.changeDetector.markForCheck();
+  }
+
+  private get apiPage(): DashboardMatchPage | null {
+    return this.requestState.kind === 'local'
+      ? null
+      : this.requestState.page;
   }
 }
