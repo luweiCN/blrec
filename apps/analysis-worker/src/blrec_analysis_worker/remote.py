@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Literal, Mapping, Optional, Sequence, cast
 from urllib.parse import urljoin
@@ -47,6 +47,7 @@ def _analysis_summary(dense: DenseScanResult) -> Dict[str, Any]:
         'hudLineupCandidateCount': sum(
             bool(lineup) for lineup in dense.scanned_part.candidate_hero_lineups
         ),
+        'modeConflictCount': dense.mode_conflict_count,
         'timelineCounts': {
             'matchFlow': counts(
                 [point.match_flow_label for point in dense.timeline_points]
@@ -210,11 +211,41 @@ class _Heartbeat:
         with self._lock:
             self._progress = max(0.0, min(0.99, float(progress)))
             if runtime_status is not None:
-                self._runtime_status = runtime_status
+                self._remember_runtime_status(runtime_status)
 
     def update_status(self, runtime_status: AnalysisStatus) -> None:
         with self._lock:
-            self._runtime_status = runtime_status
+            self._remember_runtime_status(runtime_status)
+
+    def _remember_runtime_status(self, status: AnalysisStatus) -> None:
+        previous = self._runtime_status
+        if previous is not None:
+            status = replace(
+                status,
+                coarse_frames=status.coarse_frames or previous.coarse_frames,
+                gameplay_runs=status.gameplay_runs or previous.gameplay_runs,
+                result_windows=status.result_windows or previous.result_windows,
+                current_window=status.current_window or previous.current_window,
+                total_windows=status.total_windows or previous.total_windows,
+                candidate_count=status.candidate_count or previous.candidate_count,
+                model_package_id=(status.model_package_id or previous.model_package_id),
+                keyframe_frames=(status.keyframe_frames or previous.keyframe_frames),
+                seek_fill_frames=(status.seek_fill_frames or previous.seek_fill_frames),
+                decoded_result_frames=(
+                    status.decoded_result_frames or previous.decoded_result_frames
+                ),
+                mode_conflict_count=(
+                    status.mode_conflict_count or previous.mode_conflict_count
+                ),
+                hud_lineup_candidate_count=(
+                    status.hud_lineup_candidate_count
+                    or previous.hud_lineup_candidate_count
+                ),
+                training_candidate_count=(
+                    status.training_candidate_count or previous.training_candidate_count
+                ),
+            )
+        self._runtime_status = status
 
     def _run(self) -> None:
         last_status: Optional[AnalysisStatus] = None

@@ -357,6 +357,10 @@ class VaingloryIndexService:
                 model_package_id=status.model_package_id,
                 keyframe_frames=status.keyframe_frames,
                 seek_fill_frames=status.seek_fill_frames,
+                decoded_result_frames=status.decoded_result_frames,
+                mode_conflict_count=status.mode_conflict_count,
+                hud_lineup_candidate_count=status.hud_lineup_candidate_count,
+                training_candidate_count=status.training_candidate_count,
                 events=item_events,
             )
 
@@ -386,6 +390,20 @@ class VaingloryIndexService:
                     ),
                     seek_fill_frames=(
                         status.seek_fill_frames or previous.seek_fill_frames
+                    ),
+                    decoded_result_frames=(
+                        status.decoded_result_frames or previous.decoded_result_frames
+                    ),
+                    mode_conflict_count=(
+                        status.mode_conflict_count or previous.mode_conflict_count
+                    ),
+                    hud_lineup_candidate_count=(
+                        status.hud_lineup_candidate_count
+                        or previous.hud_lineup_candidate_count
+                    ),
+                    training_candidate_count=(
+                        status.training_candidate_count
+                        or previous.training_candidate_count
                     ),
                 )
             self._runtime_status[part_id] = status

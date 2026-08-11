@@ -932,6 +932,7 @@ class DenseScanResult:
     result_windows: Tuple[ResultScanWindow, ...] = ()
     keyframe_frames: int = 0
     seek_fill_frames: int = 0
+    mode_conflict_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -962,6 +963,10 @@ class AnalysisStatus:
     model_package_id: str = ''
     keyframe_frames: int = 0
     seek_fill_frames: int = 0
+    decoded_result_frames: int = 0
+    mode_conflict_count: int = 0
+    hud_lineup_candidate_count: int = 0
+    training_candidate_count: int = 0
 
 
 def classify_match_kind(
@@ -2994,6 +2999,7 @@ class VaingloryVideoAnalyzer:
                 seek_fill_frames=seek_fill_frames,
             ),
         )
+        mode_conflicts: Tuple[_ModeConflict, ...] = ()
         if using_model_package:
             run_modes = _model_package_run_modes(observations, run_gap_ms=run_gap_ms)
             training_candidates: Tuple[TrainingCandidate, ...] = ()
@@ -3130,6 +3136,8 @@ class VaingloryVideoAnalyzer:
                 model_package_id=model_package_id,
                 keyframe_frames=keyframe_frames,
                 seek_fill_frames=seek_fill_frames,
+                mode_conflict_count=len(mode_conflicts),
+                hud_lineup_candidate_count=len(segment_hud_lineups),
             ),
         )
         hits: List[ResultHit] = []
@@ -3158,6 +3166,8 @@ class VaingloryVideoAnalyzer:
                 model_package_id=model_package_id,
                 keyframe_frames=keyframe_frames,
                 seek_fill_frames=seek_fill_frames,
+                mode_conflict_count=len(mode_conflicts),
+                hud_lineup_candidate_count=len(segment_hud_lineups),
             ),
         )
         for window_index, window in enumerate(windows, 1):
@@ -3214,6 +3224,9 @@ class VaingloryVideoAnalyzer:
                     model_package_id=model_package_id,
                     keyframe_frames=keyframe_frames,
                     seek_fill_frames=seek_fill_frames,
+                    decoded_result_frames=decoded_frames,
+                    mode_conflict_count=len(mode_conflicts),
+                    hud_lineup_candidate_count=len(segment_hud_lineups),
                 ),
             )
         self._emit_status(
@@ -3231,6 +3244,9 @@ class VaingloryVideoAnalyzer:
                 model_package_id=model_package_id,
                 keyframe_frames=keyframe_frames,
                 seek_fill_frames=seek_fill_frames,
+                decoded_result_frames=decoded_frames,
+                mode_conflict_count=len(mode_conflicts),
+                hud_lineup_candidate_count=len(segment_hud_lineups),
             ),
         )
         tail_regression_added = self._tail_regression(
@@ -3364,6 +3380,10 @@ class VaingloryVideoAnalyzer:
                     model_package_id=model_package_id,
                     keyframe_frames=keyframe_frames,
                     seek_fill_frames=seek_fill_frames,
+                    decoded_result_frames=decoded_frames,
+                    mode_conflict_count=len(mode_conflicts),
+                    hud_lineup_candidate_count=len(segment_hud_lineups),
+                    training_candidate_count=len(selected_training_candidates),
                 ),
             )
             selected_training_candidates = self._refresh_training_candidate_images(
@@ -3451,6 +3471,10 @@ class VaingloryVideoAnalyzer:
                 model_package_id=model_package_id,
                 keyframe_frames=keyframe_frames,
                 seek_fill_frames=seek_fill_frames,
+                decoded_result_frames=decoded_frames,
+                mode_conflict_count=len(mode_conflicts),
+                hud_lineup_candidate_count=len(segment_hud_lineups),
+                training_candidate_count=len(selected_training_candidates),
             ),
         )
         scanned_part = ScannedPart(
@@ -3483,6 +3507,7 @@ class VaingloryVideoAnalyzer:
             ),
             keyframe_frames=keyframe_frames,
             seek_fill_frames=seek_fill_frames,
+            mode_conflict_count=len(mode_conflicts),
         )
 
     def recognize_scanned_part(
@@ -5125,20 +5150,26 @@ class VaingloryVideoAnalyzer:
                 match.confidence,
             )
 
-        teal_side: TeamSide = 'left' if layout.left_color == 'teal' else 'right'
-        hud_teal_side = next(
-            (hud_side for hud_side, side in side_map.items() if side == teal_side), None
-        )
-        if hud_teal_side is None:
-            return tuple(updated), None
-        local_slot = team_size if hud_teal_side == 'left' else 1
-        local = hud.get((hud_teal_side, local_slot))
+        if team_size == 5:
+            local_hud_side: TeamSide = 'left'
+        else:
+            teal_side: TeamSide = 'left' if layout.left_color == 'teal' else 'right'
+            hud_teal_side = next(
+                (hud_side for hud_side, side in side_map.items() if side == teal_side),
+                None,
+            )
+            if hud_teal_side is None:
+                return tuple(updated), None
+            local_hud_side = hud_teal_side
+        local_slot = team_size if local_hud_side == 'left' else 1
+        local = hud.get((local_hud_side, local_slot))
         if local is None:
             return tuple(updated), None
+        local_result_side = side_map[local_hud_side]
         matching = [
             hero
             for hero in updated
-            if hero.side == teal_side and hero.label == local[1].label
+            if hero.side == local_result_side and hero.label == local[1].label
         ]
         if len(matching) != 1:
             return tuple(updated), None

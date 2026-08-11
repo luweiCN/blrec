@@ -7,7 +7,8 @@
     <div>
       <strong>新录播优先处理</strong>
       <span>
-        级联扫描：5 秒分类粗扫 → 4 FPS 结算精扫 → OCR、英雄与主播识别
+        新模型流程：关键帧时间线扫描 → 状态边界补帧 → 4 FPS 结算精扫 →
+        OCR、英雄阵容与主播识别
         <ng-container *ngIf="sampledAt !== null">
           · SSE 更新于 {{ sampledAt * 1000 | date: "HH:mm:ss" }}
         </ng-container>
@@ -144,27 +145,74 @@
 
       <dl *ngIf="active.runtimeStage" class="analysis-stage-metrics">
         <div *ngIf="active.modelPackageId">
-          <dt>模型包</dt><dd>{{ active.modelPackageId }}</dd>
+          <dt>模型包</dt>
+          <dd>{{ active.modelPackageId }}</dd>
         </div>
-        <div><dt>时间线采样帧</dt><dd>{{ active.coarseFrames }}</dd></div>
-        <div><dt>关键帧</dt><dd>{{ active.keyframeFrames }}</dd></div>
-        <div><dt>精确补帧</dt><dd>{{ active.seekFillFrames }}</dd></div>
-        <div><dt>推断对局段</dt><dd>{{ active.gameplayRuns }}</dd></div>
-        <div><dt>精扫区间</dt><dd>{{ active.resultWindows }}</dd></div>
+        <div>
+          <dt>时间线总帧</dt>
+          <dd>{{ active.coarseFrames }}</dd>
+        </div>
+        <div>
+          <dt>直接关键帧</dt>
+          <dd>{{ active.keyframeFrames }}</dd>
+        </div>
+        <div>
+          <dt>边界补帧</dt>
+          <dd>{{ active.seekFillFrames }}</dd>
+        </div>
+        <div>
+          <dt>疑似对局段</dt>
+          <dd>{{ active.gameplayRuns }}</dd>
+        </div>
+        <div>
+          <dt>结算精扫区间</dt>
+          <dd>{{ active.resultWindows }}</dd>
+        </div>
+        <div>
+          <dt>精扫解码帧</dt>
+          <dd>{{ active.decodedResultFrames }}</dd>
+        </div>
+        <div>
+          <dt>模式冲突</dt>
+          <dd>{{ active.modeConflictCount }}</dd>
+        </div>
+        <div>
+          <dt>HUD 阵容证据</dt>
+          <dd>{{ active.hudLineupCandidateCount }}</dd>
+        </div>
         <div>
           <dt>
-            {{ active.runtimeStage === "ocr_recognition" ? "候选验证" : "精扫进度" }}
+            {{
+              active.runtimeStage === "ocr_recognition"
+                ? "候选验证"
+                : "精扫进度"
+            }}
           </dt>
-          <dd *ngIf="active.runtimeStage === 'ocr_recognition'; else fineProgress">
+          <dd
+            *ngIf="active.runtimeStage === 'ocr_recognition'; else fineProgress"
+          >
             {{ active.currentCandidate }}/{{ active.totalCandidates }}
           </dd>
           <ng-template #fineProgress>
             <dd>{{ active.currentWindow }}/{{ active.totalWindows }}</dd>
           </ng-template>
         </div>
-        <div><dt>结算画面</dt><dd>{{ active.candidateCount }}</dd></div>
-        <div><dt>OCR 已排除</dt><dd>{{ active.rejectedCandidates }}</dd></div>
-        <div><dt>本 P 已确认</dt><dd>{{ active.recognizedMatches }}</dd></div>
+        <div>
+          <dt>结算候选</dt>
+          <dd>{{ active.candidateCount }}</dd>
+        </div>
+        <div>
+          <dt>OCR 已排除</dt>
+          <dd>{{ active.rejectedCandidates }}</dd>
+        </div>
+        <div>
+          <dt>本 P 已确认</dt>
+          <dd>{{ active.recognizedMatches }}</dd>
+        </div>
+        <div>
+          <dt>待复核训练素材</dt>
+          <dd>{{ active.trainingCandidateCount }}</dd>
+        </div>
       </dl>
 
       <section
@@ -290,25 +338,70 @@
             <dt>处理总耗时</dt>
             <dd>{{ formatDuration(completion.elapsedSeconds) }}</dd>
           </div>
-          <ng-container *ngIf="completion.analysisSummary as summary">
-            <div><dt>模型包</dt><dd>{{ summary.modelPackageId || "旧流程" }}</dd></div>
-            <div>
-              <dt>时间线采样</dt>
-              <dd>
-                {{ summary.sampledFrames }} 帧 · 关键帧
-                {{ summary.keyframeFrames }} · 补帧 {{ summary.seekFillFrames }}
-              </dd>
-            </div>
-            <div>
-              <dt>新流程结果</dt>
-              <dd>
-                {{ summary.timelineSegments.length }} 个对局段 ·
-                {{ summary.resultWindows.length }} 个精扫区间 ·
-                {{ summary.hudLineupCandidateCount }} 个 HUD 阵容证据
-              </dd>
-            </div>
-          </ng-container>
         </dl>
+        <section
+          *ngIf="completion.analysisSummary as summary"
+          class="analysis-completion-pipeline"
+          aria-label="新模型分析明细"
+        >
+          <header>
+            <strong>新模型分析明细</strong>
+            <span>{{ summary.modelPackageId || "未记录模型包" }}</span>
+          </header>
+          <dl>
+            <div>
+              <dt>时间线取帧</dt>
+              <dd>
+                共 {{ summary.sampledFrames }} · 直接关键帧
+                {{ summary.keyframeFrames }} · 边界补帧
+                {{ summary.seekFillFrames }}
+              </dd>
+            </div>
+            <div>
+              <dt>结算精扫</dt>
+              <dd>
+                {{ summary.resultWindows.length }} 个区间 · 解码
+                {{ summary.decodedResultFrames }} 帧 · 命中
+                {{ summary.resultHitFrames }} 帧 · 合并为
+                {{ summary.resultCandidateCount }} 个候选
+              </dd>
+            </div>
+            <div>
+              <dt>同局与异常证据</dt>
+              <dd>
+                {{ summary.timelineSegments.length }} 个疑似对局段 ·
+                {{ summary.hudLineupCandidateCount }} 个候选带 HUD 阵容 ·
+                {{ summary.modeConflictCount ?? 0 }} 个模式冲突
+              </dd>
+            </div>
+            <div>
+              <dt>是否在对局中</dt>
+              <dd>{{ timelineCountText(summary, "matchFlow") }}</dd>
+            </div>
+            <div>
+              <dt>英雄选择输出</dt>
+              <dd>{{ timelineCountText(summary, "heroSelect") }}</dd>
+            </div>
+            <div>
+              <dt>对局模式输出</dt>
+              <dd>{{ timelineCountText(summary, "matchMode") }}</dd>
+            </div>
+            <div>
+              <dt>进入人工复核</dt>
+              <dd>
+                {{ trainingCandidateCount(summary) }} 张 ·
+                {{ trainingCandidateText(summary) }}
+              </dd>
+            </div>
+            <div>
+              <dt>扫描耗时</dt>
+              <dd>
+                {{ summary.timingsSeconds["scanTotal"] | number: "1.1-1" }}
+                秒
+              </dd>
+            </div>
+          </dl>
+        </section>
         <button
           *ngIf="completion.matchPreviews.length > 0"
           type="button"

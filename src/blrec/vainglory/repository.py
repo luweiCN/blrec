@@ -426,6 +426,10 @@ class AnalysisQueueItem:
     model_package_id: str = ''
     keyframe_frames: int = 0
     seek_fill_frames: int = 0
+    decoded_result_frames: int = 0
+    mode_conflict_count: int = 0
+    hud_lineup_candidate_count: int = 0
+    training_candidate_count: int = 0
     events: Tuple[AnalysisQueueEvent, ...] = ()
     bvid: Optional[str] = None
     archive_page: Optional[int] = None

@@ -1,5 +1,8 @@
 import { AnalysisTaskCenterComponent } from './analysis-task-center.component';
-import { VaingloryAnalysisQueueItem } from '../vainglory.model';
+import {
+  VaingloryAnalysisQueueItem,
+  VaingloryAnalysisSummary,
+} from '../vainglory.model';
 
 describe('AnalysisTaskCenterComponent', () => {
   it('calculates visible task elapsed time from the SSE sample', () => {
@@ -41,6 +44,10 @@ describe('AnalysisTaskCenterComponent', () => {
       modelPackageId: 'vision-package-v1',
       keyframeFrames: 180,
       seekFillFrames: 60,
+      decodedResultFrames: 0,
+      modeConflictCount: 0,
+      hudLineupCandidateCount: 0,
+      trainingCandidateCount: 0,
       events: [],
       imageCount: 2,
       matchPreviews: [],
@@ -63,5 +70,39 @@ describe('AnalysisTaskCenterComponent', () => {
       title: '直播标题 · 已识别对局',
     });
     expect(sessionRequest).toBe(9);
+  });
+
+  it('formats model output and training candidate counts for the new pipeline', () => {
+    const component = new AnalysisTaskCenterComponent();
+    const summary: VaingloryAnalysisSummary = {
+      schemaVersion: 1,
+      pipeline: 'timeline-v2',
+      modelPackageId: 'vision-package-v1',
+      sampledFrames: 10,
+      keyframeFrames: 7,
+      seekFillFrames: 3,
+      decodedResultFrames: 20,
+      resultHitFrames: 4,
+      resultCandidateCount: 2,
+      hudLineupCandidateCount: 2,
+      modeConflictCount: 1,
+      timelineCounts: {
+        matchFlow: { match_flow: 8, not_match_flow: 2 },
+        heroSelect: { not_select: 9, select_3v3: 1 },
+        matchMode: { '3v3': 7, aram: 3 },
+      },
+      timelineSegments: [],
+      resultWindows: [],
+      trainingCandidateCounts: { match_mode: 2, result_detector: 3 },
+      timingsSeconds: { scanTotal: 12.5 },
+    };
+
+    expect(component.timelineCountText(summary, 'matchMode')).toBe(
+      '3V3 7 · 大乱斗 3',
+    );
+    expect(component.trainingCandidateText(summary)).toBe(
+      '结算检测 3 · 对局模式 2',
+    );
+    expect(component.trainingCandidateCount(summary)).toBe(5);
   });
 });

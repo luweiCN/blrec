@@ -114,6 +114,7 @@ class AnalysisWorkerSummaryRequest(ApiModel):
     result_hit_frames: int = Field(0, ge=0)
     result_candidate_count: int = Field(0, ge=0)
     hud_lineup_candidate_count: int = Field(0, ge=0)
+    mode_conflict_count: int = Field(0, ge=0)
     timeline_counts: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     timeline_segments: List[AnalysisTimelineSegmentRequest] = Field(
         default_factory=list, max_items=100

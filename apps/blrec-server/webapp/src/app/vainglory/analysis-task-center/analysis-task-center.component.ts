@@ -12,8 +12,35 @@ import {
   VaingloryAnalysisQueueCompletion,
   VaingloryAnalysisQueueEvent,
   VaingloryAnalysisQueueItem,
+  VaingloryAnalysisSummary,
   VaingloryAnalysisMatchPreview,
 } from '../vainglory.model';
+
+type TimelineCountGroup = 'matchFlow' | 'heroSelect' | 'matchMode';
+
+const ANALYSIS_OUTPUT_LABELS: Readonly<Record<string, string>> = {
+  match_flow: '对局中',
+  not_match_flow: '非对局',
+  select_3v3: '3V3 选英雄',
+  select_aram: '大乱斗选英雄',
+  select_5v5: '5V5 选英雄',
+  not_select: '非选英雄',
+  '3v3': '3V3',
+  aram: '大乱斗',
+  '5v5': '5V5',
+  unknown: '不确定',
+};
+
+const TRAINING_TASK_LABELS: Readonly<Record<string, string>> = {
+  match_flow: '是否在对局中',
+  hero_select: '英雄选择',
+  match_mode: '对局模式',
+  result_detector: '结算检测',
+  key_screen: '关键界面',
+  hero_avatar: '头像位置',
+  hero_identity: '英雄身份',
+  player_position: '本人位置',
+};
 
 @Component({
   selector: 'app-vainglory-analysis-task-center',
@@ -99,6 +126,30 @@ export class AnalysisTaskCenterComponent {
     return item.runtimeDetail || this.stageLabel(item);
   }
 
+  timelineCountText(
+    summary: VaingloryAnalysisSummary,
+    group: TimelineCountGroup,
+  ): string {
+    return this.countText(
+      summary.timelineCounts[group] ?? {},
+      ANALYSIS_OUTPUT_LABELS,
+    );
+  }
+
+  trainingCandidateText(summary: VaingloryAnalysisSummary): string {
+    return this.countText(
+      summary.trainingCandidateCounts,
+      TRAINING_TASK_LABELS,
+    );
+  }
+
+  trainingCandidateCount(summary: VaingloryAnalysisSummary): number {
+    return Object.values(summary.trainingCandidateCounts).reduce(
+      (total, count) => total + count,
+      0,
+    );
+  }
+
   recentEvents(
     item: VaingloryAnalysisQueueItem,
   ): readonly VaingloryAnalysisQueueEvent[] {
@@ -158,5 +209,21 @@ export class AnalysisTaskCenterComponent {
       return `${minutes}分${remainingSeconds}秒`;
     }
     return `${remainingSeconds}秒`;
+  }
+
+  private countText(
+    counts: Readonly<Record<string, number>>,
+    labels: Readonly<Record<string, string>>,
+  ): string {
+    const entries = Object.entries(counts).sort(
+      ([leftLabel, leftCount], [rightLabel, rightCount]) =>
+        rightCount - leftCount || leftLabel.localeCompare(rightLabel),
+    );
+    if (entries.length === 0) {
+      return '无';
+    }
+    return entries
+      .map(([label, count]) => `${labels[label] ?? label} ${count}`)
+      .join(' · ');
   }
 }

@@ -1772,6 +1772,97 @@ def test_result_hero_lineup_distinguishes_mismatch_from_missing_evidence() -> No
     )
 
 
+def test_five_player_hud_fallback_uses_left_slot_nearest_center(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = HeroFrame('left', 1, RgbFrame(1, 1, b'\x00\x00\x00'))
+    result_labels = {
+        'left': ('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'),
+        'right': ('Kestrel', 'Lance', 'Lyra', 'Ringo', 'Vox'),
+    }
+    heroes = tuple(
+        AnalyzedHero(side, slot, '', b'', label, 0.9)
+        for side, labels in result_labels.items()
+        for slot, label in enumerate(labels, 1)
+    )
+    hud = {
+        (hud_side, slot): (
+            replace(frame, side=hud_side, slot=slot),
+            HeroMatch(label, 0.9, 12, 6),
+        )
+        for hud_side, labels in (
+            ('left', result_labels['right']),
+            ('right', result_labels['left']),
+        )
+        for slot, label in enumerate(labels, 1)
+    }
+    analyzer = VaingloryVideoAnalyzer()
+    monkeypatch.setattr(
+        analyzer, '_recognize_gameplay_hud_heroes', lambda *_args, **_kwargs: hud
+    )
+
+    _, player = analyzer._apply_gameplay_hud_fallback(
+        heroes,
+        layout=ResultLayout(
+            left_color='teal',
+            right_color='orange',
+            winner_color='teal',
+            winner_side='left',
+            confidence=1,
+            team_size=5,
+        ),
+        frames=(),
+        team_size=5,
+    )
+
+    assert player is not None
+    assert (player.side, player.slot) == ('right', 5)
+
+
+def test_three_player_hud_fallback_uses_local_side_slot_nearest_center(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = HeroFrame('left', 1, RgbFrame(1, 1, b'\x00\x00\x00'))
+    result_labels = {
+        'left': ('Alpha', 'Beta', 'Gamma'),
+        'right': ('Kestrel', 'Lance', 'Lyra'),
+    }
+    heroes = tuple(
+        AnalyzedHero(side, slot, '', b'', label, 0.9)
+        for side, labels in result_labels.items()
+        for slot, label in enumerate(labels, 1)
+    )
+    hud = {
+        (side, slot): (
+            replace(frame, side=side, slot=slot),
+            HeroMatch(label, 0.9, 12, 6),
+        )
+        for side, labels in result_labels.items()
+        for slot, label in enumerate(labels, 1)
+    }
+    analyzer = VaingloryVideoAnalyzer()
+    monkeypatch.setattr(
+        analyzer, '_recognize_gameplay_hud_heroes', lambda *_args, **_kwargs: hud
+    )
+
+    _, player = analyzer._apply_gameplay_hud_fallback(
+        heroes,
+        layout=ResultLayout(
+            left_color='orange',
+            right_color='teal',
+            winner_color='teal',
+            winner_side='right',
+            confidence=1,
+            team_size=3,
+        ),
+        frames=(),
+        team_size=3,
+    )
+
+    assert player is not None
+    assert (player.side, player.slot) == ('right', 1)
+
+
 def test_hero_recognition_searches_one_shared_layout_offset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

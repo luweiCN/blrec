@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 import pytest
-from blrec_analysis_worker.remote import RemoteAnalysisWorker
+from blrec_analysis_worker.remote import RemoteAnalysisWorker, _Heartbeat
 
 from blrec.vainglory.analyzer import (
+    AnalysisStatus,
     DenseScanResult,
     ResultScanWindow,
     ScannedPart,
@@ -200,6 +201,51 @@ def test_concurrency_validation(tmp_path: Path) -> None:
         )
 
 
+def test_heartbeat_keeps_scan_metrics_during_ocr_stage() -> None:
+    heartbeat = _Heartbeat(
+        Client([], threading.Lock()), kind='part', item_id=1, interval_seconds=60
+    )
+    heartbeat.update_status(
+        AnalysisStatus(
+            stage='fine_scan',
+            detail='精扫',
+            elapsed_seconds=10,
+            coarse_frames=98,
+            gameplay_runs=2,
+            result_windows=2,
+            keyframe_frames=67,
+            seek_fill_frames=31,
+            decoded_result_frames=240,
+            mode_conflict_count=1,
+            hud_lineup_candidate_count=2,
+            training_candidate_count=12,
+        )
+    )
+
+    heartbeat.update_status(
+        AnalysisStatus(
+            stage='ocr_recognition',
+            detail='识别',
+            elapsed_seconds=12,
+            candidate_count=2,
+            total_candidates=2,
+        )
+    )
+
+    status = heartbeat._runtime_status
+    assert status is not None
+    assert status.stage == 'ocr_recognition'
+    assert status.coarse_frames == 98
+    assert status.gameplay_runs == 2
+    assert status.result_windows == 2
+    assert status.keyframe_frames == 67
+    assert status.seek_fill_frames == 31
+    assert status.decoded_result_frames == 240
+    assert status.mode_conflict_count == 1
+    assert status.hud_lineup_candidate_count == 2
+    assert status.training_candidate_count == 12
+
+
 def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> None:
     class CandidateAnalyzer(Analyzer):
         def scan_part_cascade(self, part: VideoPart, **kwargs: Any) -> DenseScanResult:
@@ -225,6 +271,7 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
                 timeline_segments=(TimelineSegment(0, 20_000, '3v3'),),
                 result_windows=(ResultScanWindow(15_000, 30_000, '3v3', 20_000),),
                 keyframe_frames=1,
+                mode_conflict_count=2,
                 training_candidates=(
                     TrainingCandidate(
                         at_ms=12_000,
@@ -267,6 +314,7 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
     summary = clients[0].completed_payloads[0]['analysisSummary']
     assert summary['modelPackageId'] == 'vision-package-v1'
     assert summary['keyframeFrames'] == 1
+    assert summary['modeConflictCount'] == 2
     assert summary['timelineSegments'] == [
         {'startMs': 0, 'endMs': 20_000, 'mode': '3v3'}
     ]

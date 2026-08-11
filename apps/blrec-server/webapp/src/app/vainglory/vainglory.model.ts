@@ -204,6 +204,7 @@ export interface VaingloryAnalysisSummary {
   readonly resultHitFrames: number;
   readonly resultCandidateCount: number;
   readonly hudLineupCandidateCount: number;
+  readonly modeConflictCount?: number;
   readonly timelineCounts: Readonly<
     Record<string, Readonly<Record<string, number>>>
   >;
@@ -274,6 +275,10 @@ export interface VaingloryAnalysisQueueItem {
   readonly modelPackageId: string;
   readonly keyframeFrames: number;
   readonly seekFillFrames: number;
+  readonly decodedResultFrames: number;
+  readonly modeConflictCount: number;
+  readonly hudLineupCandidateCount: number;
+  readonly trainingCandidateCount: number;
   readonly events: readonly VaingloryAnalysisQueueEvent[];
   readonly bvid?: string | null;
   readonly archivePage?: number | null;
