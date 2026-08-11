@@ -97,7 +97,7 @@ jobs:
         shell: bash
         run: |
           response_headers="$(mktemp)"
-          curl --fail --silent --show-error --location \
+          curl --ipv4 --fail --silent --show-error --location \
             --connect-timeout 10 --max-time 30 \
             --retry 4 --retry-all-errors --retry-delay 3 --retry-max-time 150 \
             --dump-header "$response_headers" \
