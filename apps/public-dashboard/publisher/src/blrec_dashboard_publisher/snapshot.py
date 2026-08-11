@@ -444,6 +444,8 @@ def _match_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
         "AND length(trim(hero.label))>0 WHERE scan.stats_included=1 "
         'AND match.stats_eligible=1 '
         "AND match.game_mode IN ('3v3','5v5','aram','other') "
+        "AND match.recorded_player_side IN ('left','right') "
+        'AND match.recorded_player_slot BETWEEN 1 AND match.team_size '
         "AND ((match.game_mode='3v3' AND match.team_size=3) "
         "OR (match.game_mode='5v5' AND match.team_size=5) "
         "OR match.game_mode IN ('aram','other')) "

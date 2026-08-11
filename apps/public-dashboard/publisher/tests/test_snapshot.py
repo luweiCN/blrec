@@ -367,7 +367,9 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_snapshot_excludes_mode_and_team_size_conflicts(tmp_path: Path) -> None:
+async def test_snapshot_excludes_incomplete_or_conflicting_matches(
+    tmp_path: Path,
+) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
     try:
@@ -378,6 +380,7 @@ async def test_snapshot_excludes_mode_and_team_size_conflicts(tmp_path: Path) ->
             (3, 'aram', 3),
             (4, '5v5', 3),
             (5, '3v3', 5),
+            (6, '5v5', 5),
         ):
             await seed_match(
                 database,
@@ -391,6 +394,10 @@ async def test_snapshot_excludes_mode_and_team_size_conflicts(tmp_path: Path) ->
                 anchor_name='主播',
                 team_size=team_size,
             )
+        await database.execute(
+            'UPDATE vainglory_matches SET recorded_player_side=NULL,'
+            'recorded_player_slot=NULL WHERE id=6'
+        )
 
         snapshot = await database.read(
             lambda connection: build_dashboard_snapshot(
