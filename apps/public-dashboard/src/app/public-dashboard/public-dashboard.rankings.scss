@@ -147,7 +147,7 @@ table {
   }
 
   td {
-    height: 70px;
+    height: 78px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--line-soft);
     color: var(--ink-muted);
@@ -310,8 +310,8 @@ table {
   position: sticky;
   top: 20px;
   grid-area: detail;
-  align-self: start;
-  padding: 24px 26px 26px;
+  align-self: stretch;
+  padding: 22px 24px 24px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background:
@@ -340,17 +340,19 @@ table {
 
 .detail-primary {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) 148px;
+  gap: 16px;
   align-items: center;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .detail-identity {
   display: flex;
-  grid-row: 2;
-  gap: 14px;
-  align-items: center;
+  grid-column: 1;
+  grid-row: 1;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 10px;
   min-width: 0;
 
   h2 {
@@ -388,8 +390,8 @@ table {
   position: relative;
   display: block;
   flex: none;
-  width: 70px;
-  height: 78px;
+  width: 58px;
+  height: 64px;
   padding: 1px;
   background: var(--cyan);
   clip-path: polygon(18% 0, 82% 0, 100% 18%, 92% 84%, 50% 100%, 8% 84%, 0 18%);
@@ -410,22 +412,22 @@ table {
 }
 
 .detail-tier {
-  --skill-tier-showcase-size: 174px;
+  --skill-tier-showcase-size: 144px;
 
   display: grid;
+  grid-column: 2;
   grid-row: 1;
-  align-self: stretch;
+  align-self: center;
   place-items: center;
   min-width: 0;
-  min-height: 206px;
-  border-bottom: 1px solid var(--line-soft);
+  min-height: 176px;
 }
 
 .detail-record {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  margin: 20px 0 0;
-  padding: 17px 0;
+  margin: 16px 0 0;
+  padding: 14px 0;
   border-top: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
 
@@ -448,25 +450,25 @@ table {
 }
 
 .detail-recent-matches {
-  margin-top: 24px;
-  padding-top: 21px;
+  margin-top: 18px;
+  padding-top: 17px;
   border-top: 1px solid var(--line-soft);
 
   ol {
     display: grid;
-    gap: 7px;
-    margin: 12px 0 0;
+    gap: 3px;
+    margin: 9px 0 0;
     padding: 0;
     list-style: none;
   }
 
   li a {
     display: grid;
-    grid-template-columns: 30px 36px minmax(0, 1fr);
-    gap: 9px;
+    grid-template-columns: 26px 31px minmax(0, 1fr);
+    gap: 7px;
     align-items: center;
-    min-height: 46px;
-    padding: 5px 7px;
+    min-height: 40px;
+    padding: 3px 5px;
     border: 1px solid transparent;
     border-radius: 7px;
     color: var(--ink-soft);
@@ -479,8 +481,8 @@ table {
   }
 
   img {
-    width: 34px;
-    height: 34px;
+    width: 29px;
+    height: 29px;
     border-radius: 50%;
     object-fit: cover;
   }
@@ -538,21 +540,21 @@ table {
 }
 
 .mode-breakdown {
-  margin-top: 20px;
+  margin-top: 16px;
 
   ol {
     display: grid;
-    gap: 10px;
-    margin: 13px 0 0;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 9px;
+    margin: 10px 0 0;
     padding: 0;
     list-style: none;
   }
 
   li > div {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 6px;
+    display: grid;
+    gap: 3px;
+    margin-bottom: 5px;
     color: var(--ink-muted);
     font-size: var(--type-caption);
 
@@ -576,28 +578,36 @@ table {
 }
 
 .hero-pool {
-  margin-top: 22px;
+  margin-top: 17px;
 
   ol {
-    margin: 12px 0 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 14px;
+    margin: 9px 0 0;
     padding: 0;
     list-style: none;
   }
 
   li {
     display: grid;
-    grid-template-columns: 36px minmax(0, 1fr) auto;
-    gap: 10px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px;
     align-items: center;
-    min-height: 50px;
+    min-width: 0;
+    min-height: 48px;
 
     & + li {
+      border-top: 0;
+    }
+
+    &:nth-child(n + 3) {
       border-top: 1px solid var(--line-soft);
     }
 
     img {
-      width: 34px;
-      height: 34px;
+      width: 28px;
+      height: 28px;
       border: 1px solid var(--line);
       border-radius: 4px;
       object-fit: cover;
@@ -625,6 +635,12 @@ table {
       color: var(--cyan);
       font-size: var(--type-label);
     }
+  }
+
+  .detail-hero-link {
+    grid-column: auto;
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 7px;
   }
 }
 

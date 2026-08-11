@@ -43,6 +43,7 @@
 
   .player-detail {
     position: static;
+    align-self: start;
     width: min(100%, 560px);
   }
 }
