@@ -4,7 +4,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, List, Mapping
 from unittest.mock import AsyncMock
 
 import pytest
@@ -671,7 +671,7 @@ async def test_upload_loop_does_not_wait_for_operational_notification_scan() -> 
     stop_event = asyncio.Event()
     iterations = 0
 
-    async def sync_live_sessions() -> list[int]:
+    async def sync_live_sessions() -> List[int]:
         nonlocal iterations
         iterations += 1
         if iterations == 2:
