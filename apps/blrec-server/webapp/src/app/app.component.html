@@ -105,6 +105,26 @@
               nzMatchRouter="true"
               nz-tooltip
               nzTooltipPlacement="right"
+              [nzTooltipTitle]="collapsed ? '访问分析' : ''"
+            >
+              <i nz-icon nzType="bar-chart" nzTheme="outline"></i>
+              <span><a routerLink="/visitor-analytics">访问分析</a></span>
+            </li>
+            <li
+              nz-menu-item
+              nzMatchRouter="true"
+              nz-tooltip
+              nzTooltipPlacement="right"
+              [nzTooltipTitle]="collapsed ? '云成本' : ''"
+            >
+              <i nz-icon nzType="dollar-circle" nzTheme="outline"></i>
+              <span><a routerLink="/cloud-cost">云成本</a></span>
+            </li>
+            <li
+              nz-menu-item
+              nzMatchRouter="true"
+              nz-tooltip
+              nzTooltipPlacement="right"
               [nzTooltipTitle]="collapsed ? '设置' : ''"
             >
               <i nz-icon nzType="setting" nzTheme="outline"></i>

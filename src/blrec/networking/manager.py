@@ -37,6 +37,8 @@ NetworkPurpose = Literal[
     'bili_api',
     'archive_download',
     'dashboard_publish',
+    'cloud_cost',
+    'visitor_analytics',
 ]
 
 _PROBE_HEADERS = {
@@ -287,6 +289,8 @@ class NetworkRouteManager:
             'bili_api',
             'archive_download',
             'dashboard_publish',
+            'cloud_cost',
+            'visitor_analytics',
         )
         for purpose in purposes:
             route = self._route_settings(purpose)
@@ -301,6 +305,8 @@ class NetworkRouteManager:
                 'upload',
                 'archive_download',
                 'dashboard_publish',
+                'cloud_cost',
+                'visitor_analytics',
             ):
                 states.append(
                     NetworkNotificationState(
@@ -390,6 +396,8 @@ class NetworkRouteManager:
             'bili_api',
             'archive_download',
             'dashboard_publish',
+            'cloud_cost',
+            'visitor_analytics',
         )
         for purpose in purposes:
             if result.reachable:
@@ -506,6 +514,8 @@ class NetworkRouteManager:
                 'upload',
                 'archive_download',
                 'dashboard_publish',
+                'cloud_cost',
+                'visitor_analytics',
             )
             if allow_failover:
                 fallback = next(

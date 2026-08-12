@@ -23,6 +23,20 @@ const routes: Routes = [
       import('./network/network.module').then((m) => m.NetworkModule),
   },
   {
+    path: 'cloud-cost',
+    canActivate: [AuthGuard],
+    loadChildren: () =>
+      import('./cloud-cost/cloud-cost.module').then((m) => m.CloudCostModule),
+  },
+  {
+    path: 'visitor-analytics',
+    canActivate: [AuthGuard],
+    loadChildren: () =>
+      import('./visitor-analytics/visitor-analytics.module').then(
+        (m) => m.VisitorAnalyticsModule,
+      ),
+  },
+  {
     path: 'settings',
     canActivate: [AuthGuard],
     loadChildren: () =>

@@ -1,0 +1,23 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bss:DescribeBillList",
+        "bssapi:DescribeInstanceBill"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "cdn:DescribeDomainUsageData",
+      "Resource": "acs:cdn:*:1159986474652925:domain/vg.luwei.host"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "log:GetLogStoreLogs",
+      "Resource": "acs:log:cn-beijing:1159986474652925:project/vainglory/logstore/vainglory-dashboard"
+    }
+  ]
+}

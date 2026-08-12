@@ -1,0 +1,177 @@
+<main class="operations-page" [attr.aria-busy]="loading">
+  <header class="page-heading">
+    <div>
+      <span class="eyebrow">ALIYUN RESOURCE OVERVIEW</span>
+      <h1>云成本</h1>
+      <p>集中查看阿里云账单、CDN 流量与 OSS 计费用量。</p>
+    </div>
+    <div class="heading-actions">
+      <span *ngIf="summary">
+        更新于 {{ summary.generatedAt | date: "MM-dd HH:mm:ss" }} · 缓存
+        {{ summary.cacheSeconds / 60 | number: "1.0-0" }} 分钟
+      </span>
+      <button
+        nz-button
+        type="button"
+        [nzLoading]="loading"
+        (click)="load(true)"
+      >
+        <i nz-icon nzType="reload"></i>
+        刷新
+      </button>
+    </div>
+  </header>
+
+  <nz-alert
+    *ngIf="summary?.status === 'not_configured'"
+    nzType="warning"
+    nzShowIcon
+    nzMessage="尚未配置阿里云只读凭据"
+    nzDescription="凭据只保存在服务端环境变量中，配置完成后即可查询。"
+  ></nz-alert>
+  <nz-alert
+    *ngIf="summary && summary.warnings.length > 0"
+    nzType="warning"
+    nzShowIcon
+    nzMessage="部分数据暂时不可用"
+    [nzDescription]="summary.warnings.join('；')"
+  ></nz-alert>
+
+  <nz-spin [nzSpinning]="loading">
+    <ng-container *ngIf="summary as data">
+      <section class="metric-grid" aria-label="本月费用概览">
+        <article class="metric-card primary">
+          <span>{{ data.billingCycle }} 应付</span>
+          <strong>{{ money(data.totals.pretaxAmount, data.currency) }}</strong>
+          <small>阿里云账号本月账单</small>
+        </article>
+        <article class="metric-card">
+          <span>本月实付</span>
+          <strong>{{ money(data.totals.paymentAmount, data.currency) }}</strong>
+          <small>优惠与抵扣后的金额</small>
+        </article>
+        <article class="metric-card" [class.warning]="data.totals.outstandingAmount > 0">
+          <span>未结清</span>
+          <strong>{{ money(data.totals.outstandingAmount, data.currency) }}</strong>
+          <small>账单接口返回的未付金额</small>
+        </article>
+        <article class="metric-card">
+          <span>CDN 本月流量</span>
+          <strong>{{ bytes(data.cdn?.trafficBytes || 0) }}</strong>
+          <small>{{ data.cdn?.requests || 0 | number }} 次请求</small>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <article class="panel trend-panel">
+          <header class="panel-heading">
+            <div>
+              <h2>费用趋势</h2>
+              <p>最近六个账期</p>
+            </div>
+          </header>
+          <div
+            *ngIf="data.trend.length > 0; else noTrend"
+            class="cost-chart"
+            echarts
+            [options]="chartOptions"
+          ></div>
+          <ng-template #noTrend>
+            <nz-empty nzNotFoundContent="暂无费用趋势"></nz-empty>
+          </ng-template>
+        </article>
+
+        <article class="panel">
+          <header class="panel-heading">
+            <div>
+              <h2>产品费用</h2>
+              <p>当前账期按云产品汇总</p>
+            </div>
+          </header>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">产品</th>
+                  <th scope="col">应付</th>
+                  <th scope="col">实付</th>
+                  <th scope="col">未结清</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr *ngFor="let product of data.products">
+                  <td>
+                    <strong>{{ product.productName }}</strong>
+                    <small>{{ product.productCode }}</small>
+                  </td>
+                  <td>{{ money(product.pretaxAmount, data.currency) }}</td>
+                  <td>{{ money(product.paymentAmount, data.currency) }}</td>
+                  <td>{{ money(product.outstandingAmount, data.currency) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <nz-empty
+            *ngIf="data.products.length === 0"
+            nzNotFoundContent="当前账期暂无账单"
+          ></nz-empty>
+        </article>
+
+        <article class="panel resource-panel">
+          <header class="panel-heading">
+            <div>
+              <h2>CDN</h2>
+              <p>{{ data.cdn?.domain || "vg.luwei.host" }}</p>
+            </div>
+            <strong>{{ money(data.cdn?.pretaxAmount || 0, data.currency) }}</strong>
+          </header>
+          <dl class="resource-facts">
+            <div>
+              <dt>本月流量</dt>
+              <dd>{{ bytes(data.cdn?.trafficBytes || 0) }}</dd>
+            </div>
+            <div>
+              <dt>请求数</dt>
+              <dd>{{ data.cdn?.requests || 0 | number }}</dd>
+            </div>
+            <div>
+              <dt>最近有数据日期</dt>
+              <dd>
+                {{ data.cdn?.daily?.length ? data.cdn?.daily?.slice(-1)?.[0]?.date : "—" }}
+              </dd>
+            </div>
+          </dl>
+          <p class="scope-note">
+            流量与请求数精确到该加速域名；费用为账号下 CDN 产品汇总。
+          </p>
+        </article>
+
+        <article class="panel resource-panel">
+          <header class="panel-heading">
+            <div>
+              <h2>OSS</h2>
+              <p>{{ data.oss?.bucket || "luwei-vainglory" }}</p>
+            </div>
+            <strong>{{ money(data.oss?.pretaxAmount || 0, data.currency) }}</strong>
+          </header>
+          <div class="usage-list">
+            <div *ngFor="let item of data.oss?.items">
+              <span>
+                <strong>{{ item.name }}</strong>
+                <small>{{ usage(item) }}</small>
+              </span>
+              <b>{{ money(item.pretaxAmount, data.currency) }}</b>
+            </div>
+          </div>
+          <nz-empty
+            *ngIf="!data.oss?.items?.length"
+            nzNotFoundContent="暂无 OSS 计费明细"
+          ></nz-empty>
+          <p class="scope-note">
+            计费用量与费用来自账号 OSS 月账单；阿里云账单接口不支持精确拆分到单个桶。
+          </p>
+        </article>
+      </section>
+    </ng-container>
+  </nz-spin>
+</main>

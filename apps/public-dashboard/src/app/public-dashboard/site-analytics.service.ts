@@ -48,6 +48,7 @@ type AnalyticsEvent = 'pageview' | 'heartbeat';
 export class SiteAnalyticsService implements OnDestroy {
   private heartbeatTimer: number | null = null;
   private lastTrackedUrl: string | null = null;
+  private currentPage = 'overview';
   private routerSubscription: Subscription | null = null;
   private visitorId: string | null = null;
 
@@ -108,13 +109,31 @@ export class SiteAnalyticsService implements OnDestroy {
       return;
     }
     this.lastTrackedUrl = url;
+    this.currentPage = analyticsPage(url);
     this.send('pageview');
   }
 
   private send(event: AnalyticsEvent): void {
+    const visitor = this.getVisitorId();
+    this.sendRequest([
+      ['event', event],
+      ['visitor', visitor],
+    ]);
+    this.sendRequest([
+      ['event', 'detail'],
+      ['kind', event],
+      ['visitor', visitor],
+      ['page', this.currentPage],
+      ['source', analyticsSource(this.document)],
+      ['device', analyticsDevice(window.innerWidth)],
+    ]);
+  }
+
+  private sendRequest(parameters: ReadonlyArray<readonly [string, string]>): void {
     const requestUrl = new URL(this.config.endpoint, this.document.location.origin);
-    requestUrl.searchParams.set('event', event);
-    requestUrl.searchParams.set('visitor', this.getVisitorId());
+    for (const [name, value] of parameters) {
+      requestUrl.searchParams.set(name, value);
+    }
 
     void window
       .fetch(requestUrl.toString(), {
@@ -150,6 +169,51 @@ export class SiteAnalyticsService implements OnDestroy {
     }
     return created;
   }
+}
+
+export function analyticsPage(url: string): string {
+  const path = url.split(/[?#]/u, 1)[0];
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length === 0) {
+    return 'overview';
+  }
+  if (segments[0] === 'players') {
+    return segments.length > 1 ? 'player-detail' : 'players';
+  }
+  if (segments[0] === 'heroes') {
+    return segments.length > 1 ? 'hero-detail' : 'heroes';
+  }
+  if (segments[0] === 'matches') {
+    return 'matches';
+  }
+  if (segments[0] === 'guide' && segments[1]) {
+    return `guide-${segments[1]}`.slice(0, 64);
+  }
+  return 'other';
+}
+
+export function analyticsSource(document: Document): string {
+  if (!document.referrer) {
+    return 'direct';
+  }
+  try {
+    const source = new URL(document.referrer, document.location.origin);
+    return source.hostname === document.location.hostname
+      ? 'internal'
+      : source.hostname.toLowerCase().slice(0, 128);
+  } catch {
+    return 'unknown';
+  }
+}
+
+export function analyticsDevice(width: number): string {
+  if (width < 768) {
+    return 'mobile';
+  }
+  if (width < 1100) {
+    return 'tablet';
+  }
+  return 'desktop';
 }
 
 function createVisitorId(): string {

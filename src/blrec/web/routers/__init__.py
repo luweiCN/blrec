@@ -2,6 +2,7 @@ from . import (
     bili_accounts,
     bili_collections,
     browser_extension,
+    cloud_cost,
     control_operations,
     highlights,
     live_status,
@@ -11,12 +12,14 @@ from . import (
     room_upload_policies,
     upload_covers,
     vainglory,
+    visitor_analytics,
 )
 
 __all__ = (
     'bili_accounts',
     'bili_collections',
     'browser_extension',
+    'cloud_cost',
     'control_operations',
     'highlights',
     'live_status',
@@ -26,4 +29,5 @@ __all__ = (
     'room_upload_policies',
     'upload_covers',
     'vainglory',
+    'visitor_analytics',
 )

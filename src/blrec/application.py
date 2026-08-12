@@ -36,8 +36,8 @@ if TYPE_CHECKING:
     from .control.operations import ControlOperationJournal, ControlOperationSnapshot
     from .core.typing import MetaData
     from .flv.operators import StreamProfile
-    from .networking.aiohttp_session import AiohttpSessionPool
-    from .networking.manager import NetworkRouteManager
+    from .networking.aiohttp_session import AiohttpSessionPool, RoutedAiohttpSession
+    from .networking.manager import NetworkPurpose, NetworkRouteManager
     from .notification.dispatcher import NotificationDispatcher
     from .setting.file_work import SettingsApplyReconciler, SettingsFileWorkCoordinator
     from .task import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
@@ -643,6 +643,18 @@ class Application:
             get_nav(cookie, self._get_bili_validation_session()),
             timeout=self._validation_timeout_seconds,
         )
+
+    def network_session(
+        self,
+        purpose: 'NetworkPurpose',
+        *,
+        anonymous: bool = False,
+        affinity_key: Optional[str] = None,
+    ) -> 'RoutedAiohttpSession':
+        pool = self._ensure_network_session_pool()
+        if pool is None:
+            raise RuntimeError('network route manager is unavailable')
+        return pool.client(purpose, anonymous=anonymous, affinity_key=affinity_key)
 
     async def validate_directory(self, path: str) -> Tuple[int, str]:
         file_work = self._settings_manager.file_work

@@ -5,7 +5,9 @@ export type NetworkPurpose =
   | 'upload'
   | 'biliApi'
   | 'archiveDownload'
-  | 'dashboardPublish';
+  | 'dashboardPublish'
+  | 'cloudCost'
+  | 'visitorAnalytics';
 
 export interface NetworkProbe {
   reachable: boolean;

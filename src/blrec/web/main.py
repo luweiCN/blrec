@@ -24,6 +24,11 @@ from blrec.bili_upload.recording_content import (
     RecordingContentUnavailable,
 )
 from blrec.bili_upload.runtime import BiliAccountRuntime
+from blrec.cloud_cost import (
+    AliyunCloudCostService,
+    AliyunOpenApiClient,
+    CloudCostConfig,
+)
 from blrec.control.operations import ControlOperationJournal
 from blrec.exception import ExistsError, ForbiddenError, NotFoundError
 from blrec.networking.manager import NetworkRouteManager
@@ -46,6 +51,11 @@ from blrec.setting.file_work import (
     validate_directory_sync,
 )
 from blrec.setting.models import DEFAULT_LOG_DIR, DEFAULT_OUT_DIR
+from blrec.visitor_analytics import (
+    AliyunSlsQueryClient,
+    VisitorAnalyticsConfig,
+    VisitorAnalyticsService,
+)
 from blrec.web.middlewares.base_herf import BaseHrefMiddleware
 from blrec.web.middlewares.request_performance import RequestPerformanceMiddleware
 from blrec.web.middlewares.route_redirect import RouteRedirectMiddleware
@@ -62,6 +72,7 @@ from .routers import (
     bili_accounts,
     bili_collections,
     browser_extension,
+    cloud_cost,
     control_operations,
     highlights,
     live_status,
@@ -77,6 +88,7 @@ from .routers import (
     upload_covers,
     vainglory,
     validation,
+    visitor_analytics,
     websockets,
 )
 from .schemas import ResponseMessage
@@ -191,6 +203,27 @@ app = Application(
     control_operation_journal=_control_operation_journal,
     room_upload_policy_enabler=_enable_collect_upload_policy,
     notification_dispatcher=_notification_dispatcher,
+)
+
+_cloud_cost_config = CloudCostConfig.from_env()
+_cloud_cost_client = AliyunOpenApiClient(
+    _cloud_cost_config.access_key_id or '',
+    _cloud_cost_config.access_key_secret or '',
+    lambda: app.network_session(
+        'cloud_cost', anonymous=False, affinity_key='aliyun-cloud-cost'
+    ),
+)
+cloud_cost.service = AliyunCloudCostService(_cloud_cost_config, _cloud_cost_client)
+
+_visitor_analytics_config = VisitorAnalyticsConfig.from_env()
+_visitor_analytics_client = AliyunSlsQueryClient(
+    _visitor_analytics_config,
+    lambda: app.network_session(
+        'visitor_analytics', anonymous=False, affinity_key='aliyun-visitor-analytics'
+    ),
+)
+visitor_analytics.service = VisitorAnalyticsService(
+    _visitor_analytics_config, _visitor_analytics_client
 )
 
 
@@ -985,6 +1018,8 @@ api.include_router(websockets.router)
 api.include_router(update.router)
 api.include_router(live_status.router, prefix='/api/v1')
 api.include_router(network.router, prefix='/api/v1')
+api.include_router(cloud_cost.router, prefix='/api/v1')
+api.include_router(visitor_analytics.router, prefix='/api/v1')
 api.include_router(realtime.router, prefix='/api/v1')
 api.include_router(bili_accounts.router, prefix='/api/v1')
 api.include_router(recording_sessions.router, prefix='/api/v1')

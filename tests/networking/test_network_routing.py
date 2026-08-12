@@ -12,7 +12,11 @@ from blrec.bili_upload.protocol import (
     TransportFailure,
 )
 from blrec.networking.aiohttp_session import AiohttpSessionPool
-from blrec.networking.manager import NetworkInterface, NetworkRouteManager
+from blrec.networking.manager import (
+    NetworkInterface,
+    NetworkPurpose,
+    NetworkRouteManager,
+)
 from blrec.networking.requests_session import (
     ResolvedHTTPConnection,
     RoutedRequestsSession,
@@ -76,6 +80,8 @@ def test_purposes_have_independent_routes() -> None:
         bili_api={'interface': 'lan1'},
         archive_download={'interface': 'lan2'},
         dashboard_publish={'interface': 'lan1'},
+        cloud_cost={'interface': 'lan2'},
+        visitor_analytics={'interface': 'lan1'},
     )
     manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
 
@@ -86,6 +92,8 @@ def test_purposes_have_independent_routes() -> None:
     assert manager.select('bili_api').interface_name == 'lan1'
     assert manager.select('archive_download').interface_name == 'lan2'
     assert manager.select('dashboard_publish').interface_name == 'lan1'
+    assert manager.select('cloud_cost').interface_name == 'lan2'
+    assert manager.select('visitor_analytics').interface_name == 'lan1'
 
 
 def test_dashboard_publish_route_inherits_existing_upload_route() -> None:
@@ -104,6 +112,54 @@ def test_dashboard_publish_route_inherits_a_parsed_upload_route() -> None:
     )
 
     assert settings.dashboard_publish.interface == 'lan1'
+
+
+def test_cloud_cost_route_inherits_existing_dashboard_publish_route() -> None:
+    settings = NetworkSettings(
+        dashboard_publish={
+            'mode': 'fixed',
+            'interface': 'lan2',
+            'failoverEnabled': False,
+        }
+    )
+
+    assert settings.cloud_cost.mode == 'fixed'
+    assert settings.cloud_cost.interface == 'lan2'
+    assert settings.cloud_cost.failover_enabled is False
+
+
+def test_visitor_analytics_route_inherits_existing_cloud_cost_route() -> None:
+    settings = NetworkSettings(
+        cloud_cost={'mode': 'fixed', 'interface': 'lan2', 'failoverEnabled': False}
+    )
+
+    assert settings.visitor_analytics.mode == 'fixed'
+    assert settings.visitor_analytics.interface == 'lan2'
+    assert settings.visitor_analytics.failover_enabled is False
+
+
+def test_observability_routes_resolve_and_record_the_system_default() -> None:
+    settings = NetworkSettings()
+    manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
+
+    purposes: Tuple[NetworkPurpose, ...] = ('cloud_cost', 'visitor_analytics')
+    for purpose in purposes:
+        selection = manager.select(purpose)
+        assert selection.interface_name == 'lan1'
+        assert selection.source_address is None
+        assert selection.role == 'system'
+
+
+def test_observability_routes_survive_settings_round_trip() -> None:
+    original = NetworkSettings(
+        cloud_cost={'interface': 'lan2'},
+        visitor_analytics={'interface': 'lan1'},
+    )
+    restored = NetworkSettings.parse_raw(original.json(by_alias=True))
+    manager = NetworkRouteManager(lambda: restored, interface_provider=_interfaces)
+
+    assert manager.select('cloud_cost').interface_name == 'lan2'
+    assert manager.select('visitor_analytics').interface_name == 'lan1'
 
 
 def test_every_route_selection_is_audited_with_replayable_context(

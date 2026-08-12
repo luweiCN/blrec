@@ -1,0 +1,254 @@
+<main class="analytics-page" [attr.aria-busy]="loading">
+  <header class="page-heading">
+    <div>
+      <span class="eyebrow">AUDIENCE INSIGHTS</span>
+      <h1>访问分析</h1>
+      <p>查看虚荣对局榜的页面访问、地域来源和设备分布。</p>
+    </div>
+    <div class="heading-actions">
+      <span *ngIf="summary">
+        更新于 {{ summary.generatedAt | date: "MM-dd HH:mm:ss" }} · 原始日志保留
+        {{ summary.retentionDays }} 天
+      </span>
+      <button
+        nz-button
+        type="button"
+        [nzLoading]="loading"
+        (click)="load(true)"
+      >
+        <i nz-icon nzType="reload"></i>
+        刷新
+      </button>
+    </div>
+  </header>
+
+  <section class="filter-panel" aria-label="访问日志筛选">
+    <label class="range-field">
+      <span>时间范围</span>
+      <nz-range-picker
+        aria-label="访问日志时间范围"
+        [(ngModel)]="dateRange"
+        [nzShowTime]="true"
+        nzFormat="yyyy-MM-dd HH:mm"
+      ></nz-range-picker>
+    </label>
+    <label>
+      <span>事件</span>
+      <nz-select aria-label="访问事件类型" [(ngModel)]="event">
+        <nz-option nzValue="pageview" nzLabel="页面浏览"></nz-option>
+        <nz-option nzValue="heartbeat" nzLabel="活跃心跳"></nz-option>
+        <nz-option nzValue="all" nzLabel="全部事件"></nz-option>
+      </nz-select>
+    </label>
+    <label>
+      <span>页面</span>
+      <input nz-input [(ngModel)]="page" list="analytics-page-options" placeholder="如 players" />
+    </label>
+    <label>
+      <span>来源</span>
+      <input nz-input [(ngModel)]="source" list="analytics-source-options" placeholder="域名或 direct" />
+    </label>
+    <label>
+      <span>设备</span>
+      <nz-select
+        aria-label="访问设备类型"
+        [(ngModel)]="device"
+        nzAllowClear
+        nzPlaceHolder="全部设备"
+      >
+        <nz-option nzValue="mobile" nzLabel="手机"></nz-option>
+        <nz-option nzValue="tablet" nzLabel="平板"></nz-option>
+        <nz-option nzValue="desktop" nzLabel="电脑"></nz-option>
+      </nz-select>
+    </label>
+    <label>
+      <span>国家</span>
+      <input nz-input [(ngModel)]="country" list="analytics-country-options" placeholder="全部国家" />
+    </label>
+    <label>
+      <span>省份</span>
+      <input nz-input [(ngModel)]="province" list="analytics-province-options" placeholder="全部省份" />
+    </label>
+    <label>
+      <span>城市</span>
+      <input nz-input [(ngModel)]="city" list="analytics-city-options" placeholder="全部城市" />
+    </label>
+    <label>
+      <span>运营商</span>
+      <input nz-input [(ngModel)]="provider" list="analytics-provider-options" placeholder="全部运营商" />
+    </label>
+    <label>
+      <span>浏览器</span>
+      <input nz-input [(ngModel)]="browser" list="analytics-browser-options" placeholder="全部浏览器" />
+    </label>
+    <div class="filter-actions">
+      <button nz-button type="button" (click)="reset()">重置</button>
+      <button nz-button nzType="primary" type="button" [nzLoading]="loading" (click)="load()">
+        查询
+      </button>
+    </div>
+  </section>
+
+  <datalist id="analytics-page-options">
+    <option *ngFor="let item of summary?.pages" [value]="item.value"></option>
+  </datalist>
+  <datalist id="analytics-source-options">
+    <option *ngFor="let item of summary?.sources" [value]="item.value"></option>
+  </datalist>
+  <datalist id="analytics-country-options">
+    <option *ngFor="let item of summary?.countries" [value]="item.value"></option>
+  </datalist>
+  <datalist id="analytics-province-options">
+    <option *ngFor="let item of summary?.provinces" [value]="item.value"></option>
+  </datalist>
+  <datalist id="analytics-city-options">
+    <option *ngFor="let item of summary?.cities" [value]="item.value"></option>
+  </datalist>
+  <datalist id="analytics-provider-options">
+    <option *ngFor="let item of summary?.providers" [value]="item.value"></option>
+  </datalist>
+  <datalist id="analytics-browser-options">
+    <option *ngFor="let item of summary?.browsers" [value]="item.value"></option>
+  </datalist>
+
+  <nz-alert
+    *ngIf="summary?.status === 'not_configured'"
+    nzType="warning"
+    nzShowIcon
+    nzMessage="尚未配置日志服务只读凭据"
+    nzDescription="配置服务端环境变量与 SLS GetLogs 权限后即可查询。"
+  ></nz-alert>
+  <nz-alert
+    *ngIf="summary && summary.warnings.length > 0"
+    nzType="warning"
+    nzShowIcon
+    nzMessage="部分分析暂时不可用"
+    [nzDescription]="summary.warnings.join('；')"
+  ></nz-alert>
+
+  <nz-spin [nzSpinning]="loading">
+    <ng-container *ngIf="summary as data">
+      <section class="metric-grid" aria-label="访问概览">
+        <article class="metric-card primary">
+          <span>独立访客</span>
+          <strong>{{ data.totals.visitors | number }}</strong>
+          <small>筛选范围内的匿名访客</small>
+        </article>
+        <article class="metric-card">
+          <span>页面浏览</span>
+          <strong>{{ data.totals.pageViews | number }}</strong>
+          <small>路由切换后也会计为一次浏览</small>
+        </article>
+        <article class="metric-card">
+          <span>访问事件</span>
+          <strong>{{ data.totals.events | number }}</strong>
+          <small>当前事件筛选命中的记录</small>
+        </article>
+        <article class="metric-card">
+          <span>活跃心跳</span>
+          <strong>{{ data.totals.heartbeats | number }}</strong>
+          <small>页面可见期间约每 2 分钟一次</small>
+        </article>
+      </section>
+
+      <article class="panel trend-panel">
+        <header class="panel-heading">
+          <div>
+            <h2>访问趋势</h2>
+            <p>按{{ data.trendGranularity === "hour" ? "小时" : "天" }}聚合</p>
+          </div>
+        </header>
+        <div *ngIf="data.trend.length > 0; else noTrend" class="trend-chart" echarts [options]="chartOptions"></div>
+        <ng-template #noTrend>
+          <nz-empty nzNotFoundContent="筛选范围内暂无访问记录"></nz-empty>
+        </ng-template>
+      </article>
+
+      <section class="dimension-grid">
+        <article class="panel dimension-panel">
+          <header class="panel-heading"><h2>页面分布</h2><span>按访客数</span></header>
+          <div class="bar-list">
+            <div *ngFor="let item of data.pages; trackBy: trackDimension">
+              <span><b>{{ dimensionLabel("page", item.value) }}</b><small>{{ item.events }} 次</small></span>
+              <div class="bar-track"><i [style.width.%]="item.visitors / maxVisitors(data.pages) * 100"></i></div>
+              <strong>{{ item.visitors }}</strong>
+            </div>
+          </div>
+        </article>
+        <article class="panel dimension-panel">
+          <header class="panel-heading"><h2>访问来源</h2><span>仅记录来源域名</span></header>
+          <div class="bar-list">
+            <div *ngFor="let item of data.sources; trackBy: trackDimension">
+              <span><b>{{ dimensionLabel("source", item.value) }}</b><small>{{ item.events }} 次</small></span>
+              <div class="bar-track"><i [style.width.%]="item.visitors / maxVisitors(data.sources) * 100"></i></div>
+              <strong>{{ item.visitors }}</strong>
+            </div>
+          </div>
+        </article>
+        <article class="panel dimension-panel">
+          <header class="panel-heading"><h2>设备分布</h2><span>粗粒度分类</span></header>
+          <div class="bar-list">
+            <div *ngFor="let item of data.devices; trackBy: trackDimension">
+              <span><b>{{ dimensionLabel("device", item.value) }}</b><small>{{ item.events }} 次</small></span>
+              <div class="bar-track"><i [style.width.%]="item.visitors / maxVisitors(data.devices) * 100"></i></div>
+              <strong>{{ item.visitors }}</strong>
+            </div>
+          </div>
+        </article>
+        <article class="panel dimension-panel">
+          <header class="panel-heading"><h2>浏览器分布</h2><span>来自 User-Agent</span></header>
+          <div class="bar-list">
+            <div *ngFor="let item of data.browsers; trackBy: trackDimension">
+              <span><b>{{ item.value }}</b><small>{{ item.events }} 次</small></span>
+              <div class="bar-track"><i [style.width.%]="item.visitors / maxVisitors(data.browsers) * 100"></i></div>
+              <strong>{{ item.visitors }}</strong>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <article class="panel geo-panel">
+        <header class="panel-heading">
+          <div><h2>地域与网络分布</h2><p>由 SLS 在服务端根据 IP 聚合，接口不返回原始 IP</p></div>
+        </header>
+        <nz-tabset>
+          <nz-tab nzTitle="省份">
+            <div class="geo-list"><div *ngFor="let item of data.provinces"><span>{{ item.value }}</span><strong>{{ item.visitors }} 人</strong><small>{{ item.events }} 次</small></div></div>
+          </nz-tab>
+          <nz-tab nzTitle="城市">
+            <div class="geo-list"><div *ngFor="let item of data.cities"><span>{{ item.value }}</span><strong>{{ item.visitors }} 人</strong><small>{{ item.events }} 次</small></div></div>
+          </nz-tab>
+          <nz-tab nzTitle="国家/地区">
+            <div class="geo-list"><div *ngFor="let item of data.countries"><span>{{ item.value }}</span><strong>{{ item.visitors }} 人</strong><small>{{ item.events }} 次</small></div></div>
+          </nz-tab>
+          <nz-tab nzTitle="运营商">
+            <div class="geo-list"><div *ngFor="let item of data.providers"><span>{{ item.value }}</span><strong>{{ item.visitors }} 人</strong><small>{{ item.events }} 次</small></div></div>
+          </nz-tab>
+        </nz-tabset>
+      </article>
+
+      <article class="panel recent-panel">
+        <header class="panel-heading">
+          <div><h2>最近访问</h2><p>最多显示 50 条；访客标识已在服务端不可逆脱敏</p></div>
+        </header>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th scope="col">时间</th><th scope="col">匿名访客</th><th scope="col">页面</th><th scope="col">地域</th><th scope="col">设备</th><th scope="col">浏览器</th><th scope="col">来源</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let visit of data.recentVisits">
+                <td>{{ visit.occurredAt }}</td>
+                <td><code>{{ visit.visitor }}</code></td>
+                <td>{{ dimensionLabel("page", visit.page) }}</td>
+                <td>{{ location(visit.country, visit.province, visit.city) }}</td>
+                <td>{{ dimensionLabel("device", visit.device) }}</td>
+                <td>{{ visit.browser }}</td>
+                <td>{{ dimensionLabel("source", visit.source) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <nz-empty *ngIf="data.recentVisits.length === 0" nzNotFoundContent="暂无访问记录"></nz-empty>
+      </article>
+    </ng-container>
+  </nz-spin>
+</main>

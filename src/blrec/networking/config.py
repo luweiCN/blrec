@@ -48,6 +48,47 @@ class NetworkSettings(_NetworkModel):
     bili_api: NetworkRouteSettings = NetworkRouteSettings()
     archive_download: NetworkRouteSettings = NetworkRouteSettings()
     dashboard_publish: NetworkRouteSettings = NetworkRouteSettings()
+    cloud_cost: NetworkRouteSettings = NetworkRouteSettings()
+    visitor_analytics: NetworkRouteSettings = NetworkRouteSettings()
+
+    @root_validator(pre=True)
+    def _inherit_visitor_analytics_route(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        migrated = dict(values)
+        if 'visitor_analytics' in migrated or 'visitorAnalytics' in migrated:
+            return migrated
+        cloud_cost = migrated.get('cloud_cost', migrated.get('cloudCost'))
+        dashboard_publish = migrated.get(
+            'dashboard_publish', migrated.get('dashboardPublish')
+        )
+        source = cloud_cost if cloud_cost is not None else dashboard_publish
+        if source is None:
+            source = migrated.get('upload')
+        if isinstance(source, dict):
+            migrated['visitor_analytics'] = dict(source)
+        elif isinstance(source, NetworkRouteSettings):
+            migrated['visitor_analytics'] = source.dict()
+        return migrated
+
+    @root_validator(pre=True)
+    def _inherit_cloud_cost_route(cls, values: Dict[str, object]) -> Dict[str, object]:
+        migrated = dict(values)
+        if 'cloud_cost' in migrated or 'cloudCost' in migrated:
+            return migrated
+        dashboard_publish = migrated.get(
+            'dashboard_publish', migrated.get('dashboardPublish')
+        )
+        source = (
+            dashboard_publish
+            if dashboard_publish is not None
+            else migrated.get('upload')
+        )
+        if isinstance(source, dict):
+            migrated['cloud_cost'] = dict(source)
+        elif isinstance(source, NetworkRouteSettings):
+            migrated['cloud_cost'] = source.dict()
+        return migrated
 
     @root_validator(pre=True)
     def _inherit_dashboard_publish_route(
@@ -90,7 +131,13 @@ class NetworkSettings(_NetworkModel):
     def _credential_routes_must_be_fixed(
         cls, values: Dict[str, object]
     ) -> Dict[str, object]:
-        for field in ('upload', 'bili_api', 'dashboard_publish'):
+        for field in (
+            'upload',
+            'bili_api',
+            'dashboard_publish',
+            'cloud_cost',
+            'visitor_analytics',
+        ):
             route = values.get(field)
             if isinstance(route, NetworkRouteSettings) and route.mode != 'fixed':
                 raise ValueError('{} network route must use fixed mode'.format(field))
@@ -107,7 +154,13 @@ class NetworkSettings(_NetworkModel):
                 raise ValueError(
                     '{} network route cannot use parallel mode'.format(field)
                 )
-        for field in ('upload', 'archive_download', 'dashboard_publish'):
+        for field in (
+            'upload',
+            'archive_download',
+            'dashboard_publish',
+            'cloud_cost',
+            'visitor_analytics',
+        ):
             route = values.get(field)
             if isinstance(route, NetworkRouteSettings) and route.failover_enabled:
                 values[field] = route.copy(update={'failover_enabled': False})

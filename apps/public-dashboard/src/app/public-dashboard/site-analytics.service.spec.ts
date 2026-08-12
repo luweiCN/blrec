@@ -6,6 +6,8 @@ import {
   SiteAnalyticsConfig,
   SiteAnalyticsService,
   SiteAnalyticsStorage,
+  analyticsDevice,
+  analyticsPage,
 } from './site-analytics.service';
 
 class MemoryAnalyticsStorage implements SiteAnalyticsStorage {
@@ -50,14 +52,31 @@ describe('SiteAnalyticsService', () => {
     service.start();
     events.next(new NavigationEnd(1, '/players', '/players'));
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
     const firstUrl = new URL(fetchSpy.calls.argsFor(0)[0] as string);
     const secondUrl = new URL(fetchSpy.calls.argsFor(1)[0] as string);
+    const thirdUrl = new URL(fetchSpy.calls.argsFor(2)[0] as string);
+    const fourthUrl = new URL(fetchSpy.calls.argsFor(3)[0] as string);
     expect(firstUrl.pathname).toBe('/analytics/pixel.svg');
     expect(firstUrl.searchParams.get('event')).toBe('pageview');
-    expect(secondUrl.searchParams.get('event')).toBe('pageview');
+    expect(firstUrl.search).toMatch(
+      /^\?event=pageview&visitor=[0-9a-f-]{16,64}$/u,
+    );
+    expect(secondUrl.searchParams.get('event')).toBe('detail');
+    expect(secondUrl.searchParams.get('kind')).toBe('pageview');
+    expect(secondUrl.searchParams.get('page')).toBe('overview');
+    expect(secondUrl.searchParams.get('source')).toMatch(/^(direct|internal)$/u);
+    expect(secondUrl.searchParams.get('device')).toMatch(
+      /^(mobile|tablet|desktop)$/u,
+    );
+    expect(thirdUrl.searchParams.get('event')).toBe('pageview');
+    expect(fourthUrl.searchParams.get('event')).toBe('detail');
+    expect(fourthUrl.searchParams.get('page')).toBe('players');
     expect(firstUrl.searchParams.get('visitor')).toBe(
       secondUrl.searchParams.get('visitor'),
+    );
+    expect(secondUrl.searchParams.get('visitor')).toBe(
+      fourthUrl.searchParams.get('visitor'),
     );
     expect(storage.getItem(SITE_ANALYTICS_STORAGE_KEY)).toBe(
       firstUrl.searchParams.get('visitor'),
@@ -65,8 +84,20 @@ describe('SiteAnalyticsService', () => {
 
     service.stop();
     events.next(new NavigationEnd(2, '/heroes', '/heroes'));
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
     expect(clearIntervalSpy).toHaveBeenCalledOnceWith(41);
+  });
+
+  it('normalizes detail routes without collecting player or hero IDs', () => {
+    expect(analyticsPage('/players/56?mode=3v3')).toBe('player-detail');
+    expect(analyticsPage('/heroes/blackfeather')).toBe('hero-detail');
+    expect(analyticsPage('/guide/download')).toBe('guide-download');
+  });
+
+  it('classifies viewport widths into coarse device groups', () => {
+    expect(analyticsDevice(390)).toBe('mobile');
+    expect(analyticsDevice(900)).toBe('tablet');
+    expect(analyticsDevice(1440)).toBe('desktop');
   });
 
   it('does not send analytics from previews or local development', () => {

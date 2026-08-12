@@ -3,11 +3,13 @@ import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
 
 import {
   BellOutline,
+  BarChartOutline,
   CloudDownloadOutline,
   CloudUploadOutline,
   CopyOutline,
   DashboardOutline,
   DatabaseOutline,
+  DollarCircleOutline,
   GlobalOutline,
   MenuFoldOutline,
   MenuUnfoldOutline,
@@ -27,6 +29,7 @@ import {
 
 const icons = [
   BellOutline,
+  BarChartOutline,
   MenuFoldOutline,
   MenuUnfoldOutline,
   MoreOutline,
@@ -36,6 +39,7 @@ const icons = [
   CloudUploadOutline,
   CopyOutline,
   DatabaseOutline,
+  DollarCircleOutline,
   QuestionCircleOutline,
   RedoOutline,
   ReloadOutline,

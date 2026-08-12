@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from blrec.networking.aiohttp_session import is_route_transport_failure
 from blrec.networking.manager import (
     NetworkInterface,
+    NetworkPurpose,
     NetworkRouteManager,
     NetworkUnavailable,
 )
@@ -184,6 +185,27 @@ def test_account_and_upload_routes_reject_round_robin_configuration() -> None:
         NetworkSettings(archive_download={'mode': 'round_robin'})
     with pytest.raises(ValidationError):
         NetworkSettings(dashboard_publish={'mode': 'round_robin'})
+    with pytest.raises(ValueError, match='cloud_cost network route'):
+        NetworkSettings(cloud_cost={'mode': 'round_robin'})
+    with pytest.raises(ValueError, match='visitor_analytics network route'):
+        NetworkSettings(visitor_analytics={'mode': 'round_robin'})
+
+
+@pytest.mark.parametrize('purpose', ['cloud_cost', 'visitor_analytics'])
+def test_observability_routes_are_fixed_and_never_fail_over(
+    purpose: NetworkPurpose,
+) -> None:
+    settings = NetworkSettings.parse_obj(
+        {purpose: {'interface': 'eth0', 'failoverEnabled': True}}
+    )
+    manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
+
+    assert getattr(settings, purpose).failover_enabled is False
+    manager.report_failure(purpose, 'eth0')
+    manager.report_failure(purpose, 'eth0')
+
+    with pytest.raises(NetworkUnavailable):
+        manager.select(purpose)
 
 
 def test_archive_download_route_is_sticky_and_never_fails_over() -> None:

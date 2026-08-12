@@ -3,6 +3,7 @@ import { Router } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import {
+  BarChartOutline,
   BellOutline,
   CloudUploadOutline,
   GithubOutline,
@@ -10,6 +11,7 @@ import {
   MenuFoldOutline,
   MenuUnfoldOutline,
   GlobalOutline,
+  DollarCircleOutline,
   ScissorOutline,
   SettingOutline,
   StarOutline,
@@ -31,6 +33,7 @@ describe('AppComponent', () => {
         {
           provide: NZ_ICONS,
           useValue: [
+            BarChartOutline,
             BellOutline,
             CloudUploadOutline,
             GithubOutline,
@@ -38,6 +41,7 @@ describe('AppComponent', () => {
             MenuFoldOutline,
             MenuUnfoldOutline,
             GlobalOutline,
+            DollarCircleOutline,
             ScissorOutline,
             SettingOutline,
             StarOutline,
@@ -138,6 +142,8 @@ describe('AppComponent', () => {
       '对局索引',
       '投稿账号',
       '网络管理',
+      '访问分析',
+      '云成本',
       '设置',
       '通知设置',
       '关于',

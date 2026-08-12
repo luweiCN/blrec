@@ -84,6 +84,8 @@ describe('NetworkComponent', () => {
       biliApi: routeSettings(),
       archiveDownload: { ...routeSettings(), failoverEnabled: true },
       dashboardPublish: { ...routeSettings(), failoverEnabled: true },
+      cloudCost: { ...routeSettings(), failoverEnabled: true },
+      visitorAnalytics: { ...routeSettings(), failoverEnabled: true },
     };
     networkService = jasmine.createSpyObj<NetworkService>(
       'NetworkService',
@@ -150,6 +152,18 @@ describe('NetworkComponent', () => {
   it('always displays dashboard publishing failover as disabled', () => {
     expect(
       fixture.componentInstance.route('dashboardPublish').failoverEnabled,
+    ).toBeFalse();
+  });
+
+  it('always displays cloud cost failover as disabled', () => {
+    expect(
+      fixture.componentInstance.route('cloudCost').failoverEnabled,
+    ).toBeFalse();
+  });
+
+  it('always displays visitor analytics failover as disabled', () => {
+    expect(
+      fixture.componentInstance.route('visitorAnalytics').failoverEnabled,
     ).toBeFalse();
   });
 

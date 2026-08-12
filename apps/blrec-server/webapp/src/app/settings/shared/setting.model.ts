@@ -34,6 +34,8 @@ export interface NetworkSettings {
   biliApi: NetworkRouteSettings;
   archiveDownload: NetworkRouteSettings;
   dashboardPublish: NetworkRouteSettings;
+  cloudCost: NetworkRouteSettings;
+  visitorAnalytics: NetworkRouteSettings;
 }
 
 export type LiveMonitorSettingsView =
