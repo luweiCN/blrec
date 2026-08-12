@@ -28,6 +28,7 @@ DEFAULT_MANIFEST = Path(__file__).with_suffix('.jsonl')
 DEFAULT_REPORT = Path('/cfg/vainglory-reanalysis-recovery-20260812-report.json')
 MISSING_PAGES_REASON = 'missing_archive_pages'
 FIVE_V_FIVE_REASON = 'five_v_five'
+MODE_LINEUP_CONFLICT_REASON = 'mode_lineup_conflict'
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ class RecoveryPlan:
     candidates: Tuple[RecoveryCandidate, ...]
     missing_archive_count: int
     five_v_five_session_count: int
+    mode_lineup_conflict_session_count: int = 0
+    mode_lineup_conflict_match_count: int = 0
 
     @property
     def session_count(self) -> int:
@@ -100,6 +103,8 @@ def load_recovery_plan(manifest_path: Path) -> RecoveryPlan:
     sessions: Dict[int, RecoveryCandidate] = {}
     missing_archive_count = 0
     five_v_five_session_count = 0
+    mode_lineup_conflict_session_count = 0
+    mode_lineup_conflict_match_count = 0
 
     for line_number, raw_line in enumerate(raw.splitlines(), start=1):
         if not raw_line.strip():
@@ -150,12 +155,29 @@ def load_recovery_plan(manifest_path: Path) -> RecoveryPlan:
             continue
         if record_type == FIVE_V_FIVE_REASON:
             five_v_five_session_count += 1
+            session_id = _positive_int(record, 'sessionId', line_number)
             _merge_session(
                 sessions,
-                session_id=_positive_int(record, 'sessionId', line_number),
+                session_id=session_id,
                 title=_title(record, line_number),
                 reason=FIVE_V_FIVE_REASON,
             )
+            conflict_match_count = int(record.get('contradictoryMatchCount', 0))
+            if conflict_match_count < 0:
+                raise ValueError(
+                    'manifest line {} has invalid contradictoryMatchCount'.format(
+                        line_number
+                    )
+                )
+            if conflict_match_count:
+                mode_lineup_conflict_session_count += 1
+                mode_lineup_conflict_match_count += conflict_match_count
+                _merge_session(
+                    sessions,
+                    session_id=session_id,
+                    title=_title(record, line_number),
+                    reason=MODE_LINEUP_CONFLICT_REASON,
+                )
             continue
         raise ValueError(
             'manifest line {} has unsupported type {!r}'.format(
@@ -169,6 +191,8 @@ def load_recovery_plan(manifest_path: Path) -> RecoveryPlan:
         metadata,
         missing_archive_count=missing_archive_count,
         five_v_five_session_count=five_v_five_session_count,
+        mode_lineup_conflict_session_count=mode_lineup_conflict_session_count,
+        mode_lineup_conflict_match_count=mode_lineup_conflict_match_count,
     )
     return RecoveryPlan(
         manifest_path=manifest_path,
@@ -177,6 +201,8 @@ def load_recovery_plan(manifest_path: Path) -> RecoveryPlan:
         candidates=tuple(imports.values()) + tuple(sessions.values()),
         missing_archive_count=missing_archive_count,
         five_v_five_session_count=five_v_five_session_count,
+        mode_lineup_conflict_session_count=mode_lineup_conflict_session_count,
+        mode_lineup_conflict_match_count=mode_lineup_conflict_match_count,
     )
 
 
@@ -234,6 +260,8 @@ def _validate_manifest_counts(
     *,
     missing_archive_count: int,
     five_v_five_session_count: int,
+    mode_lineup_conflict_session_count: int,
+    mode_lineup_conflict_match_count: int,
 ) -> None:
     missing = metadata.get('missingArchivePages')
     five = metadata.get('fiveVsFiveSessions')
@@ -243,6 +271,13 @@ def _validate_manifest_counts(
         raise ValueError('manifest missing-page count does not match its metadata')
     if int(five.get('sessionCount', -1)) != five_v_five_session_count:
         raise ValueError('manifest 5V5 count does not match its metadata')
+    if (
+        int(five.get('contradictorySessionCount', -1))
+        != mode_lineup_conflict_session_count
+    ):
+        raise ValueError('manifest conflict-session count does not match its metadata')
+    if int(five.get('contradictoryMatchCount', -1)) != mode_lineup_conflict_match_count:
+        raise ValueError('manifest conflict-match count does not match its metadata')
 
 
 class RecoveryClient:
@@ -476,6 +511,12 @@ def _print_summary(plan: RecoveryPlan) -> None:
     print('本次只读审计清单：')
     print('  缺失分 P 稿件：{} 个'.format(plan.missing_archive_count))
     print('  5V5 直播场次：{} 场'.format(plan.five_v_five_session_count))
+    print(
+        '  模式/阵容冲突：{} 场、{} 局（已与上述场次去重）'.format(
+            plan.mode_lineup_conflict_session_count,
+            plan.mode_lineup_conflict_match_count,
+        )
+    )
     print('  两类重叠场次：{} 场'.format(plan.overlap_count))
     print('  去重后整场重扫：{} 场'.format(plan.session_count))
     print('  尚未生成场次、先恢复稿件：{} 个'.format(plan.import_count))

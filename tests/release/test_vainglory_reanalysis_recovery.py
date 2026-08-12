@@ -4,6 +4,7 @@ from pathlib import Path
 from scripts.vainglory_reanalysis_recovery_20260812 import (
     FIVE_V_FIVE_REASON,
     MISSING_PAGES_REASON,
+    MODE_LINEUP_CONFLICT_REASON,
     RecoveryApiError,
     RecoveryCandidate,
     RecoveryPlan,
@@ -20,11 +21,20 @@ def test_production_audit_manifest_builds_the_expected_deduplicated_plan() -> No
 
     assert plan.missing_archive_count == 131
     assert plan.five_v_five_session_count == 165
+    assert plan.mode_lineup_conflict_session_count == 74
+    assert plan.mode_lineup_conflict_match_count == 124
     assert plan.import_count == 44
     assert plan.session_count == 231
     assert plan.overlap_count == 21
     assert len(plan.candidates) == 275
     assert len({candidate.key for candidate in plan.candidates}) == 275
+    assert (
+        sum(
+            MODE_LINEUP_CONFLICT_REASON in candidate.reasons
+            for candidate in plan.candidates
+        )
+        == 74
+    )
     assert plan.metadata['missingArchivePages']['missingPages'] == 238
 
 
