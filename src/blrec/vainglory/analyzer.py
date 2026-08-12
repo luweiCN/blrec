@@ -3095,7 +3095,7 @@ class VaingloryVideoAnalyzer:
                 duration_ms=profile.duration_ms,
                 run_gap_ms=run_gap_ms,
                 run_modes=run_modes,
-                skip_open_ended=using_model_package,
+                verify_terminal_segment=using_model_package,
             )
         )
         logger.info(

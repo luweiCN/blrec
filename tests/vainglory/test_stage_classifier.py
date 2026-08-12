@@ -13,6 +13,7 @@ from blrec.vainglory.stage_classifier import (
     STAGE_TRANSITION,
     STAGE_VICTORY_DEFEAT,
     ClassifiedObservation,
+    ClassifiedResultWindow,
     build_classified_windows,
 )
 
@@ -43,18 +44,51 @@ def test_gameplay_run_produces_result_window() -> None:
     assert window.mode == 'unknown'
 
 
-def test_open_ended_gameplay_does_not_create_a_result_window() -> None:
+def test_open_ended_gameplay_creates_a_terminal_verification_window() -> None:
     observations = (
         _observation(0, STAGE_GAMEPLAY),
         _observation(60_000, STAGE_GAMEPLAY),
     )
 
-    assert (
-        build_classified_windows(
-            observations, duration_ms=120_000, run_gap_ms=75_000, skip_open_ended=True
-        )
-        == ()
+    windows = build_classified_windows(
+        observations,
+        duration_ms=120_000,
+        run_gap_ms=75_000,
+        verify_terminal_segment=True,
     )
+
+    assert windows == (
+        ClassifiedResultWindow(
+            start_ms=20_000, end_ms=120_000, mode='unknown', focus_ms=60_000
+        ),
+    )
+
+
+def test_terminal_verification_keeps_the_last_of_three_matches() -> None:
+    observations = (
+        _observation(120_000, STAGE_GAMEPLAY),
+        _observation(160_000, STAGE_GAMEPLAY),
+        _observation(180_000, STAGE_OUT_OF_MATCH),
+        _observation(200_000, STAGE_OUT_OF_MATCH),
+        _observation(300_000, STAGE_GAMEPLAY),
+        _observation(340_000, STAGE_GAMEPLAY),
+        _observation(360_000, STAGE_OUT_OF_MATCH),
+        _observation(380_000, STAGE_OUT_OF_MATCH),
+        _observation(500_000, STAGE_GAMEPLAY),
+        _observation(540_000, STAGE_GAMEPLAY),
+    )
+
+    windows = build_classified_windows(
+        observations,
+        duration_ms=568_000,
+        run_gap_ms=75_000,
+        verify_terminal_segment=True,
+    )
+
+    assert len(windows) == 3
+    assert windows[-1].start_ms == 500_000
+    assert windows[-1].end_ms == 568_000
+    assert windows[-1].focus_ms == 540_000
 
 
 def test_quit_mid_game_still_generates_window() -> None:

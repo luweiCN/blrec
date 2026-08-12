@@ -55,6 +55,8 @@ COPY scripts/vainglory_reanalysis_recovery_20260812.py \
      /app/scripts/vainglory_reanalysis_recovery_20260812.py
 COPY scripts/vainglory_reanalysis_recovery_20260812.jsonl \
      /app/scripts/vainglory_reanalysis_recovery_20260812.jsonl
+COPY scripts/vainglory_tail_reanalysis_20260812.py \
+     /app/scripts/vainglory_tail_reanalysis_20260812.py
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/luweiCN/blrec" \
