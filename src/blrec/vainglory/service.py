@@ -5,7 +5,18 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from loguru import logger
 
@@ -24,6 +35,7 @@ from .analyzer import (
     VaingloryVideoAnalyzer,
     VideoPart,
 )
+from .archive_backfill import ArchiveBackfillUnavailable
 from .hero_recognition import load_hero_references
 from .repository import (
     AnalysisQueueEvent,
@@ -70,6 +82,7 @@ class VaingloryIndexService:
         *,
         analyzer: Optional[VaingloryVideoAnalyzer] = None,
         remote_media_cache: Optional[RemoteMediaCache] = None,
+        archive_page_reconciler: Optional[Callable[[int], Awaitable[int]]] = None,
         remote_worker_enabled: bool = False,
         idle_poll_seconds: float = 2,
         realtime_poll_seconds: float = 1,
@@ -79,6 +92,7 @@ class VaingloryIndexService:
         self._repository = repository
         self._analyzer = analyzer or VaingloryVideoAnalyzer()
         self._remote_media_cache = remote_media_cache
+        self._archive_page_reconciler = archive_page_reconciler
         self._remote_worker_enabled = bool(remote_worker_enabled)
         self._remote_worker_last_seen = 0.0
         self._idle_poll_seconds = idle_poll_seconds
@@ -303,6 +317,20 @@ class VaingloryIndexService:
             await self._repository.complete_recorded_player_backfill(item_id, None)
 
     async def request_scan(self, session_id: int) -> ScanJob:
+        if self._archive_page_reconciler is not None:
+            try:
+                added_pages = await self._archive_page_reconciler(session_id)
+            except ArchiveBackfillUnavailable as error:
+                raise VaingloryConflict(
+                    '重新分析前核对 B 站分 P 失败：{}'.format(error)
+                ) from error
+            if added_pages:
+                logger.info(
+                    'Vainglory reanalysis added missing archive pages: '
+                    'session_id={} pages={}',
+                    session_id,
+                    added_pages,
+                )
         if self._remote_media_cache is None:
             job = await self._repository.request_scan(session_id)
         else:

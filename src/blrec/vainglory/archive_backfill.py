@@ -240,6 +240,208 @@ class ArchiveBackfillService:
         )
         return tuple(self._sync(row) for row in rows)
 
+    async def reconcile_session_pages(self, session_id: int) -> int:
+        """Refresh a published session's page catalog before reanalysis.
+
+        Returns the number of recording parts added from the current Bilibili
+        archive metadata. Sessions without a published BVID are left unchanged.
+        """
+        source = await self._session_archive_source(session_id)
+        if source is None:
+            return 0
+        if str(source['account_state']) != 'active':
+            raise ArchiveBackfillUnavailable('稿件所属 B 站账号当前不可用')
+        try:
+            bundle = await self._bundle_loader(int(source['account_id']))
+            detail = await self._archive_reader.viewer_detail(
+                bundle,
+                account_id=int(source['account_id']),
+                credential_version=int(source['credential_version']),
+                bvid=str(source['bvid']),
+            )
+        except BaseException as error:
+            if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt)):
+                raise
+            raise ArchiveBackfillUnavailable(
+                '读取 B 站真实分 P 失败：{}'.format(self._error_text(error))
+            ) from error
+        pages = self._parse_detail(detail)
+        if not pages:
+            raise ArchiveBackfillUnavailable('B 站稿件没有返回可分析的分 P')
+        detail_title, description = self._detail_metadata(
+            detail, fallback_title=str(source['title'])
+        )
+        imported = await self._ensure_session_import(
+            source, detail, detail_title=detail_title
+        )
+        existing_pages = await self._database.fetchall(
+            'SELECT page,cid FROM vainglory_archive_parts '
+            'WHERE import_id=? ORDER BY page',
+            (int(imported['id']),),
+        )
+        remote_pages = {page.page: page for page in pages}
+        for existing in existing_pages:
+            page_number = int(existing['page'])
+            remote = remote_pages.get(page_number)
+            if remote is None:
+                raise ArchiveBackfillUnavailable(
+                    'B 站当前分 P 少于数据库记录，已停止重新分析以保留历史数据'
+                )
+            if int(existing['cid']) != remote.cid:
+                raise ArchiveBackfillUnavailable(
+                    'B 站 P{} 的 CID 已变化，已停止重新分析以避免覆盖历史数据'.format(
+                        page_number
+                    )
+                )
+        before = int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM recording_parts WHERE session_id=?',
+                (int(session_id),),
+            )
+        )
+        await self._persist_pages(
+            imported, pages, detail_title=detail_title, description=description
+        )
+        after = int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM recording_parts WHERE session_id=?',
+                (int(session_id),),
+            )
+        )
+        return max(0, after - before)
+
+    async def _session_archive_source(self, session_id: int) -> Optional[sqlite3.Row]:
+        return await self._database.fetchone(
+            'SELECT source.*,account.state AS account_state,'
+            'account.credential_version FROM ('
+            'SELECT 0 AS priority,imported.id AS import_id,imported.session_id,'
+            'imported.account_id,'
+            'imported.aid,imported.bvid,imported.title,imported.published_at '
+            'FROM vainglory_archive_imports imported WHERE imported.session_id=? '
+            'UNION ALL '
+            'SELECT 1,NULL,upload.session_id,upload.account_id,upload.aid,upload.bvid,'
+            'session.title,session.started_at FROM upload_jobs upload '
+            'JOIN recording_sessions session ON session.id=upload.session_id '
+            'WHERE upload.session_id=? AND upload.bvid IS NOT NULL '
+            "AND upload.bvid!='' "
+            'UNION ALL '
+            'SELECT 2,NULL,item.session_id,migration.download_account_id,item.aid,'
+            'item.bvid,'
+            'item.title,item.published_at FROM archive_migration_items item '
+            'JOIN archive_migration_jobs migration ON migration.id=item.migration_id '
+            'WHERE item.session_id=? '
+            'UNION ALL '
+            'SELECT 3,NULL,part.session_id,video.account_id,NULL,video.bvid,'
+            'session.title,'
+            'session.started_at FROM vainglory_video_sources video '
+            'JOIN recording_parts part ON part.id=video.part_id '
+            'JOIN recording_sessions session ON session.id=part.session_id '
+            'WHERE part.session_id=?'
+            ') source JOIN bili_accounts account ON account.id=source.account_id '
+            "ORDER BY CASE account.state WHEN 'active' THEN 0 ELSE 1 END,"
+            'source.priority LIMIT 1',
+            (int(session_id),) * 4,
+        )
+
+    async def _ensure_session_import(
+        self, source: sqlite3.Row, detail: Mapping[str, Any], *, detail_title: str
+    ) -> sqlite3.Row:
+        now = self._now()
+        data = detail.get('data')
+        archive = data.get('archive') if isinstance(data, Mapping) else None
+        if not isinstance(archive, Mapping):
+            archive = data if isinstance(data, Mapping) else {}
+        aid = self._positive_int(archive.get('aid')) or self._positive_int(
+            source['aid']
+        )
+        if aid is None:
+            raise ArchiveBackfillUnavailable('B 站稿件没有返回有效的 AV 号')
+        published_at = next(
+            (
+                value
+                for value in (
+                    self._positive_int(archive.get('pubtime')),
+                    self._positive_int(archive.get('ctime')),
+                    self._positive_int(source['published_at']),
+                )
+                if value is not None
+            ),
+            None,
+        )
+
+        def ensure(connection: sqlite3.Connection) -> int:
+            session_id = int(source['session_id'])
+            existing = connection.execute(
+                'SELECT * FROM vainglory_archive_imports '
+                'WHERE session_id=? OR (account_id=? AND bvid=?) '
+                'ORDER BY CASE WHEN session_id=? THEN 0 ELSE 1 END LIMIT 1',
+                (
+                    session_id,
+                    int(source['account_id']),
+                    str(source['bvid']),
+                    session_id,
+                ),
+            ).fetchone()
+            if existing is not None:
+                existing_session_id = existing['session_id']
+                if (
+                    existing_session_id is not None
+                    and int(existing_session_id) != session_id
+                ):
+                    raise ArchiveBackfillUnavailable(
+                        'B 站稿件已经关联到另一场直播，无法自动合并'
+                    )
+                if str(existing['bvid']) != str(source['bvid']):
+                    raise ArchiveBackfillUnavailable(
+                        '直播关联的 B 站稿件已变化，无法自动合并'
+                    )
+                connection.execute(
+                    'UPDATE vainglory_archive_imports SET session_id=?,aid=?,title=?,'
+                    'published_at=COALESCE(?,published_at),updated_at=? WHERE id=?',
+                    (
+                        session_id,
+                        aid,
+                        detail_title,
+                        published_at,
+                        now,
+                        int(existing['id']),
+                    ),
+                )
+                return int(existing['id'])
+            recording_started_at = resolve_recording_started_at(
+                detail_title, published_at=published_at, fallback=now
+            )
+            cursor = connection.execute(
+                'INSERT INTO vainglory_archive_imports('
+                'account_id,aid,bvid,title,published_at,recording_started_at,'
+                'session_id,state,progress,page_count,completed_page_count,error,'
+                'created_at,updated_at) '
+                "VALUES(?,?,?,?,?,?,?,'ready',1,0,0,NULL,?,?)",
+                (
+                    int(source['account_id']),
+                    aid,
+                    str(source['bvid']),
+                    detail_title,
+                    published_at,
+                    recording_started_at,
+                    session_id,
+                    now,
+                    now,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+        import_id = await self._database.write(ensure)
+        imported = await self._database.fetchone(
+            'SELECT imported.*,account.credential_version '
+            'FROM vainglory_archive_imports imported '
+            'JOIN bili_accounts account ON account.id=imported.account_id '
+            'WHERE imported.id=?',
+            (import_id,),
+        )
+        assert imported is not None
+        return imported
+
     async def list_items(
         self, account_id: int, *, limit: int = 30
     ) -> Tuple[ArchiveBackfillItem, ...]:

@@ -642,9 +642,17 @@ class BiliAccountRuntime:
                 clock=self._clock,
             )
             await vainglory_publication.purge_excluded_remote()
+            archive_backfill = ArchiveBackfillService(
+                database,
+                archive_reader,
+                bundle_loader=load_bundle,
+                remote_media_cache=remote_media_cache,
+                clock=self._clock,
+            )
             vainglory_service = VaingloryIndexService(
                 vainglory_repository,
                 remote_media_cache=remote_media_cache,
+                archive_page_reconciler=archive_backfill.reconcile_session_pages,
                 remote_worker_enabled=remote_worker_enabled,
                 analyzer=VaingloryVideoAnalyzer(
                     result_reader=result_reader,
@@ -653,13 +661,6 @@ class BiliAccountRuntime:
                 ),
             )
             await vainglory_service.start()
-            archive_backfill = ArchiveBackfillService(
-                database,
-                archive_reader,
-                bundle_loader=load_bundle,
-                remote_media_cache=remote_media_cache,
-                clock=self._clock,
-            )
             await archive_backfill.start()
             archive_migration = ArchiveMigrationService(
                 database,
