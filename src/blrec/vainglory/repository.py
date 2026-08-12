@@ -887,7 +887,7 @@ class VaingloryRepository:
     ALGORITHM_VERSION = 18
     HERO_RECOGNITION_VERSION = 5
     RECORDED_PLAYER_DETECTION_VERSION = 3
-    _REALTIME_WINDOW_SECONDS = 24 * 60 * 60
+    _REALTIME_WINDOW_SECONDS = 48 * 60 * 60
     _PUBLICATION_ANALYSIS_DEBT = (
         '(EXISTS(SELECT 1 FROM vainglory_publications publication '
         'WHERE publication.session_id=job.session_id '
@@ -1896,10 +1896,10 @@ class VaingloryRepository:
                 '0)),0) FROM recording_parts all_part '
                 'WHERE all_part.session_id=job.session_id) '
                 'AS recording_duration_seconds,'
-                "CASE WHEN job.request_kind='manual' THEN 0 "
-                "WHEN session.state='open' THEN 1 "
+                "CASE WHEN session.state='open' THEN 0 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
-                'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
+                'AND migration_item.id IS NULL AND session.started_at>=? THEN 1 '
+                "WHEN job.request_kind='manual' THEN 2 "
                 'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
                 "WHEN session.started_at>=? AND (source.origin IS NULL OR ("
                 "source.origin!='archive' AND source.cache_path IS NULL)) THEN 4 "
@@ -1966,7 +1966,7 @@ class VaingloryRepository:
             return ScanClaim(
                 session_id=session_id,
                 part=part,
-                realtime=int(row['priority']) <= 2,
+                realtime=int(row['priority']) <= 1,
                 part_duration_seconds=(
                     None
                     if row['record_duration_seconds'] is None
@@ -2062,10 +2062,10 @@ class VaingloryRepository:
                 '0)),0) FROM recording_parts all_part '
                 'WHERE all_part.session_id=ocr.session_id) '
                 'AS recording_duration_seconds,'
-                "CASE WHEN job.request_kind='manual' THEN 0 "
-                "WHEN session.state='open' THEN 1 "
+                "CASE WHEN session.state='open' THEN 0 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
-                'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
+                'AND migration_item.id IS NULL AND session.started_at>=? THEN 1 '
+                "WHEN job.request_kind='manual' THEN 2 "
                 'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
                 "WHEN source.origin='archive' THEN 4 ELSE 5 END AS priority "
                 'FROM vainglory_ocr_jobs ocr '
@@ -2243,7 +2243,7 @@ class VaingloryRepository:
             'AND part.video_deleted_at IS NULL '
             "AND session.deletion_state='none' "
             "AND instr(COALESCE(session.title,''),'直播剪辑')=0 AND ("
-            "job.request_kind='manual' OR session.state='open' OR ("
+            "session.state='open' OR ("
             "(source.origin IS NULL OR source.origin!='archive') "
             'AND migration_item.id IS NULL AND session.started_at>=?)))',
             (recent_cutoff,),
@@ -2257,18 +2257,18 @@ class VaingloryRepository:
         recent_cutoff = max(1, now - self._REALTIME_WINDOW_SECONDS)
         season_start = current_season_started_at(now)
         category_rank_sql = (
-            "CASE WHEN job.request_kind='manual' THEN 0 "
-            "WHEN session.state='open' OR ((source.origin IS NULL "
+            "CASE WHEN session.state='open' OR ((source.origin IS NULL "
             "OR source.origin!='archive') AND migration_item.id IS NULL "
-            'AND session.started_at>=?) THEN 1 '
+            'AND session.started_at>=?) THEN 0 '
+            "WHEN job.request_kind='manual' THEN 1 "
             "WHEN source.origin='archive' THEN 2 "
             'WHEN migration_item.id IS NOT NULL THEN 3 ELSE 4 END'
         )
         priority_sql = (
-            "CASE WHEN job.request_kind='manual' THEN 0 "
-            "WHEN session.state='open' THEN 1 "
+            "CASE WHEN session.state='open' THEN 0 "
             "WHEN (source.origin IS NULL OR source.origin!='archive') "
-            'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
+            'AND migration_item.id IS NULL AND session.started_at>=? THEN 1 '
+            "WHEN job.request_kind='manual' THEN 2 "
             'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
             "WHEN session.started_at>=? AND (source.origin IS NULL OR ("
             "source.origin!='archive' AND source.cache_path IS NULL)) THEN 4 "
@@ -2429,8 +2429,8 @@ class VaingloryRepository:
             + ' GROUP BY job.session_id'
         )
         category_names = {
-            0: 'manual',
-            1: 'realtime',
+            0: 'realtime',
+            1: 'manual',
             2: 'archive',
             3: 'migration',
             4: 'backlog',
