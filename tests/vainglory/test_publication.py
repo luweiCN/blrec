@@ -17,6 +17,8 @@ from blrec.vainglory.publication import (
     VaingloryPublicationService,
     _automatic_chapter_cards,
     _chapter_content,
+    _chapter_targets,
+    _ChapterPage,
     _match_anchor,
     build_publication_plan,
     description_contains_block,
@@ -175,6 +177,24 @@ def test_chapter_uses_full_chinese_hero_name_with_game_number() -> None:
     assert len(content) <= 16
     assert _automatic_chapter_cards(({'content': content},)) is True
     assert _automatic_chapter_cards(({'content': '1胜|锤妈'},)) is True
+
+
+def test_only_the_first_archive_page_gets_a_live_start_chapter() -> None:
+    targets = _chapter_targets(
+        (
+            match(1, page=1, start_ms=120_000),
+            match(2, page=2, start_ms=120_000),
+            match(3, page=2, start_ms=600_000, result_ms=1_200_000),
+        ),
+        (
+            _ChapterPage(page=1, cid=401, duration_seconds=1_200),
+            _ChapterPage(page=2, cid=402, duration_seconds=1_200),
+        ),
+    )
+
+    assert [page.page for page, _cards in targets] == [1, 2]
+    assert targets[0][1][0]['content'] == '直播开始'
+    assert all(card['content'] != '直播开始' for card in targets[1][1])
 
 
 def test_comment_keeps_all_results_in_first_comment_and_splits_only_pictures() -> None:

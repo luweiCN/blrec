@@ -2672,17 +2672,25 @@ def _chapter_targets(
         anchor_page, seconds = anchor
         anchors.setdefault(anchor_page, []).append((seconds, index, match))
     targets: List[Tuple[_ChapterPage, Tuple[Mapping[str, Any], ...]]] = []
+    first_page = min((page.page for page in pages), default=None)
     for page in sorted(pages, key=lambda item: item.page):
         if page.duration_seconds is None:
             continue
-        cards = _build_chapter_cards(page.duration_seconds, anchors.get(page.page, ()))
+        cards = _build_chapter_cards(
+            page.duration_seconds,
+            anchors.get(page.page, ()),
+            include_live_start=page.page == first_page,
+        )
         if cards:
             targets.append((page, cards))
     return tuple(targets)
 
 
 def _build_chapter_cards(
-    duration_seconds: int, anchors: Sequence[Tuple[int, int, MatchRecord]]
+    duration_seconds: int,
+    anchors: Sequence[Tuple[int, int, MatchRecord]],
+    *,
+    include_live_start: bool = True,
 ) -> Tuple[Mapping[str, Any], ...]:
     duration = max(0, int(duration_seconds))
     unique = []
@@ -2696,7 +2704,7 @@ def _build_chapter_cards(
     if not unique:
         return ()
     starts: List[Tuple[int, str]] = []
-    if unique[0][0] > 0:
+    if include_live_start and unique[0][0] > 0:
         starts.append((0, '直播开始'))
     for start, content in unique:
         if starts:

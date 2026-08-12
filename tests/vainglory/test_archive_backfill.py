@@ -573,6 +573,152 @@ async def test_keeps_short_archive_pages_for_result_scanning(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_discovers_and_materializes_pages_missing_from_an_existing_import(
+    tmp_path: Path,
+) -> None:
+    class GrowingArchiveReader(FakeArchiveReader):
+        def __init__(self) -> None:
+            self.page_count = 2
+
+        async def list_page(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            status: str,
+            page_number: int,
+            page_size: int,
+        ) -> Tuple[Mapping[str, Any], ...]:
+            del _bundle, page_size
+            assert (account_id, credential_version, status) == (
+                1,
+                1,
+                'is_pubing,pubed,not_pubed',
+            )
+            if page_number > 1:
+                return ()
+            return (
+                {
+                    'Archive': {
+                        'aid': 101,
+                        'bvid': 'BV1abcdefgh',
+                        'title': '早期虚荣录播',
+                        'pubtime': 900,
+                    },
+                    'cid_list': [201 + index for index in range(self.page_count)],
+                },
+            )
+
+        async def viewer_detail(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            bvid: str,
+        ) -> Mapping[str, Any]:
+            assert (account_id, credential_version, bvid) == (1, 1, 'BV1abcdefgh')
+            return {
+                'data': {
+                    'aid': 101,
+                    'bvid': bvid,
+                    'title': '早期虚荣录播',
+                    'pages': [
+                        {
+                            'page': page,
+                            'cid': 200 + page,
+                            'part': 'P{}'.format(page),
+                            'duration': 600 if page < 3 else 472,
+                        }
+                        for page in range(1, self.page_count + 1)
+                    ],
+                }
+            }
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    reader = GrowingArchiveReader()
+    try:
+        await seed_account(database)
+        service = ArchiveBackfillService(
+            database,
+            reader,
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+        await service.request(1)
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        original_parts = await database.fetchall(
+            'SELECT page,recording_part_id FROM vainglory_archive_parts ORDER BY page'
+        )
+        for row in original_parts:
+            await database.execute(
+                'INSERT INTO vainglory_part_jobs('
+                'part_id,session_id,state,request_kind,progress,algorithm_version,'
+                'match_count,error,requested_at,started_at,completed_at,updated_at) '
+                "SELECT id,session_id,'ready','archive',1,2,0,NULL,"
+                '1000,1000,1000,1000 FROM recording_parts WHERE id=?',
+                (int(row['recording_part_id']),),
+            )
+
+        reader.page_count = 3
+        await service.request(1)
+        assert await service.run_once() is True
+
+        stale = await database.fetchone(
+            'SELECT state,page_count,completed_page_count '
+            'FROM vainglory_archive_imports'
+        )
+        assert stale is not None
+        assert dict(stale) == {
+            'state': 'queued',
+            'page_count': 0,
+            'completed_page_count': 0,
+        }
+
+        assert await service.run_once() is True
+        refreshed = await database.fetchone(
+            'SELECT state,page_count,completed_page_count '
+            'FROM vainglory_archive_imports'
+        )
+        assert refreshed is not None
+        assert dict(refreshed) == {
+            'state': 'analyzing',
+            'page_count': 3,
+            'completed_page_count': 2,
+        }
+        refreshed_parts = await database.fetchall(
+            'SELECT page,cid,recording_part_id,duration_seconds '
+            'FROM vainglory_archive_parts ORDER BY page'
+        )
+        assert [
+            (int(row['page']), int(row['cid']), int(row['duration_seconds']))
+            for row in refreshed_parts
+        ] == [(1, 201, 600), (2, 202, 600), (3, 203, 472)]
+        assert [int(row['recording_part_id']) for row in refreshed_parts[:2]] == [
+            int(row['recording_part_id']) for row in original_parts
+        ]
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 1
+        session = await database.fetchone(
+            'SELECT started_at,ended_at,live_end_time FROM recording_sessions'
+        )
+        assert session is not None
+        assert (
+            int(session['ended_at']) - int(session['started_at']),
+            int(session['live_end_time']) - int(session['started_at']),
+        ) == (1_672, 1_672)
+        run = await database.fetchone('SELECT started_at,ended_at FROM recording_runs')
+        assert run is not None
+        assert int(run['ended_at']) - int(run['started_at']) == 1_672
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_infers_historical_anchor_from_live_room_link_and_known_sessions(
     tmp_path: Path,
 ) -> None:

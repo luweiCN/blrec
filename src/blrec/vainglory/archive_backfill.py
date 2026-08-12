@@ -103,6 +103,7 @@ class _Archive:
     bvid: str
     title: str
     published_at: Optional[int]
+    page_count: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -492,24 +493,45 @@ class ArchiveBackfillService:
                     archive.title, published_at=archive.published_at, fallback=now
                 )
                 existing = connection.execute(
-                    'SELECT id FROM vainglory_archive_imports '
+                    'SELECT id,page_count FROM vainglory_archive_imports '
                     'WHERE account_id=? AND bvid=?',
                     (account_id, archive.bvid),
                 ).fetchone()
                 if existing is not None:
-                    connection.execute(
-                        'UPDATE vainglory_archive_imports '
-                        'SET aid=?,title=?,published_at=?,recording_started_at=?,'
-                        'updated_at=? WHERE id=?',
-                        (
-                            archive.aid,
-                            archive.title,
-                            archive.published_at,
-                            recording_started_at,
-                            now,
-                            int(existing['id']),
-                        ),
-                    )
+                    if archive.page_count is not None and archive.page_count > int(
+                        existing['page_count']
+                    ):
+                        connection.execute(
+                            'UPDATE vainglory_archive_imports SET '
+                            'aid=?,title=?,published_at=?,recording_started_at=?,'
+                            "state='queued',progress=0,page_count=0,"
+                            'completed_page_count=0,error=NULL,retryable=0,'
+                            "next_retry_at=NULL,content_classification='unknown',"
+                            "classification_reason='B 站分 P 数已增加，等待补充分析',"
+                            'updated_at=? WHERE id=?',
+                            (
+                                archive.aid,
+                                archive.title,
+                                archive.published_at,
+                                recording_started_at,
+                                now,
+                                int(existing['id']),
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            'UPDATE vainglory_archive_imports '
+                            'SET aid=?,title=?,published_at=?,recording_started_at=?,'
+                            'updated_at=? WHERE id=?',
+                            (
+                                archive.aid,
+                                archive.title,
+                                archive.published_at,
+                                recording_started_at,
+                                now,
+                                int(existing['id']),
+                            ),
+                        )
                     continue
                 uploaded = connection.execute(
                     'SELECT job.session_id,COUNT(part.id) AS page_count '
@@ -831,6 +853,28 @@ class ArchiveBackfillService:
             ).fetchone()
             if run is None:
                 raise ArchiveBackfillUnavailable('历史稿件的录制批次不存在')
+            archive_session_key = 'bili-archive:{}:{}'.format(
+                int(imported['account_id']), str(imported['bvid'])
+            )
+            archive_ended_at = started_at + duration
+            is_archive_session = (
+                connection.execute(
+                    'SELECT 1 FROM recording_sessions '
+                    'WHERE id=? AND broadcast_session_key=?',
+                    (int(session_id), archive_session_key),
+                ).fetchone()
+                is not None
+            )
+            if is_archive_session:
+                connection.execute(
+                    'UPDATE recording_sessions SET ended_at=?,live_end_time=? '
+                    'WHERE id=?',
+                    (archive_ended_at, archive_ended_at, int(session_id)),
+                )
+                connection.execute(
+                    'UPDATE recording_runs SET ended_at=? WHERE id=?',
+                    (archive_ended_at, str(run['id'])),
+                )
             elapsed = 0
             for page in pages:
                 existing = connection.execute(
@@ -1405,7 +1449,9 @@ class ArchiveBackfillService:
             ),
             None,
         )
-        return _Archive(aid, bvid, title[:200], published_at)
+        cid_list = entry.get('cid_list')
+        page_count = len(cid_list) if isinstance(cid_list, list) and cid_list else None
+        return _Archive(aid, bvid, title[:200], published_at, page_count)
 
     @classmethod
     def _parse_detail(cls, detail: Mapping[str, Any]) -> Tuple[_ArchivePage, ...]:
