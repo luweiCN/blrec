@@ -14,6 +14,12 @@ const summary: VisitorAnalyticsSummary = {
   timezone: 'Asia/Shanghai',
   retentionDays: 7,
   cacheSeconds: 300,
+  archiveEnabled: true,
+  archiveInitialSyncComplete: true,
+  archiveStartAt: '2026-08-05T08:00:00Z',
+  archiveSyncedThrough: '2026-08-12T07:58:00Z',
+  archiveLastCompletedAt: '2026-08-12T08:00:00Z',
+  archiveLastError: null,
   filters: {
     startAt: '2026-08-11T08:00:00Z',
     endAt: '2026-08-12T08:00:00Z',
@@ -104,5 +110,95 @@ describe('VisitorAnalyticsComponent', () => {
     expect(message.warning).toHaveBeenCalledWith(
       '原始访问日志只保留最近 7 天',
     );
+  });
+
+  it('allows long ranges after the local archive is enabled', () => {
+    const service = jasmine.createSpyObj<VisitorAnalyticsService>(
+      'VisitorAnalyticsService',
+      ['summary'],
+    );
+    service.summary.and.returnValue(of(summary));
+    const component = new VisitorAnalyticsComponent(
+      service,
+      jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+        'error',
+        'warning',
+      ]),
+      jasmine.createSpyObj<ChangeDetectorRef>('ChangeDetectorRef', [
+        'markForCheck',
+      ]),
+    );
+    component.summary = summary;
+    component.dateRange = [
+      new Date('2026-05-01T00:00:00Z'),
+      new Date('2026-08-01T00:00:00Z'),
+    ];
+
+    component.load();
+
+    expect(service.summary).toHaveBeenCalled();
+  });
+
+  it('offers rolling and calendar time shortcuts', () => {
+    jasmine.clock().install();
+    jasmine.clock().mockDate(new Date(2026, 7, 12, 15, 30));
+    try {
+      const service = jasmine.createSpyObj<VisitorAnalyticsService>(
+        'VisitorAnalyticsService',
+        ['summary'],
+      );
+      const component = new VisitorAnalyticsComponent(
+        service,
+        jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+          'error',
+          'warning',
+        ]),
+        jasmine.createSpyObj<ChangeDetectorRef>('ChangeDetectorRef', [
+          'markForCheck',
+        ]),
+      );
+
+      expect(Object.keys(component.datePresetRanges)).toEqual([
+        '今天',
+        '昨天',
+        '最近24小时',
+        '最近7天',
+        '最近30天',
+        '最近3个月',
+        '最近6个月',
+        '最近1年',
+        '本周',
+        '上周',
+        '本月',
+        '上月',
+        '本季度',
+        '上季度',
+        '今年',
+        '去年',
+        '全部',
+      ]);
+      const today = component.datePresetRanges['今天']();
+      expect(today[0]).toEqual(new Date(2026, 7, 12));
+      expect(today[1]).toEqual(new Date(2026, 7, 12, 15, 30));
+      const previousMonth = component.datePresetRanges['上月']();
+      expect(previousMonth).toEqual([
+        new Date(2026, 6, 1),
+        new Date(2026, 7, 1),
+      ]);
+      expect(component.datePresetRanges['本季度']()[0]).toEqual(
+        new Date(2026, 6, 1),
+      );
+      expect(component.datePresetRanges['上季度']()).toEqual([
+        new Date(2026, 3, 1),
+        new Date(2026, 6, 1),
+      ]);
+      expect(component.datePresetRanges['去年']()).toEqual([
+        new Date(2025, 0, 1),
+        new Date(2026, 0, 1),
+      ]);
+      expect(component.datePresetRanges['全部']()[0]).toEqual(new Date(0));
+    } finally {
+      jasmine.clock().uninstall();
+    }
   });
 });

@@ -3,6 +3,11 @@ from typing import List, Mapping, Sequence, Tuple
 
 import pytest
 
+from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.visitor_analytics.archive import (
+    VisitorAnalyticsArchive,
+    VisitorAnalyticsSynchronizer,
+)
 from blrec.visitor_analytics.sls import (
     VisitorAnalyticsConfig,
     VisitorAnalyticsQuery,
@@ -149,3 +154,118 @@ def test_filter_values_are_sql_escaped() -> None:
     assert "'北'京'" not in where
     assert "event=detail" in where
     assert "kind=([^&]*)" in where
+
+
+class FakeArchiveSource:
+    def __init__(self, values: Sequence[Mapping[str, object]]) -> None:
+        self.values = list(values)
+        self.calls: List[Tuple[int, int, int, int]] = []
+
+    async def archive_page(
+        self, from_time: int, to_time: int, *, offset: int, limit: int
+    ) -> Sequence[Mapping[str, object]]:
+        self.calls.append((from_time, to_time, offset, limit))
+        matching = [
+            value
+            for value in self.values
+            if from_time <= int(value['occurred_at']) < to_time
+        ]
+        return matching[offset : offset + limit]
+
+
+@pytest.mark.asyncio
+async def test_archive_syncs_deduplicates_and_serves_long_ranges(tmp_path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        archive = VisitorAnalyticsArchive(database)
+        first_at = int(datetime(2026, 8, 6, 8, tzinfo=timezone.utc).timestamp())
+        second_at = int(datetime(2026, 8, 10, 8, tzinfo=timezone.utc).timestamp())
+        source = FakeArchiveSource(
+            [
+                {
+                    'request_id': 'request-1',
+                    'occurred_at': first_at,
+                    'event': 'pageview',
+                    'visitor': 'visitor-a',
+                    'page': 'players',
+                    'source': 'direct',
+                    'device': 'mobile',
+                    'browser': 'Safari',
+                    'country': '中国',
+                    'province': '北京',
+                    'city': '北京',
+                    'provider': '联通',
+                },
+                {
+                    'request_id': 'request-2',
+                    'occurred_at': second_at,
+                    'event': 'heartbeat',
+                    'visitor': 'visitor-a',
+                    'page': 'players',
+                    'source': 'internal',
+                    'device': 'mobile',
+                    'browser': 'Safari',
+                    'country': '中国',
+                    'province': '北京',
+                    'city': '北京',
+                    'provider': '联通',
+                },
+                {
+                    'request_id': 'request-3',
+                    'occurred_at': second_at + 1,
+                    'event': 'pageview',
+                    'visitor': 'visitor-b',
+                    'page': 'matches',
+                    'source': 'direct',
+                    'device': 'desktop',
+                    'browser': 'Chrome',
+                    'country': '中国',
+                    'province': '上海',
+                    'city': '上海',
+                    'provider': '电信',
+                },
+            ]
+        )
+        current = datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
+        synchronizer = VisitorAnalyticsSynchronizer(
+            configured(),
+            source,
+            archive,
+            now=lambda: current,
+            ingestion_delay_seconds=0,
+            window_seconds=8 * 86400,
+            page_size=2,
+        )
+
+        assert await synchronizer.sync_once() == 3
+        assert await synchronizer.sync_once() == 0
+
+        client = FakeSlsClient()
+        service = VisitorAnalyticsService(
+            configured(), client, archive=archive, now=lambda: current
+        )
+        result = await service.summary(
+            VisitorAnalyticsQuery(
+                start_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                end_at=current,
+                event='all',
+            )
+        )
+
+        assert result.archive_enabled is True
+        assert result.archive_initial_sync_complete is True
+        assert result.totals.events == 3
+        assert result.totals.visitors == 2
+        assert result.totals.page_views == 2
+        assert result.totals.heartbeats == 1
+        assert [item.value for item in result.pages] == ['players', 'matches']
+        assert client.calls == []
+        stored_visitor = await database.scalar(
+            'SELECT visitor_hash FROM visitor_analytics_events '
+            'WHERE request_id=\'request-1\''
+        )
+        assert stored_visitor != 'visitor-a'
+        assert len(str(stored_visitor)) == 64
+    finally:
+        await database.close()

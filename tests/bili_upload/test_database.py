@@ -79,6 +79,8 @@ REQUIRED_TABLES = {
     'archive_migration_jobs',
     'archive_migration_items',
     'dashboard_source_state',
+    'visitor_analytics_events',
+    'visitor_analytics_sync_state',
 }
 
 

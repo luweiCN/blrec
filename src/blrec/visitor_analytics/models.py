@@ -65,6 +65,12 @@ class VisitorAnalyticsSummary(VisitorAnalyticsModel):
     timezone: Literal['Asia/Shanghai'] = 'Asia/Shanghai'
     retention_days: int
     cache_seconds: int
+    archive_enabled: bool = False
+    archive_initial_sync_complete: bool = False
+    archive_start_at: Optional[datetime] = None
+    archive_synced_through: Optional[datetime] = None
+    archive_last_completed_at: Optional[datetime] = None
+    archive_last_error: Optional[str] = None
     filters: VisitorAnalyticsFilters
     totals: VisitorAnalyticsTotals
     trend_granularity: Literal['hour', 'day'] = 'day'

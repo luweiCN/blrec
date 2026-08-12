@@ -24,6 +24,7 @@ from typing import (
 )
 from urllib.parse import quote, urlencode, urlsplit
 
+from .archive import VisitorAnalyticsArchive, VisitorArchiveStatus
 from .models import (
     RecentVisit,
     VisitorAnalyticsFilters,
@@ -294,6 +295,16 @@ class AliyunSlsQueryClient:
                 raise AliyunSlsQueryError('{}：{}'.format(code, message))
         raise AliyunSlsQueryError('SLS 返回了无法识别的数据')
 
+    async def archive_page(
+        self, from_time: int, to_time: int, *, offset: int, limit: int
+    ) -> Sequence[Mapping[str, object]]:
+        search = 'domain: "{}" and uri: "/analytics/pixel.svg"'.format(
+            self._config.domain.replace('"', '')
+        )
+        return await self.query(
+            from_time, to_time, _archive_page_sql(search, offset, limit), line=limit
+        )
+
 
 class VisitorAnalyticsService:
     _dimension_expressions = {
@@ -312,11 +323,13 @@ class VisitorAnalyticsService:
         config: VisitorAnalyticsConfig,
         client: SlsQuery,
         *,
+        archive: Optional[VisitorAnalyticsArchive] = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
         self._client = client
+        self._archive = archive
         self._now = now
         self._clock = clock
         self._cache_lock = asyncio.Lock()
@@ -328,8 +341,30 @@ class VisitorAnalyticsService:
         self, query: VisitorAnalyticsQuery, *, force_refresh: bool = False
     ) -> VisitorAnalyticsSummary:
         normalized = query.normalized()
-        self._validate_range(normalized)
-        cache_key = normalized.cache_key()
+        if normalized.end_at <= normalized.start_at:
+            raise ValueError('结束时间必须晚于开始时间')
+        archive_status = None if self._archive is None else await self._archive.status()
+        maximum = timedelta(days=self._config.retention_days)
+        use_archive = bool(
+            self._archive is not None
+            and archive_status is not None
+            and (
+                archive_status.initial_sync_complete
+                or normalized.end_at - normalized.start_at > maximum
+                or (
+                    not self._config.configured
+                    and archive_status.first_event_at is not None
+                )
+            )
+        )
+        if not use_archive:
+            self._validate_sls_range(normalized)
+        source_key: Tuple[object, ...] = (
+            ('archive', archive_status.synced_through)
+            if use_archive and archive_status is not None
+            else ('sls',)
+        )
+        cache_key = source_key + normalized.cache_key()
         if not force_refresh:
             cached = self._fresh_cache(cache_key)
             if cached is not None:
@@ -339,14 +374,24 @@ class VisitorAnalyticsService:
                 cached = self._fresh_cache(cache_key)
                 if cached is not None:
                     return cached
-            result = await self._fetch_summary(normalized)
+            if use_archive:
+                assert self._archive is not None
+                assert archive_status is not None
+                result = await self._archive.summary(
+                    normalized,
+                    self._config,
+                    generated_at=_aware(self._now()).astimezone(timezone.utc),
+                    status=archive_status,
+                )
+            else:
+                result = await self._fetch_summary(normalized)
+                if archive_status is not None:
+                    _attach_archive_status(result, archive_status)
             self._prune_cache()
             self._cache[cache_key] = (self._clock(), result)
             return result
 
-    def _validate_range(self, query: VisitorAnalyticsQuery) -> None:
-        if query.end_at <= query.start_at:
-            raise ValueError('结束时间必须晚于开始时间')
+    def _validate_sls_range(self, query: VisitorAnalyticsQuery) -> None:
         maximum = timedelta(days=self._config.retention_days)
         if query.end_at - query.start_at > maximum:
             raise ValueError(
@@ -496,6 +541,25 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
         return default
 
 
+def _attach_archive_status(
+    summary: VisitorAnalyticsSummary, status: VisitorArchiveStatus
+) -> None:
+    summary.archive_enabled = True
+    summary.archive_initial_sync_complete = status.initial_sync_complete
+    summary.archive_start_at = _timestamp_datetime(status.first_event_at)
+    summary.archive_synced_through = _timestamp_datetime(status.synced_through)
+    summary.archive_last_completed_at = _timestamp_datetime(status.last_completed_at)
+    summary.archive_last_error = status.last_error
+    if status.last_error:
+        summary.warnings.append('本地访问日志同步失败：{}'.format(status.last_error))
+
+
+def _timestamp_datetime(value: Optional[int]) -> Optional[datetime]:
+    if value is None or value <= 0:
+        return None
+    return datetime.fromtimestamp(value, timezone.utc)
+
+
 def _endpoint_host(endpoint: str) -> str:
     value = endpoint.strip().rstrip('/')
     if '://' in value:
@@ -612,6 +676,42 @@ def _recent_sql(search: str, where: str) -> str:
         + ' AS city FROM log WHERE '
         + where
         + ' ORDER BY __time__ DESC LIMIT 50'
+    )
+
+
+def _archive_page_sql(search: str, offset: int, limit: int) -> str:
+    safe_offset = max(0, offset)
+    safe_limit = max(1, min(1000, limit))
+    return (
+        search
+        + ' | SELECT __time__ AS occurred_at, uuid AS request_id, '
+        + _EVENT_EXPRESSION
+        + ' AS event, '
+        + _VISITOR_EXPRESSION
+        + ' AS visitor, '
+        + _PAGE_EXPRESSION
+        + ' AS page, '
+        + _SOURCE_EXPRESSION
+        + ' AS source, '
+        + _DEVICE_EXPRESSION
+        + ' AS device, '
+        + _BROWSER_EXPRESSION
+        + ' AS browser, '
+        + _COUNTRY_EXPRESSION
+        + ' AS country, '
+        + _PROVINCE_EXPRESSION
+        + ' AS province, '
+        + _CITY_EXPRESSION
+        + ' AS city, '
+        + _PROVIDER_EXPRESSION
+        + ' AS provider FROM log WHERE '
+        + _DETAIL_EVENT
+        + ' AND '
+        + _VALID_VISITOR
+        + ' AND '
+        + _EVENT_EXPRESSION
+        + " IN ('pageview','heartbeat') ORDER BY __time__ ASC,uuid ASC LIMIT "
+        + '{},{}'.format(safe_offset, safe_limit)
     )
 
 

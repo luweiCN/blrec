@@ -7,8 +7,16 @@
     </div>
     <div class="heading-actions">
       <span *ngIf="summary">
-        更新于 {{ summary.generatedAt | date: "MM-dd HH:mm:ss" }} · 原始日志保留
+        更新于 {{ summary.generatedAt | date: "MM-dd HH:mm:ss" }} · SLS 原始日志保留
         {{ summary.retentionDays }} 天
+        <ng-container *ngIf="summary.archiveEnabled">
+          · 本地归档
+          <ng-container *ngIf="summary.archiveStartAt; else archiveStarting">
+            {{ summary.archiveStartAt | date: "yyyy-MM-dd" }} 至
+            {{ summary.archiveSyncedThrough | date: "MM-dd HH:mm" }}
+          </ng-container>
+          <ng-template #archiveStarting>首次同步中</ng-template>
+        </ng-container>
       </span>
       <button
         nz-button
@@ -28,6 +36,7 @@
       <nz-range-picker
         aria-label="访问日志时间范围"
         [(ngModel)]="dateRange"
+        [nzRanges]="datePresetRanges"
         [nzShowTime]="true"
         nzFormat="yyyy-MM-dd HH:mm"
       ></nz-range-picker>

@@ -72,6 +72,12 @@ export interface VisitorAnalyticsSummary {
   timezone: 'Asia/Shanghai';
   retentionDays: number;
   cacheSeconds: number;
+  archiveEnabled: boolean;
+  archiveInitialSyncComplete: boolean;
+  archiveStartAt: string | null;
+  archiveSyncedThrough: string | null;
+  archiveLastCompletedAt: string | null;
+  archiveLastError: string | null;
   filters: VisitorAnalyticsFilters;
   totals: VisitorAnalyticsTotals;
   trendGranularity: 'hour' | 'day';

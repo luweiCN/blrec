@@ -17,6 +17,7 @@ import {
 import { VisitorAnalyticsService } from './visitor-analytics.service';
 
 type DimensionKind = 'page' | 'source' | 'device' | 'browser';
+type DatePresetRanges = Readonly<Record<string, () => Date[]>>;
 
 @Component({
   selector: 'app-visitor-analytics',
@@ -38,6 +39,25 @@ export class VisitorAnalyticsComponent implements OnInit {
   source = '';
   device = '';
   browser = '';
+  readonly datePresetRanges: DatePresetRanges = {
+    今天: () => currentDayRange(),
+    昨天: () => previousDayRange(),
+    最近24小时: () => rollingDayRange(1),
+    最近7天: () => rollingDayRange(7),
+    最近30天: () => rollingDayRange(30),
+    最近3个月: () => rollingMonthRange(3),
+    最近6个月: () => rollingMonthRange(6),
+    最近1年: () => rollingMonthRange(12),
+    本周: () => currentWeekRange(),
+    上周: () => previousWeekRange(),
+    本月: () => currentMonthRange(),
+    上月: () => previousMonthRange(),
+    本季度: () => currentQuarterRange(),
+    上季度: () => previousQuarterRange(),
+    今年: () => currentYearRange(),
+    去年: () => previousYearRange(),
+    全部: () => [new Date(0), new Date()],
+  };
 
   constructor(
     private readonly service: VisitorAnalyticsService,
@@ -65,6 +85,7 @@ export class VisitorAnalyticsComponent implements OnInit {
     }
     const retentionDays = this.summary?.retentionDays ?? 7;
     if (
+      !this.summary?.archiveEnabled &&
       query.endAt.getTime() - query.startAt.getTime() >
       retentionDays * 86400000
     ) {
@@ -210,4 +231,82 @@ export class VisitorAnalyticsComponent implements OnInit {
       ],
     };
   }
+}
+
+function currentDayRange(now = new Date()): Date[] {
+  return [startOfDay(now), now];
+}
+
+function previousDayRange(now = new Date()): Date[] {
+  const today = startOfDay(now);
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  return [yesterday, today];
+}
+
+function rollingDayRange(days: number, now = new Date()): Date[] {
+  return [new Date(now.getTime() - days * 86400000), now];
+}
+
+function rollingMonthRange(months: number, now = new Date()): Date[] {
+  const start = new Date(now);
+  start.setMonth(start.getMonth() - months);
+  return [start, now];
+}
+
+function currentWeekRange(now = new Date()): Date[] {
+  return [startOfWeek(now), now];
+}
+
+function previousWeekRange(now = new Date()): Date[] {
+  const thisWeek = startOfWeek(now);
+  const previousWeek = new Date(thisWeek);
+  previousWeek.setDate(previousWeek.getDate() - 7);
+  return [previousWeek, thisWeek];
+}
+
+function currentMonthRange(now = new Date()): Date[] {
+  return [new Date(now.getFullYear(), now.getMonth(), 1), now];
+}
+
+function previousMonthRange(now = new Date()): Date[] {
+  return [
+    new Date(now.getFullYear(), now.getMonth() - 1, 1),
+    new Date(now.getFullYear(), now.getMonth(), 1),
+  ];
+}
+
+function currentQuarterRange(now = new Date()): Date[] {
+  const quarterStartMonth = Math.floor(now.getMonth() / 3) * 3;
+  return [new Date(now.getFullYear(), quarterStartMonth, 1), now];
+}
+
+function previousQuarterRange(now = new Date()): Date[] {
+  const quarterStartMonth = Math.floor(now.getMonth() / 3) * 3;
+  return [
+    new Date(now.getFullYear(), quarterStartMonth - 3, 1),
+    new Date(now.getFullYear(), quarterStartMonth, 1),
+  ];
+}
+
+function currentYearRange(now = new Date()): Date[] {
+  return [new Date(now.getFullYear(), 0, 1), now];
+}
+
+function previousYearRange(now = new Date()): Date[] {
+  return [
+    new Date(now.getFullYear() - 1, 0, 1),
+    new Date(now.getFullYear(), 0, 1),
+  ];
+}
+
+function startOfDay(value: Date): Date {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate());
+}
+
+function startOfWeek(value: Date): Date {
+  const start = startOfDay(value);
+  const day = start.getDay() || 7;
+  start.setDate(start.getDate() - day + 1);
+  return start;
 }

@@ -53,8 +53,10 @@ from blrec.setting.file_work import (
 from blrec.setting.models import DEFAULT_LOG_DIR, DEFAULT_OUT_DIR
 from blrec.visitor_analytics import (
     AliyunSlsQueryClient,
+    VisitorAnalyticsArchive,
     VisitorAnalyticsConfig,
     VisitorAnalyticsService,
+    VisitorAnalyticsSynchronizer,
 )
 from blrec.web.middlewares.base_herf import BaseHrefMiddleware
 from blrec.web.middlewares.request_performance import RequestPerformanceMiddleware
@@ -121,6 +123,7 @@ _password_work_coordinator: Optional[PasswordWorkCoordinator] = None
 _active_media_service: Optional[ActiveMediaService] = None
 _settings_file_work: Optional[SettingsFileWorkCoordinator] = None
 _settings_apply_reconciler: Optional[SettingsApplyReconciler] = None
+_visitor_analytics_sync: Optional[VisitorAnalyticsSynchronizer] = None
 _application_started = False
 _control_operation_journal = ControlOperationJournal(
     Path(_path).with_name('control.sqlite3')
@@ -758,7 +761,7 @@ async def settings_directory_error_handler(
 @api.on_event('startup')
 async def on_startup() -> None:
     global _active_media_service, _application_started, _password_work_coordinator
-    global _settings_apply_reconciler, _settings_file_work
+    global _settings_apply_reconciler, _settings_file_work, _visitor_analytics_sync
     _admin_auth_store.open()
     password_work = PasswordWorkCoordinator()
     active_media = ActiveMediaService()
@@ -796,6 +799,19 @@ async def on_startup() -> None:
         browser_extension.application = app
         await _notification_dispatcher.start()
         await _bili_account_runtime.start()
+        analytics_database = getattr(_bili_account_runtime, 'database', None)
+        if analytics_database is not None:
+            analytics_archive = VisitorAnalyticsArchive(analytics_database)
+            visitor_analytics.service = VisitorAnalyticsService(
+                _visitor_analytics_config,
+                _visitor_analytics_client,
+                archive=analytics_archive,
+            )
+            _visitor_analytics_sync = VisitorAnalyticsSynchronizer(
+                _visitor_analytics_config,
+                _visitor_analytics_client,
+                analytics_archive,
+            )
         bili_accounts.manager = _bili_account_runtime.manager
         bili_accounts.archive_migration = _bili_account_runtime.archive_migration
         bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
@@ -854,6 +870,8 @@ async def on_startup() -> None:
         _application_started = True
         await app.refresh_managed_cookie()
         _realtime_sampler.start()
+        if _visitor_analytics_sync is not None:
+            _visitor_analytics_sync.start()
     except BaseException:
         settings_apply.close_admission()
         close_settings = getattr(app, 'close_settings_mutation_admission', None)
@@ -902,6 +920,9 @@ async def on_startup() -> None:
                 await app.exit()
         finally:
             try:
+                if _visitor_analytics_sync is not None:
+                    await _visitor_analytics_sync.close()
+                    _visitor_analytics_sync = None
                 await _bili_account_runtime.close()
             finally:
                 try:
@@ -925,7 +946,7 @@ async def on_startup() -> None:
 @api.on_event('shutdown')
 async def on_shuntdown() -> None:
     global _active_media_service, _application_started, _password_work_coordinator
-    global _settings_apply_reconciler, _settings_file_work
+    global _settings_apply_reconciler, _settings_file_work, _visitor_analytics_sync
     password_work = _password_work_coordinator
     active_media = _active_media_service
     settings_apply = _settings_apply_reconciler
@@ -981,6 +1002,9 @@ async def on_shuntdown() -> None:
             await app.exit()
         finally:
             try:
+                if _visitor_analytics_sync is not None:
+                    await _visitor_analytics_sync.close()
+                    _visitor_analytics_sync = None
                 await _bili_account_runtime.close()
             finally:
                 await _notification_dispatcher.close(drain_timeout_seconds=15)

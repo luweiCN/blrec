@@ -1,3 +1,4 @@
+from .archive import VisitorAnalyticsArchive, VisitorAnalyticsSynchronizer
 from .models import VisitorAnalyticsSummary
 from .sls import (
     AliyunSlsQueryClient,
@@ -8,8 +9,10 @@ from .sls import (
 
 __all__ = [
     'AliyunSlsQueryClient',
+    'VisitorAnalyticsArchive',
     'VisitorAnalyticsConfig',
     'VisitorAnalyticsQuery',
     'VisitorAnalyticsService',
     'VisitorAnalyticsSummary',
+    'VisitorAnalyticsSynchronizer',
 ]

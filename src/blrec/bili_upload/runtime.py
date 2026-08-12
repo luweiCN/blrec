@@ -201,6 +201,10 @@ class BiliAccountRuntime:
         return self._manager
 
     @property
+    def database(self) -> Optional[BiliUploadDatabase]:
+        return self._database
+
+    @property
     def journal(self) -> Optional[RecordingJournalBridge]:
         return self._journal
 
