@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Tuple
+from unittest.mock import patch
 
 import pytest
 
@@ -42,6 +43,62 @@ def configured_settings() -> OperationalNotificationSettings:
         OperationalNotificationTarget(channel='pushdeer', message_type='markdown'),
     ]
     return settings
+
+
+@pytest.mark.asyncio
+async def test_health_scanner_persists_all_observations_in_one_transaction(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    center = OperationalNotificationCenter(
+        database,
+        settings_provider=OperationalNotificationSettings,
+        senders={},
+        channel_enabled=lambda _channel: False,
+    )
+    scanner = OperationalHealthScanner(database, center)
+    try:
+        await database.execute(
+            "INSERT INTO bili_accounts("
+            "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+            "state,created_at,updated_at) "
+            "VALUES(1,42,'投稿账号',X'00',1,'key','active',1,1)"
+        )
+        for session_id in (1, 2):
+            await database.execute(
+                'INSERT INTO recording_sessions('
+                'id,room_id,broadcast_session_key,state,started_at) '
+                "VALUES(?,?,?,'closed',1)",
+                (session_id, 100 + session_id, 'session-{}'.format(session_id)),
+            )
+            await database.execute(
+                'INSERT INTO upload_jobs('
+                'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+                'created_at,updated_at) '
+                "VALUES(?,?,1,'{}','ready','prepared',1,1)",
+                (session_id, session_id),
+            )
+
+        with patch.object(database, 'write', wraps=database.write) as write:
+            await scanner.scan()
+
+        assert write.await_count == 1
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM operational_notification_states'
+            )
+            == 15
+        )
+        changes_after_baseline = int(await database.scalar('SELECT total_changes()'))
+
+        await scanner.scan()
+
+        assert int(await database.scalar('SELECT total_changes()')) == (
+            changes_after_baseline
+        )
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio
