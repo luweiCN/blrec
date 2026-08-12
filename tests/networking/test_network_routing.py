@@ -152,8 +152,7 @@ def test_observability_routes_resolve_and_record_the_system_default() -> None:
 
 def test_observability_routes_survive_settings_round_trip() -> None:
     original = NetworkSettings(
-        cloud_cost={'interface': 'lan2'},
-        visitor_analytics={'interface': 'lan1'},
+        cloud_cost={'interface': 'lan2'}, visitor_analytics={'interface': 'lan1'}
     )
     restored = NetworkSettings.parse_raw(original.json(by_alias=True))
     manager = NetworkRouteManager(lambda: restored, interface_provider=_interfaces)

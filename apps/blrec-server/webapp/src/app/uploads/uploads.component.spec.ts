@@ -433,6 +433,10 @@ describe('UploadsComponent', () => {
     expect(component.canConfirmRemoval).toBeFalse();
     component.confirmRemoval();
     expect(accountService.removeAccount).not.toHaveBeenCalled();
+
+    component.closeRemovalDialog();
+    fixture.detectChanges();
+    tick(500);
   }));
 
   it('submits explicit replacement and new primary accounts', fakeAsync(() => {
