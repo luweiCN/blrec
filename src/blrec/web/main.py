@@ -808,9 +808,7 @@ async def on_startup() -> None:
                 archive=analytics_archive,
             )
             _visitor_analytics_sync = VisitorAnalyticsSynchronizer(
-                _visitor_analytics_config,
-                _visitor_analytics_client,
-                analytics_archive,
+                _visitor_analytics_config, _visitor_analytics_client, analytics_archive
             )
         bili_accounts.manager = _bili_account_runtime.manager
         bili_accounts.archive_migration = _bili_account_runtime.archive_migration
