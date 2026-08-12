@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Awaitable,
     Callable,
+    Dict,
+    List,
     Mapping,
     Optional,
     Protocol,
@@ -25,6 +28,15 @@ if TYPE_CHECKING:
     from blrec.networking.manager import NetworkRouteManager
 
 __all__ = ('OperationalHealthScanner', 'OperationalNotificationCenter')
+
+
+@dataclass(frozen=True)
+class _OperationalObservation:
+    event: OperationalEventCode
+    object_key: str
+    healthy: bool
+    title: str
+    detail: str
 
 
 class _MessageSender(Protocol):
@@ -64,55 +76,122 @@ class OperationalNotificationCenter:
         title: str,
         detail: str,
     ) -> bool:
-        if not object_key:
-            raise ValueError('notification object key must not be empty')
-        now = max(1, int(self._clock()))
-
-        def transition(connection: sqlite3.Connection) -> bool:
-            row = connection.execute(
-                'SELECT healthy FROM operational_notification_states '
-                'WHERE event_code=? AND object_key=?',
-                (event, object_key),
-            ).fetchone()
-            normalized_healthy = 1 if healthy else 0
-            if row is None:
-                connection.execute(
-                    'INSERT INTO operational_notification_states('
-                    'event_code,object_key,healthy,title,detail,observed_at) '
-                    'VALUES(?,?,?,?,?,?)',
-                    (
-                        event,
-                        object_key,
-                        normalized_healthy,
-                        title[:200],
-                        detail[:2000],
-                        now,
+        return bool(
+            await self.report_many(
+                (
+                    _OperationalObservation(
+                        event=event,
+                        object_key=object_key,
+                        healthy=healthy,
+                        title=title,
+                        detail=detail,
                     ),
                 )
-                return False
-            changed = int(row['healthy']) != normalized_healthy
-            connection.execute(
+            )
+        )
+
+    async def report_many(
+        self,
+        observations: Sequence[_OperationalObservation],
+        *,
+        retirements: Sequence[Tuple[OperationalEventCode, str]] = (),
+    ) -> int:
+        normalized: Dict[Tuple[OperationalEventCode, str], _OperationalObservation] = {}
+        for observation in observations:
+            if not observation.object_key:
+                raise ValueError('notification object key must not be empty')
+            normalized[(observation.event, observation.object_key)] = (
+                _OperationalObservation(
+                    event=observation.event,
+                    object_key=observation.object_key,
+                    healthy=observation.healthy,
+                    title=observation.title[:200],
+                    detail=observation.detail[:2000],
+                )
+            )
+        normalized_retirements = tuple(dict.fromkeys(retirements))
+        if not normalized and not normalized_retirements:
+            return 0
+        now = max(1, int(self._clock()))
+
+        def transition(connection: sqlite3.Connection) -> List[_OperationalObservation]:
+            for event, object_key in normalized_retirements:
+                connection.execute(
+                    'DELETE FROM operational_notification_states '
+                    'WHERE event_code=? AND object_key=?',
+                    (event, object_key),
+                )
+            existing = {
+                (str(row['event_code']), str(row['object_key'])): (
+                    int(row['healthy']),
+                    str(row['title']),
+                    str(row['detail']),
+                )
+                for row in connection.execute(
+                    'SELECT event_code,object_key,healthy,title,detail '
+                    'FROM operational_notification_states'
+                ).fetchall()
+            }
+            inserted = []
+            updated = []
+            changed = []
+            for observation in normalized.values():
+                key = (str(observation.event), observation.object_key)
+                normalized_healthy = 1 if observation.healthy else 0
+                previous = existing.get(key)
+                values = (
+                    normalized_healthy,
+                    observation.title,
+                    observation.detail,
+                    now,
+                    observation.event,
+                    observation.object_key,
+                )
+                if previous is None:
+                    inserted.append(
+                        (
+                            observation.event,
+                            observation.object_key,
+                            normalized_healthy,
+                            observation.title,
+                            observation.detail,
+                            now,
+                        )
+                    )
+                    continue
+                current = (normalized_healthy, observation.title, observation.detail)
+                if previous == current:
+                    continue
+                updated.append(values)
+                if previous[0] != normalized_healthy:
+                    changed.append(observation)
+            connection.executemany(
+                'INSERT INTO operational_notification_states('
+                'event_code,object_key,healthy,title,detail,observed_at) '
+                'VALUES(?,?,?,?,?,?)',
+                inserted,
+            )
+            connection.executemany(
                 'UPDATE operational_notification_states SET healthy=?,title=?,'
                 'detail=?,observed_at=? WHERE event_code=? AND object_key=?',
-                (
-                    normalized_healthy,
-                    title[:200],
-                    detail[:2000],
-                    now,
-                    event,
-                    object_key,
-                ),
+                updated,
             )
             return changed
 
         changed = await self._database.write(transition)
-        if not changed:
-            return False
-        route = self._settings_provider().route_for(event)
-        if healthy and not route.notify_recovery:
-            return True
-        self._dispatch(event, object_key, route.targets, title[:200], detail[:2000])
-        return True
+        settings = self._settings_provider()
+        for observation in changed:
+            route = settings.route_for(observation.event)
+            if observation.healthy and not route.notify_recovery:
+                continue
+            self._dispatch(
+                observation.event,
+                observation.object_key,
+                route.targets,
+                observation.title,
+                observation.detail,
+            )
+        return len(changed)
 
     async def retire_state(self, event: OperationalEventCode, object_key: str) -> bool:
         def delete(connection: sqlite3.Connection) -> bool:
@@ -163,34 +242,41 @@ class OperationalHealthScanner:
         self._network_route_manager = network_route_manager
 
     async def scan(self) -> None:
-        await self._scan_accounts()
-        await self._scan_recordings()
-        await self._scan_upload_jobs()
-        await self._scan_capacity()
-        await self._scan_network()
+        observations = []
+        observations.extend(await self._account_observations())
+        observations.extend(await self._recording_observations())
+        observations.extend(await self._upload_job_observations())
+        observations.extend(await self._capacity_observations())
+        network_observations, retirements = self._network_observations()
+        observations.extend(network_observations)
+        await self._center.report_many(observations, retirements=retirements)
 
-    async def _scan_accounts(self) -> None:
+    async def _account_observations(self) -> List[_OperationalObservation]:
         rows = await self._database.fetchall(
             'SELECT id,display_name,state,pause_reason FROM bili_accounts '
             "WHERE state!='archived' ORDER BY id"
         )
+        observations = []
         for row in rows:
             healthy = str(row['state']) == 'active'
             name = str(row['display_name'])
             reason = '' if row['pause_reason'] is None else str(row['pause_reason'])
-            await self._center.report(
-                'account_unavailable',
-                'account:{}'.format(int(row['id'])),
-                healthy=healthy,
-                title='投稿账号已恢复' if healthy else '投稿账号不可用',
-                detail=(
-                    '{} 已恢复可用'.format(name)
-                    if healthy
-                    else '{}：{}'.format(name, reason or str(row['state']))
-                ),
+            observations.append(
+                _OperationalObservation(
+                    event='account_unavailable',
+                    object_key='account:{}'.format(int(row['id'])),
+                    healthy=healthy,
+                    title='投稿账号已恢复' if healthy else '投稿账号不可用',
+                    detail=(
+                        '{} 已恢复可用'.format(name)
+                        if healthy
+                        else '{}：{}'.format(name, reason or str(row['state']))
+                    ),
+                )
             )
+        return observations
 
-    async def _scan_recordings(self) -> None:
+    async def _recording_observations(self) -> List[_OperationalObservation]:
         rows = await self._database.fetchall(
             'SELECT session.id,session.room_id,session.state,'
             'MAX(CASE WHEN part.artifact_state IN '
@@ -198,28 +284,33 @@ class OperationalHealthScanner:
             'FROM recording_sessions session LEFT JOIN recording_parts part '
             'ON part.session_id=session.id GROUP BY session.id ORDER BY session.id'
         )
+        observations = []
         for row in rows:
             session_state = str(row['state'])
             healthy = session_state not in ('cancelled', 'manual_review') and not bool(
                 row['failed_part']
             )
             room_id = int(row['room_id'])
-            await self._center.report(
-                'recording_failed',
-                'recording-session:{}'.format(int(row['id'])),
-                healthy=healthy,
-                title='录制任务已恢复' if healthy else '录制任务异常',
-                detail='房间 {}：{}'.format(
-                    room_id, '录像文件已恢复可用' if healthy else session_state
-                ),
+            observations.append(
+                _OperationalObservation(
+                    event='recording_failed',
+                    object_key='recording-session:{}'.format(int(row['id'])),
+                    healthy=healthy,
+                    title='录制任务已恢复' if healthy else '录制任务异常',
+                    detail='房间 {}：{}'.format(
+                        room_id, '录像文件已恢复可用' if healthy else session_state
+                    ),
+                )
             )
+        return observations
 
-    async def _scan_upload_jobs(self) -> None:
+    async def _upload_job_observations(self) -> List[_OperationalObservation]:
         rows = await self._database.fetchall(
             'SELECT id,state,operator_paused,review_reason,repair_state,'
             'repair_error,comment_branch_state,danmaku_branch_state,'
             'collection_branch_state,collection_error FROM upload_jobs ORDER BY id'
         )
+        observations = []
         for row in rows:
             job_id = int(row['id'])
             state = str(row['state'])
@@ -234,33 +325,39 @@ class OperationalHealthScanner:
                 marker in reason.lower()
                 for marker in ('验证码', '人工验证', '安全验证', 'captcha', 'geetest')
             )
-            await self._report_job_state(
-                'upload_failed',
-                job_id,
-                not upload_failed,
-                '上传任务已恢复',
-                '投稿需要人工验证' if verification_required else '上传任务失败',
-                reason or state,
+            observations.append(
+                self._job_observation(
+                    'upload_failed',
+                    job_id,
+                    not upload_failed,
+                    '上传任务已恢复',
+                    '投稿需要人工验证' if verification_required else '上传任务失败',
+                    reason or state,
+                )
             )
-            await self._report_job_state(
-                'review_rejected',
-                job_id,
-                state != 'rejected',
-                '稿件状态已恢复',
-                '稿件审核未通过',
-                reason or state,
+            observations.append(
+                self._job_observation(
+                    'review_rejected',
+                    job_id,
+                    state != 'rejected',
+                    '稿件状态已恢复',
+                    '稿件审核未通过',
+                    reason or state,
+                )
             )
             repair_failed = repair_state in ('failed', 'unknown_outcome')
             repair_error = (
                 '' if row['repair_error'] is None else str(row['repair_error'])
             )
-            await self._report_job_state(
-                'transcode_repair_failed',
-                job_id,
-                not repair_failed,
-                '转码修复已恢复',
-                '自动转码修复失败',
-                repair_error or repair_state,
+            observations.append(
+                self._job_observation(
+                    'transcode_repair_failed',
+                    job_id,
+                    not repair_failed,
+                    '转码修复已恢复',
+                    '自动转码修复失败',
+                    repair_error or repair_state,
+                )
             )
             branch_states: Tuple[Tuple[OperationalEventCode, str, str, str], ...] = (
                 (
@@ -275,62 +372,75 @@ class OperationalHealthScanner:
             for event, state_column, error_column, label in branch_states:
                 branch_state = str(row[state_column])
                 error = '' if row[error_column] is None else str(row[error_column])
-                await self._report_job_state(
-                    event,
-                    job_id,
-                    branch_state != 'failed',
-                    '{}已恢复'.format(label),
-                    '{}失败'.format(label),
-                    error or branch_state,
+                observations.append(
+                    self._job_observation(
+                        event,
+                        job_id,
+                        branch_state != 'failed',
+                        '{}已恢复'.format(label),
+                        '{}失败'.format(label),
+                        error or branch_state,
+                    )
                 )
+        return observations
 
-    async def _report_job_state(
-        self,
+    @staticmethod
+    def _job_observation(
         event: OperationalEventCode,
         job_id: int,
         healthy: bool,
         recovery_title: str,
         failure_title: str,
         detail: str,
-    ) -> None:
-        await self._center.report(
-            event,
-            'upload-job:{}'.format(job_id),
+    ) -> _OperationalObservation:
+        return _OperationalObservation(
+            event=event,
+            object_key='upload-job:{}'.format(job_id),
             healthy=healthy,
             title=recovery_title if healthy else failure_title,
             detail='任务 {}：{}'.format(job_id, detail),
         )
 
-    async def _scan_capacity(self) -> None:
+    async def _capacity_observations(self) -> List[_OperationalObservation]:
         if self._retention_status_provider is None:
-            return
+            return []
         status = await self._retention_status_provider()
         if status.capacity_bytes <= 0:
-            return
+            return []
         healthy = not status.warning
-        await self._center.report(
-            'capacity_warning',
-            'recording-capacity',
-            healthy=healthy,
-            title='录像容量已恢复' if healthy else '录像容量不足',
-            detail='已使用 {:.2f} GB / {:.2f} GB，剩余 {:.2f} GB'.format(
-                status.managed_video_bytes / 1024**3,
-                status.capacity_bytes / 1024**3,
-                status.remaining_bytes / 1024**3,
-            ),
-        )
+        return [
+            _OperationalObservation(
+                event='capacity_warning',
+                object_key='recording-capacity',
+                healthy=healthy,
+                title='录像容量已恢复' if healthy else '录像容量不足',
+                detail='已使用 {:.2f} GB / {:.2f} GB，剩余 {:.2f} GB'.format(
+                    status.managed_video_bytes / 1024**3,
+                    status.capacity_bytes / 1024**3,
+                    status.remaining_bytes / 1024**3,
+                ),
+            )
+        ]
 
-    async def _scan_network(self) -> None:
+    def _network_observations(
+        self,
+    ) -> Tuple[
+        List[_OperationalObservation], Tuple[Tuple[OperationalEventCode, str], ...]
+    ]:
         if self._network_route_manager is None:
-            return
-        await self._center.retire_state(
-            'network_failover', 'network-route:upload:failover'
-        )
-        for state in self._network_route_manager.notification_states():
-            await self._center.report(
-                state.event,
-                state.object_key,
+            return [], ()
+        observations = [
+            _OperationalObservation(
+                event=state.event,
+                object_key=state.object_key,
                 healthy=state.healthy,
                 title=state.title,
                 detail=state.detail,
             )
+            for state in self._network_route_manager.notification_states()
+        ]
+        return observations, (('network_failover', 'network-route:upload:failover'),)
+
+    async def _scan_network(self) -> None:
+        observations, retirements = self._network_observations()
+        await self._center.report_many(observations, retirements=retirements)

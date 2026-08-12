@@ -657,6 +657,62 @@ async def test_upload_loop_runs_one_retry_quantum_per_iteration() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upload_loop_does_not_wait_for_operational_notification_scan() -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path='/unused.sqlite3'),
+        api_key=None,
+        credential_key=None,
+        upload_interval_seconds=0.01,
+    )
+    journal = SimpleNamespace(
+        finalize_cancelled_sessions=AsyncMock(return_value=0),
+        reconcile_stale_finished_parts=AsyncMock(return_value=0),
+    )
+    stop_event = asyncio.Event()
+    iterations = 0
+
+    async def sync_live_sessions() -> list[int]:
+        nonlocal iterations
+        iterations += 1
+        if iterations == 2:
+            stop_event.set()
+        return []
+
+    coordinator = SimpleNamespace(
+        sync_live_sessions=AsyncMock(side_effect=sync_live_sessions),
+        prepare_waiting_jobs=AsyncMock(return_value=[]),
+        run_once=AsyncMock(return_value=None),
+    )
+    review_watcher = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    comment_publisher = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    danmaku_importer = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    danmaku_publisher = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    scan_release = asyncio.Event()
+
+    async def scan() -> None:
+        await scan_release.wait()
+
+    notification_scanner = SimpleNamespace(scan=AsyncMock(side_effect=scan))
+
+    await asyncio.wait_for(
+        runtime._run_uploads(
+            journal,
+            coordinator,
+            review_watcher,
+            comment_publisher,
+            danmaku_importer,
+            danmaku_publisher,
+            stop_event,
+            notification_scanner=notification_scanner,
+        ),
+        timeout=1,
+    )
+
+    assert coordinator.sync_live_sessions.await_count == 2
+    notification_scanner.scan.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_upload_task_pool_grows_and_shrinks_without_cancelling_active_tasks(
     tmp_path: Path,
 ) -> None:

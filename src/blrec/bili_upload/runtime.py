@@ -91,6 +91,7 @@ _DANMAKU_ACTION_INTERVAL_SECONDS = 25
 _REVIEW_POLL_INTERVAL_SECONDS = 300
 _REVIEW_DETAIL_INTERVAL_SECONDS = 2.0
 _REVIEW_READ_TIMEOUT_SECONDS = 180.0
+_OPERATIONAL_NOTIFICATION_INTERVAL_SECONDS = 60.0
 
 
 class BiliAccountRuntime:
@@ -1196,6 +1197,24 @@ class BiliAccountRuntime:
             except asyncio.TimeoutError:
                 pass
 
+    async def _run_operational_notifications(
+        self, scanner: OperationalHealthScanner, stop_event: asyncio.Event
+    ) -> None:
+        while not stop_event.is_set():
+            try:
+                await scanner.scan()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Operational notification scan failed')
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(),
+                    timeout=_OPERATIONAL_NOTIFICATION_INTERVAL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                pass
+
     async def _run_uploads(
         self,
         journal: RecordingJournalBridge,
@@ -1230,6 +1249,13 @@ class BiliAccountRuntime:
         danmaku_publication_worker = asyncio.create_task(
             self._run_danmaku_publications(danmaku_publisher, stop_event)
         )
+        notification_worker = (
+            asyncio.create_task(
+                self._run_operational_notifications(notification_scanner, stop_event)
+            )
+            if notification_scanner is not None
+            else None
+        )
         try:
             while not stop_event.is_set():
                 upload_processed = None
@@ -1255,13 +1281,6 @@ class BiliAccountRuntime:
                     raise
                 except Exception:
                     logger.exception('Bilibili upload worker iteration failed')
-                if notification_scanner is not None:
-                    try:
-                        await notification_scanner.scan()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        logger.exception('Operational notification scan failed')
                 delay: float
                 if comment_processed is not None:
                     delay = _COMMENT_ACTION_INTERVAL_SECONDS
@@ -1283,6 +1302,7 @@ class BiliAccountRuntime:
                     review_worker,
                     danmaku_import_worker,
                     danmaku_publication_worker,
+                    notification_worker,
                 )
                 if worker is not None
             ]
