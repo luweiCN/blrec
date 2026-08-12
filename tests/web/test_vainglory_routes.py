@@ -1,6 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, Iterator, List, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import pytest
 from fastapi import FastAPI
@@ -45,6 +45,7 @@ class FakeService:
         self.restored_zero_match_sessions = []
         self.suppressed_match_reviews = []
         self.manual_match_markers = []
+        self.requested_scans = []
         self.created_players = []
         self.renamed_players = []
         self.bound_rooms = []
@@ -195,6 +196,10 @@ class FakeService:
             id=8, session_id=session_id, part_id=11, part_index=part_index, at_ms=at_ms
         )
 
+    async def request_scan(self, session_id: int) -> object:
+        self.requested_scans.append(session_id)
+        return object()
+
     async def update_session_title(
         self, session_id: int, title: str
     ) -> MatchSessionRecord:
@@ -272,6 +277,8 @@ class FakeService:
 class FakeArchiveBackfill:
     def __init__(self) -> None:
         self.requested_accounts = []
+        self.requested_imports = []
+        self.import_sessions: Dict[int, Optional[int]] = {}
 
     async def request(self, account_id: int) -> ArchiveSync:
         self.requested_accounts.append(account_id)
@@ -301,6 +308,10 @@ class FakeArchiveBackfill:
             completed_at=None,
             updated_at=1_002,
         )
+
+    async def request_import_reanalysis(self, import_id: int) -> Optional[int]:
+        self.requested_imports.append(import_id)
+        return self.import_sessions.get(import_id)
 
     async def list_suspected_non_vainglory(
         self, *, limit: int, offset: int
@@ -805,6 +816,30 @@ def test_requests_and_reads_account_archive_backfill() -> None:
     assert status_response.status_code == 200
     assert status_response.json()['progress'] == 0.25
     assert status_response.json()['discoveredCount'] == 20
+
+
+def test_requests_archive_import_reanalysis_and_delegates_existing_session(
+    tmp_path: Path,
+) -> None:
+    application = FastAPI()
+    service = FakeService(tmp_path / 'result.png')
+    backfill = FakeArchiveBackfill()
+    backfill.import_sessions[8] = 9
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[vainglory.authenticated_manager_subject] = (
+        lambda: 'manager'
+    )
+    application.dependency_overrides[vainglory.get_service] = lambda: service
+    application.dependency_overrides[vainglory.get_archive_backfill] = lambda: backfill
+
+    with TestClient(application) as client:
+        unmaterialized = client.post('/api/v1/vainglory/archive-imports/7/scan')
+        materialized = client.post('/api/v1/vainglory/archive-imports/8/scan')
+
+    assert unmaterialized.status_code == 202
+    assert materialized.status_code == 202
+    assert backfill.requested_imports == [7, 8]
+    assert service.requested_scans == [9]
 
 
 def test_lists_suspected_non_vainglory_public_archives() -> None:

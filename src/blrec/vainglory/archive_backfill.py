@@ -225,6 +225,67 @@ class ArchiveBackfillService:
         self._wake.set()
         return await self.status(account_id)
 
+    async def request_import_reanalysis(self, import_id: int) -> Optional[int]:
+        """Queue an unmaterialized archive, or return its existing session."""
+        now = self._now()
+
+        def request(connection: sqlite3.Connection) -> Optional[int]:
+            imported = connection.execute(
+                'SELECT imported.account_id,imported.session_id,imported.state,'
+                'account.state '
+                'AS account_state FROM vainglory_archive_imports imported '
+                'JOIN bili_accounts account ON account.id=imported.account_id '
+                'WHERE imported.id=?',
+                (int(import_id),),
+            ).fetchone()
+            if imported is None:
+                raise ArchiveBackfillNotFound('历史稿件不存在')
+            if str(imported['account_state']) != 'active':
+                raise ArchiveBackfillUnavailable('稿件所属 B 站账号当前不可用')
+            if imported['session_id'] is not None:
+                return int(imported['session_id'])
+            if str(imported['state']) not in ('ready', 'skipped', 'failed'):
+                raise ArchiveBackfillUnavailable('历史稿件当前正在处理中')
+            changed = connection.execute(
+                'UPDATE vainglory_archive_imports SET '
+                "state='queued',progress=0,page_count=0,completed_page_count=0,"
+                'error=NULL,retryable=0,next_retry_at=NULL,'
+                "content_classification='unknown',"
+                "classification_reason='手动重新分析，等待核对 B 站分 P',"
+                'updated_at=? WHERE id=? AND session_id IS NULL',
+                (now, int(import_id)),
+            )
+            if changed.rowcount != 1:
+                raise ArchiveBackfillUnavailable('历史稿件状态已变化，请重试')
+            resumed = connection.execute(
+                "UPDATE vainglory_archive_syncs SET state='running',"
+                'progress=(SELECT COALESCE(AVG(CASE '
+                "WHEN candidate.state IN ('ready','skipped') THEN 1.0 "
+                "WHEN candidate.state='failed' AND candidate.retryable=0 THEN 1.0 "
+                "WHEN candidate.state='failed' THEN 0.0 ELSE candidate.progress END),"
+                '1.0) FROM vainglory_archive_imports candidate '
+                'WHERE candidate.account_id=vainglory_archive_syncs.account_id),'
+                'discovered_count=(SELECT COUNT(*) '
+                'FROM vainglory_archive_imports candidate '
+                'WHERE candidate.account_id=vainglory_archive_syncs.account_id),'
+                'completed_count=(SELECT COUNT(*) '
+                'FROM vainglory_archive_imports candidate '
+                'WHERE candidate.account_id=vainglory_archive_syncs.account_id '
+                "AND (candidate.state IN ('ready','skipped') OR "
+                "(candidate.state='failed' AND candidate.retryable=0))),"
+                'error=NULL,started_at=COALESCE(started_at,?),completed_at=NULL,'
+                'updated_at=? WHERE account_id=?',
+                (now, now, int(imported['account_id'])),
+            )
+            if resumed.rowcount != 1:
+                raise ArchiveBackfillUnavailable('稿件所属历史同步任务不存在')
+            return None
+
+        session_id = await self._database.write(request)
+        if session_id is None:
+            self._wake.set()
+        return session_id
+
     async def status(self, account_id: int) -> ArchiveSync:
         row = await self._database.fetchone(
             'SELECT * FROM vainglory_archive_syncs WHERE account_id=?',

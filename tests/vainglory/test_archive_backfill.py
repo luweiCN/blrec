@@ -6,7 +6,10 @@ import pytest
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.errors import BiliApiError
 from blrec.bili_upload.remote_media import RemoteMediaStatus
-from blrec.vainglory.archive_backfill import ArchiveBackfillService
+from blrec.vainglory.archive_backfill import (
+    ArchiveBackfillService,
+    ArchiveBackfillUnavailable,
+)
 
 
 class FakeArchiveReader:
@@ -108,6 +111,151 @@ async def seed_account(database: BiliUploadDatabase) -> None:
         "state,created_at,updated_at) "
         "VALUES(1,42,'旧账号',X'00',1,'key','active',1,1)"
     )
+
+
+@pytest.mark.asyncio
+async def test_manual_reanalysis_requeues_a_skipped_unmaterialized_import(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            'INSERT INTO vainglory_archive_syncs('
+            'account_id,state,progress,discovered_count,completed_count,error,'
+            'requested_at,started_at,completed_at,updated_at,discovery_complete,'
+            "operator_paused) VALUES(1,'ready',1,1,1,NULL,1,1,1,1,1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,state,progress,page_count,'
+            'completed_page_count,error,content_classification,'
+            'classification_reason,retryable,next_retry_at,created_at,updated_at) '
+            "VALUES(7,1,101,'BV1abcdefgh','短分 P','skipped',1,0,0,NULL,"
+            "'unknown','稿件短于10分钟，未进行内容分析',0,NULL,1,1)"
+        )
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+
+        assert await service.request_import_reanalysis(7) is None
+        imported = await database.fetchone(
+            'SELECT state,progress,page_count,completed_page_count,error,'
+            'content_classification,classification_reason,updated_at '
+            'FROM vainglory_archive_imports WHERE id=7'
+        )
+
+        assert imported is not None
+        assert dict(imported) == {
+            'state': 'queued',
+            'progress': 0.0,
+            'page_count': 0,
+            'completed_page_count': 0,
+            'error': None,
+            'content_classification': 'unknown',
+            'classification_reason': '手动重新分析，等待核对 B 站分 P',
+            'updated_at': 1_000,
+        }
+        sync = await database.fetchone(
+            'SELECT state,progress,discovered_count,completed_count,'
+            'operator_paused,completed_at,updated_at '
+            'FROM vainglory_archive_syncs WHERE account_id=1'
+        )
+        assert sync is not None
+        assert dict(sync) == {
+            'state': 'running',
+            'progress': 0.0,
+            'discovered_count': 1,
+            'completed_count': 0,
+            'operator_paused': 1,
+            'completed_at': None,
+            'updated_at': 1_000,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_archive_reanalysis_returns_an_existing_session(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(99,100,'archive:99','closed',900,'历史直播')"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,session_id,state,progress,page_count,'
+            'completed_page_count,created_at,updated_at) '
+            "VALUES(7,1,101,'BV1abcdefgh','历史直播',99,'ready',1,2,2,1,1)"
+        )
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+
+        assert await service.request_import_reanalysis(7) == 99
+        imported = await database.fetchone(
+            'SELECT state,page_count,completed_page_count,updated_at '
+            'FROM vainglory_archive_imports WHERE id=7'
+        )
+
+        assert imported is not None
+        assert dict(imported) == {
+            'state': 'ready',
+            'page_count': 2,
+            'completed_page_count': 2,
+            'updated_at': 1,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_archive_reanalysis_does_not_interrupt_active_import(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,state,progress,page_count,'
+            'completed_page_count,created_at,updated_at) '
+            "VALUES(7,1,101,'BV1abcdefgh','处理中','analyzing',0.5,2,1,1,1)"
+        )
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+
+        with pytest.raises(ArchiveBackfillUnavailable, match='当前正在处理中'):
+            await service.request_import_reanalysis(7)
+        assert (
+            await database.scalar(
+                'SELECT state FROM vainglory_archive_imports WHERE id=7'
+            )
+            == 'analyzing'
+        )
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

@@ -974,6 +974,31 @@ async def list_archive_content_reviews(
     )
 
 
+@router.post('/archive-imports/{import_id}/scan', status_code=status.HTTP_202_ACCEPTED)
+async def request_archive_import_scan(
+    import_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    backfill: ArchiveBackfillService = Depends(get_archive_backfill),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        session_id = await backfill.request_import_reanalysis(import_id)
+        if session_id is not None:
+            await index.request_scan(session_id)
+    except ArchiveBackfillNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+    except ArchiveBackfillUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
+    except (VaingloryConflict, VaingloryNotFound) as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
 @router.post(
     '/sessions/{session_id}/scan',
     response_model=ScanJobResponse,

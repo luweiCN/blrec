@@ -51,6 +51,10 @@ RUN --mount=type=bind,from=wheel-builder,source=/wheels,target=/wheels \
 COPY scripts/migrate_legacy_settings.py /app/scripts/migrate_legacy_settings.py
 COPY scripts/migrate_biliupforjava_rooms.py /app/scripts/migrate_biliupforjava_rooms.py
 COPY scripts/backup_blrec_database.py /app/scripts/backup_blrec_database.py
+COPY scripts/vainglory_reanalysis_recovery_20260812.py \
+     /app/scripts/vainglory_reanalysis_recovery_20260812.py
+COPY scripts/vainglory_reanalysis_recovery_20260812.jsonl \
+     /app/scripts/vainglory_reanalysis_recovery_20260812.jsonl
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/luweiCN/blrec" \
