@@ -922,9 +922,7 @@ def _analysis_worker_record(row: sqlite3.Row) -> AnalysisWorkerRecord:
         total_processing_seconds=float(row['total_processing_seconds'] or 0),
         profiled_task_count=int(row['profiled_task_count'] or 0),
         profiled_video_seconds=float(row['profiled_video_seconds'] or 0),
-        total_decode_analysis_seconds=float(
-            row['total_decode_analysis_seconds'] or 0
-        ),
+        total_decode_analysis_seconds=float(row['total_decode_analysis_seconds'] or 0),
         total_profiled_task_seconds=float(row['total_profiled_task_seconds'] or 0),
         last_task_finished_at=(
             None

@@ -931,9 +931,9 @@ def test_worker_completion_forwards_efficiency_metrics() -> None:
     service.complete_remote_part = AsyncMock()
     application = FastAPI()
     application.include_router(vainglory.router, prefix='/api/v1')
-    application.dependency_overrides[vainglory.security.authenticated_analysis_worker] = (
-        lambda: 'analysis-worker'
-    )
+    application.dependency_overrides[
+        vainglory.security.authenticated_analysis_worker
+    ] = lambda: 'analysis-worker'
     application.dependency_overrides[vainglory.get_service] = lambda: service
 
     with TestClient(application) as client:
