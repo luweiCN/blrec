@@ -18,6 +18,7 @@ import {
 } from '../vainglory.model';
 
 type TimelineCountGroup = 'matchFlow' | 'heroSelect' | 'matchMode';
+export type AnalysisTaskCenterView = 'workers' | 'tasks';
 
 const ANALYSIS_OUTPUT_LABELS: Readonly<Record<string, string>> = {
   match_flow: '对局中',
@@ -51,6 +52,7 @@ const TRAINING_TASK_LABELS: Readonly<Record<string, string>> = {
 })
 export class AnalysisTaskCenterComponent {
   @Input() queue: VaingloryAnalysisQueue | null = null;
+  @Input() view: AnalysisTaskCenterView = 'tasks';
   @Input() sampledAt: number | null = null;
   @Input() updatingWorkerIds: ReadonlySet<string> = new Set<string>();
   @Output() addWorker = new EventEmitter<void>();

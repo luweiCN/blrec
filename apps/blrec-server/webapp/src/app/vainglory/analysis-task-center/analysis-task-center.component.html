@@ -4,6 +4,7 @@
   aria-label="对局分析任务中心"
 >
   <section
+    *ngIf="view === 'workers'"
     class="analysis-worker-section"
     aria-label="Analysis Worker 节点状态"
   >
@@ -141,28 +142,29 @@
     ></nz-empty>
   </section>
 
-  <header class="analysis-task-header">
-    <div>
-      <strong>新录播优先处理</strong>
-      <span>
-        新模型流程：关键帧时间线扫描 → 状态边界补帧 → 4 FPS 结算精扫 →
-        OCR、英雄阵容与主播识别
-        <ng-container *ngIf="sampledAt !== null">
-          · SSE 更新于 {{ sampledAt * 1000 | date: "HH:mm:ss" }}
-        </ng-container>
-      </span>
-    </div>
-  </header>
-
-  <section class="analysis-task-section" aria-labelledby="active-task-title">
-    <header class="analysis-section-heading">
+  <ng-container *ngIf="view === 'tasks'">
+    <header class="analysis-task-header">
       <div>
-        <h3 id="active-task-title">正在处理</h3>
-        <span *ngIf="taskQueue.active.length > 0">
-          {{ taskQueue.active.length }} 个工作进程正在运行
+        <strong>新录播优先处理</strong>
+        <span>
+          新模型流程：关键帧时间线扫描 → 状态边界补帧 → 4 FPS 结算精扫 →
+          OCR、英雄阵容与主播识别
+          <ng-container *ngIf="sampledAt !== null">
+            · SSE 更新于 {{ sampledAt * 1000 | date: "HH:mm:ss" }}
+          </ng-container>
         </span>
       </div>
     </header>
+
+    <section class="analysis-task-section" aria-labelledby="active-task-title">
+      <header class="analysis-section-heading">
+        <div>
+          <h3 id="active-task-title">正在处理</h3>
+          <span *ngIf="taskQueue.active.length > 0">
+            {{ taskQueue.active.length }} 个工作进程正在运行
+          </span>
+        </div>
+      </header>
     <article
       *ngFor="let active of taskQueue.active"
       class="analysis-active-task"
@@ -722,5 +724,6 @@
         </div>
       </li>
     </ol>
-  </section>
+    </section>
+  </ng-container>
 </section>

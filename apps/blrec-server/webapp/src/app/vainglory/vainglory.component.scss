@@ -302,106 +302,9 @@
   font-size: 12px;
 }
 
-.archive-stage-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-
-  > div {
-    display: grid;
-    gap: 2px;
-    padding: 7px 9px;
-    border-radius: 4px;
-    background: #fff;
-  }
-
-  strong {
-    font-size: 12px;
-  }
-
-  span {
-    overflow: hidden;
-    color: #595959;
-    font-size: 12px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
-
-.archive-recent-items {
-  display: grid;
-  gap: 2px;
-
-  > strong {
-    color: #595959;
-    font-size: 12px;
-  }
-
-  > a {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 4px 0;
-
-    span {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    small {
-      flex: none;
-      color: #8c8c8c;
-    }
-  }
-}
-
-.archive-content-reviews {
-  display: grid;
-  gap: 10px;
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid #f0f0f0;
-
-  > header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-
-    h3 {
-      margin: 0;
-    }
-
-    span {
-      color: #8c8c8c;
-    }
-  }
-
-  ul {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  li {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 9px 0;
-    border-top: 1px solid #f5f5f5;
-
-    div,
-    span {
-      display: block;
-    }
-
-    span,
-    small {
-      color: #8c8c8c;
-    }
-  }
+.archive-download-status {
+  color: #595959;
+  font-size: 12px;
 }
 
 @media (max-width: 900px) {
@@ -418,9 +321,6 @@
     }
   }
 
-  .archive-stage-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 .hero-grid {

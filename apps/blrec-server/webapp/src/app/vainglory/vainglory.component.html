@@ -28,7 +28,7 @@
       nz-button
       type="button"
       class="worker-status-trigger"
-      (click)="analysisTaskModalVisible = true"
+      (click)="openAnalysisTaskCenter('workers')"
     >
       <span
         class="worker-status-marker"
@@ -45,7 +45,7 @@
       </ng-container>
       <ng-template #workerStatusLoading>Worker 状态</ng-template>
     </button>
-    <button nz-button type="button" (click)="analysisTaskModalVisible = true">
+    <button nz-button type="button" (click)="openAnalysisTaskCenter('tasks')">
       <i nz-icon nzType="unordered-list"></i>
       对局分析任务
       <ng-container *ngIf="analysisQueue as queue">
@@ -1421,11 +1421,8 @@
 >
   <ng-container *nzModalContent>
     <p class="archive-manager-help">
-      选择当前保存迁移后稿件的投稿账号。系统优先接入当前赛季，随后继续回溯更早历史稿件；
-      每天按设置数量启动稿件下载，下载最高画质后逐个分 P 分析，短分 P
-      也会正常检查结算画面。
-      识别结果会回填到同一个新稿件的简介和置顶评论，分析完成即删除临时视频；
-      进程异常退出后会从未完成任务继续。
+      选择需要扫描的投稿账号。这里仅关注历史稿件发现与下载，显示已扫描范围、每日下载额度，
+      以及当前下载到哪一场直播；后续识别进度请在“对局分析任务”中查看。
     </p>
     <nz-alert
       *ngIf="archiveAccountsError"
@@ -1541,7 +1538,7 @@
             }}
           </button>
           <section
-            *ngIf="archiveItems(account.id).length > 0"
+            *ngIf="archiveActiveItems(account.id).length > 0"
             class="archive-processing-panel"
           >
             <div
@@ -1550,7 +1547,7 @@
             >
               <header>
                 <div>
-                  <span class="archive-target-label">新稿件</span>
+                  <span class="archive-target-label">历史稿件</span>
                   <a
                     [href]="'https://www.bilibili.com/video/' + current.bvid"
                     target="_blank"
@@ -1560,7 +1557,7 @@
                   </a>
                 </div>
                 <nz-tag nzColor="processing">
-                  {{ archiveStageLabel(current) }}
+                  {{ archiveIntakeLabel(current) }}
                 </nz-tag>
               </header>
               <div class="archive-item-meta">
@@ -1574,110 +1571,23 @@
                 <span *ngIf="current.currentPartTitle">
                   {{ current.currentPartTitle }}
                 </span>
-                <span>已识别 {{ current.matchCount }} 局</span>
               </div>
               <nz-progress
                 nzSize="small"
-                [nzPercent]="archiveItemPercent(current)"
-                [nzStatus]="current.stage === 'failed' ? 'exception' : 'active'"
+                [nzPercent]="archiveIntakePercent(current)"
+                nzStatus="active"
               ></nz-progress>
-              <div class="archive-stage-grid">
-                <div>
-                  <strong>下载</strong>
-                  <span>{{ archiveDownloadLabel(current) }}</span>
-                </div>
-                <div>
-                  <strong>分析</strong>
-                  <span>{{ archiveAnalysisLabel(current) }}</span>
-                </div>
-                <div>
-                  <strong>OCR / 英雄</strong>
-                  <span>{{ archiveOcrLabel(current) }}</span>
-                </div>
-                <div>
-                  <strong>回填新稿件</strong>
-                  <span>{{ archivePublicationLabel(current) }}</span>
-                </div>
-              </div>
+              <span class="archive-download-status">
+                下载：{{ archiveDownloadLabel(current) }}
+              </span>
               <span *ngIf="current.error" class="error-text">
                 {{ current.error }}
               </span>
-            </div>
-            <div
-              *ngIf="archiveRecentItems(account.id).length > 0"
-              class="archive-recent-items"
-            >
-              <strong>最近处理</strong>
-              <a
-                *ngFor="let item of archiveRecentItems(account.id)"
-                [href]="'https://www.bilibili.com/video/' + item.bvid"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <span>{{ item.title }}</span>
-                <small>{{ archiveStageLabel(item) }}</small>
-              </a>
             </div>
           </section>
         </div>
       </div>
     </nz-spin>
-    <section class="archive-content-reviews">
-      <header>
-        <div>
-          <h3>疑似非虚荣的公开稿件</h3>
-          <span>
-            所有分 P 已完成分析但未发现虚荣结算；仅供复核，不会自动删除
-          </span>
-        </div>
-        <strong>{{ archiveContentReviewTotal }} 个</strong>
-      </header>
-      <nz-alert
-        *ngIf="archiveContentReviewsError"
-        nzType="error"
-        [nzMessage]="archiveContentReviewsError"
-      ></nz-alert>
-      <nz-spin [nzSpinning]="archiveContentReviewsLoading">
-        <nz-empty
-          *ngIf="
-            !archiveContentReviewsLoading &&
-            !archiveContentReviewsError &&
-            archiveContentReviews.length === 0
-          "
-          nzNotFoundContent="暂时没有疑似非虚荣稿件"
-        ></nz-empty>
-        <ul *ngIf="archiveContentReviews.length > 0">
-          <li *ngFor="let review of archiveContentReviews">
-            <div>
-              <a
-                [href]="'https://www.bilibili.com/video/' + review.bvid"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                {{ review.title }}
-              </a>
-              <span>
-                {{ review.accountName }} · {{ review.bvid }}
-                <ng-container *ngIf="review.publishedAt !== null">
-                  ·
-                  {{ review.publishedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
-                </ng-container>
-              </span>
-            </div>
-            <small>{{ review.reason }}</small>
-          </li>
-        </ul>
-      </nz-spin>
-      <nz-pagination
-        *ngIf="archiveContentReviewTotal > archiveContentReviewPageSize"
-        nzSize="small"
-        [nzPageIndex]="archiveContentReviewPageIndex"
-        [nzPageSize]="archiveContentReviewPageSize"
-        [nzTotal]="archiveContentReviewTotal"
-        [nzShowSizeChanger]="false"
-        (nzPageIndexChange)="archiveContentReviewPageChanged($event)"
-      ></nz-pagination>
-    </section>
   </ng-container>
 </nz-modal>
 
@@ -2462,7 +2372,9 @@
 
 <nz-modal
   [(nzVisible)]="analysisTaskModalVisible"
-  nzTitle="Worker 状态与对局分析任务"
+  [nzTitle]="
+    analysisTaskModalView === 'workers' ? 'Worker 状态' : '对局分析任务'
+  "
   [nzFooter]="null"
   [nzWidth]="1040"
   (nzOnCancel)="analysisTaskModalVisible = false"
@@ -2471,6 +2383,7 @@
     <app-vainglory-analysis-task-center
       *ngIf="analysisQueue as queue; else analysisQueueLoading"
       [queue]="queue"
+      [view]="analysisTaskModalView"
       [sampledAt]="indexSampledAt"
       [updatingWorkerIds]="updatingAnalysisWorkerIds"
       (addWorker)="openAddAnalysisWorker()"

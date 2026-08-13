@@ -43,7 +43,6 @@ import {
   VaingloryAnchorStats,
   VaingloryArchiveBackfillItem,
   VaingloryArchiveBackfillRealtimeSnapshot,
-  VaingloryArchiveContentReview,
   VaingloryArchiveSync,
   VaingloryHero,
   VaingloryIndexRealtimeSnapshot,
@@ -280,6 +279,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   savingRecordedPlayerMatchId: number | null = null;
   savingRecordedPlayerSlot: number | null = null;
   analysisTaskModalVisible = false;
+  analysisTaskModalView: 'workers' | 'tasks' = 'tasks';
   analysisWorkerEditorVisible = false;
   analysisWorkerEditorMode: 'add' | 'edit' = 'add';
   analysisWorkerIdDraft = '';
@@ -310,12 +310,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   indexSampledAt: number | null = null;
   readonly requestingArchiveAccountIds = new Set<number>();
   readonly archiveDailyLimitDrafts = new Map<number, number>();
-  archiveContentReviews: readonly VaingloryArchiveContentReview[] = [];
-  archiveContentReviewTotal = 0;
-  archiveContentReviewPageIndex = 1;
-  readonly archiveContentReviewPageSize = 20;
-  archiveContentReviewsLoading = false;
-  archiveContentReviewsError: string | null = null;
   scanRequesting = false;
 
   previewSession: RecordingSessionDetail | null = null;
@@ -726,6 +720,12 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       relativeTo: this.route,
       queryParams: { sessionId },
     });
+  }
+
+  openAnalysisTaskCenter(view: 'workers' | 'tasks'): void {
+    this.analysisTaskModalView = view;
+    this.analysisTaskModalVisible = true;
+    this.changeDetector.markForCheck();
   }
 
   openAddAnalysisWorker(): void {
@@ -2553,8 +2553,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.archiveManagerVisible = true;
     this.archiveAccountsLoading = true;
     this.archiveAccountsError = null;
-    this.archiveContentReviewPageIndex = 1;
-    this.loadArchiveContentReviews();
     this.accounts
       .listAccounts()
       .pipe(takeUntil(this.destroy$))
@@ -2584,14 +2582,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   closeArchiveManager(): void {
     this.archiveManagerVisible = false;
     this.changeDetector.markForCheck();
-  }
-
-  archiveContentReviewPageChanged(pageIndex: number): void {
-    if (pageIndex === this.archiveContentReviewPageIndex) {
-      return;
-    }
-    this.archiveContentReviewPageIndex = pageIndex;
-    this.loadArchiveContentReviews();
   }
 
   requestArchiveSync(account: BiliAccount): void {
@@ -2635,10 +2625,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     return this.archiveItemsByAccountId.get(accountId) ?? [];
   }
 
-  archiveCurrentItem(accountId: number): VaingloryArchiveBackfillItem | null {
-    return this.archiveActiveItems(accountId)[0] ?? null;
-  }
-
   archiveActiveItems(
     accountId: number,
   ): readonly VaingloryArchiveBackfillItem[] {
@@ -2647,35 +2633,34 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       .slice(0, 3);
   }
 
-  archiveRecentItems(
-    accountId: number,
-  ): readonly VaingloryArchiveBackfillItem[] {
-    const activeIds = new Set(
-      this.archiveActiveItems(accountId).map((item) => item.id),
-    );
-    return this.archiveItems(accountId)
-      .filter((item) => !activeIds.has(item.id))
-      .slice(0, 5);
-  }
-
-  archiveStageLabel(item: VaingloryArchiveBackfillItem): string {
+  archiveIntakeLabel(item: VaingloryArchiveBackfillItem): string {
     return {
       queued: '等待领取',
       reading_metadata: '读取稿件信息',
       download_pending: '等待下载',
       downloading: '正在下载',
-      analysis_pending: '等待分析',
-      scanning_video: '扫描视频',
-      locating_results: '定位结算画面',
-      ocr_recognition: 'OCR 与英雄识别',
-      publication_pending: '等待回填新稿件',
-      publishing_description: '回填新稿件简介',
-      publishing_comments: '发布新稿件战绩评论',
-      pinning_comment: '置顶新稿件评论',
-      completed: '全部完成',
+      analysis_pending: '下载完成',
+      scanning_video: '下载完成',
+      locating_results: '下载完成',
+      ocr_recognition: '下载完成',
+      publication_pending: '下载完成',
+      publishing_description: '下载完成',
+      publishing_comments: '下载完成',
+      pinning_comment: '下载完成',
+      completed: '下载完成',
       managed_elsewhere: '已由录制或迁移流程接管',
       failed: '处理失败',
     }[item.stage];
+  }
+
+  archiveIntakePercent(item: VaingloryArchiveBackfillItem): number {
+    if (item.downloadProgress >= 0.999 || this.archiveStageAfterDownload(item)) {
+      return 100;
+    }
+    if (item.stage === 'downloading') {
+      return Math.max(0, Math.min(100, Math.round(item.downloadProgress * 100)));
+    }
+    return 0;
   }
 
   heroRecognitionPercent(summary: VaingloryIndexSummary): number {
@@ -2726,35 +2711,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     return workers.length > 0 && workers.every((worker) => !worker.enabled);
   }
 
-  archiveItemPercent(item: VaingloryArchiveBackfillItem): number {
-    switch (item.stage) {
-      case 'queued':
-      case 'reading_metadata':
-        return 0;
-      case 'download_pending':
-        return 5;
-      case 'downloading':
-        return Math.round(5 + item.downloadProgress * 25);
-      case 'analysis_pending':
-        return 30;
-      case 'scanning_video':
-      case 'locating_results':
-      case 'ocr_recognition':
-        return Math.round(30 + item.analysisProgress * 45);
-      case 'publication_pending':
-        return 75;
-      case 'publishing_description':
-      case 'publishing_comments':
-      case 'pinning_comment':
-        return Math.round(75 + item.publicationProgress * 25);
-      case 'completed':
-      case 'managed_elsewhere':
-        return 100;
-      case 'failed':
-        return Math.round(item.progress * 100);
-    }
-  }
-
   archiveDownloadLabel(item: VaingloryArchiveBackfillItem): string {
     const size = this.archiveDownloadSize(item);
     if (
@@ -2769,64 +2725,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       }`;
     }
     return '等待';
-  }
-
-  archiveAnalysisLabel(item: VaingloryArchiveBackfillItem): string {
-    if (
-      item.analysisState === 'ready' ||
-      this.archiveStageAfterAnalysis(item)
-    ) {
-      return '已完成';
-    }
-    if (item.stage === 'scanning_video') {
-      return `粗扫 ${Math.round((item.analysisProgress / 0.45) * 100)}%`;
-    }
-    if (item.stage === 'locating_results') {
-      return `定位 ${Math.round(
-        ((item.analysisProgress - 0.45) / 0.25) * 100,
-      )}%`;
-    }
-    if (item.stage === 'ocr_recognition') {
-      return '结算画面已定位';
-    }
-    return item.stage === 'analysis_pending' ? '等待执行' : '等待';
-  }
-
-  archiveOcrLabel(item: VaingloryArchiveBackfillItem): string {
-    if (
-      item.analysisState === 'ready' ||
-      this.archiveStageAfterAnalysis(item)
-    ) {
-      return '已完成';
-    }
-    if (item.stage === 'ocr_recognition') {
-      return `${Math.max(
-        0,
-        Math.min(100, Math.round(((item.analysisProgress - 0.7) / 0.3) * 100)),
-      )}%`;
-    }
-    return '等待';
-  }
-
-  archivePublicationLabel(item: VaingloryArchiveBackfillItem): string {
-    if (item.stage === 'managed_elsewhere') {
-      return '由原录制/迁移任务处理';
-    }
-    if (item.stage === 'completed') {
-      return item.matchCount > 0
-        ? '简介、评论和置顶已完成'
-        : '未发现对局，无需回填';
-    }
-    if (item.stage === 'publishing_description') {
-      return '正在更新简介';
-    }
-    if (item.stage === 'publishing_comments') {
-      return `评论 ${item.confirmedCommentCount}/${item.commentCount}`;
-    }
-    if (item.stage === 'pinning_comment') {
-      return '正在置顶评论';
-    }
-    return item.stage === 'publication_pending' ? '等待发布' : '等待';
   }
 
   archiveDailyLimit(accountId: number, sync: VaingloryArchiveSync): number {
@@ -2925,7 +2823,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       this.refreshArchiveSync(account.id);
       this.refreshArchiveItems(account.id);
     }
-    this.loadArchiveContentReviews();
   }
 
   private applyArchiveBackfillSnapshot(data: unknown): void {
@@ -3062,18 +2959,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     ].includes(item.stage);
   }
 
-  private archiveStageAfterAnalysis(
-    item: VaingloryArchiveBackfillItem,
-  ): boolean {
-    return [
-      'publication_pending',
-      'publishing_description',
-      'publishing_comments',
-      'pinning_comment',
-      'completed',
-    ].includes(item.stage);
-  }
-
   private archiveDownloadSize(item: VaingloryArchiveBackfillItem): string {
     if (item.downloadedBytes <= 0 && item.totalBytes === null) {
       return '';
@@ -3093,34 +2978,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       unit += 1;
     }
     return `${normalized.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-  }
-
-  private loadArchiveContentReviews(): void {
-    this.archiveContentReviewsLoading = true;
-    this.archiveContentReviewsError = null;
-    this.vainglory
-      .listArchiveContentReviews(
-        this.archiveContentReviewPageSize,
-        (this.archiveContentReviewPageIndex - 1) *
-          this.archiveContentReviewPageSize,
-      )
-      .pipe(takeUntil(this.destroy$))
-      .subscribe({
-        next: (page) => {
-          this.archiveContentReviewsLoading = false;
-          this.archiveContentReviewTotal = page.total;
-          this.archiveContentReviews = page.items;
-          this.changeDetector.markForCheck();
-        },
-        error: (error: unknown) => {
-          this.archiveContentReviewsLoading = false;
-          this.archiveContentReviewsError = this.errorMessage(
-            error,
-            '疑似非虚荣稿件列表加载失败',
-          );
-          this.changeDetector.markForCheck();
-        },
-      });
   }
 
   openMatch(match: VaingloryMatch, atResult = false): void {
