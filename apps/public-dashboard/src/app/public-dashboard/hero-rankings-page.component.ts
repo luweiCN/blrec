@@ -39,6 +39,7 @@ import {
   styleUrls: [
     './leaderboard-detail-page.scss',
     './leaderboard-detail-responsive.scss',
+    './hero-rankings-toolbar.scss',
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })

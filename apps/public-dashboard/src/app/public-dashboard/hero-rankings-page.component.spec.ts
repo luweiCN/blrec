@@ -50,6 +50,10 @@ describe('HeroRankingsPageComponent', () => {
     expect(component.filteredRows.length).toBe(14);
     expect(component.totalPages).toBe(2);
     expect(page.querySelectorAll('tbody tr').length).toBe(10);
+    expect(
+      page.querySelector('.directory-title-row .result-status')?.textContent,
+    ).toContain('1–10 / 14 名');
+    expect(page.querySelectorAll('.compact-ranking-control').length).toBe(2);
   });
 
   it('searches hero aliases by pinyin and returns to the first page', () => {

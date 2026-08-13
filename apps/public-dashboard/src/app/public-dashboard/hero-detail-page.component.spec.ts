@@ -80,10 +80,11 @@ describe('HeroDetailPageComponent', () => {
     ).map((element) => element.textContent ?? '');
     expect(playerLinks.some((value) => value.includes('星河'))).toBeTrue();
     expect(page.querySelector('.usage-rank')?.textContent).toContain('/');
-    expect(page.querySelector('.hero-synergy-columns')?.textContent).toContain(
+    expect(page.querySelectorAll('.hero-relationships-card').length).toBe(1);
+    expect(page.querySelector('.hero-relationship-groups')?.textContent).toContain(
       '二蛋',
     );
-    expect(page.querySelector('.hero-synergy-columns')?.textContent).toContain(
+    expect(page.querySelector('.hero-relationship-groups')?.textContent).toContain(
       '舞司',
     );
   });

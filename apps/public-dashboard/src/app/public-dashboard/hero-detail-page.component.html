@@ -104,86 +104,90 @@
       </p>
     </section>
 
-    <section class="profile-card hero-synergy-card" aria-labelledby="hero-synergy-title">
+    <section class="profile-card hero-relationships-card" aria-labelledby="hero-relationships-title">
       <header>
         <div>
-          <h2 id="hero-synergy-title">阵容搭配</h2>
+          <h2 id="hero-relationships-title">阵容关系</h2>
+          <p>完整结算阵容去重统计 · {{ modeLabel() }}</p>
         </div>
-        <span>同队至少 5 场 · {{ modeLabel() }}</span>
+        <span>至少 5 场后展示</span>
       </header>
-      <div class="hero-synergy-columns">
-        <section>
-          <h3>最佳搭配</h3>
-          <ol>
-            <li *ngFor="let synergy of bestSynergies; trackBy: trackSynergy">
-              <a [routerLink]="['/heroes', synergy.name]">
-                <img [src]="heroImage(synergy.name)" alt="" />
-                <strong>{{ heroName(synergy.name) }}</strong>
-              </a>
-              <span>{{ relationshipDelta(synergy) }}</span>
-              <small>{{ winRate(synergy) | percent: "1.0-1" }} · {{ synergy.matches }} 局</small>
-            </li>
-          </ol>
-          <p *ngIf="bestSynergies.length === 0" class="profile-empty">
-            当前模式还没有达到样本门槛的搭配。
-          </p>
+      <div class="hero-relationship-groups">
+        <section class="hero-relationship-group" aria-labelledby="hero-synergy-title">
+          <header>
+            <h3 id="hero-synergy-title">阵容搭配</h3>
+            <span>同队表现</span>
+          </header>
+          <div class="hero-relationship-list-grid">
+            <ng-container
+              *ngTemplateOutlet="relationshipList; context: {
+                title: '最佳搭配',
+                records: bestSynergies,
+                emptyText: '暂无达到样本门槛的搭配。',
+                negative: false
+              }"
+            ></ng-container>
+            <ng-container
+              *ngTemplateOutlet="relationshipList; context: {
+                title: '仍待磨合',
+                records: worstSynergies,
+                emptyText: '暂无达到样本门槛的搭配。',
+                negative: true
+              }"
+            ></ng-container>
+          </div>
         </section>
-        <section class="worst">
-          <h3>仍待磨合</h3>
-          <ol>
-            <li *ngFor="let synergy of worstSynergies; trackBy: trackSynergy">
-              <a [routerLink]="['/heroes', synergy.name]">
-                <img [src]="heroImage(synergy.name)" alt="" />
-                <strong>{{ heroName(synergy.name) }}</strong>
-              </a>
-              <span>{{ relationshipDelta(synergy) }}</span>
-              <small>{{ winRate(synergy) | percent: "1.0-1" }} · {{ synergy.matches }} 局</small>
-            </li>
-          </ol>
-          <p *ngIf="worstSynergies.length === 0" class="profile-empty">
-            当前模式还没有达到样本门槛的搭配。
-          </p>
-        </section>
-      </div>
-    </section>
 
-    <section class="profile-card hero-synergy-card" aria-labelledby="hero-counter-title">
-      <header>
-        <div>
-          <h2 id="hero-counter-title">阵容克制</h2>
-        </div>
-        <span>全场阵容去重统计 · {{ modeLabel() }}</span>
-      </header>
-      <div class="hero-synergy-columns">
-        <section>
-          <h3>更擅长应对</h3>
-          <ol>
-            <li *ngFor="let opponent of counters; trackBy: trackSynergy">
-              <a [routerLink]="['/heroes', opponent.name]">
-                <img [src]="heroImage(opponent.name)" alt="" />
-                <strong>{{ heroName(opponent.name) }}</strong>
-              </a>
-              <span>{{ relationshipDelta(opponent) }}</span>
-              <small>{{ winRate(opponent) | percent: "1.0-1" }} · {{ opponent.matches }} 局</small>
-            </li>
-          </ol>
-          <p *ngIf="counters.length === 0" class="profile-empty">当前模式还没有达到样本门槛的克制关系。</p>
-        </section>
-        <section class="worst">
-          <h3>更容易被克制</h3>
-          <ol>
-            <li *ngFor="let opponent of counteredBy; trackBy: trackSynergy">
-              <a [routerLink]="['/heroes', opponent.name]">
-                <img [src]="heroImage(opponent.name)" alt="" />
-                <strong>{{ heroName(opponent.name) }}</strong>
-              </a>
-              <span>{{ relationshipDelta(opponent) }}</span>
-              <small>{{ winRate(opponent) | percent: "1.0-1" }} · {{ opponent.matches }} 局</small>
-            </li>
-          </ol>
-          <p *ngIf="counteredBy.length === 0" class="profile-empty">当前模式还没有达到样本门槛的克制关系。</p>
+        <section class="hero-relationship-group" aria-labelledby="hero-counter-title">
+          <header>
+            <h3 id="hero-counter-title">阵容克制</h3>
+            <span>对手表现</span>
+          </header>
+          <div class="hero-relationship-list-grid">
+            <ng-container
+              *ngTemplateOutlet="relationshipList; context: {
+                title: '更擅长应对',
+                records: counters,
+                emptyText: '暂无达到样本门槛的克制关系。',
+                negative: false
+              }"
+            ></ng-container>
+            <ng-container
+              *ngTemplateOutlet="relationshipList; context: {
+                title: '更容易被克制',
+                records: counteredBy,
+                emptyText: '暂无达到样本门槛的克制关系。',
+                negative: true
+              }"
+            ></ng-container>
+          </div>
         </section>
       </div>
+
+      <ng-template
+        #relationshipList
+        let-title="title"
+        let-records="records"
+        let-emptyText="emptyText"
+        let-negative="negative"
+      >
+        <section [class.worst]="negative">
+          <h4>{{ title }}</h4>
+          <ol>
+            <li *ngFor="let record of records; trackBy: trackSynergy">
+              <a [routerLink]="['/heroes', record.name]">
+                <img [src]="heroImage(record.name)" alt="" />
+                <strong>{{ heroName(record.name) }}</strong>
+              </a>
+              <span>{{ relationshipDelta(record) }}</span>
+              <small>{{ winRate(record) | percent: "1.0-1" }} · {{ record.matches }} 局</small>
+            </li>
+          </ol>
+          <p *ngIf="records.length === 0" class="profile-empty">
+            {{ emptyText }}
+          </p>
+        </section>
+      </ng-template>
     </section>
 
     <section *ngIf="activeScope === 'streamer'" class="profile-card profile-table-card" aria-labelledby="hero-players-title">

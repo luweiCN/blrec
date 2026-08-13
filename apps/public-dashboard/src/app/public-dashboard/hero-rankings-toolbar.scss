@@ -1,0 +1,160 @@
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.hero-directory-toolbar {
+  grid-template-columns: minmax(250px, 1fr) auto;
+  gap: 24px;
+  align-items: center;
+  padding: 18px 20px;
+
+  .directory-heading > p {
+    max-width: 54ch;
+    margin-top: 5px;
+    line-height: 1.5;
+  }
+
+  .directory-title-row {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+  }
+
+  .result-status {
+    margin: 0;
+    padding-left: 12px;
+    border-left: 1px solid var(--line-soft);
+    font-size: var(--type-caption);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.directory-actions.hero-directory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  justify-self: end;
+}
+
+.hero-search-control {
+  width: min(280px, 27vw);
+
+  input {
+    min-height: 40px;
+    font-size: var(--type-label);
+  }
+}
+
+.hero-directory-options {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.compact-ranking-control {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+
+  & > span {
+    font-size: var(--type-caption);
+    white-space: nowrap;
+  }
+
+  & > div {
+    min-height: 40px;
+  }
+
+  button {
+    min-height: 32px;
+    padding: 0 10px;
+    font-size: var(--type-caption);
+  }
+}
+
+@media (max-width: 960px) {
+  .hero-directory-toolbar {
+    grid-template-columns: 1fr;
+
+    .hero-directory-actions {
+      grid-row: auto;
+      grid-column: 1;
+      justify-content: space-between;
+      justify-self: stretch;
+    }
+
+    .hero-search-control {
+      flex: 1 1 240px;
+      width: auto;
+    }
+
+    .result-status {
+      grid-row: auto;
+      grid-column: auto;
+    }
+  }
+}
+
+@media (max-width: 620px) {
+  .hero-directory-toolbar {
+    gap: 14px;
+    padding: 16px;
+
+    .directory-heading > p {
+      font-size: var(--type-caption);
+    }
+
+    .hero-directory-actions {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    .hero-search-control {
+      width: 100%;
+    }
+  }
+
+  .hero-directory-options {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .compact-ranking-control {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+
+    & > div {
+      width: 100%;
+    }
+
+    button {
+      flex: 1;
+      min-height: 34px;
+    }
+  }
+}
+
+@media (max-width: 480px) {
+  .hero-directory-toolbar {
+    .directory-title-row {
+      justify-content: space-between;
+    }
+
+    .result-status {
+      padding-left: 0;
+      border-left: 0;
+    }
+  }
+}

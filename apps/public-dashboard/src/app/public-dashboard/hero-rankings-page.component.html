@@ -26,65 +26,68 @@
 
   <section class="directory-panel" aria-labelledby="hero-directory-title">
     <header class="directory-toolbar hero-directory-toolbar">
-      <div>
-        <h2 id="hero-directory-title">全部英雄</h2>
+      <div class="directory-heading">
+        <div class="directory-title-row">
+          <h2 id="hero-directory-title">全部英雄</h2>
+          <p class="result-status" role="status" aria-live="polite">
+            {{ resultStart }}–{{ resultEnd }} / {{ filteredRows.length }} 名
+          </p>
+        </div>
         <p>{{ rankingHint }}</p>
       </div>
 
-      <div class="directory-actions">
-        <div class="ranking-sort-control hero-scope-control">
-          <span id="hero-scope-label">统计范围</span>
-          <div role="group" aria-labelledby="hero-scope-label">
-            <button
-              type="button"
-              [class.active]="activeScope === 'streamer'"
-              [attr.aria-pressed]="activeScope === 'streamer'"
-              (click)="selectScope('streamer')"
-            >主播使用</button>
-            <button
-              type="button"
-              [class.active]="activeScope === 'environment'"
-              [attr.aria-pressed]="activeScope === 'environment'"
-              (click)="selectScope('environment')"
-            >全场环境</button>
-          </div>
-        </div>
-        <div class="ranking-sort-control">
-          <span id="hero-ranking-sort-label">排序方式</span>
-          <div role="group" aria-labelledby="hero-ranking-sort-label">
-            <button
-              type="button"
-              [class.active]="activeSort === 'win-rate'"
-              [attr.aria-pressed]="activeSort === 'win-rate'"
-              (click)="selectSort('win-rate')"
-            >
-              胜率
-            </button>
-            <button
-              type="button"
-              [class.active]="activeSort === 'usage'"
-              [attr.aria-pressed]="activeSort === 'usage'"
-              (click)="selectSort('usage')"
-            >
-              使用次数
-            </button>
-          </div>
-        </div>
-
-        <label class="search-control">
-          <span>检索英雄</span>
+      <div class="directory-actions hero-directory-actions">
+        <label class="search-control hero-search-control">
+          <span class="visually-hidden">检索英雄</span>
           <input
             type="search"
             [value]="searchQuery"
-            placeholder="中文名、别名、拼音或英文名"
+            placeholder="搜索中文名、别名、拼音或英文名"
             (input)="updateSearch($event)"
           />
         </label>
-      </div>
 
-      <p class="result-status" role="status" aria-live="polite">
-        {{ resultStart }}–{{ resultEnd }} / {{ filteredRows.length }} 名
-      </p>
+        <div class="hero-directory-options">
+          <div class="ranking-sort-control compact-ranking-control hero-scope-control">
+            <span id="hero-scope-label">范围</span>
+            <div role="group" aria-labelledby="hero-scope-label">
+              <button
+                type="button"
+                [class.active]="activeScope === 'streamer'"
+                [attr.aria-pressed]="activeScope === 'streamer'"
+                (click)="selectScope('streamer')"
+              >主播使用</button>
+              <button
+                type="button"
+                [class.active]="activeScope === 'environment'"
+                [attr.aria-pressed]="activeScope === 'environment'"
+                (click)="selectScope('environment')"
+              >全场环境</button>
+            </div>
+          </div>
+          <div class="ranking-sort-control compact-ranking-control">
+            <span id="hero-ranking-sort-label">排序</span>
+            <div role="group" aria-labelledby="hero-ranking-sort-label">
+              <button
+                type="button"
+                [class.active]="activeSort === 'win-rate'"
+                [attr.aria-pressed]="activeSort === 'win-rate'"
+                (click)="selectSort('win-rate')"
+              >
+                胜率
+              </button>
+              <button
+                type="button"
+                [class.active]="activeSort === 'usage'"
+                [attr.aria-pressed]="activeSort === 'usage'"
+                (click)="selectSort('usage')"
+              >
+                使用次数
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </header>
 
     <div class="directory-table-wrap">
