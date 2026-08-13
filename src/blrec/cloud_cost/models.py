@@ -34,13 +34,22 @@ class BillableUsageItem(CloudCostModel):
     name: str
     usage: float
     unit: str
+    list_price: Optional[float] = None
+    list_price_unit: str = ''
     pretax_amount: float
     payment_amount: float
 
 
 class OssUsage(CostTotals):
     bucket: str
+    storage_bytes: Optional[int] = None
+    object_count: Optional[int] = None
+    storage_measured_at: Optional[datetime] = None
     items: List[BillableUsageItem] = Field(default_factory=list)
+
+
+class DailyCost(CostTotals):
+    date: str
 
 
 class CdnDailyUsage(CloudCostModel):
@@ -67,6 +76,7 @@ class CloudCostSummary(CloudCostModel):
     totals: CostTotals
     products: List[ProductCost] = Field(default_factory=list)
     trend: List[CostTrendPoint] = Field(default_factory=list)
+    daily: List[DailyCost] = Field(default_factory=list)
     oss: Optional[OssUsage] = None
     cdn: Optional[CdnUsage] = None
     warnings: List[str] = Field(default_factory=list)

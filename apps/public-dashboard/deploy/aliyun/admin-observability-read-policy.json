@@ -5,9 +5,15 @@
       "Effect": "Allow",
       "Action": [
         "bss:DescribeBillList",
+        "bss:QueryAccountBill",
         "bssapi:DescribeInstanceBill"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "oss:GetBucketStat",
+      "Resource": "acs:oss:*:*:luwei-vainglory"
     },
     {
       "Effect": "Allow",

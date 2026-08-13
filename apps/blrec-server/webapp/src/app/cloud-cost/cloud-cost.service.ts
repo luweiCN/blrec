@@ -12,8 +12,14 @@ export class CloudCostService {
     private readonly url: UrlService,
   ) {}
 
-  summary(refresh = false): Observable<CloudCostSummary> {
-    const params = new HttpParams().set('refresh', refresh);
+  summary(
+    refresh = false,
+    billingCycle?: string,
+  ): Observable<CloudCostSummary> {
+    let params = new HttpParams().set('refresh', refresh);
+    if (billingCycle) {
+      params = params.set('billing_cycle', billingCycle);
+    }
     return this.http.get<CloudCostSummary>(
       this.url.makeApiUrl('/api/v1/cloud-cost/summary'),
       { params },

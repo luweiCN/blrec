@@ -48,9 +48,20 @@
   font-size: 12px;
 }
 
+.billing-cycle-field {
+  display: grid;
+  gap: 4px;
+
+  > span {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 600;
+  }
+}
+
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -160,6 +171,13 @@
     small {
       color: #9ca3af;
     }
+
+    .product-explanation {
+      max-width: 240px;
+      color: #64748b;
+      line-height: 1.45;
+      white-space: normal;
+    }
   }
 }
 
@@ -193,7 +211,7 @@
 
   > div {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
     padding: 10px 0;
@@ -202,12 +220,28 @@
 
   span {
     display: grid;
+    min-width: 0;
     gap: 2px;
+  }
+
+  b {
+    flex: none;
+    font-variant-numeric: tabular-nums;
   }
 
   small {
     color: #8c8c8c;
   }
+
+  .usage-explanation {
+    max-width: 520px;
+    color: #64748b;
+    line-height: 1.5;
+  }
+}
+
+.oss-facts {
+  margin-bottom: 12px;
 }
 
 .scope-note {
@@ -227,6 +261,12 @@
   }
 }
 
+@media (max-width: 1100px) and (min-width: 901px) {
+  .metric-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 600px) {
   .operations-page {
     padding: 16px 12px 24px;
@@ -237,6 +277,8 @@
   }
 
   .heading-actions {
+    align-items: flex-end;
+    flex-wrap: wrap;
     justify-content: space-between;
   }
 

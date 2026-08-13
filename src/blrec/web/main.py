@@ -27,6 +27,7 @@ from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.cloud_cost import (
     AliyunCloudCostService,
     AliyunOpenApiClient,
+    AliyunOssStatClient,
     CloudCostConfig,
 )
 from blrec.control.operations import ControlOperationJournal
@@ -216,7 +217,16 @@ _cloud_cost_client = AliyunOpenApiClient(
         'cloud_cost', anonymous=False, affinity_key='aliyun-cloud-cost'
     ),
 )
-cloud_cost.service = AliyunCloudCostService(_cloud_cost_config, _cloud_cost_client)
+_cloud_cost_oss_client = AliyunOssStatClient(
+    _cloud_cost_config.access_key_id or '',
+    _cloud_cost_config.access_key_secret or '',
+    lambda: app.network_session(
+        'cloud_cost', anonymous=False, affinity_key='aliyun-cloud-cost'
+    ),
+)
+cloud_cost.service = AliyunCloudCostService(
+    _cloud_cost_config, _cloud_cost_client, _cloud_cost_oss_client
+)
 
 _visitor_analytics_config = VisitorAnalyticsConfig.from_env()
 _visitor_analytics_client = AliyunSlsQueryClient(

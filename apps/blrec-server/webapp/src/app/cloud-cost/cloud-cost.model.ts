@@ -26,13 +26,22 @@ export interface BillableUsageItem {
   name: string;
   usage: number;
   unit: string;
+  listPrice: number | null;
+  listPriceUnit: string;
   pretaxAmount: number;
   paymentAmount: number;
 }
 
 export interface OssUsage extends CostTotals {
   bucket: string;
+  storageBytes: number | null;
+  objectCount: number | null;
+  storageMeasuredAt: string | null;
   items: BillableUsageItem[];
+}
+
+export interface DailyCost extends CostTotals {
+  date: string;
 }
 
 export interface CdnDailyUsage {
@@ -59,6 +68,7 @@ export interface CloudCostSummary {
   totals: CostTotals;
   products: ProductCost[];
   trend: CostTrendPoint[];
+  daily: DailyCost[];
   oss: OssUsage | null;
   cdn: CdnUsage | null;
   warnings: string[];

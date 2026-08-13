@@ -6,6 +6,17 @@
       <p>集中查看阿里云账单、CDN 流量与 OSS 计费用量。</p>
     </div>
     <div class="heading-actions">
+      <label class="billing-cycle-field">
+        <span>查看账期</span>
+        <nz-month-picker
+          aria-label="选择云成本账期"
+          nzFormat="yyyy-MM"
+          [ngModel]="selectedMonth"
+          [nzAllowClear]="false"
+          [nzDisabledDate]="disableFutureMonth"
+          (ngModelChange)="changeMonth($event)"
+        ></nz-month-picker>
+      </label>
       <span *ngIf="summary">
         更新于 {{ summary.generatedAt | date: "MM-dd HH:mm:ss" }} · 缓存
         {{ summary.cacheSeconds / 60 | number: "1.0-0" }} 分钟
@@ -39,14 +50,14 @@
 
   <nz-spin [nzSpinning]="loading">
     <ng-container *ngIf="summary as data">
-      <section class="metric-grid" aria-label="本月费用概览">
+      <section class="metric-grid" aria-label="所选账期费用概览">
         <article class="metric-card primary">
           <span>{{ data.billingCycle }} 应付</span>
           <strong>{{ money(data.totals.pretaxAmount, data.currency) }}</strong>
-          <small>阿里云账号本月账单</small>
+          <small>阿里云账号所选账期账单</small>
         </article>
         <article class="metric-card">
-          <span>本月实付</span>
+          <span>本账期实付</span>
           <strong>{{ money(data.totals.paymentAmount, data.currency) }}</strong>
           <small>优惠与抵扣后的金额</small>
         </article>
@@ -56,9 +67,18 @@
           <small>账单接口返回的未付金额</small>
         </article>
         <article class="metric-card">
-          <span>CDN 本月流量</span>
+          <span>CDN 本账期流量</span>
           <strong>{{ bytes(data.cdn?.trafficBytes || 0) }}</strong>
           <small>{{ data.cdn?.requests || 0 | number }} 次请求</small>
+        </article>
+        <article class="metric-card">
+          <span>OSS 当前占用</span>
+          <strong>
+            {{ data.oss?.storageBytes === null || data.oss?.storageBytes === undefined ? "—" : bytes(data.oss?.storageBytes || 0) }}
+          </strong>
+          <small>
+            {{ data.oss?.objectCount === null || data.oss?.objectCount === undefined ? "桶统计暂不可用" : (data.oss?.objectCount | number) + " 个对象" }}
+          </small>
         </article>
       </section>
 
@@ -81,11 +101,29 @@
           </ng-template>
         </article>
 
+        <article class="panel trend-panel">
+          <header class="panel-heading">
+            <div>
+              <h2>每日账单</h2>
+              <p>{{ data.billingCycle }} · 阿里云日账单通常延迟约 24 小时</p>
+            </div>
+          </header>
+          <div
+            *ngIf="data.daily.length > 0; else noDaily"
+            class="cost-chart"
+            echarts
+            [options]="dailyChartOptions"
+          ></div>
+          <ng-template #noDaily>
+            <nz-empty nzNotFoundContent="该账期暂无日账单"></nz-empty>
+          </ng-template>
+        </article>
+
         <article class="panel">
           <header class="panel-heading">
             <div>
               <h2>产品费用</h2>
-              <p>当前账期按云产品汇总</p>
+              <p>所选账期按云产品汇总</p>
             </div>
           </header>
           <div class="table-scroll">
@@ -103,6 +141,9 @@
                   <td>
                     <strong>{{ product.productName }}</strong>
                     <small>{{ product.productCode }}</small>
+                    <small class="product-explanation">
+                      {{ productExplanation(product) }}
+                    </small>
                   </td>
                   <td>{{ money(product.pretaxAmount, data.currency) }}</td>
                   <td>{{ money(product.paymentAmount, data.currency) }}</td>
@@ -113,7 +154,7 @@
           </div>
           <nz-empty
             *ngIf="data.products.length === 0"
-            nzNotFoundContent="当前账期暂无账单"
+            nzNotFoundContent="所选账期暂无账单"
           ></nz-empty>
         </article>
 
@@ -127,7 +168,7 @@
           </header>
           <dl class="resource-facts">
             <div>
-              <dt>本月流量</dt>
+              <dt>本账期流量</dt>
               <dd>{{ bytes(data.cdn?.trafficBytes || 0) }}</dd>
             </div>
             <div>
@@ -154,11 +195,36 @@
             </div>
             <strong>{{ money(data.oss?.pretaxAmount || 0, data.currency) }}</strong>
           </header>
+          <dl class="resource-facts oss-facts">
+            <div>
+              <dt>当前总占用</dt>
+              <dd>
+                {{ data.oss?.storageBytes === null || data.oss?.storageBytes === undefined ? "—" : bytes(data.oss?.storageBytes || 0) }}
+              </dd>
+            </div>
+            <div>
+              <dt>对象数量</dt>
+              <dd>
+                {{ data.oss?.objectCount === null || data.oss?.objectCount === undefined ? "—" : (data.oss?.objectCount | number) }}
+              </dd>
+            </div>
+            <div>
+              <dt>容量统计时间</dt>
+              <dd>
+                {{ data.oss?.storageMeasuredAt ? (data.oss?.storageMeasuredAt | date: "MM-dd HH:mm") : "—" }}
+              </dd>
+            </div>
+          </dl>
           <div class="usage-list">
             <div *ngFor="let item of data.oss?.items">
               <span>
                 <strong>{{ item.name }}</strong>
                 <small>{{ usage(item) }}</small>
+                <small>{{ unitPrice(item) }}</small>
+                <small class="usage-explanation">{{ usageExplanation(item) }}</small>
+                <small *ngIf="storageAverage(item) as average" class="usage-explanation">
+                  {{ average }}（根据账单用量单位估算）
+                </small>
               </span>
               <b>{{ money(item.pretaxAmount, data.currency) }}</b>
             </div>
@@ -168,7 +234,7 @@
             nzNotFoundContent="暂无 OSS 计费明细"
           ></nz-empty>
           <p class="scope-note">
-            计费用量与费用来自账号 OSS 月账单；阿里云账单接口不支持精确拆分到单个桶。
+            当前占用来自 {{ data.oss?.bucket }} 的 Bucket 统计，通常延迟一小时以上；计费用量与费用来自账号 OSS 月账单，不能精确拆分到单个桶。
           </p>
         </article>
       </section>

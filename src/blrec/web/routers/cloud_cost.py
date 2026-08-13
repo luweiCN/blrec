@@ -19,5 +19,15 @@ def _service() -> AliyunCloudCostService:
 
 
 @router.get('/summary', response_model=CloudCostSummary)
-async def get_summary(refresh: bool = Query(False)) -> CloudCostSummary:
-    return await _service().summary(force_refresh=refresh)
+async def get_summary(
+    refresh: bool = Query(False),
+    billing_cycle: Optional[str] = Query(None, regex=r'^\d{4}-(0[1-9]|1[0-2])$'),
+) -> CloudCostSummary:
+    try:
+        return await _service().summary(
+            force_refresh=refresh, billing_cycle=billing_cycle
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
