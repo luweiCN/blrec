@@ -326,6 +326,8 @@ class FakePublicationProtocol:
         self.chapter_calls: List[Mapping[str, Any]] = []
         self.chapter_batches: List[Tuple[Mapping[str, Any], ...]] = []
         self.chapter_cards: Tuple[Mapping[str, Any], ...] = ()
+        self.public_chapter_cards: Optional[Tuple[Mapping[str, Any], ...]] = None
+        self.public_reply_result: Any = None
         self.add_reply_result: Any = {'code': 0, 'data': {'rpid': 501}}
         self.list_replies_result: Mapping[str, Any] = {
             'code': 0,
@@ -338,7 +340,22 @@ class FakePublicationProtocol:
         self.public_archive_calls.append(bvid)
         if isinstance(self.public_archive_result, Exception):
             raise self.public_archive_result
-        return self.public_archive_result
+        result = dict(self.public_archive_result)
+        data = result.get('data')
+        if isinstance(data, Mapping):
+            result['data'] = {**data, 'desc': self.description}
+        return result
+
+    async def public_player_view(
+        self, _bundle: object, *, aid: int, cid: int
+    ) -> Mapping[str, Any]:
+        assert (aid, cid) == (303, 401)
+        cards = (
+            self.chapter_cards
+            if self.public_chapter_cards is None
+            else self.public_chapter_cards
+        )
+        return {'code': 0, 'data': {'view_points': list(cards)}}
 
     async def archive_view(
         self, _bundle: object, _params: Mapping[str, Any]
@@ -444,15 +461,37 @@ class FakePublicationProtocol:
     async def reply_detail(
         self, _bundle: object, _params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
+        content = next(
+            (
+                str(call['message'])
+                for call in reversed(self.add_reply_calls)
+                if str(call.get('message') or '')
+            ),
+            '',
+        )
         return {
             'code': 0,
             'data': {
                 'root': {
                     'rpid': 501,
-                    'content': {'pictures': [{'img_src': 'result.png'}]},
+                    'oid': 303,
+                    'mid': 42,
+                    'content': {
+                        'message': content,
+                        'pictures': [{'img_src': 'result.png'}],
+                    },
                 }
             },
         }
+
+    async def public_reply_detail(
+        self, bundle: object, params: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if isinstance(self.public_reply_result, BaseException):
+            raise self.public_reply_result
+        if isinstance(self.public_reply_result, Mapping):
+            return self.public_reply_result
+        return await self.reply_detail(bundle, params)
 
 
 async def seed_publication_match(
@@ -583,6 +622,68 @@ async def test_service_preserves_description_posts_picture_and_pins_once(
             await database.scalar('SELECT state FROM vainglory_publications')
             == 'confirmed'
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publication_is_not_confirmed_until_remote_content_is_visible(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        for _ in range(5):
+            assert await service.run_once() is True
+        protocol.public_chapter_cards = ()
+        protocol.public_reply_result = BiliApiError(
+            12006, operation='public_reply_detail'
+        )
+
+        assert await service.run_once() is True
+
+        row = await database.fetchone(
+            'SELECT state,chapter_state,description_state,pin_state,'
+            'root_rpid,remote_verified_at,error FROM vainglory_publications'
+        )
+        assert dict(row) == {
+            'state': 'prepared',
+            'chapter_state': 'prepared',
+            'description_state': 'confirmed',
+            'pin_state': 'prepared',
+            'root_rpid': None,
+            'remote_verified_at': None,
+            'error': '远端缺少视频分段、评论，将重新发布',
+        }
+        assert (
+            await database.scalar('SELECT state FROM vainglory_publication_comments')
+            == 'prepared'
+        )
+
+        await database.execute('UPDATE vainglory_publications SET next_attempt_at=0')
+        protocol.public_chapter_cards = None
+        protocol.public_reply_result = None
+        protocol.add_reply_calls.clear()
+        for _ in range(4):
+            assert await service.run_once() is True
+
+        confirmed = await database.fetchone(
+            'SELECT state,remote_verified_at FROM vainglory_publications'
+        )
+        assert dict(confirmed) == {'state': 'confirmed', 'remote_verified_at': 1000}
+        assert len(protocol.chapter_batches) == 2
+        assert len(protocol.add_reply_calls) == 1
     finally:
         await database.close()
 
@@ -868,6 +969,21 @@ async def test_publication_status_distinguishes_retry_from_bad_analysis_data(
         invalid = (await service.publication_statuses((1,)))[1]
         assert invalid.code == 'analysis_data_invalid'
         assert invalid.recommended_action == 'reanalyze'
+
+        await database.execute(
+            "UPDATE vainglory_publications SET state='confirmed',error=NULL,"
+            'remote_verified_at=NULL'
+        )
+        unverified = (await service.publication_statuses((1,)))[1]
+        assert unverified.code == 'remote_verification_pending'
+        assert unverified.recommended_action == 'wait'
+
+        await database.execute(
+            'UPDATE vainglory_publications SET remote_verified_at=1000'
+        )
+        confirmed = (await service.publication_statuses((1,)))[1]
+        assert confirmed.code == 'confirmed'
+        assert confirmed.recommended_action == 'none'
     finally:
         await database.close()
 

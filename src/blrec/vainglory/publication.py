@@ -176,6 +176,7 @@ def _publication_task_status(row: Mapping[str, Any]) -> PublicationTaskStatus:
     scan_state = None if row.get('scan_state') is None else str(row['scan_state'])
     operator_paused = bool(row.get('operator_paused'))
     next_attempt = int(row.get('next_attempt_at') or 0)
+    remote_verified = row.get('remote_verified_at') is not None
 
     code = 'queued'
     label = '发布队列中'
@@ -247,11 +248,16 @@ def _publication_task_status(row: Mapping[str, Any]) -> PublicationTaskStatus:
         label = '识别数据需重新分析'
         detail = error
         action = 'reanalyze'
-    elif publication_state == 'confirmed':
+    elif publication_state == 'confirmed' and remote_verified:
         code = 'confirmed'
         label = '发布内容已全部完成'
         detail = None
         action = 'none'
+    elif publication_state == 'confirmed':
+        code = 'remote_verification_pending'
+        label = '等待公开内容复核'
+        detail = error or '尚未确认匿名访客可以看到简介、评论和视频分段。'
+        action = 'wait'
     elif publication_state == 'running':
         code = 'running'
         label = '正在发布'
@@ -488,7 +494,7 @@ def remove_generated_description(current: str, block: str) -> str:
 
 class VaingloryPublicationService:
     _RETRYABLE_CODES = frozenset((-412, -352, 412, 429, 12015, 12051))
-    _MISSING_REPLY_CODES = frozenset((-404, 404, 12002))
+    _MISSING_REPLY_CODES = frozenset((-404, 404, 12002, 12006))
     _PERMANENT_CODES = frozenset(
         (-403, 403, 12002, 12003, 12009, 12016, 12025, 12035, 12045, 12052)
     )
@@ -528,6 +534,7 @@ class VaingloryPublicationService:
         self._delivery_wake = asyncio.Event()
         self._discovery_task: Optional[asyncio.Task[None]] = None
         self._delivery_task: Optional[asyncio.Task[None]] = None
+        self._last_audit_publication = False
 
     async def start(self) -> None:
         if self._discovery_task is not None or self._delivery_task is not None:
@@ -571,6 +578,7 @@ class VaingloryPublicationService:
             'SELECT publication.session_id,publication.source_kind,'
             'publication.state AS publication_state,publication.plan_state,'
             'publication.next_attempt_at,publication.error,'
+            'publication.remote_verified_at,'
             'upload.state AS upload_state,upload.review_reason,'
             'scan.state AS scan_state,scan.error AS scan_error,'
             'EXISTS(SELECT 1 FROM archive_migration_items paused_item '
@@ -690,7 +698,7 @@ class VaingloryPublicationService:
                     "UPDATE vainglory_publications SET state='prepared',"
                     'comment_cleanup_state=\'prepared\',pin_state=?,'
                     'root_rpid=NULL,attempt_count=0,next_attempt_at=0,error=NULL,'
-                    'priority=1,updated_at=? WHERE id=?',
+                    'remote_verified_at=NULL,priority=1,updated_at=? WHERE id=?',
                     (
                         'confirmed' if not plan.comments else 'prepared',
                         now,
@@ -702,7 +710,8 @@ class VaingloryPublicationService:
                 connection.execute(
                     'UPDATE vainglory_publications SET state=\'prepared\','
                     '{}=\'prepared\',attempt_count=0,next_attempt_at=0,error=NULL,'
-                    'priority=1,updated_at=? WHERE id=?'.format(column),
+                    'remote_verified_at=NULL,priority=1,updated_at=? '
+                    'WHERE id=?'.format(column),
                     (now, publication_id),
                 )
             return publication_id, str(publication['bvid'])
@@ -935,6 +944,16 @@ class VaingloryPublicationService:
             return await self._run_delivery_once_locked()
 
     async def _run_delivery_once_locked(self) -> bool:
+        has_new_work = bool(
+            await self._database.scalar(
+                'SELECT EXISTS(SELECT 1 FROM vainglory_publications '
+                "WHERE state IN ('prepared','running','paused') "
+                'AND needs_refresh=0 AND plan_state=\'ready\' AND priority>0 '
+                'AND next_attempt_at<=?)',
+                (self._now(),),
+            )
+        )
+        include_audit = not (self._last_audit_publication and has_new_work)
         work_query = (
             'SELECT publication.*,account.state AS account_state,'
             'account.credential_version,account.uid AS account_uid '
@@ -964,6 +983,8 @@ class VaingloryPublicationService:
             'AND '
             + _PUBLICATION_READY_PREDICATE
             + ' AND publication.next_attempt_at<=? '
+            'AND (publication.remote_verified_at IS NOT NULL '
+            'OR publication.priority>0 OR ?) '
             'ORDER BY publication.priority DESC,CASE '
             "WHEN publication.source_kind='upload' AND NOT EXISTS("
             'SELECT 1 FROM archive_migration_items priority_item '
@@ -979,11 +1000,18 @@ class VaingloryPublicationService:
                 EXCLUDED_TITLE_MARKER,
                 EXCLUDED_TITLE_MARKER,
                 self._now(),
+                int(include_audit),
             ),
         )
         if row is not None:
-            await self._process(dict(row))
+            publication = dict(row)
+            self._last_audit_publication = (
+                publication['remote_verified_at'] is None
+                and int(publication['priority']) == 0
+            )
+            await self._process(publication)
             return True
+        self._last_audit_publication = False
         return False
 
     async def _run_discovery(self) -> None:
@@ -1155,7 +1183,8 @@ class VaingloryPublicationService:
                     'comment_cleanup_state=\'prepared\',pin_state=?,'
                     'root_rpid=NULL,attempt_count=0,next_attempt_at=0,error=NULL,'
                     "needs_refresh=0,plan_state='ready',match_count=?,"
-                    'force_republish=0,active_revision_id=?,updated_at=? WHERE id=?',
+                    'force_republish=0,active_revision_id=?,remote_verified_at=NULL,'
+                    'updated_at=? WHERE id=?',
                     (
                         selected.session_id,
                         selected.upload_job_id,
@@ -1361,10 +1390,18 @@ class VaingloryPublicationService:
                     await self._remove_stale_comment(publication, stale_comment, bundle)
                     return
                 if str(publication['chapter_state']) != 'confirmed':
-                    await self._publish_chapters(publication, bundle)
+                    await self._publish_chapters(
+                        publication,
+                        bundle,
+                        force=publication['remote_verified_at'] is None,
+                    )
                     return
                 if str(publication['description_state']) != 'confirmed':
-                    await self._publish_description(publication, bundle)
+                    await self._publish_description(
+                        publication,
+                        bundle,
+                        force=publication['remote_verified_at'] is None,
+                    )
                     return
                 comment = await self._next_comment(publication_id)
                 if comment is not None:
@@ -1379,6 +1416,8 @@ class VaingloryPublicationService:
                     return
                 if str(publication['pin_state']) != 'confirmed':
                     await self._publish_pin(publication, bundle)
+                    return
+                if not await self._verify_remote_publication(publication, bundle):
                     return
                 now = self._now()
 
@@ -1402,9 +1441,10 @@ class VaingloryPublicationService:
                     connection.execute(
                         "UPDATE vainglory_publications SET state='confirmed',"
                         'needs_refresh=0,error=NULL,priority=0,'
-                        'published_revision_id=active_revision_id,updated_at=? '
+                        'published_revision_id=active_revision_id,'
+                        'remote_verified_at=?,updated_at=? '
                         'WHERE id=?',
-                        (now, publication_id),
+                        (now, now, publication_id),
                     )
 
                 await self._database.write(confirm)
@@ -1421,6 +1461,190 @@ class VaingloryPublicationService:
                 int(publication['attempt_count']),
                 '投稿账号或凭据在发布期间发生变化',
             )
+
+    async def _verify_remote_publication(
+        self, publication: Mapping[str, Any], bundle: CredentialBundle
+    ) -> bool:
+        publication_id = int(publication['id'])
+        try:
+            public = await self._protocol.public_archive_view(
+                bundle, bvid=str(publication['bvid'])
+            )
+            data = public.get('data')
+            if not isinstance(data, Mapping):
+                raise ProtocolContractError('public archive response is incomplete')
+            remote_description = str(data.get('desc') or '')
+            expected_description = str(publication['description_block'])
+            description_ok = (
+                remove_generated_description(remote_description, expected_description)
+                == remote_description
+                if int(publication['match_count']) == 0
+                else merge_archive_description(remote_description, expected_description)
+                == remote_description
+            )
+            chapter_ok = await self._remote_chapters_match(
+                publication, bundle, _chapter_pages(public)
+            )
+            comments_ok = await self._remote_comments_match(publication, bundle)
+        except (BiliApiError, DefinitelyNotSent, RemoteOutcomeUnknown):
+            await self._retry_publication(
+                publication_id,
+                int(publication['attempt_count']),
+                '远端复核失败，将自动重试',
+                minimum_delay=60,
+            )
+            return False
+        except ProtocolContractError:
+            await self._retry_publication(
+                publication_id,
+                int(publication['attempt_count']),
+                '远端复核数据异常，将自动重试',
+                minimum_delay=3600,
+            )
+            return False
+        if description_ok and chapter_ok and comments_ok:
+            return True
+        await self._reset_unverified_steps(
+            publication_id,
+            attempt=int(publication['attempt_count']),
+            description_ok=description_ok,
+            chapter_ok=chapter_ok,
+            comments_ok=comments_ok,
+        )
+        return False
+
+    async def _remote_chapters_match(
+        self,
+        publication: Mapping[str, Any],
+        bundle: CredentialBundle,
+        pages: Sequence['_ChapterPage'],
+    ) -> bool:
+        matches: Tuple[MatchRecord, ...] = ()
+        if int(publication['match_count']) > 0:
+            session_matches = await self._session_matches(
+                int(publication['session_id'])
+            )
+            matches = tuple(
+                match
+                for match in session_matches
+                if match.bvid == str(publication['bvid'])
+            )
+        targets = _chapter_targets(matches, pages)
+        target_by_page = {page.page: cards for page, cards in targets}
+        for page in pages:
+            response = await self._protocol.public_player_view(
+                bundle, aid=int(publication['aid']), cid=page.cid
+            )
+            existing = _public_chapter_cards(response)
+            expected = target_by_page.get(page.page, ())
+            if existing and not _automatic_chapter_cards(existing):
+                continue
+            if not _same_chapter_cards(existing, expected):
+                return False
+        return bool(pages)
+
+    async def _remote_comments_match(
+        self, publication: Mapping[str, Any], bundle: CredentialBundle
+    ) -> bool:
+        comments = await self._database.fetchall(
+            'SELECT content,rpid,uploaded_pictures_json '
+            'FROM vainglory_publication_comments '
+            'WHERE publication_id=? ORDER BY ordinal',
+            (int(publication['id']),),
+        )
+        for comment in comments:
+            rpid = _positive_int(comment['rpid'])
+            if rpid is None:
+                return False
+            try:
+                response = await self._protocol.public_reply_detail(
+                    bundle,
+                    {
+                        'type': 1,
+                        'oid': int(publication['aid']),
+                        'root': rpid,
+                        'pn': 1,
+                        'ps': 20,
+                    },
+                )
+            except BiliApiError as error:
+                if error.code in self._MISSING_REPLY_CODES:
+                    return False
+                raise
+            root = _reply_root(response)
+            if not _reply_matches(
+                root,
+                content=str(comment['content']),
+                account_uid=int(publication['account_uid']),
+                aid=int(publication['aid']),
+                root_rpid=None,
+                is_root=True,
+            ):
+                return False
+            expected_pictures = sum(
+                picture is not None
+                for picture in _json_pictures(comment['uploaded_pictures_json'])
+            )
+            if _reply_picture_count(root) < expected_pictures:
+                return False
+        return True
+
+    async def _reset_unverified_steps(
+        self,
+        publication_id: int,
+        *,
+        attempt: int,
+        description_ok: bool,
+        chapter_ok: bool,
+        comments_ok: bool,
+    ) -> None:
+        missing = [
+            label
+            for ok, label in (
+                (description_ok, '简介'),
+                (chapter_ok, '视频分段'),
+                (comments_ok, '评论'),
+            )
+            if not ok
+        ]
+        message = '远端缺少{}，将重新发布'.format('、'.join(missing))
+        now = self._now()
+        retry_delay = max(60, min(6 * 3600, 2 ** min(attempt + 1, 14)))
+
+        def reset(connection: sqlite3.Connection) -> None:
+            if not comments_ok:
+                connection.execute(
+                    "UPDATE vainglory_publication_comments SET state='prepared',"
+                    'rpid=NULL,uploaded_pictures_json=\'[]\',next_attempt_at=0,'
+                    'error=?,updated_at=? WHERE publication_id=?',
+                    (message, now, publication_id),
+                )
+            connection.execute(
+                "UPDATE vainglory_publications SET state='prepared',"
+                'chapter_state=?,description_state=?,comment_cleanup_state=?,'
+                'pin_state=?,root_rpid=?,remote_verified_at=NULL,'
+                'next_attempt_at=?,error=?,priority=0,updated_at=? WHERE id=?',
+                (
+                    'confirmed' if chapter_ok else 'prepared',
+                    'confirmed' if description_ok else 'prepared',
+                    'prepared' if not comments_ok else 'confirmed',
+                    'prepared' if not comments_ok else 'confirmed',
+                    (
+                        None
+                        if not comments_ok
+                        else connection.execute(
+                            'SELECT root_rpid FROM vainglory_publications WHERE id=?',
+                            (publication_id,),
+                        ).fetchone()[0]
+                    ),
+                    now + retry_delay,
+                    message,
+                    now,
+                    publication_id,
+                ),
+            )
+
+        await self._database.write(reset)
 
     async def _confirm_public_visibility(
         self, publication: Mapping[str, Any], bundle: CredentialBundle
@@ -1632,7 +1856,11 @@ class VaingloryPublicationService:
         )
 
     async def _publish_chapters(
-        self, publication: Mapping[str, Any], bundle: CredentialBundle
+        self,
+        publication: Mapping[str, Any],
+        bundle: CredentialBundle,
+        *,
+        force: bool = False,
     ) -> None:
         publication_id = int(publication['id'])
         try:
@@ -1703,7 +1931,7 @@ class VaingloryPublicationService:
                         page.cid,
                     )
                     continue
-                if _same_chapter_cards(existing, cards):
+                if _same_chapter_cards(existing, cards) and not force:
                     continue
                 await self._protocol.submit_archive_chapters(
                     bundle,
@@ -1759,7 +1987,11 @@ class VaingloryPublicationService:
             await self._set_chapter_state(publication_id, 'confirmed')
 
     async def _publish_description(
-        self, publication: Mapping[str, Any], bundle: CredentialBundle
+        self,
+        publication: Mapping[str, Any],
+        bundle: CredentialBundle,
+        *,
+        force: bool = False,
     ) -> None:
         publication_id = int(publication['id'])
         try:
@@ -1788,11 +2020,11 @@ class VaingloryPublicationService:
         merged: Optional[str]
         if int(publication['match_count']) == 0:
             merged = remove_generated_description(current, block)
-            if merged == current:
+            if merged == current and not force:
                 await self._set_description_state(publication_id, 'confirmed')
                 return
         else:
-            if description_contains_block(current, block):
+            if description_contains_block(current, block) and not force:
                 await self._set_description_state(publication_id, 'confirmed')
                 return
             merged = merge_archive_description(current, block)
@@ -1804,7 +2036,7 @@ class VaingloryPublicationService:
                     minimum_delay=6 * 3600,
                 )
                 return
-        if merged == current:
+        if merged == current and not force:
             await self._set_description_state(publication_id, 'confirmed')
             return
         payload['desc'] = merged
@@ -2792,6 +3024,18 @@ def _existing_chapter_cards(
             return ()
         return tuple(card for card in cards if isinstance(card, Mapping))
     return ()
+
+
+def _public_chapter_cards(response: Mapping[str, Any]) -> Tuple[Mapping[str, Any], ...]:
+    data = response.get('data')
+    if not isinstance(data, Mapping):
+        raise ProtocolContractError('public chapter response is incomplete')
+    cards = data.get('view_points')
+    if cards is None:
+        return ()
+    if not isinstance(cards, list):
+        raise ProtocolContractError('public chapter response is incomplete')
+    return tuple(card for card in cards if isinstance(card, Mapping))
 
 
 def _automatic_chapter_cards(cards: Sequence[Mapping[str, Any]]) -> bool:

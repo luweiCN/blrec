@@ -91,7 +91,10 @@ PROTOCOL_MATRIX = {
         'POST', 'member', '/x/web/card/submit', 'web_cookie_csrf', False
     ),
     'public_archive_view': OperationSpec(
-        'GET', 'api', '/x/web-interface/view', 'web_cookie', True
+        'GET', 'api', '/x/web-interface/view', 'anonymous', True
+    ),
+    'public_player_view': OperationSpec(
+        'GET', 'api', '/x/player/v2', 'anonymous', True
     ),
     'public_archive_tags': OperationSpec(
         'GET', 'api', '/x/tag/archive/tags', 'web_cookie', True
@@ -102,6 +105,9 @@ PROTOCOL_MATRIX = {
     ),
     'reply_detail': OperationSpec(
         'GET', 'api', '/x/v2/reply/detail', 'web_cookie_wbi', True
+    ),
+    'public_reply_detail': OperationSpec(
+        'GET', 'api', '/x/v2/reply/detail', 'anonymous_wbi', True
     ),
     'add_reply': OperationSpec(
         'POST', 'api', '/x/v2/reply/add', 'web_cookie_csrf_wbi', False

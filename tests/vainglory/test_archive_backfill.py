@@ -114,6 +114,96 @@ async def seed_account(database: BiliUploadDatabase) -> None:
 
 
 @pytest.mark.asyncio
+async def test_completed_archive_requires_publication_remote_verification(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(1,100,'archive:1','closed',1,'历史直播')"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_syncs('
+            'account_id,state,progress,discovered_count,completed_count,error,'
+            'requested_at,completed_at,updated_at) '
+            "VALUES(1,'ready',1,1,1,NULL,1,1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,session_id,state,progress,page_count,'
+            'completed_page_count,created_at,updated_at) '
+            "VALUES(1,1,101,'BV1abcdefgh','历史直播',1,'ready',1,1,1,1,1)"
+        )
+        await database.execute(
+            "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+            "VALUES('archive-run',1,'finished',1,2)"
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,record_start_time,'
+            'artifact_state,created_at,updated_at) '
+            "VALUES(1,1,'archive-run',1,?,1,'ready',1,1)",
+            (str(tmp_path / 'archive.mp4'),),
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_parts('
+            'id,import_id,page,cid,title,duration_seconds,recording_part_id,'
+            'state,progress,created_at,updated_at) '
+            "VALUES(1,1,1,201,'P1',600,1,'ready',1,1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_scan_jobs('
+            'session_id,state,progress,algorithm_version,match_count,error,'
+            'requested_at,started_at,completed_at,updated_at) '
+            "VALUES(1,'ready',1,1,1,NULL,1,1,1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_matches('
+            'id,session_id,result_part_id,started_at_ms,result_at_ms,game_mode,'
+            'team_size,result_text,end_reason,left_color,right_color,winner_side,'
+            'left_kills,right_kills,left_economy,right_economy,confidence,'
+            'created_at) '
+            "VALUES(1,1,1,0,1,'3v3',3,'Victory','normal','teal','orange',"
+            "'left',1,0,1000,900,1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_publications('
+            'id,account_id,session_id,aid,bvid,source_kind,payload_hash,'
+            'description_block,state,description_state,pin_state,created_at,'
+            'updated_at,needs_refresh,chapter_state,comment_cleanup_state,'
+            'plan_state,match_count,public_visible_at) '
+            "VALUES(1,1,1,101,'BV1abcdefgh','archive',?,'已回填','prepared',"
+            "'confirmed','confirmed',1,1,0,'confirmed','confirmed','ready',1,1)",
+            ('a' * 64,),
+        )
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+
+        pending = (await service.list_items(1))[0]
+        assert pending.stage == 'publication_pending'
+        assert pending.publication_progress == 0.99
+
+        await database.execute(
+            "UPDATE vainglory_publications SET state='confirmed',"
+            'remote_verified_at=1000 WHERE id=1'
+        )
+        completed = (await service.list_items(1))[0]
+        assert completed.stage == 'completed'
+        assert completed.publication_progress == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_manual_reanalysis_requeues_a_skipped_unmaterialized_import(
     tmp_path: Path,
 ) -> None:

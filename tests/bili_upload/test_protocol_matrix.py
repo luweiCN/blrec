@@ -180,11 +180,13 @@ async def test_default_wbi_signer_discovers_and_caches_remote_keys() -> None:
         ('archive_view', 'web_cookie', '/x/vupre/web/archive/view'),
         ('archive_cards', 'web_cookie', '/x/web/allcards'),
         ('submit_archive_chapters', 'web_cookie_csrf', '/x/web/card/submit'),
-        ('public_archive_view', 'web_cookie', '/x/web-interface/view'),
+        ('public_archive_view', 'anonymous', '/x/web-interface/view'),
+        ('public_player_view', 'anonymous', '/x/player/v2'),
         ('public_archive_tags', 'web_cookie', '/x/tag/archive/tags'),
         ('web_nav', 'web_cookie', '/x/web-interface/nav'),
         ('list_replies', 'web_cookie_wbi', '/x/v2/reply/main'),
         ('reply_detail', 'web_cookie_wbi', '/x/v2/reply/detail'),
+        ('public_reply_detail', 'anonymous_wbi', '/x/v2/reply/detail'),
         ('add_reply', 'web_cookie_csrf_wbi', '/x/v2/reply/add'),
         ('delete_reply', 'web_cookie_csrf', '/x/v2/reply/del'),
         ('top_reply', 'web_cookie_csrf', '/x/v2/reply/top'),
@@ -328,10 +330,12 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     await client.list_archives(bundle, {'pn': 1})
     await client.archive_view(bundle, {'bvid': 'BVfixture'})
     await client.public_archive_view(bundle, bvid='BVfixture')
+    await client.public_player_view(bundle, aid=303, cid=202)
     await client.public_archive_tags(bundle, bvid='BVfixture')
     await client.web_nav(bundle)
     await client.list_replies(bundle, {'oid': 303, 'type': 1})
     await client.reply_detail(bundle, {'oid': 303, 'root': 101, 'type': 1})
+    await client.public_reply_detail(bundle, {'oid': 303, 'root': 101, 'type': 1})
     await client.add_reply(bundle, {'oid': 303, 'message': 'fixture', 'type': 1})
     await client.top_reply(bundle, {'oid': 303, 'rpid': 101, 'type': 1})
     await client.post_danmaku(bundle, {'oid': 202, 'msg': 'fixture', 'progress': 1})
@@ -355,7 +359,6 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'archive_pre',
         'list_archives',
         'archive_view',
-        'public_archive_view',
         'public_archive_tags',
         'submit_archive',
         'edit_archive',
@@ -399,8 +402,19 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         assert dict(request.query).get('uploadId') == 'fixture-upload-id' or name == (
             'preupload_init'
         )
-    for name in ('list_replies', 'reply_detail', 'add_reply', 'post_danmaku'):
+    for name in (
+        'list_replies',
+        'reply_detail',
+        'public_reply_detail',
+        'add_reply',
+        'post_danmaku',
+    ):
         assert 'w_rid' in dict(requests[name].query)
+    for name in ('public_archive_view', 'public_player_view', 'public_reply_detail'):
+        request = requests[name]
+        assert 'Cookie' not in request.headers
+        assert request.headers['Referer'] == 'https://www.bilibili.com/'
+        assert request.headers['User-Agent'].startswith('Mozilla/5.0 ')
     for name in (
         'preupload',
         'archive_pre',

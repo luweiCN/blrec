@@ -857,6 +857,81 @@ async def test_sixty_eighth_migration_resets_legacy_archive_claim_quota(
 
 
 @pytest.mark.asyncio
+async def test_seventy_second_migration_requeues_publication_for_public_audit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 72):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'existing',X'00',1,'key','active',1,1)"
+        )
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(1,100,'100:1','closed',1,'直播回放')"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_publications('
+            'id,account_id,session_id,aid,bvid,source_kind,payload_hash,'
+            'description_block,state,description_state,pin_state,attempt_count,'
+            'next_attempt_at,created_at,updated_at,needs_refresh,chapter_state,'
+            'comment_cleanup_state,priority,plan_state,match_count,force_republish,'
+            'public_visible_at) '
+            "VALUES(1,1,1,303,'BV1abcdefgh','archive',?,'已回填','confirmed',"
+            "'confirmed','confirmed',9,9999,1,2,0,'confirmed','confirmed',1,"
+            "'ready',1,0,2)",
+            ('a' * 64,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        publication = await database.fetchone(
+            'SELECT state,description_state,pin_state,chapter_state,'
+            'comment_cleanup_state,attempt_count,next_attempt_at,error,priority,'
+            'remote_verified_at FROM vainglory_publications WHERE id=1'
+        )
+        assert publication is not None and dict(publication) == {
+            'state': 'prepared',
+            'description_state': 'confirmed',
+            'pin_state': 'confirmed',
+            'chapter_state': 'confirmed',
+            'comment_cleanup_state': 'confirmed',
+            'attempt_count': 0,
+            'next_attempt_at': 0,
+            'error': '等待远端复核简介、评论和视频分段',
+            'priority': 0,
+            'remote_verified_at': None,
+        }
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_media_library_schema_constraints_and_list_index(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()

@@ -554,7 +554,7 @@ class ArchiveBackfillService:
             'WHERE match_part.import_id=imported.id) AS match_count,'
             'publication.state AS publication_state,'
             'publication.chapter_state,publication.description_state,'
-            'publication.pin_state,'
+            'publication.pin_state,publication.remote_verified_at,'
             'publication.error AS publication_error,'
             'COALESCE((SELECT COUNT(*) FROM vainglory_publication_comments comment '
             'WHERE comment.publication_id=publication.id),0) AS comment_count,'
@@ -1842,8 +1842,13 @@ class ArchiveBackfillService:
                 else 0.32 * confirmed_comment_count / max(1, comment_count)
             )
             publication_progress += 0.34 if row['pin_state'] == 'confirmed' else 0.0
-        if row['publication_state'] == 'confirmed':
+        if (
+            row['publication_state'] == 'confirmed'
+            and row['remote_verified_at'] is not None
+        ):
             publication_progress = 1.0
+        else:
+            publication_progress = min(publication_progress, 0.99)
         error = next(
             (
                 str(value)
@@ -1932,6 +1937,11 @@ class ArchiveBackfillService:
                 return 'publishing_comments'
             if row['pin_state'] != 'confirmed':
                 return 'pinning_comment'
+            if (
+                row['publication_state'] != 'confirmed'
+                or row['remote_verified_at'] is None
+            ):
+                return 'publication_pending'
             return 'completed'
         source_state = row['source_state']
         analysis_state = row['analysis_state']

@@ -730,8 +730,17 @@ class BiliProtocolClient:
     async def public_archive_view(
         self, bundle: CredentialBundle, *, bvid: str
     ) -> Mapping[str, Any]:
-        return await self._web_request(
-            'public_archive_view', bundle, query={'bvid': bvid}
+        return await self._standard_request(
+            'public_archive_view', headers=self._tv_headers(), query={'bvid': bvid}
+        )
+
+    async def public_player_view(
+        self, bundle: CredentialBundle, *, aid: int, cid: int
+    ) -> Mapping[str, Any]:
+        return await self._standard_request(
+            'public_player_view',
+            headers=self._tv_headers(),
+            query={'aid': aid, 'cid': cid},
         )
 
     async def public_archive_tags(
@@ -785,6 +794,15 @@ class BiliProtocolClient:
     ) -> Mapping[str, Any]:
         return await self._web_request(
             'reply_detail', bundle, query=await self._wbi_signer.sign(params)
+        )
+
+    async def public_reply_detail(
+        self, bundle: CredentialBundle, params: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        return await self._standard_request(
+            'public_reply_detail',
+            headers=self._tv_headers(),
+            query=await self._wbi_signer.sign(params),
         )
 
     async def add_reply(
