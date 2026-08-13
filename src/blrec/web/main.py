@@ -356,6 +356,7 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
         summary = await index_service.index_summary()
         worker_status = index_service.analysis_worker_status
         worker_nodes = await index_service.list_analysis_workers()
+        remote_worker_for = index_service.remote_worker_for
 
         def match_preview(value: Any) -> Dict[str, object]:
             return {
@@ -377,7 +378,7 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
         def queue_item(value: Any) -> Dict[str, object]:
             return {
                 'partId': value.part_id,
-                'workerId': index_service.remote_worker_for('part', value.part_id),
+                'workerId': remote_worker_for('part', value.part_id),
                 'sessionId': value.session_id,
                 'partIndex': value.part_index,
                 'title': value.title,
