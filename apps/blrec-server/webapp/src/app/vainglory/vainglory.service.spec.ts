@@ -189,6 +189,23 @@ describe('VaingloryService', () => {
     request.flush(null);
   });
 
+  it('registers and safely pauses an analysis worker', () => {
+    service.addAnalysisWorker('mac-studio', 'Mac Studio').subscribe();
+    const created = http.expectOne('/api/v1/vainglory/workers');
+    expect(created.request.method).toBe('POST');
+    expect(created.request.body).toEqual({
+      workerId: 'mac-studio',
+      displayName: 'Mac Studio',
+    });
+    created.flush({ workerId: 'mac-studio' });
+
+    service.updateAnalysisWorker('mac-studio', { enabled: false }).subscribe();
+    const paused = http.expectOne('/api/v1/vainglory/workers/mac-studio');
+    expect(paused.request.method).toBe('PATCH');
+    expect(paused.request.body).toEqual({ enabled: false });
+    paused.flush({ workerId: 'mac-studio', enabled: false });
+  });
+
   it('manages players and loads player-centred rankings', () => {
     service.listPlayers().subscribe();
     const listed = http.expectOne('/api/v1/vainglory/players');

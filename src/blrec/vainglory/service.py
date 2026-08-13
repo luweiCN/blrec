@@ -41,6 +41,7 @@ from .repository import (
     AnalysisQueueEvent,
     AnalysisQueueItem,
     AnalysisQueueStatus,
+    AnalysisWorkerRecord,
     AnchorStatsRecord,
     HeroStatsRecord,
     IndexSummary,
@@ -75,6 +76,56 @@ class RemoteAnalysisClaim:
     anchor_name: str = ''
 
 
+@dataclass(frozen=True)
+class AnalysisWorkerNodeStatus:
+    state: Literal['running', 'stopped', 'failed']
+    worker_id: str
+    display_name: str
+    enabled: bool
+    model_package_id: str
+    pipeline_version: str
+    last_seen_at: Optional[int]
+    active_task_count: int = 0
+    active_part_ids: Tuple[int, ...] = ()
+    concurrency: int = 0
+    completed_task_count: int = 0
+    failed_task_count: int = 0
+    total_processing_seconds: float = 0
+    profiled_task_count: int = 0
+    profiled_video_seconds: float = 0
+    total_decode_analysis_seconds: float = 0
+    total_profiled_task_seconds: float = 0
+    last_task_finished_at: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class AnalysisWorkerStatus:
+    state: Literal['running', 'stopped', 'failed']
+    remote_enabled: bool
+    worker_id: str
+    model_package_id: str
+    pipeline_version: str
+    last_seen_at: Optional[int]
+    workers: Tuple[AnalysisWorkerNodeStatus, ...] = ()
+
+
+@dataclass
+class _RemoteWorkerRegistration:
+    worker_id: str
+    model_package_id: str
+    pipeline_version: str
+    concurrency: int
+    last_seen: float
+    last_seen_at: int
+
+
+@dataclass
+class _RemoteWorkAssignment:
+    worker_id: str
+    started_at: float
+    last_seen: float
+
+
 class VaingloryIndexService:
     def __init__(
         self,
@@ -95,6 +146,12 @@ class VaingloryIndexService:
         self._archive_page_reconciler = archive_page_reconciler
         self._remote_worker_enabled = bool(remote_worker_enabled)
         self._remote_worker_last_seen = 0.0
+        self._remote_worker_last_seen_at: Optional[int] = None
+        self._remote_worker_id = ''
+        self._remote_worker_model_package_id = ''
+        self._remote_worker_pipeline_version = ''
+        self._remote_workers: Dict[str, _RemoteWorkerRegistration] = {}
+        self._remote_task_workers: Dict[Tuple[str, int], _RemoteWorkAssignment] = {}
         self._idle_poll_seconds = idle_poll_seconds
         self._realtime_poll_seconds = realtime_poll_seconds
         self._scan_wake = asyncio.Event()
@@ -103,6 +160,7 @@ class VaingloryIndexService:
         self._scan_task: Optional[asyncio.Task[None]] = None
         self._ocr_task: Optional[asyncio.Task[None]] = None
         self._analysis_lock = asyncio.Lock()
+        self._remote_claim_lock = asyncio.Lock()
         self._runtime_lock = threading.Lock()
         self._runtime_status: Dict[int, AnalysisStatus] = {}
         self._runtime_events: Dict[int, List[AnalysisQueueEvent]] = {}
@@ -112,11 +170,13 @@ class VaingloryIndexService:
         return self._repository
 
     @property
-    def worker_state(self) -> str:
+    def worker_state(self) -> Literal['running', 'stopped', 'failed']:
         if self._remote_worker_enabled:
+            with self._runtime_lock:
+                last_seen = self._remote_worker_last_seen
             return (
                 'running'
-                if time.monotonic() - self._remote_worker_last_seen <= 90
+                if last_seen > 0 and time.monotonic() - last_seen <= 90
                 else 'stopped'
             )
         tasks = tuple(
@@ -132,6 +192,156 @@ class VaingloryIndexService:
         if all(task.done() for task in tasks):
             return 'stopped'
         return 'running'
+
+    @property
+    def analysis_worker_status(self) -> AnalysisWorkerStatus:
+        with self._runtime_lock:
+            worker_id = self._remote_worker_id
+            model_package_id = self._remote_worker_model_package_id
+            pipeline_version = self._remote_worker_pipeline_version
+            last_seen_at = self._remote_worker_last_seen_at
+            now = time.monotonic()
+            active_by_worker: Dict[str, List[Tuple[str, int]]] = {}
+            for task, assignment in tuple(self._remote_task_workers.items()):
+                if now - assignment.last_seen > 90:
+                    self._remote_task_workers.pop(task, None)
+                    continue
+                active_by_worker.setdefault(assignment.worker_id, []).append(task)
+            workers = tuple(
+                AnalysisWorkerNodeStatus(
+                    state=(
+                        'running' if now - registration.last_seen <= 90 else 'stopped'
+                    ),
+                    worker_id=registration.worker_id,
+                    display_name='',
+                    enabled=True,
+                    model_package_id=registration.model_package_id,
+                    pipeline_version=registration.pipeline_version,
+                    last_seen_at=registration.last_seen_at,
+                    active_task_count=(
+                        len(active_by_worker.get(registration.worker_id, ()))
+                        if now - registration.last_seen <= 90
+                        else 0
+                    ),
+                    active_part_ids=tuple(
+                        sorted(
+                            item_id
+                            for kind, item_id in active_by_worker.get(
+                                registration.worker_id, ()
+                            )
+                            if kind == 'part'
+                        )
+                    ),
+                    concurrency=registration.concurrency,
+                )
+                for registration in sorted(
+                    self._remote_workers.values(),
+                    key=lambda value: (-value.last_seen, value.worker_id),
+                )
+            )
+        return AnalysisWorkerStatus(
+            state=self.worker_state,
+            remote_enabled=self._remote_worker_enabled,
+            worker_id=worker_id,
+            model_package_id=model_package_id,
+            pipeline_version=pipeline_version,
+            last_seen_at=last_seen_at,
+            workers=workers,
+        )
+
+    async def list_analysis_workers(self) -> Tuple[AnalysisWorkerNodeStatus, ...]:
+        records = await self._repository.list_analysis_workers()
+        with self._runtime_lock:
+            registrations = dict(self._remote_workers)
+            assignments = dict(self._remote_task_workers)
+        now = time.monotonic()
+        active_by_worker: Dict[str, List[Tuple[str, int]]] = {}
+        for task, assignment in assignments.items():
+            if now - assignment.last_seen <= 90:
+                active_by_worker.setdefault(assignment.worker_id, []).append(task)
+        return tuple(
+            self._analysis_worker_node(record, registrations, active_by_worker, now)
+            for record in records
+        )
+
+    @staticmethod
+    def _analysis_worker_node(
+        record: AnalysisWorkerRecord,
+        registrations: Mapping[str, _RemoteWorkerRegistration],
+        active_by_worker: Mapping[str, Sequence[Tuple[str, int]]],
+        now: float,
+    ) -> AnalysisWorkerNodeStatus:
+        registration = registrations.get(record.worker_id)
+        online = registration is not None and now - registration.last_seen <= 90
+        active = active_by_worker.get(record.worker_id, ()) if online else ()
+        return AnalysisWorkerNodeStatus(
+            state='running' if online else 'stopped',
+            worker_id=record.worker_id,
+            display_name=record.display_name,
+            enabled=record.enabled,
+            model_package_id=(
+                record.model_package_id
+                if registration is None
+                else registration.model_package_id
+            ),
+            pipeline_version=(
+                record.pipeline_version
+                if registration is None
+                else registration.pipeline_version
+            ),
+            last_seen_at=(
+                record.last_seen_at
+                if registration is None
+                else registration.last_seen_at
+            ),
+            active_task_count=len(active),
+            active_part_ids=tuple(
+                sorted(item_id for kind, item_id in active if kind == 'part')
+            ),
+            concurrency=(
+                record.concurrency if registration is None else registration.concurrency
+            ),
+            completed_task_count=record.completed_task_count,
+            failed_task_count=record.failed_task_count,
+            total_processing_seconds=record.total_processing_seconds,
+            profiled_task_count=record.profiled_task_count,
+            profiled_video_seconds=record.profiled_video_seconds,
+            total_decode_analysis_seconds=record.total_decode_analysis_seconds,
+            total_profiled_task_seconds=record.total_profiled_task_seconds,
+            last_task_finished_at=record.last_task_finished_at,
+        )
+
+    async def add_analysis_worker(
+        self, worker_id: str, display_name: str
+    ) -> AnalysisWorkerNodeStatus:
+        worker_id = worker_id.strip()
+        if not worker_id:
+            raise ValueError('Worker ID 不能为空')
+        await self._repository.add_analysis_worker(worker_id, display_name)
+        workers = await self.list_analysis_workers()
+        return next(worker for worker in workers if worker.worker_id == worker_id)
+
+    async def update_analysis_worker(
+        self,
+        worker_id: str,
+        *,
+        display_name: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> AnalysisWorkerNodeStatus:
+        worker_id = worker_id.strip()
+        if not worker_id:
+            raise ValueError('Worker ID 不能为空')
+        if enabled is None:
+            await self._repository.update_analysis_worker(
+                worker_id, display_name=display_name
+            )
+        else:
+            async with self._remote_claim_lock:
+                await self._repository.update_analysis_worker(
+                    worker_id, display_name=display_name, enabled=enabled
+                )
+        workers = await self.list_analysis_workers()
+        return next(worker for worker in workers if worker.worker_id == worker_id)
 
     async def start(self) -> None:
         if self._scan_task is not None or self._ocr_task is not None:
@@ -181,26 +391,194 @@ class VaingloryIndexService:
     def remote_worker_enabled(self) -> bool:
         return self._remote_worker_enabled
 
-    def _require_remote_worker(self) -> None:
+    def _require_remote_worker(
+        self,
+        *,
+        worker_id: str = '',
+        model_package_id: str = '',
+        pipeline_version: str = '',
+        concurrency: int = 0,
+    ) -> None:
         if not self._remote_worker_enabled:
             raise VaingloryConflict('远程分析 Worker 未启用')
-        self._remote_worker_last_seen = time.monotonic()
+        with self._runtime_lock:
+            now = time.monotonic()
+            now_at = int(time.time())
+            self._remote_worker_last_seen = now
+            self._remote_worker_last_seen_at = now_at
+            if worker_id:
+                self._remote_worker_id = worker_id
+                previous = self._remote_workers.get(worker_id)
+                registration = _RemoteWorkerRegistration(
+                    worker_id=worker_id,
+                    model_package_id=(
+                        model_package_id
+                        or ('' if previous is None else previous.model_package_id)
+                    ),
+                    pipeline_version=(
+                        pipeline_version
+                        or ('' if previous is None else previous.pipeline_version)
+                    ),
+                    concurrency=(
+                        concurrency or (0 if previous is None else previous.concurrency)
+                    ),
+                    last_seen=now,
+                    last_seen_at=now_at,
+                )
+                self._remote_workers[worker_id] = registration
+                self._remote_worker_model_package_id = registration.model_package_id
+                self._remote_worker_pipeline_version = registration.pipeline_version
+            else:
+                if model_package_id:
+                    self._remote_worker_model_package_id = model_package_id
+                if pipeline_version:
+                    self._remote_worker_pipeline_version = pipeline_version
 
-    async def claim_remote_work(self) -> Optional[RemoteAnalysisClaim]:
-        self._require_remote_worker()
+    def register_remote_worker_activity(
+        self,
+        *,
+        worker_id: str = '',
+        model_package_id: str = '',
+        pipeline_version: str = '',
+        concurrency: int = 0,
+    ) -> None:
+        self._require_remote_worker(
+            worker_id=worker_id,
+            model_package_id=model_package_id,
+            pipeline_version=pipeline_version,
+            concurrency=concurrency,
+        )
+
+    def _assign_remote_work(
+        self, claim: RemoteAnalysisClaim, worker_id: str
+    ) -> RemoteAnalysisClaim:
+        if not worker_id:
+            return claim
+        with self._runtime_lock:
+            now = time.monotonic()
+            self._remote_task_workers[(claim.kind, claim.item_id)] = (
+                _RemoteWorkAssignment(
+                    worker_id=worker_id, started_at=now, last_seen=now
+                )
+            )
+        return claim
+
+    def _touch_remote_work(self, kind: str, item_id: int, worker_id: str = '') -> None:
+        with self._runtime_lock:
+            key = (kind, item_id)
+            assignment = self._remote_task_workers.get(key)
+            assigned_worker_id = worker_id or (
+                '' if assignment is None else assignment.worker_id
+            )
+            registration = self._remote_workers.get(assigned_worker_id)
+            if registration is None:
+                return
+            now = time.monotonic()
+            now_at = int(time.time())
+            self._remote_task_workers[key] = _RemoteWorkAssignment(
+                worker_id=assigned_worker_id,
+                started_at=(now if assignment is None else assignment.started_at),
+                last_seen=now,
+            )
+            registration.last_seen = now
+            registration.last_seen_at = now_at
+            self._remote_worker_last_seen = now
+            self._remote_worker_last_seen_at = now_at
+
+    def _clear_remote_work(
+        self, kind: str, item_id: int
+    ) -> Optional[_RemoteWorkAssignment]:
+        with self._runtime_lock:
+            return self._remote_task_workers.pop((kind, item_id), None)
+
+    async def _record_remote_work_result(
+        self,
+        kind: str,
+        item_id: int,
+        *,
+        succeeded: bool,
+        video_duration_seconds: Optional[float] = None,
+        decode_analysis_seconds: Optional[float] = None,
+    ) -> None:
+        assignment = self._clear_remote_work(kind, item_id)
+        if assignment is None:
+            return
+        await self._repository.record_analysis_worker_task(
+            assignment.worker_id,
+            succeeded=succeeded,
+            processing_seconds=max(0.0, time.monotonic() - assignment.started_at),
+            video_duration_seconds=video_duration_seconds,
+            decode_analysis_seconds=decode_analysis_seconds,
+        )
+
+    def remote_worker_for(self, kind: str, item_id: int) -> str:
+        with self._runtime_lock:
+            assignment = self._remote_task_workers.get((kind, item_id))
+            if assignment is None or time.monotonic() - assignment.last_seen > 90:
+                return ''
+            return assignment.worker_id
+
+    async def claim_remote_work(
+        self,
+        *,
+        worker_id: str = '',
+        model_package_id: str = '',
+        pipeline_version: str = '',
+        concurrency: int = 0,
+    ) -> Optional[RemoteAnalysisClaim]:
+        async with self._remote_claim_lock:
+            return await self._claim_remote_work(
+                worker_id=worker_id,
+                model_package_id=model_package_id,
+                pipeline_version=pipeline_version,
+                concurrency=concurrency,
+            )
+
+    async def _claim_remote_work(
+        self,
+        *,
+        worker_id: str,
+        model_package_id: str,
+        pipeline_version: str,
+        concurrency: int,
+    ) -> Optional[RemoteAnalysisClaim]:
+        if worker_id:
+            worker = await self._repository.register_analysis_worker(
+                worker_id,
+                model_package_id=model_package_id,
+                pipeline_version=pipeline_version,
+                concurrency=concurrency,
+            )
+            if not worker.enabled:
+                self._require_remote_worker(
+                    worker_id=worker_id,
+                    model_package_id=model_package_id,
+                    pipeline_version=pipeline_version,
+                    concurrency=concurrency,
+                )
+                return None
+        self._require_remote_worker(
+            worker_id=worker_id,
+            model_package_id=model_package_id,
+            pipeline_version=pipeline_version,
+            concurrency=concurrency,
+        )
         recovered = await self._repository.recover_stale_remote_work(180)
         if recovered:
             logger.warning('Recovered stale remote Vainglory work: count={}', recovered)
 
         rerun = await self._repository.claim_next_match_rerun()
         if rerun is not None:
-            return RemoteAnalysisClaim(
-                kind='match_rerun',
-                item_id=rerun.match_id,
-                part=rerun.part,
-                session_id=rerun.session_id,
-                result_at_ms=rerun.result_at_ms,
-                view_context=rerun.view_context,
+            return self._assign_remote_work(
+                RemoteAnalysisClaim(
+                    kind='match_rerun',
+                    item_id=rerun.match_id,
+                    part=rerun.part,
+                    session_id=rerun.session_id,
+                    result_at_ms=rerun.result_at_ms,
+                    view_context=rerun.view_context,
+                ),
+                worker_id,
             )
 
         if not await self._repository.has_realtime_pending():
@@ -210,10 +588,13 @@ class VaingloryIndexService:
                     recorded_player.match_id
                 )
                 if path is not None:
-                    return RemoteAnalysisClaim(
-                        kind='recorded_player_backfill',
-                        item_id=recorded_player.match_id,
-                        frame_png=path.read_bytes(),
+                    return self._assign_remote_work(
+                        RemoteAnalysisClaim(
+                            kind='recorded_player_backfill',
+                            item_id=recorded_player.match_id,
+                            frame_png=path.read_bytes(),
+                        ),
+                        worker_id,
                     )
                 await self._repository.complete_recorded_player_backfill(
                     recorded_player.match_id, None
@@ -223,24 +604,30 @@ class VaingloryIndexService:
             if hero is not None:
                 path = await self._repository.result_frame_path(hero.match_id)
                 if path is not None:
-                    return RemoteAnalysisClaim(
-                        kind='hero_rematch',
-                        item_id=hero.match_id,
-                        frame_png=path.read_bytes(),
+                    return self._assign_remote_work(
+                        RemoteAnalysisClaim(
+                            kind='hero_rematch',
+                            item_id=hero.match_id,
+                            frame_png=path.read_bytes(),
+                        ),
+                        worker_id,
                     )
                 await self._repository.complete_hero_rematch(hero.match_id, ())
 
         claim = await self._repository.claim_next()
         if claim is None:
             return None
-        return RemoteAnalysisClaim(
-            kind='part',
-            item_id=claim.part.id,
-            part=claim.part,
-            session_id=claim.session_id,
-            part_duration_seconds=claim.part_duration_seconds,
-            recording_duration_seconds=claim.recording_duration_seconds,
-            anchor_name=claim.anchor_name,
+        return self._assign_remote_work(
+            RemoteAnalysisClaim(
+                kind='part',
+                item_id=claim.part.id,
+                part=claim.part,
+                session_id=claim.session_id,
+                part_duration_seconds=claim.part_duration_seconds,
+                recording_duration_seconds=claim.recording_duration_seconds,
+                anchor_name=claim.anchor_name,
+            ),
+            worker_id,
         )
 
     async def heartbeat_remote_work(
@@ -249,8 +636,19 @@ class VaingloryIndexService:
         item_id: int,
         progress: float,
         status: Optional[AnalysisStatus] = None,
+        *,
+        worker_id: str = '',
+        model_package_id: str = '',
+        pipeline_version: str = '',
+        concurrency: int = 0,
     ) -> None:
-        self._require_remote_worker()
+        self._require_remote_worker(
+            worker_id=worker_id,
+            model_package_id=model_package_id,
+            pipeline_version=pipeline_version,
+            concurrency=concurrency,
+        )
+        self._touch_remote_work(kind, item_id, worker_id)
         if kind == 'part':
             await self._repository.update_progress(item_id, progress)
             if status is not None:
@@ -266,6 +664,8 @@ class VaingloryIndexService:
         candidate_count: int,
         training_candidates: Sequence[TrainingCandidate] = (),
         analysis_summary: Optional[Mapping[str, Any]] = None,
+        video_duration_seconds: Optional[float] = None,
+        decode_analysis_seconds: Optional[float] = None,
     ) -> None:
         self._require_remote_worker()
         await self._repository.complete_part(
@@ -276,24 +676,36 @@ class VaingloryIndexService:
             analysis_summary=analysis_summary,
         )
         self._clear_runtime_status(part_id)
+        await self._record_remote_work_result(
+            'part',
+            part_id,
+            succeeded=True,
+            video_duration_seconds=video_duration_seconds,
+            decode_analysis_seconds=decode_analysis_seconds,
+        )
 
     async def complete_remote_match_rerun(
         self, match_id: int, match: AnalyzedMatch
     ) -> None:
         self._require_remote_worker()
         await self._repository.complete_match_rerun(match_id, match)
+        await self._record_remote_work_result('match_rerun', match_id, succeeded=True)
 
     async def complete_remote_hero_rematch(
         self, match_id: int, heroes: Sequence[AnalyzedHero]
     ) -> None:
         self._require_remote_worker()
         await self._repository.complete_hero_rematch(match_id, heroes)
+        await self._record_remote_work_result('hero_rematch', match_id, succeeded=True)
 
     async def complete_remote_recorded_player_backfill(
         self, match_id: int, player: Optional[RecordedPlayer]
     ) -> None:
         self._require_remote_worker()
         await self._repository.complete_recorded_player_backfill(match_id, player)
+        await self._record_remote_work_result(
+            'recorded_player_backfill', match_id, succeeded=True
+        )
 
     async def fail_remote_work(
         self,
@@ -315,6 +727,7 @@ class VaingloryIndexService:
             await self._repository.complete_hero_rematch(item_id, ())
         elif kind == 'recorded_player_backfill':
             await self._repository.complete_recorded_player_backfill(item_id, None)
+        await self._record_remote_work_result(kind, item_id, succeeded=False)
 
     async def request_scan(self, session_id: int) -> ScanJob:
         if self._archive_page_reconciler is not None:

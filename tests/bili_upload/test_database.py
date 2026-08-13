@@ -52,6 +52,7 @@ REQUIRED_TABLES = {
     'media_library_parts',
     'media_library_file_moves',
     'vainglory_scan_jobs',
+    'vainglory_analysis_workers',
     'vainglory_part_jobs',
     'vainglory_ocr_jobs',
     'vainglory_heroes',

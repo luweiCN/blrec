@@ -12,6 +12,7 @@ import {
   VaingloryHeroStats,
   VaingloryArchiveSync,
   VaingloryArchiveSyncControl,
+  VaingloryAnalysisWorkerNodeStatus,
   VaingloryArchiveContentReviewList,
   VaingloryMatch,
   VaingloryMatchFilters,
@@ -201,6 +202,36 @@ export class VaingloryService {
   getScan(sessionId: number): Observable<VaingloryScanJob> {
     return this.http.get<VaingloryScanJob>(
       this.url.makeApiUrl(`/api/v1/vainglory/sessions/${sessionId}/scan`),
+    );
+  }
+
+  listAnalysisWorkers(): Observable<{
+    readonly workers: readonly VaingloryAnalysisWorkerNodeStatus[];
+  }> {
+    return this.http.get<{
+      readonly workers: readonly VaingloryAnalysisWorkerNodeStatus[];
+    }>(this.url.makeApiUrl('/api/v1/vainglory/workers'));
+  }
+
+  addAnalysisWorker(
+    workerId: string,
+    displayName: string,
+  ): Observable<VaingloryAnalysisWorkerNodeStatus> {
+    return this.http.post<VaingloryAnalysisWorkerNodeStatus>(
+      this.url.makeApiUrl('/api/v1/vainglory/workers'),
+      { workerId, displayName },
+    );
+  }
+
+  updateAnalysisWorker(
+    workerId: string,
+    update: { readonly displayName?: string; readonly enabled?: boolean },
+  ): Observable<VaingloryAnalysisWorkerNodeStatus> {
+    return this.http.patch<VaingloryAnalysisWorkerNodeStatus>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/workers/${encodeURIComponent(workerId)}`,
+      ),
+      update,
     );
   }
 

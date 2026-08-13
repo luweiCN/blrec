@@ -4,6 +4,7 @@ import argparse
 import importlib
 import json
 import os
+import socket
 import sys
 import time
 from collections import Counter
@@ -16,7 +17,7 @@ from blrec.vainglory.analyzer import AnalyzedMatch, VaingloryVideoAnalyzer, Vide
 from blrec.vainglory.glm_ocr import GlmOcrClient, GlmOcrResultReader
 from blrec.vainglory.sampling import FfmpegSampler
 
-from .model_package import build_package_runtime, load_model_package
+from .model_package import ModelPackage, build_package_runtime, load_model_package
 from .remote import AnalysisWorkerClient, RemoteAnalysisWorker, load_worker_token
 
 
@@ -56,6 +57,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument('--debug-dir', type=Path, default=None)
     run.add_argument('--poll-seconds', type=float, default=5)
     run.add_argument('--concurrency', type=int, default=1)
+    run.add_argument(
+        '--worker-id',
+        default=os.environ.get('BLREC_ANALYSIS_WORKER_ID', socket.gethostname()),
+        help='管理后台登记的 Worker ID；默认使用当前机器名',
+    )
     run.add_argument('--once', action='store_true')
     run.add_argument(
         '--model-package',
@@ -82,7 +88,7 @@ def _execution_providers(name: str) -> Tuple[str, ...]:
 
 def _build_analyzer(
     *, ocr_url: str, providers: Sequence[str], model_package_path: Optional[Path]
-) -> VaingloryVideoAnalyzer:
+) -> Tuple[VaingloryVideoAnalyzer, ModelPackage]:
     if model_package_path is None:
         raise ValueError(
             '必须通过 --model-package 或 BLREC_VISION_MODEL_PACKAGE 指定已验收模型包'
@@ -101,14 +107,17 @@ def _build_analyzer(
         ','.join(sorted(package.models)),
     )
     result_reader = None if not ocr_url else GlmOcrResultReader(GlmOcrClient(ocr_url))
-    return VaingloryVideoAnalyzer(
-        sampler=sampler,
-        result_reader=result_reader,
-        hero_recognizer=runtime.hero_recognizer,
-        hero_avatar_detector=runtime.hero_avatar_detector,
-        recorded_player_detector=runtime.recorded_player_detector,
-        result_panel_detector=runtime.result_panel_detector,
-        stage_classifier=runtime.stage_classifier,
+    return (
+        VaingloryVideoAnalyzer(
+            sampler=sampler,
+            result_reader=result_reader,
+            hero_recognizer=runtime.hero_recognizer,
+            hero_avatar_detector=runtime.hero_avatar_detector,
+            recorded_player_detector=runtime.recorded_player_detector,
+            result_panel_detector=runtime.result_panel_detector,
+            stage_classifier=runtime.stage_classifier,
+        ),
+        package,
     )
 
 
@@ -155,7 +164,7 @@ def _scan_file(arguments: argparse.Namespace) -> int:
     run_started = time.monotonic()
     setup_started = time.monotonic()
     providers = _execution_providers(arguments.execution_provider)
-    analyzer = _build_analyzer(
+    analyzer, _package = _build_analyzer(
         ocr_url=ocr_url, providers=providers, model_package_path=arguments.model_package
     )
     setup_seconds = time.monotonic() - setup_started
@@ -259,17 +268,28 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
         raise ValueError('Mac Worker 必须配置本机 OCR 服务地址')
     if not 1 <= arguments.concurrency <= 8:
         raise ValueError('并发任务数必须在 1 到 8 之间')
+    worker_id = str(arguments.worker_id).strip()
+    if not worker_id:
+        raise ValueError('Worker ID 不能为空')
     token = load_worker_token(arguments.token_file)
     providers = _execution_providers(arguments.execution_provider)
-    analyzer = _build_analyzer(
+    analyzer, package = _build_analyzer(
         ocr_url=ocr_url, providers=providers, model_package_path=arguments.model_package
     )
     RemoteAnalysisWorker(
-        lambda: AnalysisWorkerClient(server_url, token),
+        lambda: AnalysisWorkerClient(
+            server_url,
+            token,
+            worker_id=worker_id,
+            model_package_id=package.package_id,
+            pipeline_version=package.pipeline_version,
+            concurrency=arguments.concurrency,
+        ),
         analyzer,
         cache_dir=arguments.cache_dir,
         poll_seconds=arguments.poll_seconds,
         concurrency=arguments.concurrency,
+        worker_id=worker_id,
         debug_dir=arguments.debug_dir,
     ).run(once=arguments.once)
     return 0

@@ -12,6 +12,7 @@ import {
   VaingloryAnalysisQueueCompletion,
   VaingloryAnalysisQueueEvent,
   VaingloryAnalysisQueueItem,
+  VaingloryAnalysisWorkerNodeStatus,
   VaingloryAnalysisSummary,
   VaingloryAnalysisMatchPreview,
 } from '../vainglory.model';
@@ -51,6 +52,13 @@ const TRAINING_TASK_LABELS: Readonly<Record<string, string>> = {
 export class AnalysisTaskCenterComponent {
   @Input() queue: VaingloryAnalysisQueue | null = null;
   @Input() sampledAt: number | null = null;
+  @Input() updatingWorkerIds: ReadonlySet<string> = new Set<string>();
+  @Output() addWorker = new EventEmitter<void>();
+  @Output() editWorker = new EventEmitter<VaingloryAnalysisWorkerNodeStatus>();
+  @Output() workerEnabledChange = new EventEmitter<{
+    readonly workerId: string;
+    readonly enabled: boolean;
+  }>();
   @Output() playPart = new EventEmitter<{
     readonly sessionId: number;
     readonly partId: number;
@@ -62,17 +70,164 @@ export class AnalysisTaskCenterComponent {
     readonly title: string;
   }>();
 
-  workerLabel(queue: VaingloryAnalysisQueue): string {
-    if (queue.workerState === 'failed') {
+  toggleWorker(worker: VaingloryAnalysisWorkerNodeStatus): void {
+    this.workerEnabledChange.emit({
+      workerId: worker.workerId,
+      enabled: !worker.enabled,
+    });
+  }
+
+  workerLabel(worker: VaingloryAnalysisWorkerNodeStatus): string {
+    if (!worker.enabled) {
+      if (worker.state === 'stopped') {
+        return '已暂停 · 离线';
+      }
+      return worker.activeTaskCount > 0 ? '暂停中（任务收尾）' : '已暂停';
+    }
+    if (worker.state === 'failed') {
       return '分析服务异常';
     }
-    if (queue.workerState === 'stopped') {
+    if (worker.state === 'stopped') {
       return '分析服务未运行';
     }
-    if (queue.active.length > 0) {
+    if (worker.activeTaskCount > 0) {
       return '正在运行';
     }
-    return queue.pendingCount > 0 ? '准备领取任务' : '空闲';
+    return '空闲';
+  }
+
+  workerNodes(
+    queue: VaingloryAnalysisQueue,
+  ): readonly VaingloryAnalysisWorkerNodeStatus[] {
+    const workers = queue.workers ?? [];
+    if (workers.length > 0) {
+      return workers;
+    }
+    if (!queue.worker.workerId) {
+      return [];
+    }
+    return [
+      {
+        state: queue.worker.state,
+        workerId: queue.worker.workerId,
+        displayName: '',
+        enabled: true,
+        modelPackageId: queue.worker.modelPackageId,
+        pipelineVersion: queue.worker.pipelineVersion,
+        lastSeenAt: queue.worker.lastSeenAt,
+        activeTaskCount: queue.active.length,
+        activePartIds: queue.active.map((item) => item.partId),
+        concurrency: 0,
+        completedTaskCount: 0,
+        failedTaskCount: 0,
+        totalProcessingSeconds: 0,
+        profiledTaskCount: 0,
+        profiledVideoSeconds: 0,
+        totalDecodeAnalysisSeconds: 0,
+        totalProfiledTaskSeconds: 0,
+        lastTaskFinishedAt: null,
+      },
+    ];
+  }
+
+  workerTaskLabel(
+    queue: VaingloryAnalysisQueue,
+    worker: VaingloryAnalysisWorkerNodeStatus,
+  ): string {
+    const active = this.workerActiveItems(queue, worker);
+    const first = active[0];
+    if (first === undefined) {
+      if (!worker.enabled) {
+        return '已停止领取新任务';
+      }
+      if (worker.activeTaskCount > 0) {
+        return `${worker.activeTaskCount} 个后台任务正在运行`;
+      }
+      return worker.state === 'running' ? '空闲，正在轮询新任务' : '无任务运行';
+    }
+    const prefix = active.length > 1 ? `${active.length} 个任务 · ` : '';
+    return `${prefix}${this.stageLabel(first)} · ${this.percent(first)}%`;
+  }
+
+  workerAverageSeconds(worker: VaingloryAnalysisWorkerNodeStatus): number {
+    const taskCount = worker.completedTaskCount + worker.failedTaskCount;
+    return taskCount === 0 ? 0 : worker.totalProcessingSeconds / taskCount;
+  }
+
+  workerMinutesPerVideoHour(
+    worker: VaingloryAnalysisWorkerNodeStatus,
+    dimension: 'decodeAnalysis' | 'wholeTask',
+  ): number | null {
+    if (worker.profiledTaskCount === 0 || worker.profiledVideoSeconds <= 0) {
+      return null;
+    }
+    const seconds =
+      dimension === 'decodeAnalysis'
+        ? worker.totalDecodeAnalysisSeconds
+        : worker.totalProfiledTaskSeconds;
+    return (seconds / worker.profiledVideoSeconds) * 60;
+  }
+
+  workerEfficiencyLabel(
+    worker: VaingloryAnalysisWorkerNodeStatus,
+    dimension: 'decodeAnalysis' | 'wholeTask',
+  ): string {
+    const minutes = this.workerMinutesPerVideoHour(worker, dimension);
+    return minutes === null
+      ? '暂无完整视频样本'
+      : `${minutes.toFixed(1)} 分钟 / 1 小时视频`;
+  }
+
+  workerEfficiencySampleLabel(
+    worker: VaingloryAnalysisWorkerNodeStatus,
+  ): string {
+    if (worker.profiledTaskCount === 0 || worker.profiledVideoSeconds <= 0) {
+      return '等待 Worker 完成完整视频任务';
+    }
+    return `${worker.profiledTaskCount} 个任务 · ${(
+      worker.profiledVideoSeconds / 3_600
+    ).toFixed(1)} 小时视频`;
+  }
+
+  workerModelMismatch(
+    queue: VaingloryAnalysisQueue,
+    worker: VaingloryAnalysisWorkerNodeStatus,
+  ): boolean {
+    const loaded = worker.modelPackageId;
+    return Boolean(
+      loaded &&
+      this.workerActiveItems(queue, worker).some(
+        (item) => item.modelPackageId && item.modelPackageId !== loaded,
+      ),
+    );
+  }
+
+  workerModelState(
+    queue: VaingloryAnalysisQueue,
+    worker: VaingloryAnalysisWorkerNodeStatus,
+  ): string {
+    if (!worker.modelPackageId) {
+      return worker.state === 'running' ? '等待版本上报' : '暂无版本记录';
+    }
+    if (this.workerModelMismatch(queue, worker)) {
+      return '任务版本与当前版本不一致';
+    }
+    return worker.state === 'running' ? '已加载并通过启动校验' : '最后上报版本';
+  }
+
+  private workerActiveItems(
+    queue: VaingloryAnalysisQueue,
+    worker: VaingloryAnalysisWorkerNodeStatus,
+  ): readonly VaingloryAnalysisQueueItem[] {
+    const assigned = queue.active.filter(
+      (item) => item.workerId === worker.workerId,
+    );
+    if (assigned.length > 0 || (queue.workers ?? []).length > 0) {
+      return assigned;
+    }
+    return queue.active.filter((item) =>
+      worker.activePartIds.includes(item.partId),
+    );
   }
 
   categoryLabel(category: VaingloryAnalysisQueueCategory): string {

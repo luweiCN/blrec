@@ -112,6 +112,63 @@ class TestModelTesting(unittest.TestCase):
             metrics={'accuracy': 0.9},
         )
 
+    def test_model_deployment_history_separates_running_and_finished(self):
+        package_path = self.root / 'ready-package'
+        package_path.mkdir()
+        db.create_model_package(
+            self.conn,
+            package_id='ready-package',
+            status='ready',
+            path=str(package_path),
+            manifest={'package_id': 'ready-package', 'status': 'ready'},
+        )
+
+        deployment = db.create_model_deployment(
+            self.conn, package_id='ready-package', target='analysis-worker'
+        )
+        self.assertEqual(deployment['status'], 'queued')
+        with self.assertRaisesRegex(ValueError, '正在部署'):
+            db.create_model_deployment(
+                self.conn, package_id='ready-package', target='analysis-worker'
+            )
+
+        running = db.update_model_deployment(
+            self.conn,
+            deployment_id=deployment['id'],
+            status='running',
+            previous_package_id='old-package',
+        )
+        self.assertEqual(running['previous_package_id'], 'old-package')
+        finished = db.update_model_deployment(
+            self.conn,
+            deployment_id=deployment['id'],
+            status='succeeded',
+            worker_package_id='ready-package',
+            detail={'worker_state': 'running'},
+        )
+        self.assertEqual(finished['status'], 'succeeded')
+        self.assertEqual(finished['detail_json']['worker_state'], 'running')
+        self.assertIsNotNone(finished['finished_at'])
+        self.assertEqual(
+            db.list_model_deployments(self.conn, limit=1)[0]['id'], deployment['id']
+        )
+
+    def test_only_ready_package_can_be_deployed(self):
+        package_path = self.root / 'incomplete-package'
+        package_path.mkdir()
+        db.create_model_package(
+            self.conn,
+            package_id='incomplete-package',
+            status='incomplete',
+            path=str(package_path),
+            manifest={'package_id': 'incomplete-package', 'status': 'incomplete'},
+        )
+
+        with self.assertRaisesRegex(ValueError, '尚未达到发布条件'):
+            db.create_model_deployment(
+                self.conn, package_id='incomplete-package', target='analysis-worker'
+            )
+
     def tearDown(self):
         config.WORK_DIR = self.old_work_dir
         self.conn.close()

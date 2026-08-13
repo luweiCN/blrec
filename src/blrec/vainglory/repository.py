@@ -465,6 +465,26 @@ class IndexSummary:
 
 
 @dataclass(frozen=True)
+class AnalysisWorkerRecord:
+    worker_id: str
+    display_name: str
+    enabled: bool
+    model_package_id: str
+    pipeline_version: str
+    concurrency: int
+    first_seen_at: Optional[int]
+    last_seen_at: Optional[int]
+    completed_task_count: int
+    failed_task_count: int
+    total_processing_seconds: float
+    profiled_task_count: int
+    profiled_video_seconds: float
+    total_decode_analysis_seconds: float
+    total_profiled_task_seconds: float
+    last_task_finished_at: Optional[int]
+
+
+@dataclass(frozen=True)
 class HeroRematchClaim:
     match_id: int
 
@@ -883,6 +903,37 @@ def _definitely_unusable_part_reason(
     return None
 
 
+def _analysis_worker_record(row: sqlite3.Row) -> AnalysisWorkerRecord:
+    return AnalysisWorkerRecord(
+        worker_id=str(row['worker_id']),
+        display_name=str(row['display_name'] or ''),
+        enabled=bool(row['enabled']),
+        model_package_id=str(row['model_package_id'] or ''),
+        pipeline_version=str(row['pipeline_version'] or ''),
+        concurrency=int(row['concurrency'] or 0),
+        first_seen_at=(
+            None if row['first_seen_at'] is None else int(row['first_seen_at'])
+        ),
+        last_seen_at=(
+            None if row['last_seen_at'] is None else int(row['last_seen_at'])
+        ),
+        completed_task_count=int(row['completed_task_count'] or 0),
+        failed_task_count=int(row['failed_task_count'] or 0),
+        total_processing_seconds=float(row['total_processing_seconds'] or 0),
+        profiled_task_count=int(row['profiled_task_count'] or 0),
+        profiled_video_seconds=float(row['profiled_video_seconds'] or 0),
+        total_decode_analysis_seconds=float(
+            row['total_decode_analysis_seconds'] or 0
+        ),
+        total_profiled_task_seconds=float(row['total_profiled_task_seconds'] or 0),
+        last_task_finished_at=(
+            None
+            if row['last_task_finished_at'] is None
+            else int(row['last_task_finished_at'])
+        ),
+    )
+
+
 class VaingloryRepository:
     ALGORITHM_VERSION = 18
     HERO_RECOGNITION_VERSION = 5
@@ -1119,6 +1170,154 @@ class VaingloryRepository:
             return part_count + rerun_count
 
         return await self._database.write(recover)
+
+    async def list_analysis_workers(self) -> Tuple[AnalysisWorkerRecord, ...]:
+        rows = await self._database.fetchall(
+            'SELECT * FROM vainglory_analysis_workers '
+            'ORDER BY last_seen_at DESC,worker_id'
+        )
+        return tuple(_analysis_worker_record(row) for row in rows)
+
+    async def register_analysis_worker(
+        self,
+        worker_id: str,
+        *,
+        model_package_id: str = '',
+        pipeline_version: str = '',
+        concurrency: int = 0,
+    ) -> AnalysisWorkerRecord:
+        now = self._now()
+
+        def register(connection: sqlite3.Connection) -> AnalysisWorkerRecord:
+            connection.execute(
+                'INSERT INTO vainglory_analysis_workers('
+                'worker_id,model_package_id,pipeline_version,concurrency,'
+                'first_seen_at,last_seen_at,created_at,updated_at) '
+                'VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(worker_id) DO UPDATE SET '
+                'model_package_id=CASE WHEN excluded.model_package_id<>\'\' '
+                'THEN excluded.model_package_id ELSE model_package_id END,'
+                'pipeline_version=CASE WHEN excluded.pipeline_version<>\'\' '
+                'THEN excluded.pipeline_version ELSE pipeline_version END,'
+                'concurrency=CASE WHEN excluded.concurrency>0 '
+                'THEN excluded.concurrency ELSE concurrency END,'
+                'first_seen_at=COALESCE(first_seen_at,excluded.first_seen_at),'
+                'last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at',
+                (
+                    worker_id,
+                    model_package_id,
+                    pipeline_version,
+                    max(0, int(concurrency)),
+                    now,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                'SELECT * FROM vainglory_analysis_workers WHERE worker_id=?',
+                (worker_id,),
+            ).fetchone()
+            assert row is not None
+            return _analysis_worker_record(row)
+
+        return await self._database.write(register)
+
+    async def add_analysis_worker(
+        self, worker_id: str, display_name: str
+    ) -> AnalysisWorkerRecord:
+        now = self._now()
+
+        def add(connection: sqlite3.Connection) -> AnalysisWorkerRecord:
+            try:
+                connection.execute(
+                    'INSERT INTO vainglory_analysis_workers('
+                    'worker_id,display_name,created_at,updated_at) VALUES(?,?,?,?)',
+                    (worker_id, display_name, now, now),
+                )
+            except sqlite3.IntegrityError as error:
+                raise VaingloryConflict('这个 Worker 已经登记') from error
+            row = connection.execute(
+                'SELECT * FROM vainglory_analysis_workers WHERE worker_id=?',
+                (worker_id,),
+            ).fetchone()
+            assert row is not None
+            return _analysis_worker_record(row)
+
+        return await self._database.write(add)
+
+    async def update_analysis_worker(
+        self,
+        worker_id: str,
+        *,
+        display_name: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> AnalysisWorkerRecord:
+        now = self._now()
+
+        def update(connection: sqlite3.Connection) -> AnalysisWorkerRecord:
+            cursor = connection.execute(
+                'UPDATE vainglory_analysis_workers SET '
+                'display_name=COALESCE(?,display_name),'
+                'enabled=COALESCE(?,enabled),updated_at=? WHERE worker_id=?',
+                (
+                    display_name,
+                    None if enabled is None else int(enabled),
+                    now,
+                    worker_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise VaingloryNotFound('Worker 不存在')
+            row = connection.execute(
+                'SELECT * FROM vainglory_analysis_workers WHERE worker_id=?',
+                (worker_id,),
+            ).fetchone()
+            assert row is not None
+            return _analysis_worker_record(row)
+
+        return await self._database.write(update)
+
+    async def record_analysis_worker_task(
+        self,
+        worker_id: str,
+        *,
+        succeeded: bool,
+        processing_seconds: float,
+        video_duration_seconds: Optional[float] = None,
+        decode_analysis_seconds: Optional[float] = None,
+    ) -> None:
+        now = self._now()
+        profiled = (
+            succeeded
+            and video_duration_seconds is not None
+            and video_duration_seconds > 0
+            and decode_analysis_seconds is not None
+            and decode_analysis_seconds >= 0
+        )
+        await self._database.execute(
+            'UPDATE vainglory_analysis_workers SET '
+            'completed_task_count=completed_task_count+?,'
+            'failed_task_count=failed_task_count+?,'
+            'total_processing_seconds=total_processing_seconds+?,'
+            'profiled_task_count=profiled_task_count+?,'
+            'profiled_video_seconds=profiled_video_seconds+?,'
+            'total_decode_analysis_seconds=total_decode_analysis_seconds+?,'
+            'total_profiled_task_seconds=total_profiled_task_seconds+?,'
+            'last_task_finished_at=?,updated_at=? '
+            'WHERE worker_id=?',
+            (
+                int(succeeded),
+                int(not succeeded),
+                max(0.0, float(processing_seconds)),
+                int(profiled),
+                float(video_duration_seconds or 0) if profiled else 0.0,
+                float(decode_analysis_seconds or 0) if profiled else 0.0,
+                max(0.0, float(processing_seconds)) if profiled else 0.0,
+                now,
+                now,
+                worker_id,
+            ),
+        )
 
     async def purge_excluded_content(self) -> int:
         def purge(connection: sqlite3.Connection) -> Dict[str, int]:

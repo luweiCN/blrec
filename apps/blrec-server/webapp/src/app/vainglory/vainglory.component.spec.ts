@@ -194,6 +194,8 @@ describe('VaingloryComponent remote media', () => {
       'setPlayerHero',
       'reanalyzeMatch',
       'suppressMatchReview',
+      'addAnalysisWorker',
+      'updateAnalysisWorker',
     ]);
     recordings = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',

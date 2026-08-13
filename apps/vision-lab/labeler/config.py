@@ -39,6 +39,26 @@ NAS_RESULT_FRAME_DIR = os.environ.get(
     'VISION_LAB_NAS_RESULT_FRAME_DIR', '/cfg/vainglory-result-frames'
 ).rstrip('/')
 
+# MacBook Pro Analysis Worker 模型包发布。SSH 只使用系统密钥/SSH agent，
+# Vision Lab 不保存 Worker 密码。
+WORKER_SSH_HOST = os.environ.get('VISION_LAB_WORKER_SSH_HOST', '192.168.50.143').strip()
+WORKER_SSH_USER = os.environ.get(
+    'VISION_LAB_WORKER_SSH_USER', os.environ.get('USER', '')
+).strip()
+WORKER_SSH_PORT = os.environ.get('VISION_LAB_WORKER_SSH_PORT', '22').strip()
+WORKER_SSH_IDENTITY = os.environ.get('VISION_LAB_WORKER_SSH_IDENTITY', '').strip()
+WORKER_MODEL_ROOT = os.environ.get(
+    'VISION_LAB_WORKER_MODEL_ROOT',
+    '~/Library/Application Support/BLRECAnalysisWorker/model-packages',
+).strip()
+WORKER_LAUNCHD_LABEL = os.environ.get(
+    'VISION_LAB_WORKER_LAUNCHD_LABEL', 'com.luwei.blrec-analysis-worker'
+).strip()
+WORKER_LAUNCHD_PLIST = os.environ.get(
+    'VISION_LAB_WORKER_LAUNCHD_PLIST',
+    '~/Library/LaunchAgents/com.luwei.blrec-analysis-worker.plist',
+).strip()
+
 VIDEO_EXTS = {'.flv', '.mp4', '.ts', '.mkv', '.m4s'}
 
 # ---------- 分层标注体系 ----------

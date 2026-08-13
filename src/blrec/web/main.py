@@ -321,6 +321,15 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
     index_service = _bili_account_runtime.vainglory_service
     analysis_queue: Dict[str, object] = {
         'workerState': 'stopped',
+        'worker': {
+            'state': 'stopped',
+            'remoteEnabled': False,
+            'workerId': '',
+            'modelPackageId': '',
+            'pipelineVersion': '',
+            'lastSeenAt': None,
+        },
+        'workers': [],
         'active': [],
         'queued': [],
         'recentCompletions': [],
@@ -345,6 +354,8 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
     if index_service is not None:
         queue_status = await index_service.analysis_queue_status()
         summary = await index_service.index_summary()
+        worker_status = index_service.analysis_worker_status
+        worker_nodes = await index_service.list_analysis_workers()
 
         def match_preview(value: Any) -> Dict[str, object]:
             return {
@@ -366,6 +377,7 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
         def queue_item(value: Any) -> Dict[str, object]:
             return {
                 'partId': value.part_id,
+                'workerId': index_service.remote_worker_for('part', value.part_id),
                 'sessionId': value.session_id,
                 'partIndex': value.part_index,
                 'title': value.title,
@@ -424,7 +436,40 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
             }
 
         analysis_queue = {
-            'workerState': index_service.worker_state,
+            'workerState': worker_status.state,
+            'worker': {
+                'state': worker_status.state,
+                'remoteEnabled': worker_status.remote_enabled,
+                'workerId': worker_status.worker_id,
+                'modelPackageId': worker_status.model_package_id,
+                'pipelineVersion': worker_status.pipeline_version,
+                'lastSeenAt': worker_status.last_seen_at,
+            },
+            'workers': [
+                {
+                    'state': worker.state,
+                    'workerId': worker.worker_id,
+                    'displayName': worker.display_name,
+                    'enabled': worker.enabled,
+                    'modelPackageId': worker.model_package_id,
+                    'pipelineVersion': worker.pipeline_version,
+                    'lastSeenAt': worker.last_seen_at,
+                    'activeTaskCount': worker.active_task_count,
+                    'activePartIds': list(worker.active_part_ids),
+                    'concurrency': worker.concurrency,
+                    'completedTaskCount': worker.completed_task_count,
+                    'failedTaskCount': worker.failed_task_count,
+                    'totalProcessingSeconds': worker.total_processing_seconds,
+                    'profiledTaskCount': worker.profiled_task_count,
+                    'profiledVideoSeconds': worker.profiled_video_seconds,
+                    'totalDecodeAnalysisSeconds': (
+                        worker.total_decode_analysis_seconds
+                    ),
+                    'totalProfiledTaskSeconds': worker.total_profiled_task_seconds,
+                    'lastTaskFinishedAt': worker.last_task_finished_at,
+                }
+                for worker in worker_nodes
+            ],
             'active': [queue_item(item) for item in queue_status.active],
             'queued': [queue_item(item) for item in queue_status.queued],
             'recentCompletions': [

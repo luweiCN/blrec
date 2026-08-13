@@ -3,9 +3,14 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+from unittest import mock
 
 import pytest
-from blrec_analysis_worker.remote import RemoteAnalysisWorker, _Heartbeat
+from blrec_analysis_worker.remote import (
+    AnalysisWorkerClient,
+    RemoteAnalysisWorker,
+    _Heartbeat,
+)
 
 from blrec.vainglory.analyzer import (
     AnalysisStatus,
@@ -134,6 +139,98 @@ def _wait_until(predicate: Any, *, timeout: float = 10) -> bool:
             return True
         time.sleep(0.01)
     return predicate()
+
+
+def test_client_reports_loaded_model_while_polling_for_work() -> None:
+    response = mock.Mock(status_code=204)
+    session = mock.Mock()
+    session.post.return_value = response
+    with mock.patch(
+        'blrec_analysis_worker.remote.requests.Session', return_value=session
+    ):
+        client = AnalysisWorkerClient(
+            'http://nas:2234',
+            'token',
+            worker_id='macbook-pro',
+            model_package_id='vg-vision-v2',
+            pipeline_version='timeline-v2',
+        )
+
+    assert client.claim() is None
+    session.post.assert_called_once_with(
+        'http://nas:2234/api/v1/vainglory/worker/claim',
+        headers={'X-BLREC-Analysis-Worker-Token': 'token'},
+        json={
+            'workerId': 'macbook-pro',
+            'modelPackageId': 'vg-vision-v2',
+            'pipelineVersion': 'timeline-v2',
+            'concurrency': 0,
+        },
+        timeout=(10, 30),
+    )
+
+
+def test_client_reports_worker_identity_with_heartbeat() -> None:
+    response = mock.Mock()
+    with mock.patch(
+        'blrec_analysis_worker.remote.requests.post', return_value=response
+    ) as post:
+        client = AnalysisWorkerClient(
+            'http://nas:2234',
+            'token',
+            worker_id='mac-studio',
+            model_package_id='vg-vision-v2',
+            pipeline_version='timeline-v2',
+        )
+        client.heartbeat('part', 7, 0.25, None)
+
+    post.assert_called_once_with(
+        'http://nas:2234/api/v1/vainglory/worker/heartbeat',
+        headers={'X-BLREC-Analysis-Worker-Token': 'token'},
+        json={
+            'workerId': 'mac-studio',
+            'modelPackageId': 'vg-vision-v2',
+            'pipelineVersion': 'timeline-v2',
+            'concurrency': 0,
+            'kind': 'part',
+            'itemId': 7,
+            'progress': 0.25,
+            'runtimeStatus': None,
+        },
+        timeout=(10, 20),
+    )
+
+
+def test_client_reports_worker_identity_when_work_finishes() -> None:
+    response = mock.Mock()
+    session = mock.Mock()
+    session.post.return_value = response
+    with mock.patch(
+        'blrec_analysis_worker.remote.requests.Session', return_value=session
+    ):
+        client = AnalysisWorkerClient(
+            'http://nas:2234',
+            'token',
+            worker_id='mac-studio',
+            model_package_id='vg-vision-v2',
+            pipeline_version='timeline-v2',
+            concurrency=3,
+        )
+
+    client.complete({'kind': 'part', 'itemId': 7})
+    session.post.assert_called_once_with(
+        'http://nas:2234/api/v1/vainglory/worker/complete',
+        headers={'X-BLREC-Analysis-Worker-Token': 'token'},
+        json={
+            'kind': 'part',
+            'itemId': 7,
+            'workerId': 'mac-studio',
+            'modelPackageId': 'vg-vision-v2',
+            'pipelineVersion': 'timeline-v2',
+            'concurrency': 3,
+        },
+        timeout=(10, 120),
+    )
 
 
 def test_parallel_workers_process_claims_concurrently(tmp_path: Path) -> None:
@@ -319,6 +416,8 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
         {'startMs': 0, 'endMs': 20_000, 'mode': '3v3'}
     ]
     assert summary['trainingCandidateCounts'] == {'result_detector': 1}
+    assert clients[0].completed_payloads[0]['videoDurationSeconds'] == 60.0
+    assert clients[0].completed_payloads[0]['decodeAnalysisSeconds'] >= 0
 
 
 def test_worker_reports_unusable_video_as_structured_failure(tmp_path: Path) -> None:

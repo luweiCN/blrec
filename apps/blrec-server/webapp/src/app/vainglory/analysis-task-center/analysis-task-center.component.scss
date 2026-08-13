@@ -21,6 +21,106 @@
   overflow-y: auto;
 }
 
+.analysis-worker-section,
+.analysis-worker-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.analysis-worker-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+
+  > div {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  strong {
+    color: #262626;
+    font-size: 16px;
+  }
+
+  span {
+    color: #8c8c8c;
+    font-size: 12px;
+  }
+}
+
+.analysis-worker-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  span {
+    color: #8c8c8c;
+    font-size: 12px;
+  }
+}
+
+.analysis-worker-grid {
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+}
+
+.analysis-worker-overview {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 8px;
+  background: #f7f9fc;
+
+  > header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+
+    > div {
+      display: grid;
+      min-width: 0;
+      gap: 3px;
+    }
+
+    strong {
+      color: #262626;
+      font-size: 15px;
+    }
+
+    span {
+      color: #595959;
+      font-size: 12px;
+    }
+  }
+
+  > dl {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 16px;
+    margin: 0;
+
+    > div {
+      min-width: 0;
+    }
+
+    dt {
+      color: #8c8c8c;
+      font-size: 12px;
+    }
+
+    dd {
+      overflow: hidden;
+      margin: 3px 0 0;
+      color: #262626;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+}
+
 .analysis-task-section {
   gap: 12px;
 }
@@ -545,6 +645,10 @@
 }
 
 @media (max-width: 900px) {
+  .analysis-worker-overview > dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .analysis-completion-pipeline > dl {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -566,6 +670,21 @@
 }
 
 @media (max-width: 620px) {
+  .analysis-worker-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .analysis-worker-overview {
+    > header {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    > dl {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
   .analysis-task-header,
   .analysis-active-heading,
   .analysis-queued-task > .analysis-queued-heading,

@@ -39,6 +39,7 @@ import {
   MatchKind,
   TeamColor,
   VaingloryAnalysisQueue,
+  VaingloryAnalysisWorkerNodeStatus,
   VaingloryAnchorStats,
   VaingloryArchiveBackfillItem,
   VaingloryArchiveBackfillRealtimeSnapshot,
@@ -279,6 +280,12 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   savingRecordedPlayerMatchId: number | null = null;
   savingRecordedPlayerSlot: number | null = null;
   analysisTaskModalVisible = false;
+  analysisWorkerEditorVisible = false;
+  analysisWorkerEditorMode: 'add' | 'edit' = 'add';
+  analysisWorkerIdDraft = '';
+  analysisWorkerNameDraft = '';
+  savingAnalysisWorker = false;
+  updatingAnalysisWorkerIds: ReadonlySet<string> = new Set<string>();
   analysisImageBrowserVisible = false;
   analysisImageBrowserTitle = '';
   analysisImageBrowserLoading = false;
@@ -346,22 +353,20 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.loadHeroReviews(false);
     this.loadRecordedPlayerReviews(false);
     this.loadZeroMatchSessions();
-    this.realtime.events$
-      .pipe(takeUntil(this.destroy$))
-      .subscribe((event) => {
-        if (event.type === 'resync') {
-          if (this.archiveManagerVisible) {
-            this.refreshArchiveManager();
-          }
-          return;
+    this.realtime.events$.pipe(takeUntil(this.destroy$)).subscribe((event) => {
+      if (event.type === 'resync') {
+        if (this.archiveManagerVisible) {
+          this.refreshArchiveManager();
         }
-        if (event.type === 'archive_backfill') {
-          this.applyArchiveBackfillSnapshot(event.data);
-        }
-        if (event.type === 'vainglory_index') {
-          this.applyVaingloryIndexSnapshot(event.data);
-        }
-      });
+        return;
+      }
+      if (event.type === 'archive_backfill') {
+        this.applyArchiveBackfillSnapshot(event.data);
+      }
+      if (event.type === 'vainglory_index') {
+        this.applyVaingloryIndexSnapshot(event.data);
+      }
+    });
     this.route.queryParamMap
       .pipe(takeUntil(this.destroy$))
       .subscribe((params) => {
@@ -452,9 +457,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   get heroStats(): readonly VaingloryHeroStats[] {
-    return this.heroStatsView.state === 'ready'
-      ? this.heroStatsView.items
-      : [];
+    return this.heroStatsView.state === 'ready' ? this.heroStatsView.items : [];
   }
 
   get scanJob(): VaingloryScanJob | null {
@@ -491,8 +494,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     }
     return Math.max(
       0,
-      this.indexSummary.playerSlotCount -
-        this.indexSummary.recognizedHeroCount,
+      this.indexSummary.playerSlotCount - this.indexSummary.recognizedHeroCount,
     );
   }
 
@@ -504,7 +506,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   get currentAnalysisImage(): VaingloryMatch | null {
-    return this.analysisImageBrowserItems[this.analysisImageBrowserIndex] ?? null;
+    return (
+      this.analysisImageBrowserItems[this.analysisImageBrowserIndex] ?? null
+    );
   }
 
   applySearch(): void {
@@ -525,8 +529,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   toggleSessionSort(): void {
-    this.sessionSort =
-      this.sessionSort === 'analyzed' ? 'started' : 'analyzed';
+    this.sessionSort = this.sessionSort === 'analyzed' ? 'started' : 'analyzed';
     this.applySearch();
   }
 
@@ -725,6 +728,100 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     });
   }
 
+  openAddAnalysisWorker(): void {
+    this.analysisWorkerEditorMode = 'add';
+    this.analysisWorkerIdDraft = '';
+    this.analysisWorkerNameDraft = '';
+    this.analysisWorkerEditorVisible = true;
+    this.changeDetector.markForCheck();
+  }
+
+  openEditAnalysisWorker(worker: VaingloryAnalysisWorkerNodeStatus): void {
+    this.analysisWorkerEditorMode = 'edit';
+    this.analysisWorkerIdDraft = worker.workerId;
+    this.analysisWorkerNameDraft = worker.displayName;
+    this.analysisWorkerEditorVisible = true;
+    this.changeDetector.markForCheck();
+  }
+
+  saveAnalysisWorker(): void {
+    if (this.savingAnalysisWorker) {
+      return;
+    }
+    const workerId = this.analysisWorkerIdDraft.trim();
+    const displayName = this.analysisWorkerNameDraft.trim();
+    if (!workerId) {
+      this.messages.warning('请输入 Worker ID');
+      return;
+    }
+    this.savingAnalysisWorker = true;
+    const request =
+      this.analysisWorkerEditorMode === 'add'
+        ? this.vainglory.addAnalysisWorker(workerId, displayName)
+        : this.vainglory.updateAnalysisWorker(workerId, { displayName });
+    request.pipe(takeUntil(this.destroy$)).subscribe({
+      next: (worker) => {
+        this.savingAnalysisWorker = false;
+        this.analysisWorkerEditorVisible = false;
+        this.replaceAnalysisWorker(worker);
+        this.messages.success(
+          this.analysisWorkerEditorMode === 'add'
+            ? 'Worker 已登记，等待节点使用同一 ID 连接'
+            : 'Worker 名称已保存',
+        );
+        this.changeDetector.markForCheck();
+      },
+      error: (error: unknown) => {
+        this.savingAnalysisWorker = false;
+        this.messages.error(this.errorMessage(error, 'Worker 保存失败'));
+        this.changeDetector.markForCheck();
+      },
+    });
+  }
+
+  setAnalysisWorkerEnabled(change: {
+    readonly workerId: string;
+    readonly enabled: boolean;
+  }): void {
+    if (this.updatingAnalysisWorkerIds.has(change.workerId)) {
+      return;
+    }
+    this.updatingAnalysisWorkerIds = new Set([
+      ...this.updatingAnalysisWorkerIds,
+      change.workerId,
+    ]);
+    this.vainglory
+      .updateAnalysisWorker(change.workerId, { enabled: change.enabled })
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (worker) => {
+          this.updatingAnalysisWorkerIds = new Set(
+            [...this.updatingAnalysisWorkerIds].filter(
+              (workerId) => workerId !== change.workerId,
+            ),
+          );
+          this.replaceAnalysisWorker(worker);
+          this.messages.success(
+            change.enabled
+              ? 'Worker 已恢复领取新任务'
+              : worker.activeTaskCount > 0
+                ? 'Worker 已进入安全暂停，当前任务完成后不再领取'
+                : 'Worker 已暂停领取新任务',
+          );
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.updatingAnalysisWorkerIds = new Set(
+            [...this.updatingAnalysisWorkerIds].filter(
+              (workerId) => workerId !== change.workerId,
+            ),
+          );
+          this.messages.error(this.errorMessage(error, 'Worker 状态更新失败'));
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
   openAnalysisImageBrowser(request: AnalysisImageRequest): void {
     const generation = ++this.analysisImageRequestGeneration;
     this.analysisImageBrowserVisible = true;
@@ -809,10 +906,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
             return;
           }
           const items = [...accumulated, ...response.items];
-          if (
-            response.items.length > 0 &&
-            items.length < response.total
-          ) {
+          if (response.items.length > 0 && items.length < response.total) {
             this.loadAnalysisImagePage(
               request,
               items.length,
@@ -1031,7 +1125,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       .subscribe({
         next: () => {
           this.markPublicationStepQueued(session.sessionId, step);
-          const labels: Readonly<Record<VaingloryPublicationRetryStep, string>> = {
+          const labels: Readonly<
+            Record<VaingloryPublicationRetryStep, string>
+          > = {
             description: '简介',
             comments: '置顶评论',
             pin: '置顶评论',
@@ -1042,12 +1138,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
           );
         },
         error: (error: unknown) => {
-          this.messages.error(
-            this.errorMessage(
-              error,
-              '无法重试这个发布步骤',
-            ),
-          );
+          this.messages.error(this.errorMessage(error, '无法重试这个发布步骤'));
         },
       });
   }
@@ -1086,17 +1177,13 @@ export class VaingloryComponent implements OnInit, OnDestroy {
             step === 'pin' || step === 'comments'
               ? 'prepared'
               : session.pinState,
-          chapterState:
-            step === 'chapter' ? 'prepared' : session.chapterState,
+          chapterState: step === 'chapter' ? 'prepared' : session.chapterState,
         };
       }),
     };
   }
 
-  publicationStepColor(
-    state: string | null,
-    failed: boolean,
-  ): string {
+  publicationStepColor(state: string | null, failed: boolean): string {
     if (failed) {
       return 'red';
     }
@@ -1419,7 +1506,11 @@ export class VaingloryComponent implements OnInit, OnDestroy {
 
   private parseMarkerTime(value: string): number | null {
     const parts = value.trim().split(':');
-    if (parts.length < 1 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) {
+    if (
+      parts.length < 1 ||
+      parts.length > 3 ||
+      parts.some((part) => !/^\d+$/.test(part))
+    ) {
       return null;
     }
     const numbers = parts.map((part) => Number.parseInt(part, 10));
@@ -1781,9 +1872,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         },
         error: (error: unknown) => {
           this.managedAnchorsLoading = false;
-          this.messages.error(
-            this.errorMessage(error, '房间管理主播加载失败'),
-          );
+          this.messages.error(this.errorMessage(error, '房间管理主播加载失败'));
           this.loadPlayers();
           this.changeDetector.markForCheck();
         },
@@ -1832,9 +1921,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       });
   }
 
-  unrecognizedPlayers(
-    match: VaingloryMatch,
-  ): readonly VaingloryMatchPlayer[] {
+  unrecognizedPlayers(match: VaingloryMatch): readonly VaingloryMatchPlayer[] {
     return match.players.filter((player) => player.heroId === null);
   }
 
@@ -1954,7 +2041,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       .subscribe({
         next: () => {
           this.removeMatchFromReviewQueue(match.id, reviewType);
-          this.messages.success('已从当前待确认列表忽略，对局和统计数据保持不变');
+          this.messages.success(
+            '已从当前待确认列表忽略，对局和统计数据保持不变',
+          );
         },
         error: (error: unknown) => {
           this.messages.error(this.errorMessage(error, '忽略待确认项失败'));
@@ -2025,9 +2114,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         error: (error: unknown) => {
           this.savingRecordedPlayerMatchId = null;
           this.savingRecordedPlayerSlot = null;
-          this.messages.error(
-            this.errorMessage(error, '主播英雄人工确认失败'),
-          );
+          this.messages.error(this.errorMessage(error, '主播英雄人工确认失败'));
           this.changeDetector.markForCheck();
         },
       });
@@ -2145,7 +2232,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         total: Math.max(
           0,
           this.recordedPlayerReviewView.total -
-            (items.length === this.recordedPlayerReviewView.items.length ? 0 : 1),
+            (items.length === this.recordedPlayerReviewView.items.length
+              ? 0
+              : 1),
         ),
         items,
       };
@@ -2394,13 +2483,11 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       .pipe(
         concatMap((sessionId) =>
           this.vainglory.requestScan(sessionId).pipe(
-            map(
-              (job): BulkRescanResult => ({
-                state: 'queued',
-                sessionId,
-                job,
-              }),
-            ),
+            map((job): BulkRescanResult => ({
+              state: 'queued',
+              sessionId,
+              job,
+            })),
             catchError((error: unknown) =>
               of<BulkRescanResult>({ state: 'failed', sessionId, error }),
             ),
@@ -2428,9 +2515,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
           }
         }
         if (failedCount === 0) {
-          this.messages.success(
-            `已将 ${queuedCount} 场直播加入重新分析队列`,
-          );
+          this.messages.success(`已将 ${queuedCount} 场直播加入重新分析队列`);
         } else if (queuedCount > 0) {
           this.messages.warning(
             `已加入 ${queuedCount} 场，${failedCount} 场失败；失败项已保留选中`,
@@ -2550,9 +2635,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     return this.archiveItemsByAccountId.get(accountId) ?? [];
   }
 
-  archiveCurrentItem(
-    accountId: number,
-  ): VaingloryArchiveBackfillItem | null {
+  archiveCurrentItem(accountId: number): VaingloryArchiveBackfillItem | null {
     return this.archiveActiveItems(accountId)[0] ?? null;
   }
 
@@ -2604,6 +2687,45 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     );
   }
 
+  workerStatusTriggerLabel(queue: VaingloryAnalysisQueue): string {
+    const workers = queue.workers ?? [];
+    if (workers.length === 0) {
+      if (queue.workerState === 'failed') {
+        return 'Worker 异常';
+      }
+      return queue.workerState === 'stopped' ? 'Worker 离线' : 'Worker 空闲';
+    }
+    const runningWorkers = workers.filter(
+      (worker) => worker.state === 'running' && worker.enabled,
+    ).length;
+    const failedWorkers = workers.filter(
+      (worker) => worker.state === 'failed',
+    ).length;
+    const pausedWorkers = workers.filter((worker) => !worker.enabled).length;
+    if (failedWorkers > 0) {
+      return `${failedWorkers} 个 Worker 异常`;
+    }
+    if (runningWorkers === 0 && pausedWorkers > 0) {
+      return `${pausedWorkers} 个 Worker 已暂停`;
+    }
+    if (runningWorkers === 0) {
+      return `${workers.length} 个 Worker 离线`;
+    }
+    const count = runningWorkers > 0 ? `${runningWorkers} 个 Worker` : 'Worker';
+    const activeTasks = workers.reduce(
+      (total, worker) => total + worker.activeTaskCount,
+      0,
+    );
+    return activeTasks > 0 || queue.active.length > 0
+      ? `${count} 处理中`
+      : `${count} 空闲`;
+  }
+
+  workerStatusPaused(queue: VaingloryAnalysisQueue | null): boolean {
+    const workers = queue?.workers ?? [];
+    return workers.length > 0 && workers.every((worker) => !worker.enabled);
+  }
+
   archiveItemPercent(item: VaingloryArchiveBackfillItem): number {
     switch (item.stage) {
       case 'queued':
@@ -2635,7 +2757,10 @@ export class VaingloryComponent implements OnInit, OnDestroy {
 
   archiveDownloadLabel(item: VaingloryArchiveBackfillItem): string {
     const size = this.archiveDownloadSize(item);
-    if (item.downloadProgress >= 0.999 || this.archiveStageAfterDownload(item)) {
+    if (
+      item.downloadProgress >= 0.999 ||
+      this.archiveStageAfterDownload(item)
+    ) {
       return size ? `已完成 · ${size}` : '已完成';
     }
     if (item.stage === 'downloading') {
@@ -2647,7 +2772,10 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   archiveAnalysisLabel(item: VaingloryArchiveBackfillItem): string {
-    if (item.analysisState === 'ready' || this.archiveStageAfterAnalysis(item)) {
+    if (
+      item.analysisState === 'ready' ||
+      this.archiveStageAfterAnalysis(item)
+    ) {
       return '已完成';
     }
     if (item.stage === 'scanning_video') {
@@ -2665,16 +2793,16 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   archiveOcrLabel(item: VaingloryArchiveBackfillItem): string {
-    if (item.analysisState === 'ready' || this.archiveStageAfterAnalysis(item)) {
+    if (
+      item.analysisState === 'ready' ||
+      this.archiveStageAfterAnalysis(item)
+    ) {
       return '已完成';
     }
     if (item.stage === 'ocr_recognition') {
       return `${Math.max(
         0,
-        Math.min(
-          100,
-          Math.round(((item.analysisProgress - 0.7) / 0.3) * 100),
-        ),
+        Math.min(100, Math.round(((item.analysisProgress - 0.7) / 0.3) * 100)),
       )}%`;
     }
     return '等待';
@@ -2685,7 +2813,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       return '由原录制/迁移任务处理';
     }
     if (item.stage === 'completed') {
-      return item.matchCount > 0 ? '简介、评论和置顶已完成' : '未发现对局，无需回填';
+      return item.matchCount > 0
+        ? '简介、评论和置顶已完成'
+        : '未发现对局，无需回填';
     }
     if (item.stage === 'publishing_description') {
       return '正在更新简介';
@@ -2916,7 +3046,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     return !['completed', 'managed_elsewhere', 'failed'].includes(item.stage);
   }
 
-  private archiveStageAfterDownload(item: VaingloryArchiveBackfillItem): boolean {
+  private archiveStageAfterDownload(
+    item: VaingloryArchiveBackfillItem,
+  ): boolean {
     return [
       'analysis_pending',
       'scanning_video',
@@ -2930,7 +3062,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     ].includes(item.stage);
   }
 
-  private archiveStageAfterAnalysis(item: VaingloryArchiveBackfillItem): boolean {
+  private archiveStageAfterAnalysis(
+    item: VaingloryArchiveBackfillItem,
+  ): boolean {
     return [
       'publication_pending',
       'publishing_description',
@@ -3422,6 +3556,24 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       items: this.sessionsView.items.map((item) =>
         item.sessionId === saved.sessionId ? saved : item,
       ),
+    };
+  }
+
+  private replaceAnalysisWorker(
+    saved: VaingloryAnalysisWorkerNodeStatus,
+  ): void {
+    if (this.analysisQueue === null) {
+      return;
+    }
+    const existing = this.analysisQueue.workers ?? [];
+    const found = existing.some((worker) => worker.workerId === saved.workerId);
+    this.analysisQueue = {
+      ...this.analysisQueue,
+      workers: found
+        ? existing.map((worker) =>
+            worker.workerId === saved.workerId ? saved : worker,
+          )
+        : [...existing, saved],
     };
   }
 

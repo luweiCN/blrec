@@ -17,6 +17,7 @@ from blrec.vainglory.analyzer import (
 from blrec.vainglory.repository import (
     AnalysisQueueCompletion,
     AnalysisQueueStatus,
+    AnalysisWorkerRecord,
     ScanClaim,
     VaingloryRepository,
 )
@@ -113,6 +114,250 @@ def test_runtime_log_deduplicates_repeated_stage_messages() -> None:
     assert service._runtime_status[1].coarse_frames == 3
     assert service._runtime_status[1].model_package_id == 'vision-package-v1'
     assert service._runtime_status[1].keyframe_frames == 2
+
+
+@pytest.mark.asyncio
+async def test_remote_worker_status_tracks_multiple_nodes_and_task_owner() -> None:
+    class IdleRemoteRepository:
+        def __init__(self) -> None:
+            self.claims = [
+                ScanClaim(
+                    session_id=1,
+                    part=VideoPart(id=7, index=1, path='/unused'),
+                    realtime=True,
+                )
+            ]
+
+        async def recover_stale_remote_work(self, _timeout: int) -> int:
+            return 0
+
+        async def register_analysis_worker(
+            self,
+            worker_id: str,
+            *,
+            model_package_id: str = '',
+            pipeline_version: str = '',
+            concurrency: int = 0,
+        ) -> AnalysisWorkerRecord:
+            return AnalysisWorkerRecord(
+                worker_id=worker_id,
+                display_name='',
+                enabled=True,
+                model_package_id=model_package_id,
+                pipeline_version=pipeline_version,
+                concurrency=concurrency,
+                first_seen_at=1,
+                last_seen_at=1,
+                completed_task_count=0,
+                failed_task_count=0,
+                total_processing_seconds=0,
+                profiled_task_count=0,
+                profiled_video_seconds=0,
+                total_decode_analysis_seconds=0,
+                total_profiled_task_seconds=0,
+                last_task_finished_at=None,
+            )
+
+        async def claim_next_match_rerun(self):
+            return None
+
+        async def has_realtime_pending(self) -> bool:
+            return True
+
+        async def claim_next(self):
+            return self.claims.pop(0) if self.claims else None
+
+        async def update_progress(self, _part_id: int, _progress: float) -> None:
+            return None
+
+    service = VaingloryIndexService(
+        IdleRemoteRepository(), remote_worker_enabled=True  # type: ignore[arg-type]
+    )
+
+    first_claim = await service.claim_remote_work(
+        worker_id='macbook-pro',
+        model_package_id='vg-vision-v2',
+        pipeline_version='timeline-v2',
+    )
+    second_claim = await service.claim_remote_work(
+        worker_id='mac-studio',
+        model_package_id='vg-vision-v2',
+        pipeline_version='timeline-v2',
+    )
+    await service.heartbeat_remote_work(
+        'part',
+        7,
+        0.25,
+        worker_id='macbook-pro',
+        model_package_id='vg-vision-v2',
+        pipeline_version='timeline-v2',
+    )
+
+    assert first_claim is not None
+    assert first_claim.item_id == 7
+    assert second_claim is None
+    status = service.analysis_worker_status
+    assert status.state == 'running'
+    assert status.remote_enabled is True
+    assert status.worker_id == 'macbook-pro'
+    assert status.model_package_id == 'vg-vision-v2'
+    assert status.pipeline_version == 'timeline-v2'
+    assert status.last_seen_at is not None
+    assert {worker.worker_id for worker in status.workers} == {
+        'macbook-pro',
+        'mac-studio',
+    }
+    macbook = next(
+        worker for worker in status.workers if worker.worker_id == 'macbook-pro'
+    )
+    assert macbook.active_task_count == 1
+    assert macbook.active_part_ids == (7,)
+    assert service.remote_worker_for('part', 7) == 'macbook-pro'
+
+
+@pytest.mark.asyncio
+async def test_remote_worker_registry_preserves_pause_and_records_work(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    repository = VaingloryRepository(database, clock=lambda: 1_000)
+    try:
+        created = await repository.add_analysis_worker(
+            'mac-studio', 'Mac Studio 夜间节点'
+        )
+        paused = await repository.update_analysis_worker(
+            created.worker_id, enabled=False
+        )
+        registered = await repository.register_analysis_worker(
+            created.worker_id,
+            model_package_id='vg-vision-v2',
+            pipeline_version='timeline-v2',
+            concurrency=3,
+        )
+
+        assert paused.enabled is False
+        assert registered.enabled is False
+        assert registered.display_name == 'Mac Studio 夜间节点'
+        assert registered.concurrency == 3
+
+        service = VaingloryIndexService(repository, remote_worker_enabled=True)
+        assert (
+            await service.claim_remote_work(
+                worker_id=created.worker_id,
+                model_package_id='vg-vision-v2',
+                pipeline_version='timeline-v2',
+                concurrency=3,
+            )
+            is None
+        )
+
+        await repository.record_analysis_worker_task(
+            created.worker_id,
+            succeeded=True,
+            processing_seconds=180.0,
+            video_duration_seconds=3_600.0,
+            decode_analysis_seconds=120.0,
+        )
+        worker = (await repository.list_analysis_workers())[0]
+        assert worker.completed_task_count == 1
+        assert worker.failed_task_count == 0
+        assert worker.total_processing_seconds == 180.0
+        assert worker.profiled_task_count == 1
+        assert worker.profiled_video_seconds == 3_600.0
+        assert worker.total_decode_analysis_seconds == 120.0
+        assert worker.total_profiled_task_seconds == 180.0
+        assert worker.last_task_finished_at == 1_000
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_analysis_worker_registry_uses_bound_parameters(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    repository = VaingloryRepository(database)
+    try:
+        malicious_name = "'; DROP TABLE vainglory_analysis_workers; --"
+        created = await repository.add_analysis_worker('safe-worker', malicious_name)
+
+        assert created.display_name == malicious_name
+        assert 'vainglory_analysis_workers' in await database.table_names()
+        assert len(await repository.list_analysis_workers()) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_waits_for_inflight_claim_before_returning() -> None:
+    class BlockingRepository:
+        def __init__(self) -> None:
+            self.enabled = True
+            self.claim_entered = asyncio.Event()
+            self.release_claim = asyncio.Event()
+
+        async def register_analysis_worker(
+            self, worker_id: str, **_metadata: object
+        ) -> AnalysisWorkerRecord:
+            return AnalysisWorkerRecord(
+                worker_id=worker_id,
+                display_name='',
+                enabled=self.enabled,
+                model_package_id='',
+                pipeline_version='',
+                concurrency=1,
+                first_seen_at=1,
+                last_seen_at=1,
+                completed_task_count=0,
+                failed_task_count=0,
+                total_processing_seconds=0,
+                profiled_task_count=0,
+                profiled_video_seconds=0,
+                total_decode_analysis_seconds=0,
+                total_profiled_task_seconds=0,
+                last_task_finished_at=None,
+            )
+
+        async def recover_stale_remote_work(self, _timeout: int) -> int:
+            return 0
+
+        async def claim_next_match_rerun(self):
+            self.claim_entered.set()
+            await self.release_claim.wait()
+            return None
+
+        async def has_realtime_pending(self) -> bool:
+            return True
+
+        async def claim_next(self):
+            return None
+
+        async def update_analysis_worker(
+            self, worker_id: str, **update: object
+        ) -> AnalysisWorkerRecord:
+            self.enabled = bool(update['enabled'])
+            return await self.register_analysis_worker(worker_id)
+
+        async def list_analysis_workers(self):
+            return (await self.register_analysis_worker('mac-studio'),)
+
+    repository = BlockingRepository()
+    service = VaingloryIndexService(
+        repository, remote_worker_enabled=True  # type: ignore[arg-type]
+    )
+    claim = asyncio.create_task(service.claim_remote_work(worker_id='mac-studio'))
+    await repository.claim_entered.wait()
+    pause = asyncio.create_task(
+        service.update_analysis_worker('mac-studio', enabled=False)
+    )
+    await asyncio.sleep(0)
+
+    assert pause.done() is False
+    repository.release_claim.set()
+    assert await claim is None
+    paused = await pause
+    assert paused.enabled is False
+    assert await service.claim_remote_work(worker_id='mac-studio') is None
 
 
 @pytest.mark.asyncio

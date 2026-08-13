@@ -17,9 +17,11 @@
     <nav id="side-nav">
       <button class="nav-item active" data-view="source">数据源</button>
       <button class="nav-item" data-view="candidates"
-              data-candidate-status="needs_review">统一打标</button>
+              data-candidate-source="new"
+              data-candidate-status="needs_review">新同步数据</button>
       <button class="nav-item" data-view="candidates"
-              data-candidate-status="legacy_hero">历史头像训练补齐</button>
+              data-candidate-source="legacy"
+              data-candidate-status="migration_review">历史人工数据</button>
       <button class="nav-item" data-view="inspect">数据检查</button>
       <button class="nav-item" data-view="datasets">数据集版本</button>
       <button class="nav-item" data-view="pairs">同局判断</button>
@@ -492,19 +494,20 @@
     <!-- ============ 新模型统一复核视图 ============ -->
     <section class="view" id="view-candidates">
       <header class="view-header">
-        <h2 id="candidate-page-title">新模型统一打标</h2>
+        <h2 id="candidate-page-title">新同步数据</h2>
+        <div id="candidate-scope-summary" class="candidate-scope-summary muted"
+             role="status" aria-live="polite">读取中…</div>
         <div class="toolbar">
           <button id="btn-candidate-sync" class="primary">同步 NAS（Worker＋历史结算图）</button>
           <span id="candidate-sync-state" class="muted"></span>
           <span class="spacer"></span>
-          <label>状态
+          <label>工作队列
             <select id="candidate-status-filter">
-              <option value="needs_review">待确认／待补齐</option>
+              <option value="needs_review">待确认</option>
               <option value="missing_player">只补本人标记</option>
-              <option value="legacy_hero">历史头像训练补齐</option>
-              <option value="confirmed">分类标签已确认</option>
+              <option value="confirmed">已确认</option>
               <option value="skipped">已跳过</option>
-              <option value="all">全部</option>
+              <option value="all">全部新图</option>
             </select>
           </label>
           <button id="btn-candidate-refresh">刷新</button>
@@ -528,7 +531,7 @@
           <span id="candidate-legacy-summary" class="muted"
                 role="status" aria-live="polite"></span>
         </div>
-        <p id="candidate-page-hint" class="hint small">一张图只看一次：右侧确认对局状态、模式、英雄选择和结算面板，图片下方确认英雄头像来自 HUD、积分板还是结算图。模型结果只是预选，未人工确认的图片不会进入训练集；旧积分板、商店和光栅框会保留，但这里不要求重画。</p>
+        <p id="candidate-page-hint" class="hint small">这里只显示 Worker 新采样和 NAS 结算归档。新模型会先填写分类、结算框及可判断的英雄信息，你只需核对和修正；未经人工确认的图片不会进入训练集。</p>
       </header>
       <div id="candidate-layout">
         <div id="candidate-stage">
@@ -598,6 +601,11 @@
           </div>
         </div>
         <aside id="candidate-inspector">
+          <div class="candidate-primary-actions">
+            <div id="candidate-save-state" class="muted small"
+                 role="status" aria-live="polite"></div>
+            <button id="btn-candidate-save" class="primary">确认并下一张</button>
+          </div>
           <div class="toolbar tight">
             <button id="btn-candidate-prev">←</button>
             <span id="candidate-progress" class="muted"
@@ -618,8 +626,6 @@
               <button id="btn-candidate-clear-boxes">清除结算框</button>
               <button id="btn-candidate-skip">跳过图片</button>
             </div>
-            <button id="btn-candidate-save" class="primary full">确认并下一张</button>
-            <div id="candidate-save-state" class="muted small"></div>
           </div>
         </aside>
       </div>
@@ -746,19 +752,21 @@
       <div class="model-package-panel">
         <div class="model-package-heading">
           <div>
-            <h3>生成 Worker 发布候选包</h3>
-            <p class="hint small">把 7 个新模型以及各自的标签、预处理规则、训练数据版本、指标和文件哈希封装成一个不可变 ZIP。</p>
+            <h3>生成并部署 Worker 模型包</h3>
+            <p class="hint small">先把 7 个已验收模型封装成不可变版本，再从下方直接部署到 MacBook Pro Worker。</p>
           </div>
-          <span class="model-package-notice">不会自动部署或重启 Worker</span>
+          <span id="model-worker-live" class="model-package-notice"
+                role="status" aria-live="polite">正在读取 Worker 版本</span>
         </div>
         <details class="model-package-explainer">
           <summary>这个模型包具体有什么用？</summary>
-          <p>它相当于一次可追溯的“装箱”：以后部署时可以准确知道 Worker 使用的是哪几个模型、哪批训练数据和哪套输入规则。7 个新模型都必须验收通过，避免发布一个只能扫时间线、却不能完成头像、英雄和主播位置识别的半成品。生成 ZIP 只是准备候选版本，仍需后续的 Worker 加载与发布步骤。</p>
+          <p>它相当于一次可追溯的“装箱”：可以准确知道 Worker 使用的是哪几个模型、哪批训练数据和哪套输入规则。点击部署后会先上传新目录并校验全部哈希，再原子切换版本并重启 Worker；启动失败会自动切回原版本。重新部署以前的完整模型包就是回滚。</p>
         </details>
         <div id="model-package-runs"></div>
-        <button id="btn-build-model-package" class="primary">生成候选包</button>
+        <button id="btn-build-model-package" class="primary">生成可部署版本</button>
         <span id="model-package-state" class="muted"></span>
         <div id="model-package-list"></div>
+        <div id="model-deployment-history" class="model-deployment-history"></div>
       </div>
     </section>
 

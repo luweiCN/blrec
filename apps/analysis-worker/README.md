@@ -33,10 +33,14 @@ blrec-analysis-worker run \
   --token-file /path/to/worker-token \
   --ocr-url http://127.0.0.1:18080 \
   --model-package /path/to/unpacked/vg-vision-package \
+  --worker-id mac-studio \
+  --concurrency 3 \
   --execution-provider coreml
 ```
 
 `--model-package` 也可以通过 `BLREC_VISION_MODEL_PACKAGE` 指定，并且是必填项。
+`--worker-id` 默认使用机器名，也可以通过 `BLREC_ANALYSIS_WORKER_ID` 指定；它需要
+与管理后台手动登记的 Worker ID 一致。未预先登记的节点首次连接时会自动登记。
 Worker 启动时会校验包状态、七个模型角色、类别顺序和每个 ONNX 的 SHA-256；
 不完整、未验收或被修改的模型包会直接拒绝加载。Worker wheel 不再携带旧模型或
 SIFT 英雄参考图，也不存在旧模型回退路径。
@@ -50,6 +54,10 @@ SIFT 英雄参考图，也不存在旧模型回退路径。
 
 `deploy/macos/` 提供 launchd 模板。Worker 只通过版本化 HTTP 分析协议领任务和
 回传结果；缓存、日志与 token 均位于源码目录之外。
+
+Vision Lab 的模型测试页可通过 SSH 发布已经验收的完整模型包。首次发布会把
+launchd 的 `--model-package` 统一改为外部模型目录下的 `current` 符号链接；后续
+版本都先写入独立目录、校验完成后再切换该链接。启动失败时恢复旧链接和旧 plist。
 
 新管线会回传模型包、关键帧／补帧、时间线分段、结算窗口和候选统计，所以正式
 启用时需要先更新 NAS Server，再更新 MacBook Pro Worker。只在 Vision Lab 中

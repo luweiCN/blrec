@@ -25,6 +25,8 @@ let trainingPollTimer = null;
 let trainingLogRunId = null;
 let candidateQueue = [];
 let candidateIndex = 0;
+let candidateSourceScope = 'new';
+let candidateLoadedSourceScope = 'new';
 let candidateLoadedStatus = 'needs_review';
 let candidateFilteredTotal = 0;
 let candidateSessionCompleted = 0;
@@ -54,6 +56,9 @@ let modelTestSamples = [];
 let modelTestIndex = 0;
 let modelTestPrediction = null;
 let modelTestBatchReport = null;
+let modelPackages = [];
+let modelDeploymentData = null;
+let modelDeploymentPollTimer = null;
 const initialTask = new URLSearchParams(window.location.search).get('task');
 const state = {
   task: initialTask === 'mode_gate' ? 'mode_gate' : 'result_detector',
@@ -111,8 +116,11 @@ function bindNav() {
       if (btn.dataset.view === 'bp-review') loadBpReview();
       if (btn.dataset.view === 'key-screen-review') loadKeyScreenReview();
       if (btn.dataset.view === 'candidates') {
-        $('#candidate-status-filter').value =
-          btn.dataset.candidateStatus || 'needs_review';
+        setCandidateSourceScope(
+          btn.dataset.candidateSource || 'new',
+          btn.dataset.candidateStatus || 'needs_review',
+          false,
+        );
         loadCandidateReview();
       }
       if (btn.dataset.view === 'model-tests') loadModelTesting();
@@ -198,7 +206,26 @@ const CANDIDATE_SOURCE_LABELS = {
   worker: 'Worker 新采样',
   result_archive: 'NAS 结算归档',
   model_prefill: '新模型预填',
+  hero_model_prefill: '英雄模型预填',
   other: '其他本地素材',
+};
+
+const CANDIDATE_QUEUE_OPTIONS = {
+  new: [
+    ['needs_review', '待确认'],
+    ['missing_player', '只补本人标记'],
+    ['confirmed', '已确认'],
+    ['skipped', '已跳过'],
+    ['all', '全部新图'],
+  ],
+  legacy: [
+    ['migration_review', '迁移待人工复核'],
+    ['needs_review', '旧标签不完整'],
+    ['legacy_hero', '头像待补齐（按局折叠）'],
+    ['human_confirmed', '新流程人工已确认'],
+    ['skipped', '已跳过'],
+    ['all', '全部历史图'],
+  ],
 };
 
 const CANDIDATE_HERO_LAYOUTS = {
@@ -238,6 +265,30 @@ const CANDIDATE_HERO_SELECT_VISIBILITY = {
 
 function currentCandidate() {
   return candidateQueue[candidateIndex] || null;
+}
+
+function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true) {
+  candidateSourceScope = scope === 'legacy' ? 'legacy' : 'new';
+  const options = CANDIDATE_QUEUE_OPTIONS[candidateSourceScope];
+  const selected = options.some(([value]) => value === status)
+    ? status : 'needs_review';
+  $('#candidate-status-filter').replaceChildren(
+    ...options.map(([value, label]) => new Option(label, value)),
+  );
+  $('#candidate-status-filter').value = selected;
+  const historical = candidateSourceScope === 'legacy';
+  $('#candidate-page-title').textContent = historical
+    ? '历史人工数据' : '新同步数据';
+  $('#candidate-scope-summary').textContent = historical
+    ? '正在读取历史人工数据…' : '正在读取新同步数据…';
+  $('#btn-candidate-sync').classList.toggle('hidden', historical);
+  $('#candidate-sync-state').classList.toggle('hidden', historical);
+  if (syncNav) {
+    $$('.nav-item').forEach((button) => button.classList.remove('active'));
+    const nav = $(`.nav-item[data-view="candidates"]` +
+      `[data-candidate-source="${candidateSourceScope}"]`);
+    if (nav) nav.classList.add('active');
+  }
 }
 
 function candidateSourceText(item) {
@@ -719,6 +770,17 @@ function renderCandidateBoxes() {
 function renderCandidateSuggestions(item) {
   const suggestions = $('#candidate-suggestion');
   suggestions.innerHTML = '';
+  const historical = (item.source_categories || []).includes('legacy');
+  const hasNewModelPrefill = (item.sources || []).some(
+    (source) => source.source_type === 'new_model_prefill');
+  $('.candidate-model-title').textContent = historical
+    ? '新模型对照' : '模型建议';
+  if (historical && !hasNewModelPrefill) {
+    suggestions.textContent = '正在生成新模型结果；旧人工标签不会被覆盖';
+    $('#candidate-reason').textContent = '';
+    $('#candidate-reason').title = '';
+    return;
+  }
   TRAINING_REVIEW_FIELDS.forEach((field) => {
     const suggestion = candidateSuggestion(item, field.suggestion);
     if (!suggestion) return;
@@ -731,7 +793,11 @@ function renderCandidateSuggestions(item) {
       `${(Number(suggestion.confidence || 0) * 100).toFixed(1)}%`;
     suggestions.appendChild(line);
   });
-  if (!suggestions.childElementCount) suggestions.textContent = '没有模型建议';
+  if (!suggestions.childElementCount) {
+    suggestions.textContent = historical
+      ? '新模型没有产出可用结果；旧人工标签仍然保留'
+      : '没有模型建议';
+  }
   const reasons = new Set();
   Object.values(item.suggestions || {}).forEach((suggestion) => {
     if (suggestion.reason) reasons.add(suggestion.reason);
@@ -2008,9 +2074,15 @@ function candidateItemMatchesStatus(item, status) {
   if (status === 'legacy_hero') {
     return Boolean(item.legacy_hero_needs_review);
   }
+  if (status === 'migration_review') {
+    return Boolean(item.legacy_migration_needs_review);
+  }
+  if (status === 'human_confirmed') {
+    return item.review_status === 'confirmed' &&
+      Boolean(item.unified_manual_reviewed);
+  }
   if (status === 'needs_review') {
-    return ['pending', 'partial'].includes(item.review_status) ||
-      Boolean(item.needs_player_hero_review);
+    return ['pending', 'partial'].includes(item.review_status);
   }
   if (status === 'missing_player') {
     return Boolean(item.needs_player_hero_review);
@@ -2019,19 +2091,25 @@ function candidateItemMatchesStatus(item, status) {
 }
 
 function candidateReviewTotal(stats, status) {
-  const statuses = stats.statuses || {};
-  if (status === 'all') return Number(stats.total || 0);
+  const scope = (stats.source_scopes || {})[candidateSourceScope] || {};
+  const statuses = scope.statuses || {};
+  if (status === 'all') return Number(scope.total || 0);
   if (status === 'legacy_hero') {
     return Number(
       (stats.legacy_hero_filtered || stats.legacy_hero || {}).remaining_groups || 0
     );
   }
+  if (status === 'migration_review') {
+    return Number(scope.migration_pending_review || 0);
+  }
+  if (status === 'human_confirmed') {
+    return Number(scope.human_confirmed || 0);
+  }
   if (status === 'needs_review') {
-    return Number(statuses.pending || 0) + Number(statuses.partial || 0) +
-      Number(stats.missing_player_hero || 0);
+    return Number(scope.needs_review || 0);
   }
   if (status === 'missing_player') {
-    return Number(stats.missing_player_hero || 0);
+    return Number(scope.missing_player_hero || 0);
   }
   return Number(statuses[status] || 0);
 }
@@ -2039,11 +2117,14 @@ function candidateReviewTotal(stats, status) {
 function candidateStatusIsReviewQueue(status) {
   return [
     'needs_review', 'missing_player', 'pending', 'partial', 'legacy_hero',
+    'migration_review',
   ].includes(status);
 }
 
 function candidateReviewQuery(status, offset = null) {
-  const query = new URLSearchParams({status, limit: '2000'});
+  const query = new URLSearchParams({
+    status, limit: '2000', source_scope: candidateSourceScope,
+  });
   if (offset !== null) query.set('offset', String(offset));
   if (status === 'legacy_hero') {
     const streamer = $('#candidate-legacy-streamer').value;
@@ -2055,13 +2136,20 @@ function candidateReviewQuery(status, offset = null) {
 }
 
 function renderCandidateLegacyControls(stats, status) {
-  const active = status === 'legacy_hero';
+  const historical = candidateSourceScope === 'legacy';
+  const active = historical && status === 'legacy_hero';
   $('#candidate-legacy-filters').classList.toggle('hidden', !active);
-  $('#candidate-page-title').textContent = active
-    ? '历史头像训练补齐' : '统一打标';
+  $('#candidate-page-title').textContent = historical
+    ? '历史人工数据' : '新同步数据';
   $('#candidate-page-hint').textContent = active
-    ? '这不是另一套数据，也不是让你把约 7000 张旧图全部重标。系统只从旧图里的 HUD、积分板和结算图按主播、同一局和画面类型折叠出代表组，用来补头像圆框与英雄；只有真正补齐并确认的代表图才进入头像位置、英雄身份和本人位置训练，未画头像的旧图不会被当成“没有头像”的负样本。'
-    : 'Worker 新采样、NAS 历史结算归档和历史标签迁移都在这里统一确认。图片顶部会明确显示来源。分类标签已确认只表示四项分类真值可用，不代表 HUD、积分板或结算图的英雄头像也已补齐；头像训练完整度请看顶部来源统计。';
+    ? '这里只把历史 HUD、积分板和结算图按主播、同一局和画面类型折叠成代表组；你补一张代表图即可，不需要把约 7000 张旧图逐张重标。未补头像的旧图不会被当作“没有头像”的负样本。'
+    : historical && status === 'migration_review'
+      ? '这些图片只是把旧格式标签迁移成了新字段，还没有在统一打标页面由你重新确认。旧标签和新模型结果都只作为预填；请像新数据一样核对完整分类，并按画面选择 HUD、积分板、结算、无头像或看不清。确认后才会进入“新流程人工已确认”。'
+      : historical && status === 'human_confirmed'
+        ? '这里只显示你在统一打标页面亲自确认过的历史图片；迁移程序自动带入的旧标签不会出现在这里。'
+        : historical
+          ? '这里展示旧格式人工标签及其迁移状态，与新数据使用同一套分类、头像来源、圆框、英雄和本人位置标注。没有头像框的旧图不会成为头像模型的负样本。'
+          : '这里只显示 Worker 新采样和 NAS 结算归档。新模型会先填写分类、结算框及可判断的英雄信息，你只需核对和修正；未经人工确认的图片不会进入训练集。同一图片若已有历史人工标签，也可能同时出现在历史入口。';
   if (!active) return;
   const globalStats = stats.legacy_hero || {};
   const filteredStats = stats.legacy_hero_filtered || globalStats;
@@ -2104,18 +2192,26 @@ function renderCandidateProgress() {
 }
 
 function renderCandidateSyncStats(stats) {
-  const missingPlayer = stats.missing_player_hero || 0;
-  const sourceFrames = stats.source_frames || {};
-  const legacy = stats.legacy_data || {};
-  $('#candidate-sync-state').textContent =
-    `本地去重后 ${stats.total || 0} · 来源覆盖：历史标签 ${sourceFrames.legacy || 0}、` +
-    `Worker 新图 ${sourceFrames.worker || 0}、结算归档 ${sourceFrames.result_archive || 0}` +
-    `（同图可有多个来源） · 历史分类可用 ${legacy.core_label_confirmed || 0} · ` +
-    `历史头像训练完整 ${legacy.hero_complete || 0}/${legacy.hero_eligible || 0} · ` +
-    `待补齐 ${((stats.statuses || {}).pending || 0) +
-      ((stats.statuses || {}).partial || 0) + missingPlayer}（待补本人 ${missingPlayer}） · ` +
-    `分类标签已确认 ${(stats.statuses || {}).confirmed || 0} · ` +
-    `待回传 ${stats.dirty || 0}`;
+  const scopes = stats.source_scopes || {};
+  const fresh = scopes.new || {};
+  const legacy = scopes.legacy || {};
+  const freshStatuses = fresh.statuses || {};
+  const scope = candidateSourceScope === 'legacy' ? legacy : fresh;
+  if (candidateSourceScope === 'legacy') {
+    const hero = stats.legacy_hero || {};
+    $('#candidate-scope-summary').textContent =
+      `共 ${scope.total || 0} 张旧图 · 迁移待人工复核 ` +
+      `${scope.migration_pending_review || 0} · 新流程人工已确认 ` +
+      `${scope.human_confirmed || 0} · 旧标签不完整 ${scope.needs_review || 0} · ` +
+      `头像待补 ${hero.remaining_groups || 0} 组`;
+    return;
+  }
+  $('#candidate-scope-summary').textContent =
+    `共 ${scope.total || 0} 张新图 · 待确认 ${scope.needs_review || 0} · ` +
+    `已确认 ${freshStatuses.confirmed || 0} · ` +
+    `待补本人 ${scope.missing_player_hero || 0} · ` +
+    `新模型预填 ${scope.core_model_prefilled || 0}/${scope.total || 0} · ` +
+    `英雄模型预填 ${scope.hero_model_prefilled || 0} · 待回传 ${stats.dirty || 0}`;
 }
 
 function renderCandidateItem() {
@@ -2175,16 +2271,24 @@ function renderCandidateItem() {
   renderCandidateChoices();
   $('#btn-candidate-save').disabled = false;
   $('#candidate-save-state').classList.remove('error');
+  const historical = (item.source_categories || []).includes('legacy');
   $('#candidate-save-state').textContent = item.legacy_hero_needs_review
     ? '历史分类标签已迁移并保留；这里只补头像来源、圆框、英雄和本人位置'
+    : item.legacy_migration_needs_review
+      ? '旧格式标签已经预填，但你尚未按新流程确认；请核对完整分类和英雄标注'
     : item.needs_player_hero_review
     ? '原标注已保留，请补齐英雄阵容并标出主播本人'
     : item.review_status === 'confirmed'
-      ? '这张图已经人工确认' : item.review_status === 'partial'
+      ? historical
+        ? '历史人工标签已保留；顶部新模型结果只作对照，不会覆盖真值'
+        : '这张图已经人工确认'
+      : item.review_status === 'partial'
       ? '历史数据只覆盖了部分标签，请补齐后确认'
       : item.review_status === 'skipped' ? '已跳过' : '';
   $('#btn-candidate-skip').disabled =
-    Boolean(item.legacy_hero_needs_review) || item.review_status === 'confirmed';
+    Boolean(item.legacy_hero_needs_review) ||
+    (item.review_status === 'confirmed' &&
+      !item.legacy_migration_needs_review);
   renderCandidateBoxes();
   loadCandidateHeroLineup(item);
   requestCandidateModelPrefill(item);
@@ -2193,7 +2297,10 @@ function renderCandidateItem() {
 async function requestCandidateModelPrefill(item) {
   const frameId = Number(item && item.frame_id);
   if (!frameId || candidatePrefillRequested.has(frameId)) return;
-  if (!['pending', 'partial'].includes(String(item.review_status || ''))) return;
+  const historicalConfirmed = item.review_status === 'confirmed' &&
+    (item.source_categories || []).includes('legacy');
+  if (!historicalConfirmed &&
+      !['pending', 'partial'].includes(String(item.review_status || ''))) return;
   candidatePrefillRequested.add(frameId);
   try {
     const result = await api(
@@ -2219,8 +2326,12 @@ async function requestCandidateModelPrefill(item) {
 
 async function loadCandidateReview() {
   const status = $('#candidate-status-filter').value;
+  const sourceScope = candidateSourceScope;
   try {
     const data = await api(candidateReviewQuery(status));
+    if (sourceScope !== candidateSourceScope ||
+        status !== $('#candidate-status-filter').value) return;
+    candidateLoadedSourceScope = sourceScope;
     candidateLoadedStatus = status;
     renderCandidateLegacyControls(data.stats || {}, status);
     candidateFilteredTotal = candidateReviewTotal(data.stats || {}, status);
@@ -2237,11 +2348,13 @@ async function loadCandidateReview() {
 
 async function refillCandidateReviewQueue() {
   const status = candidateLoadedStatus;
+  const sourceScope = candidateLoadedSourceScope;
   const offset = candidateQueue.filter(
     (item) => candidateItemMatchesStatus(item, status)).length;
   const data = await api(
     candidateReviewQuery(status, offset));
-  if ($('#candidate-status-filter').value !== status) return 0;
+  if ($('#candidate-status-filter').value !== status ||
+      candidateSourceScope !== sourceScope) return 0;
   candidateFilteredTotal = candidateReviewTotal(data.stats || {}, status);
   renderCandidateSyncStats(data.stats || {});
   const known = new Set(candidateQueue.map((item) => item.frame_id));
@@ -2444,19 +2557,15 @@ async function refreshCandidateSync() {
   try {
     const value = await api('/api/worker-candidates/state');
     const sync = value.sync || {};
-    const review = value.review || {};
     $('#candidate-sync-state').textContent = sync.running
       ? `同步中：Worker ${sync.processed || 0}/${sync.total || 0}，` +
         `历史结算 ${sync.archive_processed || 0}/${sync.archive_total || 0}`
       : sync.error ? `同步失败：${sync.error}`
       : sync.archive_failed ?
         `历史结算图失败 ${sync.archive_failed} 张：${sync.archive_last_error || '未知错误'}`
-      : `本地 ${review.total || 0} · 待补齐 ${((review.statuses || {}).pending || 0) +
-          ((review.statuses || {}).partial || 0) +
-          (review.missing_player_hero || 0)}（待补本人 ${review.missing_player_hero || 0}） · ` +
-        `待回传 ${review.dirty || 0} · ` +
-        `历史结算新增 ${sync.archive_inserted || 0}／预填框 ${sync.archive_box_suggested || 0} · ` +
-        `本次拉取 ${sync.reviews_pulled || 0}／回传 ${sync.reviews_pushed || 0}`;
+      : `同步完成：本次拉取 ${sync.reviews_pulled || 0}、` +
+        `回传 ${sync.reviews_pushed || 0} · ` +
+        `历史结算新增 ${sync.archive_inserted || 0}／预填框 ${sync.archive_box_suggested || 0}`;
     if (!sync.running && candidateSyncTimer) {
       clearInterval(candidateSyncTimer);
       candidateSyncTimer = null;
@@ -2489,6 +2598,7 @@ function bindCandidateReview() {
       if (event.isTrusted) candidateFormTouched = true;
     }, true);
   });
+  setCandidateSourceScope('new', 'needs_review', false);
   $('#candidate-status-filter').onchange = loadCandidateReview;
   $('#candidate-legacy-streamer').onchange = loadCandidateReview;
   $('#candidate-legacy-screen').onchange = loadCandidateReview;
@@ -5891,19 +6001,120 @@ function refreshModelPackageBuildState() {
     : `7 个新模型已齐，当前会打包 ${selected.length} 个模型`;
 }
 
-function renderModelPackages(packages) {
-  $('#model-package-list').innerHTML = (packages || []).map((item) => {
+function modelDeploymentStatusLabel(status) {
+  return {
+    queued: '等待部署', running: '正在部署', succeeded: '部署成功', failed: '部署失败',
+  }[status] || status;
+}
+
+function renderModelDeploymentState() {
+  const data = modelDeploymentData || {};
+  const deployments = data.deployments || [];
+  const active = deployments.find(
+    (item) => ['queued', 'running'].includes(item.status));
+  const lastSuccess = deployments.find((item) => item.status === 'succeeded');
+  const live = data.live || null;
+  const currentPackage = (live && live.package_id) ||
+    (lastSuccess && lastSuccess.worker_package_id) || '';
+  const liveState = $('#model-worker-live');
+  liveState.className = 'model-package-notice';
+  liveState.removeAttribute('title');
+  if (active) {
+    liveState.textContent = `正在部署 ${active.package_id}`;
+    liveState.classList.add('deploying');
+  } else if (live && live.worker_state === 'running' && currentPackage) {
+    liveState.textContent = `Worker 当前：${currentPackage}`;
+    liveState.classList.add('running');
+  } else if (data.probe_error) {
+    liveState.textContent = currentPackage
+      ? `最近部署：${currentPackage} · Worker 暂不可达`
+      : 'Worker 暂不可达';
+    liveState.title = data.probe_error;
+    liveState.classList.add('unreachable');
+  } else if (currentPackage) {
+    liveState.textContent = `最近部署：${currentPackage}`;
+    liveState.classList.add('running');
+  } else {
+    liveState.textContent = '尚无部署记录';
+  }
+
+  $('#model-deployment-history').innerHTML = deployments.length
+    ? '<div class="model-deployment-history-title">最近部署</div>' +
+      deployments.slice(0, 5).map((item) =>
+        `<div class="model-deployment-row ${esc(item.status)}">` +
+        `<span>${esc(modelDeploymentStatusLabel(item.status))}</span>` +
+        `<b>${esc(item.package_id)}</b>` +
+        `<small>${esc(item.finished_at || item.started_at || item.created_at || '')}` +
+        `${item.error ? ` · ${esc(item.error)}` : ''}</small></div>`
+      ).join('')
+    : '';
+  return {active, currentPackage};
+}
+
+function renderModelPackages(packages = modelPackages) {
+  modelPackages = packages || [];
+  const {active, currentPackage} = renderModelDeploymentState();
+  const deploymentBusy = Boolean(active);
+  $('#model-package-list').innerHTML = modelPackages.map((item) => {
     const missing = ((item.manifest_json || {}).missing_roles || []).join('、');
     const modelCount = Object.keys(
       (item.manifest_json || {}).models || {}).length;
     const ready = item.status === 'ready';
-    return `<div class="model-package-item"><div><b>${esc(item.id)}</b>` +
-      `<span class="${ready ? 'ready' : 'incomplete'}">${ready ? '可发布' : '不完整'}</span>` +
+    const current = item.id === currentPackage;
+    const deploying = active && active.package_id === item.id;
+    const actionLabel = current ? '当前使用中' : deploying ? '部署中…' :
+      currentPackage ? '部署此版本' : '部署到 Worker';
+    return `<div class="model-package-item${current ? ' current' : ''}"><div><b>${esc(item.id)}</b>` +
+      `<span class="${current ? 'active' : ready ? 'ready' : 'incomplete'}">` +
+      `${current ? '已上线' : ready ? '可发布' : '不完整'}</span>` +
       `${missing
         ? `<small>缺少 ${esc(missing)}</small>`
         : `<small>包含 ${modelCount} 个模型及完整追溯信息</small>`}</div>` +
-      `<a href="/api/model-packages/${encodeURIComponent(item.id)}/archive">下载 ZIP</a></div>`;
+      `<div class="model-package-actions">` +
+      `<a href="/api/model-packages/${encodeURIComponent(item.id)}/archive">下载 ZIP</a>` +
+      `<button type="button" class="model-package-deploy${current ? '' : ' primary'}" ` +
+      `data-package-id="${esc(item.id)}" ` +
+      `${!ready || current || deploymentBusy ? 'disabled' : ''}>${actionLabel}</button>` +
+      `</div></div>`;
   }).join('') || '<div class="muted small">还没有模型包</div>';
+  $$('.model-package-deploy[data-package-id]').forEach((button) => {
+    button.onclick = () => deployModelPackage(button.dataset.packageId);
+  });
+}
+
+async function loadModelDeployments(probe = false) {
+  try {
+    modelDeploymentData = await api(
+      `/api/model-deployments${probe ? '?probe=true' : ''}`);
+    renderModelPackages();
+    const active = (modelDeploymentData.deployments || []).some(
+      (item) => ['queued', 'running'].includes(item.status));
+    if (modelDeploymentPollTimer) clearTimeout(modelDeploymentPollTimer);
+    modelDeploymentPollTimer = active
+      ? setTimeout(() => loadModelDeployments(false), 1500) : null;
+  } catch (error) {
+    $('#model-worker-live').textContent = '读取 Worker 部署状态失败';
+    $('#model-worker-live').title = error.message;
+  }
+}
+
+async function deployModelPackage(packageId) {
+  const confirmed = window.confirm(
+    `确定把 ${packageId} 部署到 MacBook Pro Worker 吗？\n\n` +
+    '系统会校验完整模型包、切换版本并重启 Worker；启动失败会自动回滚。');
+  if (!confirmed) return;
+  $('#model-package-state').textContent = `正在创建 ${packageId} 的部署任务…`;
+  try {
+    await api(
+      `/api/model-packages/${encodeURIComponent(packageId)}/deploy-worker`,
+      {method: 'POST'});
+    $('#model-package-state').textContent =
+      `已提交 ${packageId}，正在上传、校验并切换 Worker…`;
+    await loadModelDeployments(false);
+  } catch (error) {
+    $('#model-package-state').textContent = '部署失败：' + error.message;
+    await loadModelDeployments(false);
+  }
 }
 
 async function buildModelPackage() {
@@ -5923,7 +6134,7 @@ async function buildModelPackage() {
       method: 'POST', body: JSON.stringify({run_ids: runIds}),
     });
     $('#model-package-state').textContent = result.status === 'ready'
-      ? `已生成发布候选包：${result.id}（尚未部署）`
+      ? `已生成可部署版本：${result.id}（尚未部署）`
       : `未达到发布条件：${Object.keys(result.evaluation_gaps || {}).length ? '固定测试集覆盖不足' : '模型不完整'}`;
     const packages = await api('/api/model-packages');
     renderModelPackages(packages.packages);
@@ -5934,11 +6145,14 @@ async function buildModelPackage() {
 
 async function loadModelTesting(preferredRunId = '', loadSamples = true) {
   try {
-    const [runsData, packagesData] = await Promise.all([
+    const [runsData, packagesData, deploymentData] = await Promise.all([
       api('/api/model-tests/runs'), api('/api/model-packages'),
+      api('/api/model-deployments'),
       ensureCandidateHeroCatalog().catch(() => []),
     ]);
     modelTestRuns = runsData.runs || [];
+    modelPackages = packagesData.packages || [];
+    modelDeploymentData = deploymentData;
     const select = $('#model-test-run');
     const previous = preferredRunId || select.value;
     select.innerHTML = '<option value="">请选择训练结果</option>' +
@@ -5949,7 +6163,8 @@ async function loadModelTesting(preferredRunId = '', loadSamples = true) {
     if (modelTestRuns.some((run) => run.id === previous)) select.value = previous;
     else if (modelTestRuns.length) select.value = modelTestRuns[0].id;
     renderModelPackageChoices();
-    renderModelPackages(packagesData.packages);
+    renderModelPackages();
+    loadModelDeployments(true);
     renderModelTestSummary();
     if (loadSamples) await loadModelTestSamples();
   } catch (error) {

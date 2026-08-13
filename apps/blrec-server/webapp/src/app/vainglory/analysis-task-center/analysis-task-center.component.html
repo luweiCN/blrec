@@ -3,6 +3,144 @@
   class="analysis-task-center"
   aria-label="对局分析任务中心"
 >
+  <section
+    class="analysis-worker-section"
+    aria-label="Analysis Worker 节点状态"
+  >
+    <header class="analysis-worker-heading">
+      <div>
+        <strong>Analysis Worker</strong>
+        <span>{{ workerNodes(taskQueue).length }} 台已登记节点</span>
+      </div>
+      <button nz-button nzSize="small" (click)="addWorker.emit()">
+        手动添加 Worker
+      </button>
+    </header>
+
+    <div class="analysis-worker-grid">
+      <article
+        *ngFor="let worker of workerNodes(taskQueue)"
+        class="analysis-worker-overview"
+      >
+        <header>
+          <div>
+            <strong>{{ worker.displayName || worker.workerId }}</strong>
+            <span *ngIf="worker.displayName">ID：{{ worker.workerId }}</span>
+            <span *ngIf="worker.lastSeenAt !== null">
+              最近心跳
+              {{ worker.lastSeenAt * 1000 | date: "MM-dd HH:mm:ss" }}
+            </span>
+          </div>
+          <nz-tag
+            [nzColor]="
+              !worker.enabled
+                ? 'orange'
+                : worker.state === 'failed'
+                  ? 'red'
+                  : worker.activeTaskCount > 0
+                    ? 'blue'
+                    : worker.state === 'running'
+                      ? 'green'
+                      : 'default'
+            "
+          >
+            {{ workerLabel(worker) }}
+          </nz-tag>
+        </header>
+        <dl>
+          <div>
+            <dt>当前任务</dt>
+            <dd>{{ workerTaskLabel(taskQueue, worker) }}</dd>
+          </div>
+          <div>
+            <dt>模型包</dt>
+            <dd [title]="worker.modelPackageId">
+              {{ worker.modelPackageId || "尚未上报" }}
+            </dd>
+          </div>
+          <div>
+            <dt>模型状态</dt>
+            <dd>{{ workerModelState(taskQueue, worker) }}</dd>
+          </div>
+          <div>
+            <dt>分析管线</dt>
+            <dd>{{ worker.pipelineVersion || "尚未上报" }}</dd>
+          </div>
+          <div>
+            <dt>并发任务数</dt>
+            <dd>{{ worker.concurrency || "尚未上报" }}</dd>
+          </div>
+          <div>
+            <dt>累计结果</dt>
+            <dd>
+              完成 {{ worker.completedTaskCount }} · 失败
+              {{ worker.failedTaskCount }}
+            </dd>
+          </div>
+          <div>
+            <dt>累计工作时间</dt>
+            <dd>{{ formatDuration(worker.totalProcessingSeconds) }}</dd>
+          </div>
+          <div>
+            <dt>平均每项</dt>
+            <dd>{{ formatDuration(workerAverageSeconds(worker)) }}</dd>
+          </div>
+          <div>
+            <dt>解码分析效率</dt>
+            <dd>{{ workerEfficiencyLabel(worker, "decodeAnalysis") }}</dd>
+          </div>
+          <div>
+            <dt>整体任务效率</dt>
+            <dd>{{ workerEfficiencyLabel(worker, "wholeTask") }}</dd>
+          </div>
+          <div>
+            <dt>效率样本</dt>
+            <dd>{{ workerEfficiencySampleLabel(worker) }}</dd>
+          </div>
+          <div>
+            <dt>最近完成</dt>
+            <dd>
+              <ng-container
+                *ngIf="worker.lastTaskFinishedAt !== null; else noFinishedTask"
+              >
+                {{ worker.lastTaskFinishedAt * 1000 | date: "MM-dd HH:mm:ss" }}
+              </ng-container>
+              <ng-template #noFinishedTask>暂无记录</ng-template>
+            </dd>
+          </div>
+        </dl>
+        <footer class="analysis-worker-actions">
+          <button nz-button nzSize="small" (click)="editWorker.emit(worker)">
+            编辑名称
+          </button>
+          <button
+            nz-button
+            nzSize="small"
+            [nzType]="worker.enabled ? 'default' : 'primary'"
+            [nzDanger]="worker.enabled"
+            [nzLoading]="updatingWorkerIds.has(worker.workerId)"
+            (click)="toggleWorker(worker)"
+          >
+            {{ worker.enabled ? "安全暂停" : "恢复领取" }}
+          </button>
+          <span *ngIf="worker.enabled">当前任务不会被中断</span>
+        </footer>
+        <nz-alert
+          *ngIf="workerModelMismatch(taskQueue, worker)"
+          nzType="warning"
+          nzShowIcon
+          nzMessage="当前任务上报的模型版本与本节点加载版本不一致"
+          nzDescription="可能正处于模型切换或旧任务收尾阶段；请等待下一次心跳后再确认。"
+        ></nz-alert>
+      </article>
+    </div>
+
+    <nz-empty
+      *ngIf="workerNodes(taskQueue).length === 0"
+      nzNotFoundContent="尚无 Worker 上报"
+    ></nz-empty>
+  </section>
+
   <header class="analysis-task-header">
     <div>
       <strong>新录播优先处理</strong>
@@ -14,17 +152,6 @@
         </ng-container>
       </span>
     </div>
-    <nz-tag
-      [nzColor]="
-        taskQueue.workerState === 'failed'
-          ? 'red'
-          : taskQueue.active.length > 0
-            ? 'blue'
-            : 'default'
-      "
-    >
-      {{ workerLabel(taskQueue) }}
-    </nz-tag>
   </header>
 
   <section class="analysis-task-section" aria-labelledby="active-task-title">
@@ -45,6 +172,7 @@
           <div>
             <strong>{{ active.title || "未命名直播" }}</strong>
             <nz-tag nzColor="blue">{{ categoryLabel(active.category) }}</nz-tag>
+            <nz-tag *ngIf="active.workerId">{{ active.workerId }}</nz-tag>
           </div>
           <span>
             <ng-container *ngIf="active.anchorName">
@@ -130,7 +258,8 @@
         <header>
           <span>当前步骤</span>
           <time>
-            阶段累计 {{ formatDuration(active.runtimeElapsedSeconds) }} · 最后进度
+            阶段累计 {{ formatDuration(active.runtimeElapsedSeconds) }} ·
+            最后进度
             {{ active.updatedAt * 1000 | date: "HH:mm:ss" }}
           </time>
         </header>
@@ -247,7 +376,9 @@
     <header class="analysis-section-heading">
       <div>
         <h3 id="recent-completion-title">最近完成</h3>
-        <span>展示最近 {{ taskQueue.recentCompletions.length }} 个已完成分 P</span>
+        <span
+          >展示最近 {{ taskQueue.recentCompletions.length }} 个已完成分 P</span
+        >
       </div>
     </header>
     <ol class="analysis-completion-list">
@@ -258,7 +389,8 @@
           </strong>
           <div class="analysis-completion-actions">
             <time>
-              完成于 {{ completion.completedAt * 1000 | date: "MM-dd HH:mm:ss" }}
+              完成于
+              {{ completion.completedAt * 1000 | date: "MM-dd HH:mm:ss" }}
             </time>
             <button
               nz-button
@@ -270,7 +402,10 @@
               查看直播详情
             </button>
             <a
-              *ngIf="biliUrl(completion) as archiveUrl; else completedLocalPlayback"
+              *ngIf="
+                biliUrl(completion) as archiveUrl;
+                else completedLocalPlayback
+              "
               nz-button
               nzType="link"
               nzSize="small"
@@ -320,10 +455,17 @@
           <div>
             <dt>候选画面</dt>
             <dd>
-              {{ completion.candidateCount === null ? "历史未保存" : completion.candidateCount + " 个" }}
+              {{
+                completion.candidateCount === null
+                  ? "历史未保存"
+                  : completion.candidateCount + " 个"
+              }}
             </dd>
           </div>
-          <div><dt>确认对局</dt><dd>{{ completion.matchCount }} 局</dd></div>
+          <div>
+            <dt>确认对局</dt>
+            <dd>{{ completion.matchCount }} 局</dd>
+          </div>
           <div>
             <dt>直播分 P</dt>
             <dd>
@@ -411,7 +553,10 @@
         >
           <span class="analysis-image-strip-thumbnails">
             <img
-              *ngFor="let preview of completion.matchPreviews; let previewIndex = index"
+              *ngFor="
+                let preview of completion.matchPreviews;
+                let previewIndex = index
+              "
               [src]="preview.resultFrameUrl"
               [alt]="previewAlt(preview, previewIndex)"
               loading="lazy"
@@ -431,12 +576,30 @@
       </div>
     </header>
     <dl class="analysis-queue-counts">
-      <div><dt>总等待</dt><dd>{{ taskQueue.pendingCount }}</dd></div>
-      <div><dt>手动任务</dt><dd>{{ taskQueue.manualPending }}</dd></div>
-      <div><dt>新录播</dt><dd>{{ taskQueue.realtimePending }}</dd></div>
-      <div><dt>历史接入</dt><dd>{{ taskQueue.archivePending }}</dd></div>
-      <div><dt>稿件迁移</dt><dd>{{ taskQueue.migrationPending }}</dd></div>
-      <div><dt>旧数据重扫</dt><dd>{{ taskQueue.backlogPending }}</dd></div>
+      <div>
+        <dt>总等待</dt>
+        <dd>{{ taskQueue.pendingCount }}</dd>
+      </div>
+      <div>
+        <dt>手动任务</dt>
+        <dd>{{ taskQueue.manualPending }}</dd>
+      </div>
+      <div>
+        <dt>新录播</dt>
+        <dd>{{ taskQueue.realtimePending }}</dd>
+      </div>
+      <div>
+        <dt>历史接入</dt>
+        <dd>{{ taskQueue.archivePending }}</dd>
+      </div>
+      <div>
+        <dt>稿件迁移</dt>
+        <dd>{{ taskQueue.migrationPending }}</dd>
+      </div>
+      <div>
+        <dt>旧数据重扫</dt>
+        <dd>{{ taskQueue.backlogPending }}</dd>
+      </div>
     </dl>
   </section>
 
@@ -504,7 +667,9 @@
             <div>
               <dt>直播开始</dt>
               <dd>
-                <ng-container *ngIf="queued.liveStartedAt > 0; else noQueuedLiveStart">
+                <ng-container
+                  *ngIf="queued.liveStartedAt > 0; else noQueuedLiveStart"
+                >
                   {{ queued.liveStartedAt * 1000 | date: "MM-dd HH:mm" }}
                 </ng-container>
                 <ng-template #noQueuedLiveStart>待获取</ng-template>
@@ -514,13 +679,15 @@
               <dt>整场录像</dt>
               <dd>{{ formatDuration(queued.recordingDurationSeconds) }}</dd>
             </div>
-            <div><dt>已确认</dt><dd>{{ queued.matchCount }} 局</dd></div>
+            <div>
+              <dt>已确认</dt>
+              <dd>{{ queued.matchCount }} 局</dd>
+            </div>
             <div>
               <dt>分 P 进度</dt>
               <dd>
-                {{ queued.completedPartCount }}/{{ queued.partCount }} · 下一个 P{{
-                  queued.partIndex
-                }}
+                {{ queued.completedPartCount }}/{{ queued.partCount }} · 下一个
+                P{{ queued.partIndex }}
                 <ng-container *ngIf="queued.ignoredPartCount > 0">
                   · 原始 {{ queued.originalPartCount }} 个 · 忽略
                   {{ queued.ignoredPartCount }} 个损坏分 P
@@ -541,7 +708,10 @@
           >
             <span class="analysis-image-strip-thumbnails">
               <img
-                *ngFor="let preview of queued.matchPreviews; let previewIndex = index"
+                *ngFor="
+                  let preview of queued.matchPreviews;
+                  let previewIndex = index
+                "
                 [src]="preview.resultFrameUrl"
                 [alt]="previewAlt(preview, previewIndex)"
                 loading="lazy"

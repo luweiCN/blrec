@@ -16,23 +16,13 @@ export type ViewContext = (typeof VIEW_CONTEXTS)[number];
 export type VaingloryMatchSessionSort = 'analyzed' | 'started';
 
 export type VaingloryPublicationState =
-  | 'prepared'
-  | 'running'
-  | 'confirmed'
-  | 'paused'
-  | 'failed';
+  'prepared' | 'running' | 'confirmed' | 'paused' | 'failed';
 export type VaingloryDescriptionState =
-  | 'prepared'
-  | 'in_flight'
-  | 'confirmed'
-  | 'skipped_no_room';
+  'prepared' | 'in_flight' | 'confirmed' | 'skipped_no_room';
 export type VaingloryPinState = 'prepared' | 'in_flight' | 'confirmed';
 export type VaingloryChapterState = 'prepared' | 'confirmed' | 'skipped';
 export type VaingloryPublicationRetryStep =
-  | 'description'
-  | 'comments'
-  | 'pin'
-  | 'chapter';
+  'description' | 'comments' | 'pin' | 'chapter';
 export type VaingloryPublicationStatus =
   | 'operator_paused'
   | 'analysis_failed'
@@ -63,11 +53,7 @@ export type ScanState = 'pending' | 'analyzing' | 'ready' | 'failed';
 export type RecordedPlayerSource = 'automatic' | 'manual';
 export type HeroRecognitionSource = 'automatic' | 'manual';
 export type RecordedPlayerState =
-  | 'pending'
-  | 'uncertain'
-  | 'automatic'
-  | 'manual'
-  | 'unsupported';
+  'pending' | 'uncertain' | 'automatic' | 'manual' | 'unsupported';
 
 export type ArchiveSyncState =
   'idle' | 'discovering' | 'running' | 'ready' | 'failed';
@@ -146,11 +132,7 @@ export interface VaingloryArchiveBackfillItem {
 }
 
 export type VaingloryAnalysisQueueCategory =
-  | 'manual'
-  | 'realtime'
-  | 'archive'
-  | 'migration'
-  | 'backlog';
+  'manual' | 'realtime' | 'archive' | 'migration' | 'backlog';
 
 export type VaingloryAnalysisRuntimeStage =
   | 'probing'
@@ -240,6 +222,7 @@ export interface VaingloryAnalysisQueueCompletion {
 
 export interface VaingloryAnalysisQueueItem {
   readonly partId: number;
+  readonly workerId?: string;
   readonly sessionId: number;
   readonly partIndex: number;
   readonly title: string;
@@ -287,8 +270,40 @@ export interface VaingloryAnalysisQueueItem {
   readonly matchPreviews: readonly VaingloryAnalysisMatchPreview[];
 }
 
+export interface VaingloryAnalysisWorkerStatus {
+  readonly state: 'running' | 'stopped' | 'failed';
+  readonly remoteEnabled: boolean;
+  readonly workerId: string;
+  readonly modelPackageId: string;
+  readonly pipelineVersion: string;
+  readonly lastSeenAt: number | null;
+}
+
+export interface VaingloryAnalysisWorkerNodeStatus {
+  readonly state: 'running' | 'stopped' | 'failed';
+  readonly workerId: string;
+  readonly displayName: string;
+  readonly enabled: boolean;
+  readonly modelPackageId: string;
+  readonly pipelineVersion: string;
+  readonly lastSeenAt: number | null;
+  readonly activeTaskCount: number;
+  readonly activePartIds: readonly number[];
+  readonly concurrency: number;
+  readonly completedTaskCount: number;
+  readonly failedTaskCount: number;
+  readonly totalProcessingSeconds: number;
+  readonly profiledTaskCount: number;
+  readonly profiledVideoSeconds: number;
+  readonly totalDecodeAnalysisSeconds: number;
+  readonly totalProfiledTaskSeconds: number;
+  readonly lastTaskFinishedAt: number | null;
+}
+
 export interface VaingloryAnalysisQueue {
   readonly workerState: 'running' | 'stopped' | 'failed';
+  readonly worker: VaingloryAnalysisWorkerStatus;
+  readonly workers: readonly VaingloryAnalysisWorkerNodeStatus[];
   readonly active: readonly VaingloryAnalysisQueueItem[];
   readonly queued: readonly VaingloryAnalysisQueueItem[];
   readonly recentCompletions: readonly VaingloryAnalysisQueueCompletion[];
@@ -314,7 +329,9 @@ export interface VaingloryIndexSummary {
 
 export interface VaingloryArchiveBackfillRealtimeSnapshot {
   readonly syncs: readonly VaingloryArchiveSync[];
-  readonly items: Readonly<Record<string, readonly VaingloryArchiveBackfillItem[]>>;
+  readonly items: Readonly<
+    Record<string, readonly VaingloryArchiveBackfillItem[]>
+  >;
 }
 
 export interface VaingloryIndexRealtimeSnapshot {
@@ -486,9 +503,7 @@ export interface VaingloryMatchSession {
   readonly publicationStatus?: VaingloryPublicationStatus | null;
   readonly publicationStatusLabel?: string | null;
   readonly publicationStatusDetail?: string | null;
-  readonly publicationRecommendedAction?:
-    | VaingloryPublicationRecommendedAction
-    | null;
+  readonly publicationRecommendedAction?: VaingloryPublicationRecommendedAction | null;
   readonly publicationNextAttemptAt?: number | null;
   readonly publicationPlanState?: 'waiting_analysis' | 'ready' | null;
   readonly uploadJobState?: string | null;

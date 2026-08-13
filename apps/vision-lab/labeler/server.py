@@ -22,7 +22,7 @@ from . import hero_review
 from . import inference as inference_mod
 from . import local, model_prefill, model_testing, result_archive
 from . import stats as stats_mod
-from . import training, training_review, worker_candidates
+from . import training, training_review, worker_candidates, worker_deployment
 from .extract import (
     cancel_extraction,
     extract_videos_multi,
@@ -65,6 +65,7 @@ async def lifespan(_app: FastAPI):
             "WHERE status IN ('queued', 'running')",
             (db.now(),),
         )
+        db.fail_interrupted_model_deployments(conn)
         conn.commit()
         conn.close()
     except Exception:  # noqa: BLE001
@@ -114,6 +115,7 @@ _worker_candidate_sync_state: Dict[str, Any] = {
 }
 _training_manager = training.TrainingManager(config.DB_PATH)
 _training_start_lock = threading.RLock()
+_worker_deployment_lock = threading.RLock()
 
 
 def _conn():
@@ -1090,6 +1092,7 @@ def api_training_review_items(
     status: str = 'needs_review',
     limit: int = Query(500, ge=1, le=2000),
     offset: int = Query(0, ge=0),
+    source_scope: str = 'all',
     streamer: str = '',
     hero_screen_type: str = '',
 ) -> Dict[str, Any]:
@@ -1102,14 +1105,16 @@ def api_training_review_items(
                     status=status,
                     limit=limit,
                     offset=offset,
+                    source_scope=source_scope,
                     streamer=streamer,
                     hero_screen_type=hero_screen_type,
                 )
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
             stats = db.training_review_stats(conn)
-            if status == 'legacy_hero':
+            if source_scope == 'legacy' or status == 'legacy_hero':
                 stats['legacy_hero'] = db.legacy_hero_review_stats(conn)
+            if status == 'legacy_hero':
                 stats['legacy_hero_filtered'] = db.legacy_hero_review_stats(
                     conn, streamer=streamer, screen_type=hero_screen_type
                 )
@@ -2193,6 +2198,119 @@ def api_model_package_archive(package_id: str) -> FileResponse:
         finally:
             conn.close()
     return FileResponse(archive, media_type='application/zip', filename=archive.name)
+
+
+def _deploy_model_package_to_worker(deployment_id: int, package_id: str) -> None:
+    with _worker_deployment_lock:
+        try:
+            target = worker_deployment.configured_target()
+            with _db_lock:
+                conn = _conn()
+                try:
+                    db.update_model_deployment(
+                        conn, deployment_id=deployment_id, status='running'
+                    )
+                    archive = model_testing.model_package_archive(conn, package_id)
+                finally:
+                    conn.close()
+            result = worker_deployment.WorkerDeploymentClient(target).deploy(
+                archive, package_id
+            )
+            with _db_lock:
+                conn = _conn()
+                try:
+                    db.update_model_deployment(
+                        conn,
+                        deployment_id=deployment_id,
+                        status='succeeded',
+                        previous_package_id=str(
+                            result.get('previous_package_id') or ''
+                        ),
+                        worker_package_id=str(result.get('package_id') or ''),
+                        error='',
+                        detail=result,
+                    )
+                finally:
+                    conn.close()
+        except Exception as error:  # noqa: BLE001
+            with _db_lock:
+                conn = _conn()
+                try:
+                    current = db.get_model_deployment(conn, deployment_id)
+                    if current is not None and current['status'] in {
+                        'queued',
+                        'running',
+                    }:
+                        db.update_model_deployment(
+                            conn,
+                            deployment_id=deployment_id,
+                            status='failed',
+                            error='{}: {}'.format(type(error).__name__, error),
+                        )
+                finally:
+                    conn.close()
+
+
+@app.get('/api/model-deployments')
+def api_model_deployments(probe: bool = Query(False)) -> Dict[str, Any]:
+    target_payload: Dict[str, Any] = {'configured': False}
+    live: Optional[Dict[str, Any]] = None
+    probe_error = ''
+    try:
+        target = worker_deployment.configured_target()
+        target_payload = {
+            'configured': True,
+            'display_name': target.display_name,
+            'model_root': target.model_root,
+            'launchd_label': target.launchd_label,
+        }
+        if probe:
+            try:
+                live = worker_deployment.WorkerDeploymentClient(target).status()
+            except (OSError, RuntimeError, ValueError) as error:
+                probe_error = str(error)
+    except ValueError as error:
+        probe_error = str(error)
+    with _db_lock:
+        conn = _conn()
+        try:
+            deployments = db.list_model_deployments(conn, limit=30)
+        finally:
+            conn.close()
+    return {
+        'target': target_payload,
+        'live': live,
+        'probe_error': probe_error,
+        'deployments': deployments,
+    }
+
+
+@app.post('/api/model-packages/{package_id}/deploy-worker')
+def api_deploy_model_package_to_worker(package_id: str) -> Dict[str, Any]:
+    try:
+        target = worker_deployment.configured_target()
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                deployment = db.create_model_deployment(
+                    conn, package_id=package_id, target='analysis-worker'
+                )
+            except KeyError as error:
+                raise HTTPException(404, str(error))
+            except ValueError as error:
+                raise HTTPException(409, str(error))
+        finally:
+            conn.close()
+    threading.Thread(
+        target=_deploy_model_package_to_worker,
+        args=(int(deployment['id']), package_id),
+        name='worker-model-deployment',
+        daemon=True,
+    ).start()
+    return {'deployment': deployment, 'target': target.display_name}
 
 
 @app.get('/api/events')

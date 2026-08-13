@@ -85,10 +85,25 @@ def _analysis_summary(dense: DenseScanResult) -> Dict[str, Any]:
 
 
 class AnalysisWorkerClient:
-    def __init__(self, server_url: str, token: str) -> None:
+    def __init__(
+        self,
+        server_url: str,
+        token: str,
+        *,
+        worker_id: str = '',
+        model_package_id: str = '',
+        pipeline_version: str = '',
+        concurrency: int = 0,
+    ) -> None:
         self._server_url = server_url.rstrip('/') + '/'
         self._headers = {'X-BLREC-Analysis-Worker-Token': token}
         self._session = requests.Session()
+        self._registration = {
+            'workerId': worker_id,
+            'modelPackageId': model_package_id,
+            'pipelineVersion': pipeline_version,
+            'concurrency': concurrency,
+        }
 
     def close(self) -> None:
         self._session.close()
@@ -97,6 +112,7 @@ class AnalysisWorkerClient:
         response = self._session.post(
             self._url('api/v1/vainglory/worker/claim'),
             headers=self._headers,
+            json=self._registration,
             timeout=(10, 30),
         )
         if response.status_code == 204:
@@ -133,6 +149,7 @@ class AnalysisWorkerClient:
             self._url('api/v1/vainglory/worker/heartbeat'),
             headers=self._headers,
             json={
+                **self._registration,
                 'kind': kind,
                 'itemId': item_id,
                 'progress': progress,
@@ -145,10 +162,12 @@ class AnalysisWorkerClient:
         response.raise_for_status()
 
     def complete(self, payload: Mapping[str, Any]) -> None:
+        body = dict(payload)
+        body.update(self._registration)
         response = self._session.post(
             self._url('api/v1/vainglory/worker/complete'),
             headers=self._headers,
-            json=dict(payload),
+            json=body,
             timeout=(10, 120),
         )
         response.raise_for_status()
@@ -165,6 +184,7 @@ class AnalysisWorkerClient:
             self._url('api/v1/vainglory/worker/fail'),
             headers=self._headers,
             json={
+                **self._registration,
                 'kind': kind,
                 'itemId': item_id,
                 'error': error[:500],
@@ -274,6 +294,7 @@ class RemoteAnalysisWorker:
         cache_dir: Path,
         poll_seconds: float = 5,
         concurrency: int = 1,
+        worker_id: str = '',
         debug_dir: Optional[Path] = None,
     ) -> None:
         if poll_seconds <= 0:
@@ -285,6 +306,7 @@ class RemoteAnalysisWorker:
         self._cache_dir = cache_dir.expanduser().resolve()
         self._poll_seconds = poll_seconds
         self._concurrency = concurrency
+        self._worker_id = worker_id.strip() or socket.gethostname()
         self._debug_dir = (
             None if debug_dir is None else Path(debug_dir).expanduser().resolve()
         )
@@ -297,7 +319,7 @@ class RemoteAnalysisWorker:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
             'Mac 分析 Worker 已启动：worker_id={} cache={} concurrency={}',
-            socket.gethostname(),
+            self._worker_id,
             self._cache_dir,
             self._concurrency,
         )
@@ -333,9 +355,7 @@ class RemoteAnalysisWorker:
         self, client: AnalysisWorkerClient, *, worker_id: int, once: bool
     ) -> None:
         logger.info(
-            '分析 Worker 线程已启动：worker_id={} worker={}',
-            socket.gethostname(),
-            worker_id,
+            '分析 Worker 线程已启动：worker_id={} worker={}', self._worker_id, worker_id
         )
         while not self._stop.is_set():
             try:
@@ -482,6 +502,7 @@ class RemoteAnalysisWorker:
             def dense_progress(value: float) -> None:
                 heartbeat.update(0.02 + value * 0.68)
 
+            analysis_started = time.monotonic()
             dense = self._analyzer.scan_part_cascade(
                 part,
                 progress=dense_progress,
@@ -509,6 +530,7 @@ class RemoteAnalysisWorker:
                 debug_dir=self._debug_dir,
             )
             recognition_seconds = time.monotonic() - recognition_started
+            decode_analysis_seconds = time.monotonic() - analysis_started
             logger.info(
                 'Vainglory 任务耗时明细：kind={} item_id={} download={:.3f}s '
                 'dense={:.3f}s recognition={:.3f}s total={:.3f}s '
@@ -527,6 +549,10 @@ class RemoteAnalysisWorker:
                 'kind': kind,
                 'itemId': item_id,
                 'candidateCount': len(dense.scanned_part.candidate_times_ms),
+                'videoDurationSeconds': (
+                    dense.scanned_part.video_duration_ms / 1_000
+                ),
+                'decodeAnalysisSeconds': decode_analysis_seconds,
                 'matches': [encode_match(match) for match in matches],
                 'analysisSummary': _analysis_summary(dense),
                 'trainingCandidates': [

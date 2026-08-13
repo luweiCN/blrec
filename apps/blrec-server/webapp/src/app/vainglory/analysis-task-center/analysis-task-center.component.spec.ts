@@ -1,5 +1,6 @@
 import { AnalysisTaskCenterComponent } from './analysis-task-center.component';
 import {
+  VaingloryAnalysisQueue,
   VaingloryAnalysisQueueItem,
   VaingloryAnalysisSummary,
 } from '../vainglory.model';
@@ -104,5 +105,85 @@ describe('AnalysisTaskCenterComponent', () => {
       '结算检测 3 · 对局模式 2',
     );
     expect(component.trainingCandidateCount(summary)).toBe(5);
+  });
+
+  it('shows the loaded worker model and detects an active task version mismatch', () => {
+    const component = new AnalysisTaskCenterComponent();
+    const active = {
+      modelPackageId: 'vision-package-v1',
+    } as VaingloryAnalysisQueueItem;
+    const queue = {
+      workerState: 'running',
+      worker: {
+        state: 'running',
+        remoteEnabled: true,
+        workerId: 'macbook-pro',
+        modelPackageId: 'vision-package-v2',
+        pipelineVersion: 'timeline-v2',
+        lastSeenAt: 1_500,
+      },
+      workers: [
+        {
+          state: 'running',
+          workerId: 'macbook-pro',
+          displayName: 'MacBook Pro',
+          enabled: true,
+          modelPackageId: 'vision-package-v2',
+          pipelineVersion: 'timeline-v2',
+          lastSeenAt: 1_500,
+          activeTaskCount: 1,
+          activePartIds: [7],
+          concurrency: 3,
+          completedTaskCount: 12,
+          failedTaskCount: 1,
+          totalProcessingSeconds: 260,
+          profiledTaskCount: 4,
+          profiledVideoSeconds: 7_200,
+          totalDecodeAnalysisSeconds: 240,
+          totalProfiledTaskSeconds: 360,
+          lastTaskFinishedAt: 1_400,
+        },
+      ],
+      active: [active],
+      queued: [],
+      recentCompletions: [],
+      pendingCount: 0,
+      manualPending: 0,
+      realtimePending: 0,
+      archivePending: 0,
+      migrationPending: 0,
+      backlogPending: 0,
+    } satisfies VaingloryAnalysisQueue;
+
+    expect(component.workerModelMismatch(queue, queue.workers[0])).toBeFalse();
+    expect(
+      component.workerMinutesPerVideoHour(queue.workers[0], 'decodeAnalysis'),
+    ).toBe(2);
+    expect(
+      component.workerMinutesPerVideoHour(queue.workers[0], 'wholeTask'),
+    ).toBe(3);
+
+    const assignedQueue = {
+      ...queue,
+      active: [{ ...active, workerId: 'macbook-pro' }],
+    };
+    expect(
+      component.workerModelMismatch(assignedQueue, queue.workers[0]),
+    ).toBeTrue();
+    expect(component.workerModelState(assignedQueue, queue.workers[0])).toBe(
+      '任务版本与当前版本不一致',
+    );
+
+    const idleQueue = { ...queue, active: [] };
+    const idleWorker = { ...queue.workers[0], activeTaskCount: 0 };
+    expect(component.workerTaskLabel(idleQueue, idleWorker)).toBe(
+      '空闲，正在轮询新任务',
+    );
+
+    const pausedWorker = { ...idleWorker, enabled: false };
+    expect(component.workerLabel(pausedWorker)).toBe('已暂停');
+    expect(component.workerTaskLabel(idleQueue, pausedWorker)).toBe(
+      '已停止领取新任务',
+    );
   });
 });

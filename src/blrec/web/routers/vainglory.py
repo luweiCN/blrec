@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from blrec.logging.audit import audit
 from blrec.utils.string import camel_case
 from blrec.vainglory.analysis_protocol import (
     decode_hero,
@@ -84,10 +85,33 @@ class ScanJobResponse(ApiModel):
 
 
 class AnalysisWorkerHeartbeatRequest(ApiModel):
+    worker_id: str = Field('', max_length=100)
+    model_package_id: str = Field('', max_length=100)
+    pipeline_version: str = Field('', max_length=40)
+    concurrency: int = Field(0, ge=0, le=64)
     kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
     item_id: int = Field(..., ge=1)
     progress: float = Field(0, ge=0, le=0.99)
     runtime_status: Optional[Dict[str, Any]] = None
+
+
+class AnalysisWorkerClaimRequest(ApiModel):
+    worker_id: str = Field('', max_length=100)
+    model_package_id: str = Field('', max_length=100)
+    pipeline_version: str = Field('', max_length=40)
+    concurrency: int = Field(0, ge=0, le=64)
+
+
+class AnalysisWorkerCreateRequest(ApiModel):
+    worker_id: str = Field(
+        ..., min_length=1, max_length=100, regex=r'^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    )
+    display_name: str = Field('', max_length=100)
+
+
+class AnalysisWorkerUpdateRequest(ApiModel):
+    display_name: Optional[str] = Field(None, max_length=100)
+    enabled: Optional[bool] = None
 
 
 class AnalysisTimelineSegmentRequest(ApiModel):
@@ -127,6 +151,10 @@ class AnalysisWorkerSummaryRequest(ApiModel):
 
 
 class AnalysisWorkerCompleteRequest(ApiModel):
+    worker_id: str = Field('', max_length=100)
+    model_package_id: str = Field('', max_length=100)
+    pipeline_version: str = Field('', max_length=40)
+    concurrency: int = Field(0, ge=0, le=64)
     kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
     item_id: int = Field(..., ge=1)
     candidate_count: int = Field(0, ge=0)
@@ -135,9 +163,15 @@ class AnalysisWorkerCompleteRequest(ApiModel):
     recorded_player: Optional[Dict[str, Any]] = None
     training_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     analysis_summary: Optional[AnalysisWorkerSummaryRequest] = None
+    video_duration_seconds: Optional[float] = Field(None, gt=0)
+    decode_analysis_seconds: Optional[float] = Field(None, ge=0)
 
 
 class AnalysisWorkerFailureRequest(ApiModel):
+    worker_id: str = Field('', max_length=100)
+    model_package_id: str = Field('', max_length=100)
+    pipeline_version: str = Field('', max_length=40)
+    concurrency: int = Field(0, ge=0, le=64)
     kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
     item_id: int = Field(..., ge=1)
     error: str = Field(..., min_length=1, max_length=500)
@@ -753,6 +787,29 @@ def _raise_repository_error(error: ValueError) -> None:
 router = APIRouter(prefix='/vainglory', tags=['vainglory'])
 
 
+def _analysis_worker_payload(worker: Any) -> Dict[str, Any]:
+    return {
+        'state': worker.state,
+        'workerId': worker.worker_id,
+        'displayName': worker.display_name,
+        'enabled': worker.enabled,
+        'modelPackageId': worker.model_package_id,
+        'pipelineVersion': worker.pipeline_version,
+        'lastSeenAt': worker.last_seen_at,
+        'activeTaskCount': worker.active_task_count,
+        'activePartIds': list(worker.active_part_ids),
+        'concurrency': worker.concurrency,
+        'completedTaskCount': worker.completed_task_count,
+        'failedTaskCount': worker.failed_task_count,
+        'totalProcessingSeconds': worker.total_processing_seconds,
+        'profiledTaskCount': worker.profiled_task_count,
+        'profiledVideoSeconds': worker.profiled_video_seconds,
+        'totalDecodeAnalysisSeconds': worker.total_decode_analysis_seconds,
+        'totalProfiledTaskSeconds': worker.total_profiled_task_seconds,
+        'lastTaskFinishedAt': worker.last_task_finished_at,
+    }
+
+
 def _remote_media_path(part_id: int) -> str:
     expires_at = int(time.time()) + 12 * 60 * 60
     query = urlencode(
@@ -764,13 +821,84 @@ def _remote_media_path(part_id: int) -> str:
     return '/api/v1/recording-sessions/parts/{}/media?{}'.format(part_id, query)
 
 
+@router.get('/workers')
+async def list_analysis_workers(
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Dict[str, Any]:
+    return {
+        'workers': [
+            _analysis_worker_payload(worker)
+            for worker in await index.list_analysis_workers()
+        ]
+    }
+
+
+@router.post('/workers', status_code=status.HTTP_201_CREATED)
+async def add_analysis_worker(
+    payload: AnalysisWorkerCreateRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Dict[str, Any]:
+    try:
+        worker = await index.add_analysis_worker(
+            payload.worker_id.strip(), payload.display_name.strip()
+        )
+    except ValueError as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    audit(
+        'vainglory_analysis_worker_added',
+        worker_id=worker.worker_id,
+        display_name=worker.display_name,
+    )
+    return _analysis_worker_payload(worker)
+
+
+@router.patch('/workers/{worker_id}')
+async def update_analysis_worker(
+    worker_id: str,
+    payload: AnalysisWorkerUpdateRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Dict[str, Any]:
+    try:
+        worker = await index.update_analysis_worker(
+            worker_id,
+            display_name=(
+                None if payload.display_name is None else payload.display_name.strip()
+            ),
+            enabled=payload.enabled,
+        )
+    except ValueError as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    audit(
+        'vainglory_analysis_worker_updated',
+        worker_id=worker.worker_id,
+        display_name_updated=payload.display_name is not None,
+        enabled=worker.enabled,
+    )
+    return _analysis_worker_payload(worker)
+
+
 @router.post('/worker/claim', response_model=None)
 async def claim_analysis_work(
+    registration: Optional[AnalysisWorkerClaimRequest] = None,
     _worker: str = Depends(security.authenticated_analysis_worker),
     index: VaingloryIndexService = Depends(get_service),
 ) -> Response:
     try:
-        claim = await index.claim_remote_work()
+        claim = await index.claim_remote_work(
+            worker_id='' if registration is None else registration.worker_id,
+            model_package_id=(
+                '' if registration is None else registration.model_package_id
+            ),
+            pipeline_version=(
+                '' if registration is None else registration.pipeline_version
+            ),
+            concurrency=0 if registration is None else registration.concurrency,
+        )
     except VaingloryConflict as error:
         _raise_repository_error(error)
         raise AssertionError('unreachable')
@@ -815,7 +943,14 @@ async def heartbeat_analysis_work(
                 detail='Worker 运行状态无效：{}'.format(error),
             ) from None
     await index.heartbeat_remote_work(
-        payload.kind, payload.item_id, payload.progress, runtime_status
+        payload.kind,
+        payload.item_id,
+        payload.progress,
+        runtime_status,
+        worker_id=payload.worker_id,
+        model_package_id=payload.model_package_id,
+        pipeline_version=payload.pipeline_version,
+        concurrency=payload.concurrency,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -827,6 +962,12 @@ async def complete_analysis_work(
     index: VaingloryIndexService = Depends(get_service),
 ) -> Response:
     try:
+        index.register_remote_worker_activity(
+            worker_id=payload.worker_id,
+            model_package_id=payload.model_package_id,
+            pipeline_version=payload.pipeline_version,
+            concurrency=payload.concurrency,
+        )
         if payload.kind == 'part':
             try:
                 training_candidates = decode_training_candidates(
@@ -850,6 +991,8 @@ async def complete_analysis_work(
                     if payload.analysis_summary is None
                     else payload.analysis_summary.dict(by_alias=True)
                 ),
+                video_duration_seconds=payload.video_duration_seconds,
+                decode_analysis_seconds=payload.decode_analysis_seconds,
             )
         elif payload.kind == 'match_rerun':
             if len(payload.matches) != 1:
@@ -879,6 +1022,12 @@ async def fail_analysis_work(
     _worker: str = Depends(security.authenticated_analysis_worker),
     index: VaingloryIndexService = Depends(get_service),
 ) -> Response:
+    index.register_remote_worker_activity(
+        worker_id=payload.worker_id,
+        model_package_id=payload.model_package_id,
+        pipeline_version=payload.pipeline_version,
+        concurrency=payload.concurrency,
+    )
     await index.fail_remote_work(
         payload.kind, payload.item_id, payload.error, payload.failure_kind
     )

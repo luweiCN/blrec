@@ -27,8 +27,25 @@
     <button
       nz-button
       type="button"
+      class="worker-status-trigger"
       (click)="analysisTaskModalVisible = true"
     >
+      <span
+        class="worker-status-marker"
+        [class.running]="
+          analysisQueue?.workerState === 'running' &&
+          !workerStatusPaused(analysisQueue)
+        "
+        [class.paused]="workerStatusPaused(analysisQueue)"
+        [class.failed]="analysisQueue?.workerState === 'failed'"
+        aria-hidden="true"
+      ></span>
+      <ng-container *ngIf="analysisQueue as queue; else workerStatusLoading">
+        {{ workerStatusTriggerLabel(queue) }}
+      </ng-container>
+      <ng-template #workerStatusLoading>Worker 状态</ng-template>
+    </button>
+    <button nz-button type="button" (click)="analysisTaskModalVisible = true">
       <i nz-icon nzType="unordered-list"></i>
       对局分析任务
       <ng-container *ngIf="analysisQueue as queue">
@@ -204,9 +221,7 @@
           <button nz-button type="button" (click)="toggleSessionSort()">
             <i nz-icon nzType="swap" [nzRotate]="90"></i>
             {{
-              sessionSort === "analyzed"
-                ? "排序：最近分析"
-                : "排序：直播时间"
+              sessionSort === "analyzed" ? "排序：最近分析" : "排序：直播时间"
             }}
           </button>
           <button
@@ -322,9 +337,7 @@
                 nz-checkbox
                 class="session-select"
                 [ngModel]="isSessionSelected(session.sessionId)"
-                (ngModelChange)="
-                  setSessionSelected(session.sessionId, $event)
-                "
+                (ngModelChange)="setSessionSelected(session.sessionId, $event)"
               ></label>
               <div>
                 <h2>{{ session.title || "未命名录播" }}</h2>
@@ -493,9 +506,7 @@
                   "
                 >
                   {{
-                    session.statsIncluded === false
-                      ? "不计入统计"
-                      : "计入统计"
+                    session.statsIncluded === false ? "不计入统计" : "计入统计"
                   }}
                 </nz-tag>
                 <a
@@ -643,7 +654,11 @@
                           </div>
                           <div
                             class="recorded-player-control"
-                            style="display: grid; width: min(320px, 100%); gap: 5px"
+                            style="
+                              display: grid;
+                              width: min(320px, 100%);
+                              gap: 5px;
+                            "
                           >
                             <div
                               style="
@@ -691,7 +706,9 @@
                                 >
                                   <img
                                     *ngIf="
-                                      heroThumbnail(selectedPlayer) as thumbnail;
+                                      heroThumbnail(
+                                        selectedPlayer
+                                      ) as thumbnail;
                                       else missingRecordedPlayerAvatar
                                     "
                                     [src]="thumbnail"
@@ -723,7 +740,9 @@
                               >
                                 <nz-option
                                   *ngFor="
-                                    let player of recordedPlayerCandidates(match);
+                                    let player of recordedPlayerCandidates(
+                                      match
+                                    );
                                     trackBy: trackPlayer
                                   "
                                   [nzValue]="recordedPlayerOptionValue(player)"
@@ -845,9 +864,7 @@
                               (nzOnConfirm)="toggleMatchStatsEligibility(match)"
                             >
                               {{
-                                match.statsEligible
-                                  ? "不计入统计"
-                                  : "恢复统计"
+                                match.statsEligible ? "不计入统计" : "恢复统计"
                               }}
                             </button>
                             <ng-container
@@ -1077,20 +1094,24 @@
             nzShowIcon
             [nzDescription]="heroStatsView.message"
           ></nz-alert>
-          <div
-            *ngIf="heroStatsView.state === 'loading'"
-            class="loading-state"
-          >
+          <div *ngIf="heroStatsView.state === 'loading'" class="loading-state">
             <nz-spin nzSimple></nz-spin>
             <span>正在汇总英雄排行…</span>
           </div>
           <ol *ngIf="heroStats.length > 0" class="hero-ranking-list">
             <li
-              *ngFor="let stats of heroStats; let rank = index; trackBy: trackHeroStats"
+              *ngFor="
+                let stats of heroStats;
+                let rank = index;
+                trackBy: trackHeroStats
+              "
             >
               <strong>{{ rank + 1 }}</strong>
               <span>{{ stats.heroLabel || "未命名英雄" }}</span>
-              <span>{{ stats.matchCount }} 局 · {{ stats.playerCount }} 名玩家</span>
+              <span
+                >{{ stats.matchCount }} 局 ·
+                {{ stats.playerCount }} 名玩家</span
+              >
               <b>{{ stats.winRate | percent: "1.0-1" }}</b>
             </li>
           </ol>
@@ -1158,7 +1179,8 @@
               <h3>
                 常用英雄：{{ stats.heroes[0].heroLabel }}（{{
                   stats.heroes[0].matchCount
-                }} 局）
+                }}
+                局）
               </h3>
               <ul>
                 <li *ngFor="let hero of stats.heroes; trackBy: trackHeroStats">
@@ -1436,15 +1458,13 @@
               <span>{{ archiveSyncLabel(sync) }}</span>
               <span *ngIf="sync.operatorPaused">任务已暂停</span>
               <span *ngIf="sync.seasonStartedAt && sync.seasonEndedAt">
-                优先赛季：{{
-                  sync.seasonStartedAt * 1000 | date: "yyyy-MM-dd"
-                }}
+                优先赛季：{{ sync.seasonStartedAt * 1000 | date: "yyyy-MM-dd" }}
                 至
                 {{ sync.seasonEndedAt * 1000 | date: "yyyy-MM-dd" }}
               </span>
               <span>
-                今日已开始下载 {{ sync.dailyUsed }}/{{ sync.dailyLimit }} 个稿件 ·
-                已扫描至第 {{ sync.nextPage - 1 }} 页
+                今日已开始下载 {{ sync.dailyUsed }}/{{ sync.dailyLimit }} 个稿件
+                · 已扫描至第 {{ sync.nextPage - 1 }} 页
               </span>
               <nz-progress
                 *ngIf="archiveSyncActive(sync)"
@@ -1532,9 +1552,7 @@
                 <div>
                   <span class="archive-target-label">新稿件</span>
                   <a
-                    [href]="
-                      'https://www.bilibili.com/video/' + current.bvid
-                    "
+                    [href]="'https://www.bilibili.com/video/' + current.bvid"
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -1549,9 +1567,9 @@
                 <span>{{ current.bvid }}</span>
                 <span *ngIf="current.pageCount > 0">
                   分 P
-                  {{ current.currentPage || current.completedPageCount || 1 }}/{{
-                    current.pageCount
-                  }}
+                  {{
+                    current.currentPage || current.completedPageCount || 1
+                  }}/{{ current.pageCount }}
                 </span>
                 <span *ngIf="current.currentPartTitle">
                   {{ current.currentPartTitle }}
@@ -1642,10 +1660,7 @@
                 {{ review.accountName }} · {{ review.bvid }}
                 <ng-container *ngIf="review.publishedAt !== null">
                   ·
-                  {{
-                    review.publishedAt * 1000
-                      | date: "yyyy-MM-dd HH:mm"
-                  }}
+                  {{ review.publishedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
                 </ng-container>
               </span>
             </div>
@@ -1764,7 +1779,9 @@
               type="button"
               nz-popconfirm
               nzPopconfirmTitle="只从“未识别英雄”列表忽略；对局、截图和统计都会保留。"
-              [nzLoading]="ignoringReviewKeys.has(reviewIgnoreKey(match.id, 'hero'))"
+              [nzLoading]="
+                ignoringReviewKeys.has(reviewIgnoreKey(match.id, 'hero'))
+              "
               (nzOnConfirm)="ignoreMatchReview(match, 'hero')"
             >
               忽略
@@ -1974,9 +1991,7 @@
               </div>
               <div style="display: grid">
                 <strong>{{ player.name || "未识别玩家" }}</strong>
-                <span>
-                  {{ heroName(player) }} · {{ formatKda(player) }}
-                </span>
+                <span> {{ heroName(player) }} · {{ formatKda(player) }} </span>
               </div>
               <button
                 nz-button
@@ -2045,6 +2060,7 @@
           nzNotFoundContent="当前没有需要核对的 0 局直播"
         ></nz-empty>
 
+        <!-- prettier-ignore -->
         <ng-container
           *ngIf="
             zeroMatchSessionsView.state === 'ready' &&
@@ -2052,8 +2068,7 @@
           "
           [ngTemplateOutlet]="zeroMatchSessionList"
           [ngTemplateOutletContext]="{
-            items: zeroMatchSessions,
-            suppressed: false
+            items: zeroMatchSessions, suppressed: false
           }"
         ></ng-container>
 
@@ -2100,6 +2115,7 @@
           nzNotFoundContent="当前没有已确认无需扫描的直播"
         ></nz-empty>
 
+        <!-- prettier-ignore -->
         <ng-container
           *ngIf="
             suppressedZeroMatchSessionsView.state === 'ready' &&
@@ -2107,8 +2123,7 @@
           "
           [ngTemplateOutlet]="zeroMatchSessionList"
           [ngTemplateOutletContext]="{
-            items: suppressedZeroMatchSessions,
-            suppressed: true
+            items: suppressedZeroMatchSessions, suppressed: true
           }"
         ></ng-container>
 
@@ -2178,11 +2193,7 @@
             >
               查看稿件
             </a>
-            <button
-              nz-button
-              type="button"
-              (click)="openManualMarker(session)"
-            >
+            <button nz-button type="button" (click)="openManualMarker(session)">
               <i nz-icon nzType="plus"></i>
               手动添加对局
             </button>
@@ -2369,33 +2380,47 @@
         <h3>队伍汇总</h3>
         <label>
           <span>左队击杀</span>
-          <nz-input-number [(ngModel)]="draft.leftKills" [nzMin]="0"></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="draft.leftKills"
+            [nzMin]="0"
+          ></nz-input-number>
         </label>
         <label>
           <span>右队击杀</span>
-          <nz-input-number [(ngModel)]="draft.rightKills" [nzMin]="0"></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="draft.rightKills"
+            [nzMin]="0"
+          ></nz-input-number>
         </label>
         <label>
           <span>左队经济</span>
-          <nz-input-number [(ngModel)]="draft.leftEconomy" [nzMin]="0"></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="draft.leftEconomy"
+            [nzMin]="0"
+          ></nz-input-number>
         </label>
         <label>
           <span>右队经济</span>
-          <nz-input-number [(ngModel)]="draft.rightEconomy" [nzMin]="0"></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="draft.rightEconomy"
+            [nzMin]="0"
+          ></nz-input-number>
         </label>
       </section>
 
       <section class="match-editor-players">
         <h3>玩家数据</h3>
         <div class="match-editor-player-header" aria-hidden="true">
-          <span>位置</span><span>玩家名</span><span>英雄</span>
-          <span>K</span><span>D</span><span>A</span><span>经济</span><span>补刀</span>
+          <span>位置</span><span>玩家名</span><span>英雄</span> <span>K</span
+          ><span>D</span><span>A</span><span>经济</span><span>补刀</span>
         </div>
         <div
           *ngFor="let player of draft.players"
           class="match-editor-player-row"
         >
-          <strong>{{ player.side === "left" ? "左" : "右" }}{{ player.slot }}</strong>
+          <strong
+            >{{ player.side === "left" ? "左" : "右" }}{{ player.slot }}</strong
+          >
           <input nz-input maxlength="80" [(ngModel)]="player.name" />
           <nz-select
             nzShowSearch
@@ -2409,11 +2434,26 @@
               [nzLabel]="hero.label"
             ></nz-option>
           </nz-select>
-          <nz-input-number [(ngModel)]="player.kills" [nzMin]="0"></nz-input-number>
-          <nz-input-number [(ngModel)]="player.deaths" [nzMin]="0"></nz-input-number>
-          <nz-input-number [(ngModel)]="player.assists" [nzMin]="0"></nz-input-number>
-          <nz-input-number [(ngModel)]="player.economy" [nzMin]="0"></nz-input-number>
-          <nz-input-number [(ngModel)]="player.lastHits" [nzMin]="0"></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="player.kills"
+            [nzMin]="0"
+          ></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="player.deaths"
+            [nzMin]="0"
+          ></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="player.assists"
+            [nzMin]="0"
+          ></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="player.economy"
+            [nzMin]="0"
+          ></nz-input-number>
+          <nz-input-number
+            [(ngModel)]="player.lastHits"
+            [nzMin]="0"
+          ></nz-input-number>
         </div>
       </section>
     </ng-container>
@@ -2422,7 +2462,7 @@
 
 <nz-modal
   [(nzVisible)]="analysisTaskModalVisible"
-  nzTitle="对局分析任务"
+  nzTitle="Worker 状态与对局分析任务"
   [nzFooter]="null"
   [nzWidth]="1040"
   (nzOnCancel)="analysisTaskModalVisible = false"
@@ -2432,6 +2472,10 @@
       *ngIf="analysisQueue as queue; else analysisQueueLoading"
       [queue]="queue"
       [sampledAt]="indexSampledAt"
+      [updatingWorkerIds]="updatingAnalysisWorkerIds"
+      (addWorker)="openAddAnalysisWorker()"
+      (editWorker)="openEditAnalysisWorker($event)"
+      (workerEnabledChange)="setAnalysisWorkerEnabled($event)"
       (playPart)="openAnalysisPart($event)"
       (viewSession)="openAnalysisSessionDetails($event)"
       (browseMatches)="openAnalysisImageBrowser($event)"
@@ -2439,6 +2483,49 @@
     <ng-template #analysisQueueLoading>
       <nz-spin nzSimple></nz-spin>
     </ng-template>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="analysisWorkerEditorVisible"
+  [nzTitle]="
+    analysisWorkerEditorMode === 'add' ? '手动添加 Worker' : '编辑 Worker'
+  "
+  [nzOkText]="analysisWorkerEditorMode === 'add' ? '添加' : '保存'"
+  [nzOkLoading]="savingAnalysisWorker"
+  [nzCancelDisabled]="savingAnalysisWorker"
+  (nzOnOk)="saveAnalysisWorker()"
+  (nzOnCancel)="analysisWorkerEditorVisible = false"
+>
+  <ng-container *nzModalContent>
+    <section class="analysis-worker-editor">
+      <label>
+        <span>Worker ID</span>
+        <input
+          nz-input
+          [(ngModel)]="analysisWorkerIdDraft"
+          [disabled]="analysisWorkerEditorMode === 'edit'"
+          placeholder="例如 mac-studio"
+          maxlength="100"
+        />
+      </label>
+      <label>
+        <span>显示名称（可选）</span>
+        <input
+          nz-input
+          [(ngModel)]="analysisWorkerNameDraft"
+          placeholder="例如 Mac Studio 夜间节点"
+          maxlength="100"
+        />
+      </label>
+      <nz-alert
+        *ngIf="analysisWorkerEditorMode === 'add'"
+        nzType="info"
+        nzShowIcon
+        nzMessage="这里登记节点，不会远程安装程序"
+        nzDescription="启动 Worker 时使用相同的 Worker ID；节点首次连接后会自动显示在线、模型版本、并发量和任务状态。未提前登记的旧 Worker 也会自动登记。"
+      ></nz-alert>
+    </section>
   </ng-container>
 </nz-modal>
 
@@ -2475,7 +2562,8 @@
             {{ analysisImageTitle(currentImage, analysisImageBrowserIndex) }}
           </strong>
           <span>
-            第 {{ analysisImageBrowserIndex + 1 }} / {{ analysisImageBrowserItems.length }}
+            第 {{ analysisImageBrowserIndex + 1 }} /
+            {{ analysisImageBrowserItems.length }}
             张 · 可用键盘左右键切换
           </span>
         </figcaption>
@@ -2502,7 +2590,10 @@
       </nav>
       <div class="analysis-image-thumbnails" aria-label="全部对局截图">
         <button
-          *ngFor="let image of analysisImageBrowserItems; let imageIndex = index"
+          *ngFor="
+            let image of analysisImageBrowserItems;
+            let imageIndex = index
+          "
           type="button"
           [class.is-current]="imageIndex === analysisImageBrowserIndex"
           [attr.aria-current]="

@@ -35,6 +35,7 @@ apps/vision-lab/
 │   ├── stats.py        # 数据检查统计
 │   ├── export.py       # JSONL/YOLO/COCO 导出 + 不可变版本 + 按视频切分
 │   ├── worker_candidates.py # 同步 worker 上传的模型预标候选帧
+│   ├── worker_deployment.py # 通过 SSH 校验、切换并回滚 Worker 模型包
 │   ├── training.py     # 训练任务、进度、历史版本与本机测试发布
 │   ├── training_runner.py # Ultralytics 训练子进程
 │   ├── server.py       # FastAPI(端口 8800)
@@ -54,6 +55,9 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 export SYNO_ADMIN_USERNAME=你的群晖用户名
 export SYNO_ADMIN_PASSWORD=你的群晖密码
+# 默认是 luwei@192.168.50.143；地址或账号变化时再覆盖
+export VISION_LAB_WORKER_SSH_HOST=192.168.50.143
+export VISION_LAB_WORKER_SSH_USER=luwei
 ./start.sh
 # 打开 http://127.0.0.1:8800
 ```
@@ -215,14 +219,20 @@ MacBook Pro 上的 Analysis Worker 只复用正常分析已经解码的帧，不
 
 训练优先使用 Apple MPS，不可用时退回 CPU。训练成功后在“模型测试”页选择该
 run；页面直接读取 run 绑定的不可变快照和 ONNX，不需要先覆盖本机测试模型。
-人工记录通过／不通过后，只有通过的 run 才能组装模型包。四个核心角色不齐，
-或已选择模型的固定测试集缺少必要类别时，只能生成 `incomplete` 研究包；不能
-作为生产部署包。三个英雄增强模型可以在各自验收通过后一起加入模型包。
+人工记录通过／不通过后，只有通过的 run 才能进入模型包。四个流程模型和三个
+英雄模型必须全部选齐，且各自固定测试集覆盖完整，才能生成可部署版本；不完整
+版本不能部署到 Worker。
 
-模型包 ZIP 不会自动修改 NAS 或 MacBook Pro Worker。当前 Worker 的新模型包
-加载器和影子管线尚未上线；完成后部署也只需要更新 MacBook Pro Worker，NAS
-Server 仍不加载视觉模型。旧的 `publish-local` API 暂时保留兼容，但不是新的验收
-与生产发布流程。
+模型测试页会显示 Worker 当前模型和每次部署记录。模型包达到 `ready` 后可直接点
+“部署到 Worker”：Vision Lab 通过 SSH 上传完整 ZIP，远端校验七个角色与所有
+SHA-256，原子切换 `current` 后重新加载 launchd；若新进程没有稳定启动，会恢复
+旧配置和旧模型。SSH 只使用系统密钥或 SSH agent，页面和数据库不保存 Worker
+密码。部署以前的完整模型包即为回滚。NAS Server 仍不加载视觉模型。
+
+可选配置包括 `VISION_LAB_WORKER_SSH_PORT`、`VISION_LAB_WORKER_SSH_IDENTITY`、
+`VISION_LAB_WORKER_MODEL_ROOT`、`VISION_LAB_WORKER_LAUNCHD_LABEL` 和
+`VISION_LAB_WORKER_LAUNCHD_PLIST`。旧的 `publish-local` API 暂时保留兼容，但
+不是生产发布流程。
 
 ## 独立打包与发布
 

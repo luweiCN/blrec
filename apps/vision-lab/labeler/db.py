@@ -172,6 +172,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail TEXT DEFAULT '',
     created_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_audit_action_frame
+    ON audit_log (action, frame_id);
 
 -- 实时打标进度(单用户,单行状态)
 CREATE TABLE IF NOT EXISTS live_state (
@@ -491,6 +493,26 @@ CREATE TABLE IF NOT EXISTS model_packages (
     manifest_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS model_deployments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id TEXT NOT NULL REFERENCES model_packages(id),
+    target TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('queued', 'running', 'succeeded', 'failed')),
+    previous_package_id TEXT NOT NULL DEFAULT '',
+    worker_package_id TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_model_deployments_created
+    ON model_deployments (created_at DESC, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_model_deployments_active_target
+    ON model_deployments (target)
+    WHERE status IN ('queued', 'running');
 
 -- 本地工作目录迁移只执行一次，避免每次 API 打开连接都遍历数万张图片。
 CREATE TABLE IF NOT EXISTS workspace_migrations (
@@ -1570,6 +1592,123 @@ def list_model_packages(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         item['manifest_json'] = json.loads(item['manifest_json'] or '{}')
         result.append(item)
     return result
+
+
+_MODEL_DEPLOYMENT_STATUSES = {'queued', 'running', 'succeeded', 'failed'}
+_MODEL_DEPLOYMENT_TRANSITIONS = {
+    'queued': {'running', 'failed'},
+    'running': {'succeeded', 'failed'},
+    'succeeded': set(),
+    'failed': set(),
+}
+
+
+def _model_deployment_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    item = dict(row)
+    item['detail_json'] = json.loads(item['detail_json'] or '{}')
+    return item
+
+
+def create_model_deployment(
+    conn: sqlite3.Connection, *, package_id: str, target: str
+) -> Dict[str, Any]:
+    package = conn.execute(
+        'SELECT status FROM model_packages WHERE id = ?', (package_id,)
+    ).fetchone()
+    if package is None:
+        raise KeyError(f'模型包不存在: {package_id}')
+    if str(package['status']) != 'ready':
+        raise ValueError('模型包尚未达到发布条件')
+    active = conn.execute(
+        "SELECT id FROM model_deployments WHERE target = ? "
+        "AND status IN ('queued', 'running')",
+        (target,),
+    ).fetchone()
+    if active is not None:
+        raise ValueError('这个 Worker 正在部署另一个模型包')
+    cursor = conn.execute(
+        'INSERT INTO model_deployments '
+        '(package_id, target, status, created_at) VALUES (?, ?, ?, ?)',
+        (package_id, target, 'queued', now()),
+    )
+    conn.commit()
+    return get_model_deployment(conn, int(cursor.lastrowid)) or {}
+
+
+def get_model_deployment(
+    conn: sqlite3.Connection, deployment_id: int
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        'SELECT * FROM model_deployments WHERE id = ?', (deployment_id,)
+    ).fetchone()
+    return None if row is None else _model_deployment_dict(row)
+
+
+def update_model_deployment(
+    conn: sqlite3.Connection,
+    *,
+    deployment_id: int,
+    status: str,
+    previous_package_id: Optional[str] = None,
+    worker_package_id: Optional[str] = None,
+    error: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if status not in _MODEL_DEPLOYMENT_STATUSES:
+        raise ValueError(f'未知模型部署状态: {status}')
+    current = get_model_deployment(conn, deployment_id)
+    if current is None:
+        raise KeyError(f'模型部署记录不存在: {deployment_id}')
+    if status not in _MODEL_DEPLOYMENT_TRANSITIONS[str(current['status'])]:
+        raise ValueError(
+            '模型部署状态不能从 {} 变为 {}'.format(current['status'], status)
+        )
+    timestamp = now()
+    conn.execute(
+        'UPDATE model_deployments SET status = ?, '
+        'previous_package_id = COALESCE(?, previous_package_id), '
+        'worker_package_id = COALESCE(?, worker_package_id), '
+        'error = COALESCE(?, error), '
+        'detail_json = COALESCE(?, detail_json), '
+        'started_at = CASE WHEN ? = \'running\' THEN ? ELSE started_at END, '
+        "finished_at = CASE WHEN ? IN ('succeeded', 'failed') "
+        'THEN ? ELSE finished_at END WHERE id = ?',
+        (
+            status,
+            previous_package_id,
+            worker_package_id,
+            None if error is None else error[:4000],
+            None if detail is None else json.dumps(detail, ensure_ascii=False),
+            status,
+            timestamp,
+            status,
+            timestamp,
+            deployment_id,
+        ),
+    )
+    conn.commit()
+    return get_model_deployment(conn, deployment_id) or {}
+
+
+def list_model_deployments(
+    conn: sqlite3.Connection, *, limit: int = 20
+) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        'SELECT * FROM model_deployments ORDER BY id DESC LIMIT ?',
+        (max(1, min(200, int(limit))),),
+    ).fetchall()
+    return [_model_deployment_dict(row) for row in rows]
+
+
+def fail_interrupted_model_deployments(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        "UPDATE model_deployments SET status = 'failed', "
+        "error = '标注服务重启，无法确认部署是否完成', finished_at = ? "
+        "WHERE status IN ('queued', 'running')",
+        (now(),),
+    )
+    conn.commit()
+    return int(cursor.rowcount)
 
 
 def audit_recent(conn: sqlite3.Connection, limit: int = 50) -> List[Dict[str, Any]]:
@@ -2691,6 +2830,7 @@ _TRAINING_REVIEW_LABELS = {
     'result_panel': {'result_panel', 'no_result_panel', 'unreadable'},
 }
 _TRAINING_REVIEW_STATUSES = {'pending', 'partial', 'confirmed', 'skipped'}
+_TRAINING_REVIEW_SOURCE_SCOPES = {'all', 'new', 'legacy'}
 _HERO_SCREEN_TYPES = {'gameplay_hud', 'scoreboard', 'result_page'}
 _HERO_LAYOUT_LABELS = _HERO_SCREEN_TYPES | {'none', 'unreadable'}
 _HERO_SELECT_VARIANTS = {'bp', 'blind', 'random', 'unreadable'}
@@ -2736,6 +2876,14 @@ AND (
               )
         )
     )
+)
+"""
+_UNIFIED_MANUAL_REVIEWED = """
+EXISTS (
+    SELECT 1
+    FROM audit_log manual_review
+    WHERE manual_review.frame_id = item.frame_id
+      AND manual_review.action = 'training_review'
 )
 """
 _TRAINING_REVIEW_ARAM_PRIORITY = """
@@ -2940,6 +3088,12 @@ def _training_review_item_dict(
     )
     item['boxes'] = get_boxes(conn, int(row['frame_id']))
     item['needs_player_hero_review'] = bool(item['needs_player_hero_review'])
+    item['unified_manual_reviewed'] = bool(item['unified_manual_reviewed'])
+    item['legacy_migration_needs_review'] = bool(
+        item['review_status'] == 'confirmed'
+        and 'legacy' in item['source_categories']
+        and not item['unified_manual_reviewed']
+    )
     return item
 
 
@@ -3136,9 +3290,31 @@ def _training_review_source_category(source_type: Any) -> str:
         return 'result_archive'
     if normalized == 'new_model_prefill':
         return 'model_prefill'
+    if normalized == 'new_model_hero_prefill':
+        return 'hero_model_prefill'
     if normalized == 'legacy_annotation' or normalized.startswith('legacy_'):
         return 'legacy'
     return 'other'
+
+
+def _training_review_origin_frame_ids(
+    conn: sqlite3.Connection, source_scope: str
+) -> Optional[set[int]]:
+    if source_scope not in _TRAINING_REVIEW_SOURCE_SCOPES:
+        raise ValueError('训练复核数据来源无效')
+    if source_scope == 'all':
+        return None
+    if source_scope == 'legacy':
+        rows = conn.execute(
+            'SELECT DISTINCT frame_id FROM training_review_sources '
+            "WHERE source_type LIKE 'legacy_%'"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            'SELECT DISTINCT frame_id FROM training_review_sources '
+            "WHERE source_type IN ('worker', 'result_archive')"
+        ).fetchall()
+    return {int(row['frame_id']) for row in rows}
 
 
 def training_review_duplicate_result_frame_ids(conn: sqlite3.Connection) -> set[int]:
@@ -3161,7 +3337,9 @@ def get_training_review_item(
                frame.height, frame.frame_path, frame.thumb_path, frame.sha256,
                video.streamer, video.filename, video.remote_path,
                CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW})
-                    THEN 1 ELSE 0 END AS needs_player_hero_review
+                    THEN 1 ELSE 0 END AS needs_player_hero_review,
+               CASE WHEN ({_UNIFIED_MANUAL_REVIEWED})
+                    THEN 1 ELSE 0 END AS unified_manual_reviewed
         FROM training_review_items item
         JOIN frames frame ON frame.id = item.frame_id
         JOIN videos video ON video.id = frame.video_id
@@ -3422,6 +3600,7 @@ def list_training_review_items(
     status: str = 'pending',
     limit: int = 1000,
     offset: int = 0,
+    source_scope: str = 'all',
     streamer: str = '',
     hero_screen_type: str = '',
 ) -> List[Dict[str, Any]]:
@@ -3430,11 +3609,16 @@ def list_training_review_items(
         'needs_review',
         'missing_player',
         'legacy_hero',
+        'migration_review',
+        'human_confirmed',
     }:
         raise ValueError('训练复核状态无效')
     if limit < 1 or limit > 10_000 or offset < 0:
         raise ValueError('训练复核分页参数无效')
+    source_frame_ids = _training_review_origin_frame_ids(conn, source_scope)
     if status == 'legacy_hero':
+        if source_scope == 'new':
+            return []
         return list_legacy_hero_review_items(
             conn,
             streamer=streamer,
@@ -3452,10 +3636,8 @@ def list_training_review_items(
         base = (
             'SELECT item.frame_id FROM training_review_items item '
             "WHERE item.review_status IN ('pending', 'partial') "
-            f'OR ({_MISSING_PLAYER_HERO_REVIEW}) '
             f'ORDER BY {_TRAINING_REVIEW_ARAM_PRIORITY}, '
-            f'CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW}) THEN 0 '
-            "WHEN item.review_status = 'pending' THEN 1 ELSE 2 END, "
+            "CASE WHEN item.review_status = 'pending' THEN 0 ELSE 1 END, "
             f'{_TRAINING_REVIEW_SOURCE_CREATED_AT} DESC, '
             f'{_TRAINING_REVIEW_SOURCE_OFFSET} DESC, '
             'item.updated_at DESC, item.frame_id DESC'
@@ -3465,6 +3647,25 @@ def list_training_review_items(
             'SELECT item.frame_id FROM training_review_items item '
             f'WHERE {_MISSING_PLAYER_HERO_REVIEW} '
             'ORDER BY item.updated_at DESC, item.frame_id DESC'
+        )
+    elif status == 'migration_review':
+        base = (
+            'SELECT item.frame_id FROM training_review_items item '
+            "WHERE item.review_status = 'confirmed' "
+            'AND EXISTS ('
+            'SELECT 1 FROM training_review_sources source '
+            'WHERE source.frame_id = item.frame_id '
+            "AND source.source_type LIKE 'legacy_%') "
+            f'AND NOT ({_UNIFIED_MANUAL_REVIEWED}) '
+            f'ORDER BY {_TRAINING_REVIEW_ARAM_PRIORITY}, '
+            'item.updated_at DESC, item.frame_id DESC'
+        )
+    elif status == 'human_confirmed':
+        base = (
+            'SELECT item.frame_id FROM training_review_items item '
+            "WHERE item.review_status = 'confirmed' "
+            f'AND ({_UNIFIED_MANUAL_REVIEWED}) '
+            'ORDER BY item.reviewed_at DESC, item.frame_id DESC'
         )
     elif status == 'pending':
         base = (
@@ -3486,6 +3687,7 @@ def list_training_review_items(
     visible = [
         int(row['frame_id'])
         for row in rows
+        if (source_frame_ids is None or int(row['frame_id']) in source_frame_ids)
         if result_groups.get(int(row['frame_id']), {}).get(
             'result_group_representative_frame_id', int(row['frame_id'])
         )
@@ -4320,14 +4522,15 @@ def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
             "AND sync_state = 'conflict'"
         ).fetchone()[0]
     )
-    missing_player_hero = sum(
-        1
+    missing_player_ids = {
+        int(row['frame_id'])
         for row in conn.execute(
             'SELECT item.frame_id FROM training_review_items item '
             f'WHERE {_MISSING_PLAYER_HERO_REVIEW}'
         ).fetchall()
         if int(row['frame_id']) not in duplicates
-    )
+    }
+    missing_player_hero = len(missing_player_ids)
     categories_by_frame: Dict[int, set[str]] = {}
     for row in conn.execute(
         'SELECT frame_id, source_type FROM training_review_sources'
@@ -4381,14 +4584,68 @@ def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         for row in visible_rows
         if int(row['frame_id']) in legacy_ids
     )
+    manually_reviewed_ids = {
+        int(row['frame_id'])
+        for row in conn.execute(
+            "SELECT DISTINCT frame_id FROM audit_log WHERE action = ? "
+            'AND frame_id IS NOT NULL',
+            ('training_review',),
+        ).fetchall()
+        if int(row['frame_id']) in visible_ids
+    }
+    confirmed_ids = {
+        int(row['frame_id'])
+        for row in visible_rows
+        if str(row['review_status']) == 'confirmed'
+    }
+    legacy_manual_confirmed = len(legacy_ids & manually_reviewed_ids & confirmed_ids)
+    legacy_migration_pending = len((legacy_ids & confirmed_ids) - manually_reviewed_ids)
     legacy_data = {
         'frames': len(legacy_ids),
         'core_label_confirmed': legacy_core_confirmed,
         'core_label_needs_review': len(legacy_ids) - legacy_core_confirmed,
+        'unified_manual_confirmed': legacy_manual_confirmed,
+        'migration_pending_review': legacy_migration_pending,
         'hero_eligible': len(legacy_hero_targets),
         'hero_complete': legacy_hero_complete,
         'hero_missing': len(legacy_hero_targets) - legacy_hero_complete,
     }
+    source_scopes: Dict[str, Dict[str, Any]] = {}
+    scope_ids = {
+        'new': {
+            frame_id
+            for frame_id, categories in categories_by_frame.items()
+            if categories & {'worker', 'result_archive'}
+        },
+        'legacy': legacy_ids,
+    }
+    for scope, frame_ids in scope_ids.items():
+        scope_rows = [row for row in visible_rows if int(row['frame_id']) in frame_ids]
+        scope_statuses: Dict[str, int] = {}
+        for row in scope_rows:
+            review_status = str(row['review_status'])
+            scope_statuses[review_status] = scope_statuses.get(review_status, 0) + 1
+        source_scopes[scope] = {
+            'total': len(scope_rows),
+            'statuses': scope_statuses,
+            'needs_review': int(scope_statuses.get('pending', 0))
+            + int(scope_statuses.get('partial', 0)),
+            'missing_player_hero': len(frame_ids & missing_player_ids),
+            'human_confirmed': len(frame_ids & manually_reviewed_ids & confirmed_ids),
+            'migration_pending_review': (
+                len((frame_ids & confirmed_ids) - manually_reviewed_ids)
+                if scope == 'legacy'
+                else 0
+            ),
+            'core_model_prefilled': sum(
+                'model_prefill' in categories_by_frame.get(frame_id, set())
+                for frame_id in frame_ids
+            ),
+            'hero_model_prefilled': sum(
+                'hero_model_prefill' in categories_by_frame.get(frame_id, set())
+                for frame_id in frame_ids
+            ),
+        }
     return {
         'total': sum(statuses.values()),
         'statuses': statuses,
@@ -4397,5 +4654,6 @@ def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         'conflicts': conflicts,
         'missing_player_hero': missing_player_hero,
         'source_frames': source_frames,
+        'source_scopes': source_scopes,
         'legacy_data': legacy_data,
     }

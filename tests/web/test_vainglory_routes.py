@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Iterator, List, Optional, Tuple
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
@@ -860,3 +861,103 @@ def test_lists_suspected_non_vainglory_public_archives() -> None:
     assert response.status_code == 200
     assert response.json()['total'] == 1
     assert response.json()['items'][0]['bvid'] == 'BV1abcdefgh'
+
+
+def test_manages_analysis_workers() -> None:
+    worker = SimpleNamespace(
+        state='running',
+        worker_id='mac-studio',
+        display_name='Mac Studio',
+        enabled=True,
+        model_package_id='vg-vision-v2',
+        pipeline_version='timeline-v2',
+        last_seen_at=1_000,
+        active_task_count=1,
+        active_part_ids=(7,),
+        concurrency=3,
+        completed_task_count=12,
+        failed_task_count=1,
+        total_processing_seconds=240.0,
+        profiled_task_count=10,
+        profiled_video_seconds=18_000.0,
+        total_decode_analysis_seconds=600.0,
+        total_profiled_task_seconds=900.0,
+        last_task_finished_at=999,
+    )
+    service = SimpleNamespace()
+    service.list_analysis_workers = AsyncMock(return_value=(worker,))
+    service.add_analysis_worker = AsyncMock(return_value=worker)
+    paused = SimpleNamespace(**{**worker.__dict__, 'enabled': False})
+    service.update_analysis_worker = AsyncMock(return_value=paused)
+    application = FastAPI()
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[vainglory.authenticated_manager_subject] = (
+        lambda: 'manager'
+    )
+    application.dependency_overrides[vainglory.get_service] = lambda: service
+
+    with TestClient(application) as client:
+        listed = client.get('/api/v1/vainglory/workers')
+        created = client.post(
+            '/api/v1/vainglory/workers',
+            json={'workerId': 'mac-studio', 'displayName': ' Mac Studio '},
+        )
+        updated = client.patch(
+            '/api/v1/vainglory/workers/mac-studio', json={'enabled': False}
+        )
+        invalid = client.post(
+            '/api/v1/vainglory/workers', json={'workerId': '../not-allowed'}
+        )
+
+    assert listed.status_code == 200
+    assert listed.json()['workers'][0]['activePartIds'] == [7]
+    assert listed.json()['workers'][0]['profiledTaskCount'] == 10
+    assert listed.json()['workers'][0]['profiledVideoSeconds'] == 18_000.0
+    assert listed.json()['workers'][0]['totalDecodeAnalysisSeconds'] == 600.0
+    assert listed.json()['workers'][0]['totalProfiledTaskSeconds'] == 900.0
+    assert created.status_code == 201
+    assert updated.status_code == 200
+    assert updated.json()['enabled'] is False
+    assert invalid.status_code == 422
+    service.add_analysis_worker.assert_awaited_once_with('mac-studio', 'Mac Studio')
+    service.update_analysis_worker.assert_awaited_once_with(
+        'mac-studio', display_name=None, enabled=False
+    )
+
+
+def test_worker_completion_forwards_efficiency_metrics() -> None:
+    service = SimpleNamespace()
+    service.register_remote_worker_activity = Mock()
+    service.complete_remote_part = AsyncMock()
+    application = FastAPI()
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[vainglory.security.authenticated_analysis_worker] = (
+        lambda: 'analysis-worker'
+    )
+    application.dependency_overrides[vainglory.get_service] = lambda: service
+
+    with TestClient(application) as client:
+        response = client.post(
+            '/api/v1/vainglory/worker/complete',
+            json={
+                'workerId': 'mac-studio',
+                'modelPackageId': 'vg-vision-v2',
+                'pipelineVersion': 'timeline-v2',
+                'concurrency': 3,
+                'kind': 'part',
+                'itemId': 7,
+                'videoDurationSeconds': 3_600,
+                'decodeAnalysisSeconds': 120,
+            },
+        )
+
+    assert response.status_code == 204
+    service.complete_remote_part.assert_awaited_once_with(
+        7,
+        (),
+        candidate_count=0,
+        training_candidates=(),
+        analysis_summary=None,
+        video_duration_seconds=3_600,
+        decode_analysis_seconds=120,
+    )

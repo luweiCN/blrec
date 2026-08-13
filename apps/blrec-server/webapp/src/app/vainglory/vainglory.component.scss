@@ -11,6 +11,32 @@
   padding: 0 24px 24px;
 }
 
+.worker-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.worker-status-marker {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: #bfbfbf;
+
+  &.running {
+    background: #52c41a;
+  }
+
+  &.paused {
+    background: #faad14;
+  }
+
+  &.failed {
+    background: #ff4d4f;
+  }
+}
+
 .tab-panel {
   display: grid;
   gap: 16px;
@@ -250,6 +276,22 @@
   color: #096dd9;
   background: #e6f7ff;
   font-size: 12px;
+}
+
+.analysis-worker-editor {
+  display: grid;
+  gap: 16px;
+
+  > label {
+    display: grid;
+    gap: 6px;
+
+    > span {
+      color: #595959;
+      font-size: 13px;
+      font-weight: 600;
+    }
+  }
 }
 
 .archive-item-meta {

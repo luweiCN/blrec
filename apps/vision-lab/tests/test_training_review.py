@@ -377,6 +377,8 @@ class TestLegacyMigration(TrainingReviewTestCase):
                 'frames': 5,
                 'core_label_confirmed': 5,
                 'core_label_needs_review': 0,
+                'unified_manual_confirmed': 0,
+                'migration_pending_review': 5,
                 'hero_eligible': 4,
                 'hero_complete': 0,
                 'hero_missing': 4,
@@ -433,6 +435,120 @@ class TestLegacyMigration(TrainingReviewTestCase):
 
 
 class TestTrainingReviewStorage(TrainingReviewTestCase):
+    def test_migrated_legacy_label_needs_unified_manual_confirmation(self):
+        frame_id = self.frame(1)
+        db.save_annotation(
+            self.conn,
+            frame_id,
+            {
+                'content_family': 'vainglory',
+                'game_context': 'in_match',
+                'screen_type': 'gameplay',
+                'game_mode': '3v3',
+            },
+            status='complete',
+        )
+        training_review.migrate_legacy_training_reviews(self.conn)
+
+        migrated = db.list_training_review_items(
+            self.conn, status='migration_review', source_scope='legacy'
+        )
+        manual = db.list_training_review_items(
+            self.conn, status='human_confirmed', source_scope='legacy'
+        )
+        self.assertEqual([item['frame_id'] for item in migrated], [frame_id])
+        self.assertTrue(migrated[0]['legacy_migration_needs_review'])
+        self.assertFalse(migrated[0]['unified_manual_reviewed'])
+        self.assertEqual(manual, [])
+
+        db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='3v3',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label=None,
+            status='confirmed',
+        )
+
+        migrated = db.list_training_review_items(
+            self.conn, status='migration_review', source_scope='legacy'
+        )
+        manual = db.list_training_review_items(
+            self.conn, status='human_confirmed', source_scope='legacy'
+        )
+        stats = db.training_review_stats(self.conn)['source_scopes']['legacy']
+        self.assertEqual(migrated, [])
+        self.assertEqual([item['frame_id'] for item in manual], [frame_id])
+        self.assertTrue(manual[0]['unified_manual_reviewed'])
+        self.assertFalse(manual[0]['legacy_migration_needs_review'])
+        self.assertEqual(stats['migration_pending_review'], 0)
+        self.assertEqual(stats['human_confirmed'], 1)
+
+    def test_review_queue_separates_new_and_legacy_sources(self):
+        legacy_frame = self.frame(1)
+        new_frame = self.frame(2)
+        shared_frame = self.frame(3)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=legacy_frame,
+            source_type='legacy_annotation',
+            source_id='legacy-only',
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=legacy_frame,
+            source_type='new_model_prefill',
+            source_id='core-prefill',
+        )
+        db.add_training_review_source(
+            self.conn, frame_id=new_frame, source_type='worker', source_id='worker-only'
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=new_frame,
+            source_type='new_model_hero_prefill',
+            source_id='hero-prefill',
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=shared_frame,
+            source_type='legacy_bp_review',
+            source_id='shared-legacy',
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=shared_frame,
+            source_type='result_archive',
+            source_id='shared-new',
+        )
+
+        legacy = db.list_training_review_items(
+            self.conn, status='needs_review', source_scope='legacy'
+        )
+        new = db.list_training_review_items(
+            self.conn, status='needs_review', source_scope='new'
+        )
+        stats = db.training_review_stats(self.conn)['source_scopes']
+
+        self.assertEqual(
+            {item['frame_id'] for item in legacy}, {legacy_frame, shared_frame}
+        )
+        self.assertEqual({item['frame_id'] for item in new}, {new_frame, shared_frame})
+        self.assertEqual(stats['legacy']['total'], 2)
+        self.assertEqual(stats['legacy']['needs_review'], 2)
+        self.assertEqual(stats['legacy']['core_model_prefilled'], 1)
+        self.assertEqual(stats['new']['total'], 2)
+        self.assertEqual(stats['new']['needs_review'], 2)
+        self.assertEqual(stats['new']['hero_model_prefilled'], 1)
+
+    def test_review_queue_rejects_unknown_source_scope(self):
+        with self.assertRaisesRegex(ValueError, '数据来源无效'):
+            db.list_training_review_items(
+                self.conn, status='needs_review', source_scope='mystery'
+            )
+
     def test_review_queue_prioritizes_aram_evidence(self):
         normal = self.frame(1)
         inferred_aram = self.frame(2)
@@ -896,9 +1012,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
 
         self.assertEqual([item['frame_id'] for item in missing], [result_frame])
         self.assertTrue(missing[0]['needs_player_hero_review'])
-        self.assertEqual(
-            [item['frame_id'] for item in needs_review], [result_frame, pending_frame]
-        )
+        self.assertEqual([item['frame_id'] for item in needs_review], [pending_frame])
         self.assertEqual(db.training_review_stats(self.conn)['missing_player_hero'], 1)
 
         slots = [
