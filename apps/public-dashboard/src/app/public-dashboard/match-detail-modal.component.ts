@@ -107,6 +107,10 @@ export class MatchDetailModalComponent
   }
 
   closeImage(): void {
+    if (this.initialImageExpanded) {
+      this.close();
+      return;
+    }
     this.imageExpanded = false;
   }
 

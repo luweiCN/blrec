@@ -20,6 +20,13 @@ img {
   object-fit: cover;
 }
 
+:host(.detail-portrait) img,
+:host(.profile-avatar) img {
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  margin: -2px;
+}
+
 .avatar-fallback {
   display: grid;
   place-items: center;

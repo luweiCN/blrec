@@ -142,6 +142,34 @@ describe('MatchExplorerComponent', () => {
     );
   });
 
+  it('closes the whole modal after a result image opened from the list', () => {
+    fixture.componentRef.setInput('matches', [
+      {
+        ...TEST_DASHBOARD_MATCHES[0],
+        resultImage: {
+          url: 'https://vg.luwei.host/data/match-images/001/1200-0123456789abcdef.webp',
+          width: 1600,
+          height: 900,
+        },
+      },
+    ]);
+    fixture.detectChanges();
+    const page = fixture.nativeElement as HTMLElement;
+
+    (page.querySelector('.match-image-link') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(page.querySelector('.match-image-lightbox')).not.toBeNull();
+
+    (
+      page.querySelector(
+        '.match-image-lightbox button',
+      ) as HTMLButtonElement
+    ).click();
+    fixture.detectChanges();
+
+    expect(page.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it('uses compact economy and expands the result image from its thumbnail', () => {
     fixture.componentRef.setInput('matches', [
       {
