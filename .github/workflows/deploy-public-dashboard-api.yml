@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - apps/public-dashboard/api/**
+      - apps/public-dashboard/publisher/src/blrec_dashboard_publisher/deduplication.py
       - apps/public-dashboard/publisher/src/blrec_dashboard_publisher/rating.py
       - apps/public-dashboard/publisher/src/blrec_dashboard_publisher/snapshot.py
       - .github/workflows/deploy-public-dashboard-api.yml

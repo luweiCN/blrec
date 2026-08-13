@@ -37,6 +37,7 @@ import {
   COMPETITIVE_MODE_OPTIONS,
   CompetitiveMode,
   HeroPerformance,
+  HeroDataScope,
   HeroStanding,
   HeroSynergy,
   ModeFilter,
@@ -76,6 +77,7 @@ const EMPTY_PERFORMANCE: HeroPerformance = {
 export class HeroDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
+  activeScope: HeroDataScope = 'streamer';
   readonly heroGoldPerMinute = heroGoldPerMinute;
   readonly heroKda = heroKda;
   readonly peerComparisonKind = heroPeerComparisonKind;
@@ -83,6 +85,7 @@ export class HeroDetailPageComponent implements OnDestroy {
   readonly peerMetricKind = heroPeerMetricKind;
   readonly peerMetricText = heroPeerMetricText;
   private readonly modeSubscription: Subscription;
+  private readonly revisionSubscription: Subscription;
 
   constructor(
     private readonly data: DashboardDataService,
@@ -99,10 +102,14 @@ export class HeroDetailPageComponent implements OnDestroy {
       this.activeMode = mode;
       changeDetector.markForCheck();
     });
+    this.revisionSubscription = data.revision$.subscribe(() => {
+      changeDetector.markForCheck();
+    });
   }
 
   ngOnDestroy(): void {
     this.modeSubscription.unsubscribe();
+    this.revisionSubscription.unsubscribe();
   }
 
   get heroId(): string {
@@ -114,7 +121,12 @@ export class HeroDetailPageComponent implements OnDestroy {
   }
 
   get seasonHero(): HeroStanding | undefined {
-    return heroForSeason(this.data.snapshot, this.activeSeason, this.heroId);
+    return heroForSeason(
+      this.data.snapshot,
+      this.activeSeason,
+      this.heroId,
+      this.activeScope,
+    );
   }
 
   get identity(): HeroIdentity | undefined {
@@ -142,6 +154,8 @@ export class HeroDetailPageComponent implements OnDestroy {
       this.data.snapshot,
       this.activeSeason,
       this.activeMode,
+      'win-rate',
+      this.activeScope,
     ).findIndex(
       (standing) =>
         standing.name.toLocaleLowerCase() === hero.name.toLocaleLowerCase(),
@@ -159,6 +173,7 @@ export class HeroDetailPageComponent implements OnDestroy {
       this.activeSeason,
       this.activeMode,
       'usage',
+      this.activeScope,
     ).findIndex(
       (standing) =>
         standing.name.toLocaleLowerCase() === hero.name.toLocaleLowerCase(),
@@ -178,11 +193,32 @@ export class HeroDetailPageComponent implements OnDestroy {
   }
 
   get bestSynergies(): readonly HeroSynergy[] {
-    return this.seasonHero?.synergies?.[this.activeMode].best ?? [];
+    return this.relationshipHero?.synergies?.[this.activeMode].best ?? [];
   }
 
   get worstSynergies(): readonly HeroSynergy[] {
-    return this.seasonHero?.synergies?.[this.activeMode].worst ?? [];
+    return this.relationshipHero?.synergies?.[this.activeMode].worst ?? [];
+  }
+
+  get counters(): readonly HeroSynergy[] {
+    return this.relationshipHero?.counters?.[this.activeMode].counters ?? [];
+  }
+
+  get counteredBy(): readonly HeroSynergy[] {
+    return this.relationshipHero?.counters?.[this.activeMode].counteredBy ?? [];
+  }
+
+  get environmentHero(): HeroStanding | undefined {
+    return heroForSeason(
+      this.data.snapshot,
+      this.activeSeason,
+      this.heroId,
+      'environment',
+    );
+  }
+
+  private get relationshipHero(): HeroStanding | undefined {
+    return this.environmentHero ?? this.seasonHero;
   }
 
   get playerRecords(): readonly HeroProficiency[] {
@@ -208,6 +244,7 @@ export class HeroDetailPageComponent implements OnDestroy {
         this.data.snapshot,
         season.key,
         hero.name,
+        this.activeScope,
       );
       if (
         seasonHero === undefined ||
@@ -219,6 +256,8 @@ export class HeroDetailPageComponent implements OnDestroy {
         this.data.snapshot,
         season.key,
         this.activeMode,
+        'win-rate',
+        this.activeScope,
       ).findIndex(
         (standing) =>
           standing.name.toLocaleLowerCase() === hero.name.toLocaleLowerCase(),
@@ -236,6 +275,10 @@ export class HeroDetailPageComponent implements OnDestroy {
     this.activeSeason = season;
   }
 
+  selectScope(scope: HeroDataScope): void {
+    this.activeScope = scope;
+  }
+
   heroImage(heroName: string): string {
     return heroImage(heroName);
   }
@@ -246,6 +289,11 @@ export class HeroDetailPageComponent implements OnDestroy {
 
   winRate(value: { readonly matches: number; readonly wins: number }): number {
     return winRate(value);
+  }
+
+  relationshipDelta(value: HeroSynergy): string {
+    const points = (value.delta ?? 0) * 100;
+    return `${points > 0 ? '+' : points < 0 ? '−' : ''}${Math.abs(points).toFixed(1)}pp`;
   }
 
   modeLabel(): string {

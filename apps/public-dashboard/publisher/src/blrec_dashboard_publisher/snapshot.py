@@ -22,6 +22,7 @@ from typing import (
     Tuple,
 )
 
+from .deduplication import exact_match_fingerprint
 from .rating import (
     CARRYOVER_MATCH_CAP,
     CATCHUP_LIMIT,
@@ -832,14 +833,23 @@ def _empty_synergy_modes() -> Dict[str, Mapping[str, List[Mapping[str, Any]]]]:
     return {mode: {'best': [], 'worst': []} for mode in PUBLIC_MODES}
 
 
-def _hero_synergies(
+def _empty_counter_modes() -> Dict[str, Mapping[str, List[Mapping[str, Any]]]]:
+    return {mode: {'counters': [], 'counteredBy': []} for mode in PUBLIC_MODES}
+
+
+def _hero_relationships(
     rows: Sequence[Mapping[str, Any]], lineups: Mapping[int, List[Mapping[str, Any]]]
-) -> Mapping[str, Mapping[str, Mapping[str, List[Mapping[str, Any]]]]]:
+) -> Tuple[
+    Mapping[str, Mapping[str, Mapping[str, List[Mapping[str, Any]]]]],
+    Mapping[str, Mapping[str, Mapping[str, List[Mapping[str, Any]]]]],
+]:
     totals: Dict[str, Dict[str, List[int]]] = {}
     pairs: Dict[str, Dict[str, Dict[str, List[int]]]] = {}
+    opponents: Dict[str, Dict[str, Dict[str, List[int]]]] = {}
     for row in rows:
         match_id = int(row['match_id'])
         public_mode = RAW_MODE_TO_PUBLIC[str(row['game_mode'])]
+        heroes_by_side: Dict[str, List[str]] = {}
         for side in ('left', 'right'):
             hero_names = sorted(
                 {
@@ -852,6 +862,7 @@ def _hero_synergies(
             )
             if not hero_names:
                 continue
+            heroes_by_side[side] = hero_names
             won = str(row['winner_side']) == side
             for mode in (public_mode, 'all'):
                 for hero_name in hero_names:
@@ -867,8 +878,20 @@ def _hero_synergies(
                         pair_totals = hero_pairs.setdefault(partner_name, [0, 0])
                         pair_totals[0] += 1
                         pair_totals[1] += int(won)
+        if len(heroes_by_side) != 2:
+            continue
+        for side, hero_names in heroes_by_side.items():
+            opposing_side = 'right' if side == 'left' else 'left'
+            won = str(row['winner_side']) == side
+            for mode in (public_mode, 'all'):
+                for hero_name in hero_names:
+                    matchups = opponents.setdefault(hero_name, {}).setdefault(mode, {})
+                    for opponent_name in heroes_by_side[opposing_side]:
+                        matchup = matchups.setdefault(opponent_name, [0, 0])
+                        matchup[0] += 1
+                        matchup[1] += int(won)
 
-    values: Dict[str, Dict[str, Mapping[str, List[Mapping[str, Any]]]]] = {}
+    synergies: Dict[str, Dict[str, Mapping[str, List[Mapping[str, Any]]]]] = {}
     for hero_name, modes in pairs.items():
         public_modes = _empty_synergy_modes()
         for mode, partners in modes.items():
@@ -880,17 +903,25 @@ def _hero_synergies(
                 if pair_totals[0] >= HERO_SYNERGY_MIN_MATCHES
             ]
 
-            def smoothed(item: Tuple[str, int, int]) -> float:
+            def lift(item: Tuple[str, int, int]) -> float:
                 _name, matches, wins = item
-                return (wins + base_win_rate * HERO_SYNERGY_PRIOR_MATCHES) / (
+                without_matches = hero_matches - matches
+                without_wins = hero_wins - wins
+                comparison = (
+                    without_wins / without_matches
+                    if without_matches > 0
+                    else base_win_rate
+                )
+                smoothed = (wins + comparison * HERO_SYNERGY_PRIOR_MATCHES) / (
                     matches + HERO_SYNERGY_PRIOR_MATCHES
                 )
+                return smoothed - comparison
 
             ranking_limit = min(HERO_SYNERGY_LIMIT, max(1, len(eligible) // 2))
             best = sorted(
                 eligible,
                 key=lambda item: (
-                    -smoothed(item),
+                    -lift(item),
                     -item[1],
                     -item[2],
                     item[0].casefold(),
@@ -901,7 +932,7 @@ def _hero_synergies(
             worst = sorted(
                 (item for item in eligible if item[0] not in best_names),
                 key=lambda item: (
-                    smoothed(item),
+                    lift(item),
                     -item[1],
                     item[2],
                     item[0].casefold(),
@@ -910,15 +941,195 @@ def _hero_synergies(
             )[:ranking_limit]
             public_modes[mode] = {
                 'best': [
-                    {'name': name, 'matches': matches, 'wins': wins}
+                    {
+                        'name': name,
+                        'matches': matches,
+                        'wins': wins,
+                        'delta': lift((name, matches, wins)),
+                    }
                     for name, matches, wins in best
                 ],
                 'worst': [
-                    {'name': name, 'matches': matches, 'wins': wins}
+                    {
+                        'name': name,
+                        'matches': matches,
+                        'wins': wins,
+                        'delta': lift((name, matches, wins)),
+                    }
                     for name, matches, wins in worst
                 ],
             }
-        values[hero_name] = public_modes
+        synergies[hero_name] = public_modes
+
+    counters: Dict[str, Dict[str, Mapping[str, List[Mapping[str, Any]]]]] = {}
+    for hero_name, modes in opponents.items():
+        public_modes = _empty_counter_modes()
+        for mode, matchups in modes.items():
+            hero_matches, hero_wins = totals[hero_name][mode]
+            base_win_rate = hero_wins / hero_matches if hero_matches else 0.5
+            eligible = [
+                (opponent_name, matchup[0], matchup[1])
+                for opponent_name, matchup in matchups.items()
+                if matchup[0] >= HERO_SYNERGY_MIN_MATCHES
+            ]
+
+            def matchup_lift(item: Tuple[str, int, int]) -> float:
+                _name, matches, wins = item
+                return (wins + base_win_rate * HERO_SYNERGY_PRIOR_MATCHES) / (
+                    matches + HERO_SYNERGY_PRIOR_MATCHES
+                ) - base_win_rate
+
+            limit = min(HERO_SYNERGY_LIMIT, max(1, len(eligible) // 2))
+            dominates = sorted(
+                eligible,
+                key=lambda item: (
+                    -matchup_lift(item),
+                    -item[1],
+                    -item[2],
+                    item[0].casefold(),
+                    item[0],
+                ),
+            )[:limit]
+            dominant_names = {item[0] for item in dominates}
+            countered_by = sorted(
+                (item for item in eligible if item[0] not in dominant_names),
+                key=lambda item: (
+                    matchup_lift(item),
+                    -item[1],
+                    item[2],
+                    item[0].casefold(),
+                    item[0],
+                ),
+            )[:limit]
+
+            def public_value(item: Tuple[str, int, int]) -> Mapping[str, Any]:
+                name, matches, wins = item
+                return {
+                    'name': name,
+                    'matches': matches,
+                    'wins': wins,
+                    'delta': matchup_lift(item),
+                }
+
+            public_modes[mode] = {
+                'counters': [public_value(item) for item in dominates],
+                'counteredBy': [public_value(item) for item in countered_by],
+            }
+        counters[hero_name] = public_modes
+    return synergies, counters
+
+
+def _environment_heroes(
+    rows: Sequence[Mapping[str, Any]], lineups: Mapping[int, List[Mapping[str, Any]]]
+) -> List[Mapping[str, Any]]:
+    hero_modes: Dict[str, Dict[str, _HeroPerformance]] = {}
+    player_names: Dict[str, Dict[str, Set[str]]] = {}
+    for row in rows:
+        match_id = int(row['match_id'])
+        public_mode = RAW_MODE_TO_PUBLIC[str(row['game_mode'])]
+        for side in ('left', 'right'):
+            won = str(row['winner_side']) == side
+            seen_heroes = set()
+            for participant in lineups.get(match_id, ()):
+                if str(participant['side']) != side:
+                    continue
+                hero_name = str(participant['hero_name'])
+                if not hero_name or hero_name in seen_heroes:
+                    continue
+                seen_heroes.add(hero_name)
+                result = 'W' if won else 'L'
+                hero = hero_modes.setdefault(hero_name, _empty_hero_modes())
+                # Environment mode has no stable identity for every participant;
+                # the numeric value is replaced below with conservative name counts.
+                hero[public_mode].add(match_id, result)
+                hero['all'].add(match_id, result)
+                participant_name = str(participant.get('player_name') or '').strip()
+                if participant_name and participant_name.casefold() != 'guest':
+                    names = player_names.setdefault(hero_name, {})
+                    names.setdefault(public_mode, set()).add(
+                        participant_name.casefold()
+                    )
+                    names.setdefault('all', set()).add(participant_name.casefold())
+
+    synergies, counters = _hero_relationships(rows, lineups)
+    values = []
+    for hero_name, modes in sorted(
+        hero_modes.items(), key=lambda item: (item[0].casefold(), item[0])
+    ):
+        public_modes = {}
+        for mode in PUBLIC_MODES:
+            performance = dict(modes[mode].public_value())
+            performance['players'] = len(player_names.get(hero_name, {}).get(mode, ()))
+            public_modes[mode] = performance
+        values.append(
+            {
+                'id': hero_name,
+                'name': hero_name,
+                'modes': public_modes,
+                'synergies': synergies.get(hero_name, _empty_synergy_modes()),
+                'counters': counters.get(hero_name, _empty_counter_modes()),
+            }
+        )
+    return values
+
+
+def _row_exact_fingerprint(
+    row: Mapping[str, Any], lineups: Mapping[int, List[Mapping[str, Any]]]
+) -> Optional[str]:
+    stored = row.get('exact_fingerprint')
+    if stored:
+        return str(stored)
+    match_id = int(row['match_id'])
+    participants = lineups.get(match_id, ())
+    teams = []
+    for side in ('left', 'right'):
+        teams.append(
+            {
+                'side': side,
+                'kills': row.get('{}_kills'.format(side)),
+                'economy': row.get('{}_economy'.format(side)),
+                'players': [
+                    {
+                        'hero_name': participant.get('hero_name'),
+                        'kills': participant.get('kills'),
+                        'deaths': participant.get('deaths'),
+                        'assists': participant.get('assists'),
+                        'economy': participant.get('economy'),
+                        'last_hits': participant.get('last_hits'),
+                    }
+                    for participant in participants
+                    if str(participant.get('side')) == side
+                ],
+            }
+        )
+    return exact_match_fingerprint(
+        mode=str(row['game_mode']),
+        duration_seconds=int(row['duration_seconds']),
+        winner_side=str(row['winner_side']),
+        teams=teams,
+    )
+
+
+def _deduplicate_rows(
+    rows: Sequence[Mapping[str, Any]],
+    lineups: Mapping[int, List[Mapping[str, Any]]],
+    *,
+    per_player: bool,
+) -> List[Mapping[str, Any]]:
+    values = []
+    seen = set()
+    for row in rows:
+        fingerprint = _row_exact_fingerprint(row, lineups)
+        if fingerprint is None:
+            values.append(row)
+            continue
+        identity: Any = (
+            (int(row['player_id']), fingerprint) if per_player else fingerprint
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        values.append(row)
     return values
 
 
@@ -950,6 +1161,7 @@ def _standings_for_rows(
     aliases: Mapping[int, List[str]],
     lineups: Mapping[int, List[Mapping[str, Any]]],
     previous_ratings: MutableMapping[Tuple[int, str], _PreviousRating],
+    environment_rows: Sequence[Mapping[str, Any]],
     *,
     reset_visible_score: bool,
 ) -> Mapping[str, Any]:
@@ -1023,19 +1235,21 @@ def _standings_for_rows(
             }
         )
 
-    synergies = _hero_synergies(rows, lineups)
     public_heroes = [
         {
             'id': hero_name,
             'name': hero_name,
             'modes': {mode: modes[mode].public_value() for mode in PUBLIC_MODES},
-            'synergies': synergies.get(hero_name, _empty_synergy_modes()),
         }
         for hero_name, modes in sorted(
             hero_modes.items(), key=lambda item: (item[0].casefold(), item[0])
         )
     ]
-    return {'players': public_players, 'heroes': public_heroes}
+    return {
+        'players': public_players,
+        'heroes': public_heroes,
+        'environmentHeroes': _environment_heroes(environment_rows, lineups),
+    }
 
 
 def _utc_iso(moment: datetime) -> str:
@@ -1061,6 +1275,7 @@ def build_dashboard_snapshot(
         players=players,
         aliases=aliases,
         rows=rows,
+        environment_rows=rows,
         lineups=lineups,
         public_matches=public_matches,
         generated_at=generated_at,
@@ -1072,6 +1287,7 @@ def build_dashboard_snapshot_from_records(
     players: Mapping[int, Mapping[str, Any]],
     aliases: Mapping[int, List[str]],
     rows: Sequence[Mapping[str, Any]],
+    environment_rows: Optional[Sequence[Mapping[str, Any]]] = None,
     lineups: Mapping[int, List[Mapping[str, Any]]],
     public_matches: Sequence[Mapping[str, Any]],
     generated_at: datetime,
@@ -1085,15 +1301,29 @@ def build_dashboard_snapshot_from_records(
     if generated_at.tzinfo is None:
         raise ValueError('dashboard snapshot time must include a timezone')
     current_season = _season_for(generated_at)
+    source_rows = list(rows)
+    rows = _deduplicate_rows(source_rows, lineups, per_player=True)
 
     seasons_by_key: Dict[str, _Season] = {current_season.key: current_season}
+    environment_values = _deduplicate_rows(
+        source_rows if environment_rows is None else environment_rows,
+        lineups,
+        per_player=False,
+    )
     rows_by_season: Dict[str, List[Mapping[str, Any]]] = {}
+    environment_rows_by_season: Dict[str, List[Mapping[str, Any]]] = {}
     for row in rows:
         season = _season_for(
             datetime.fromtimestamp(int(row['played_at']), tz=timezone.utc)
         )
         seasons_by_key[season.key] = season
         rows_by_season.setdefault(season.key, []).append(row)
+    for row in environment_values:
+        season = _season_for(
+            datetime.fromtimestamp(int(row['played_at']), tz=timezone.utc)
+        )
+        seasons_by_key[season.key] = season
+        environment_rows_by_season.setdefault(season.key, []).append(row)
     chronological_seasons = sorted(
         seasons_by_key.values(), key=lambda value: value.starts_at
     )
@@ -1106,20 +1336,27 @@ def build_dashboard_snapshot_from_records(
             aliases,
             lineups,
             previous_ratings,
+            environment_rows_by_season.get(season.key, []),
             reset_visible_score=True,
         )
     seasons = list(reversed(chronological_seasons))
     standings['all-time'] = _standings_for_rows(
-        rows, players, aliases, lineups, {}, reset_visible_score=False
+        rows,
+        players,
+        aliases,
+        lineups,
+        {},
+        environment_values,
+        reset_visible_score=False,
     )
     publication_date = generated_at.astimezone(SHANGHAI).date().isoformat()
-    source_last_match_id = max((int(row['match_id']) for row in rows), default=0)
+    source_last_match_id = max((int(row['match_id']) for row in source_rows), default=0)
     body: Dict[str, Any] = {
         'schemaVersion': 3,
         'publicationDate': publication_date,
         'generatedAt': _utc_iso(generated_at),
         'sourceLastMatchId': source_last_match_id,
-        'sourceMatchCount': len(rows),
+        'sourceMatchCount': len(source_rows),
         'ratingModel': {
             'version': RATING_MODEL_VERSION,
             'priorMatches': PRIOR_MATCHES,

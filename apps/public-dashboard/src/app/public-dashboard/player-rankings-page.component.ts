@@ -16,6 +16,7 @@ import {
   modeLabel,
   PlayerRankingSort,
   playerMatchesQuery,
+  playerKdaForMode,
   RankMovement,
   seasonOption,
   winRate,
@@ -48,6 +49,7 @@ export class PlayerRankingsPageComponent implements OnDestroy {
   activeSort: PlayerRankingSort = 'rating';
   currentPage = 1;
   private readonly modeSubscription: Subscription;
+  private readonly revisionSubscription: Subscription;
 
   constructor(
     private readonly data: DashboardDataService,
@@ -64,10 +66,15 @@ export class PlayerRankingsPageComponent implements OnDestroy {
       this.currentPage = 1;
       changeDetector.markForCheck();
     });
+    this.revisionSubscription = data.revision$.subscribe(() => {
+      this.clampPage();
+      changeDetector.markForCheck();
+    });
   }
 
   ngOnDestroy(): void {
     this.modeSubscription.unsubscribe();
+    this.revisionSubscription.unsubscribe();
   }
 
   get seasonOptions(): readonly SeasonOption[] {
@@ -183,6 +190,10 @@ export class PlayerRankingsPageComponent implements OnDestroy {
     return winRate(value);
   }
 
+  playerKda(player: PlayerStanding): number | null {
+    return playerKdaForMode(player, this.activeMode)?.value ?? null;
+  }
+
   rankMovement(player: PlayerStanding): RankMovement {
     return getRankMovement(
       getPlayerTrend(
@@ -209,5 +220,9 @@ export class PlayerRankingsPageComponent implements OnDestroy {
 
   trackPage(_index: number, page: number): number {
     return page;
+  }
+
+  private clampPage(): void {
+    this.currentPage = Math.min(this.currentPage, this.totalPages);
   }
 }

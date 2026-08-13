@@ -25,6 +25,7 @@ import {
 import { DashboardDataService } from './public-dashboard-data.service';
 import {
   HeroPerformance,
+  HeroDataScope,
   HeroRankingRow,
   HeroStanding,
   ModeFilter,
@@ -46,8 +47,10 @@ export class HeroRankingsPageComponent implements OnDestroy {
   activeMode: ModeFilter;
   searchQuery = '';
   activeSort: HeroRankingSort = 'win-rate';
+  activeScope: HeroDataScope = 'streamer';
   currentPage = 1;
   private readonly modeSubscription: Subscription;
+  private readonly revisionSubscription: Subscription;
 
   constructor(
     private readonly data: DashboardDataService,
@@ -64,10 +67,15 @@ export class HeroRankingsPageComponent implements OnDestroy {
       this.currentPage = 1;
       changeDetector.markForCheck();
     });
+    this.revisionSubscription = data.revision$.subscribe(() => {
+      this.clampPage();
+      changeDetector.markForCheck();
+    });
   }
 
   ngOnDestroy(): void {
     this.modeSubscription.unsubscribe();
+    this.revisionSubscription.unsubscribe();
   }
 
   get seasonOptions(): readonly SeasonOption[] {
@@ -80,13 +88,18 @@ export class HeroRankingsPageComponent implements OnDestroy {
       this.activeSeason,
       this.activeMode,
       this.activeSort,
+      this.activeScope,
     );
   }
 
   get rankingHint(): string {
+    const sample =
+      this.activeScope === 'streamer'
+        ? '只统计主播本人使用的英雄。'
+        : '统计完整结算阵容，同一局仅在高置信重复时合并。';
     return this.activeSort === 'win-rate'
-      ? '当前模式至少 20 局后进入胜率排名。'
-      : '按对局次数展示当前模式最常被使用的英雄。';
+      ? `${sample} 当前模式至少 20 局后进入胜率排名。`
+      : `${sample} 按对局次数展示当前模式最常被使用的英雄。`;
   }
 
   get rankingCaption(): string {
@@ -142,6 +155,11 @@ export class HeroRankingsPageComponent implements OnDestroy {
     this.currentPage = 1;
   }
 
+  selectScope(scope: HeroDataScope): void {
+    this.activeScope = scope;
+    this.currentPage = 1;
+  }
+
   updateSearch(event: Event): void {
     this.searchQuery = (event.target as HTMLInputElement).value;
     this.currentPage = 1;
@@ -164,6 +182,9 @@ export class HeroRankingsPageComponent implements OnDestroy {
   }
 
   proficiencyLeader(hero: HeroStanding): HeroProficiency | null {
+    if (this.activeScope === 'environment') {
+      return null;
+    }
     return getHeroProficiencyLeader(
       this.data.snapshot,
       this.activeSeason,
@@ -186,5 +207,9 @@ export class HeroRankingsPageComponent implements OnDestroy {
 
   trackPage(_index: number, page: number): number {
     return page;
+  }
+
+  private clampPage(): void {
+    this.currentPage = Math.min(this.currentPage, this.totalPages);
   }
 }

@@ -198,6 +198,11 @@
 
     td:nth-child(8) {
       grid-row: 3;
+      grid-column: 3;
+    }
+
+    td:nth-child(9) {
+      grid-row: 3;
       grid-column: 4;
     }
   }

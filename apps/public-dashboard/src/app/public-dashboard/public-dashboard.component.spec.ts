@@ -1,6 +1,7 @@
 import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
+import { Subject } from 'rxjs';
 
 import {
   DASHBOARD_MODE_STORAGE,
@@ -36,6 +37,7 @@ describe('PublicDashboardComponent', () => {
           useValue: {
             snapshot: TEST_DASHBOARD_SNAPSHOT,
             trends: TEST_DASHBOARD_TRENDS,
+            revision$: new Subject<string>(),
           },
         },
         {
@@ -110,7 +112,7 @@ describe('PublicDashboardComponent', () => {
     ) as HTMLElement;
 
     expect(movement.textContent).toContain('↑1');
-    expect(movement.getAttribute('aria-label')).toContain('较上次数据发布');
+    expect(movement.getAttribute('aria-label')).toContain('今日较昨日');
   });
 
   it('limits the featured player hero pool to six heroes', () => {

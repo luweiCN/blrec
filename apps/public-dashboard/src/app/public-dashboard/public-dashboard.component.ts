@@ -19,6 +19,7 @@ import {
   heroImage,
   modeLabel,
   OVERVIEW_LIMIT,
+  playerKdaForMode,
   RankMovement,
   seasonOption,
   selectedHeroWinRate,
@@ -69,6 +70,7 @@ export class PublicDashboardComponent implements OnDestroy {
   activeMode: ModeFilter;
 
   private readonly modeSubscription: Subscription;
+  private readonly revisionSubscription: Subscription;
   private apiRecentMatches: readonly DashboardMatch[] | null = null;
   private recentRequestSequence = 0;
 
@@ -88,12 +90,17 @@ export class PublicDashboardComponent implements OnDestroy {
       void this.loadRecentMatches();
       this.changeDetector.markForCheck();
     });
+    this.revisionSubscription = data.revision$.subscribe(() => {
+      void this.loadRecentMatches();
+      this.changeDetector.markForCheck();
+    });
     void this.loadRecentMatches();
   }
 
   ngOnDestroy(): void {
     this.recentRequestSequence += 1;
     this.modeSubscription.unsubscribe();
+    this.revisionSubscription.unsubscribe();
   }
 
   get rankings(): readonly PlayerStanding[] {
@@ -203,6 +210,10 @@ export class PublicDashboardComponent implements OnDestroy {
 
   selectedHeroWinRate(hero: HeroUsage): number {
     return selectedHeroWinRate(hero);
+  }
+
+  playerKda(player: PlayerStanding): number | null {
+    return playerKdaForMode(player, this.activeMode)?.value ?? null;
   }
 
   heroPerformance(hero: HeroStanding): HeroPerformance {

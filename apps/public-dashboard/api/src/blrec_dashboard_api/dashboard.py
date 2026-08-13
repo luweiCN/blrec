@@ -45,6 +45,7 @@ def _player_metadata(
 def _ranking_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
     rows = connection.execute(
         'SELECT match.source_match_id AS match_id,match.player_id,'
+        'match.exact_fingerprint,'
         'match.mode AS game_mode,match.played_at_epoch AS played_at,'
         'match.duration_seconds,match.result,ally.side AS recorded_player_side,'
         'enemy.side AS enemy_side,COALESCE(recorded.hero_name,\'\') AS hero_name,'
@@ -57,6 +58,31 @@ def _ranking_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
         'LEFT JOIN match_participants recorded '
         'ON recorded.match_id=match.source_match_id '
         "AND recorded.team_role='ally' AND recorded.is_recorded_player=1 "
+        'ORDER BY match.played_at_epoch,match.source_match_id'
+    ).fetchall()
+    values: List[Mapping[str, Any]] = []
+    for row in rows:
+        value = dict(row)
+        value['winner_side'] = (
+            str(row['recorded_player_side'])
+            if str(row['result']) == 'W'
+            else str(row['enemy_side'])
+        )
+        values.append(value)
+    return values
+
+
+def _environment_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
+    rows = connection.execute(
+        'SELECT match.source_match_id AS match_id,match.mode AS game_mode,'
+        'match.played_at_epoch AS played_at,match.duration_seconds,'
+        'match.exact_fingerprint,ally.side AS recorded_player_side,'
+        'enemy.side AS enemy_side,match.result '
+        'FROM matches match '
+        'JOIN match_teams ally ON ally.match_id=match.source_match_id '
+        "AND ally.role='ally' "
+        'JOIN match_teams enemy ON enemy.match_id=match.source_match_id '
+        "AND enemy.role='enemy' "
         'ORDER BY match.played_at_epoch,match.source_match_id'
     ).fetchall()
     values: List[Mapping[str, Any]] = []
@@ -132,6 +158,7 @@ def refresh_dashboard_state(
         players=players,
         aliases=aliases,
         rows=_ranking_rows(connection),
+        environment_rows=_environment_rows(connection),
         lineups=_lineups_by_match(connection),
         public_matches=(),
         generated_at=generated_at,

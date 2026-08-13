@@ -328,7 +328,7 @@
             </dd>
           </div>
           <div>
-            <dt>较上次发布</dt>
+            <dt>今日较昨日</dt>
             <dd
               [class.up]="ratingDeltaKind === 'up'"
               [class.down]="ratingDeltaKind === 'down'"
@@ -355,6 +355,7 @@
                 <polyline
                   *ngIf="trendChartPoints.length > 1"
                   class="trend-line"
+                  pathLength="1"
                   [attr.points]="trendPolyline"
                 ></polyline>
               </svg>
@@ -395,14 +396,14 @@
             </div>
           </div>
           <p *ngIf="playerTrend.points.length === 1" class="trend-start-note">
-            已记录本次发布；下一次数据发布后会形成变化曲线。
+            已记录今日节点；明日有新数据后会形成日变化曲线。
           </p>
         </div>
       </div>
 
       <ng-template #noRatingTrend>
         <p class="profile-empty trend-empty">
-          当前模式尚无趋势记录，数据发布后会自动开始累计。
+          当前模式尚无趋势记录，有新数据后会按天自动累计。
         </p>
       </ng-template>
     </section>

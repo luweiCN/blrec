@@ -112,8 +112,8 @@ const TREND_CHART_HEIGHT = 180;
 const TREND_CHART_PADDING_X = 18;
 const TREND_CHART_PADDING_Y = 18;
 const TREND_RANGE_OPTIONS: readonly TrendRangeOption[] = [
-  { key: 'recent-7', label: '近 7 次', limit: 7 },
-  { key: 'recent-30', label: '近 30 次', limit: 30 },
+  { key: 'recent-7', label: '近 7 天', limit: 7 },
+  { key: 'recent-30', label: '近 30 天', limit: 30 },
   { key: 'all', label: '全部', limit: null },
 ];
 
@@ -145,6 +145,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
   readonly peerMetricKind = heroPeerMetricKind;
   readonly peerMetricText = heroPeerMetricText;
   private readonly modeSubscription: Subscription;
+  private readonly revisionSubscription: Subscription;
 
   constructor(
     private readonly data: DashboardDataService,
@@ -161,10 +162,14 @@ export class PlayerDetailPageComponent implements OnDestroy {
       this.activeMode = mode;
       changeDetector.markForCheck();
     });
+    this.revisionSubscription = data.revision$.subscribe(() => {
+      changeDetector.markForCheck();
+    });
   }
 
   ngOnDestroy(): void {
     this.modeSubscription.unsubscribe();
+    this.revisionSubscription.unsubscribe();
   }
 
   get playerId(): number | null {
@@ -312,7 +317,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
       case 'down':
         return this.rankMovement.text;
       case 'pending':
-        return '待累计';
+        return '待明日对比';
     }
   }
 
@@ -350,8 +355,8 @@ export class PlayerDetailPageComponent implements OnDestroy {
     const total = this.playerTrend.points.length;
     const visible = this.visibleTrendPoints.length;
     return visible === total
-      ? `共 ${total} 次数据发布`
-      : `显示 ${visible} / ${total} 次数据发布`;
+      ? `共 ${total} 个每日节点`
+      : `显示 ${visible} / ${total} 天`;
   }
 
   get trendChartPoints(): readonly TrendChartPoint[] {
@@ -533,9 +538,9 @@ export class PlayerDetailPageComponent implements OnDestroy {
       return '首次记录';
     }
     if (delta === 0) {
-      return '较前次持平';
+      return point.recorded ? '较前一日持平' : '当日无新对局';
     }
-    return `较前次 ${delta > 0 ? '+' : '−'}${Math.abs(delta).toLocaleString('zh-CN')}`;
+    return `较前一日 ${delta > 0 ? '+' : '−'}${Math.abs(delta).toLocaleString('zh-CN')}`;
   }
 
   trackMode(_index: number, mode: ModeBreakdown): ModeFilter {

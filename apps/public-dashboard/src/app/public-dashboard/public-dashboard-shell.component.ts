@@ -25,6 +25,12 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   siteStatsState: SiteStatsState = { kind: 'loading' };
 
   private destroyed = false;
+  private refreshTimer?: ReturnType<typeof setInterval>;
+  private readonly visibilityHandler = (): void => {
+    if (document.visibilityState === 'visible') {
+      void this.refreshDashboard();
+    }
+  };
 
   constructor(
     readonly data: DashboardDataService,
@@ -39,6 +45,12 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     void this.loadDashboard();
     this.siteAnalytics.start();
+    document.addEventListener('visibilitychange', this.visibilityHandler);
+    this.refreshTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void this.refreshDashboard();
+      }
+    }, 60_000);
     void this.siteStats.load().then((state) => {
       if (this.destroyed) {
         return;
@@ -50,6 +62,10 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.destroyed = true;
+    if (this.refreshTimer !== undefined) {
+      clearInterval(this.refreshTimer);
+    }
+    document.removeEventListener('visibilitychange', this.visibilityHandler);
     this.playerLiveStatus.stop();
     this.siteAnalytics.stop();
   }
@@ -68,21 +84,6 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
       : seasonOption(snapshot, snapshot.currentSeasonKey).label;
   }
 
-  get lastUpdatedLabel(): string {
-    const snapshot = this.data.snapshotOrNull;
-    if (snapshot === null) {
-      return '';
-    }
-    return new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).format(new Date(snapshot.generatedAt));
-  }
-
   reloadDashboard(): void {
     void this.loadDashboard();
   }
@@ -95,6 +96,13 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
       if (this.data.state.kind === 'ready') {
         this.playerLiveStatus.start();
       }
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  private async refreshDashboard(): Promise<void> {
+    const changed = await this.data.refresh();
+    if (changed && !this.destroyed) {
       this.changeDetector.markForCheck();
     }
   }

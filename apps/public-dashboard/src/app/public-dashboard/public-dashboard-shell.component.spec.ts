@@ -14,6 +14,7 @@ describe('PublicDashboardShellComponent', () => {
     state: { kind: 'loading' };
     snapshotOrNull: null;
     load: jasmine.Spy<() => Promise<void>>;
+    refresh: jasmine.Spy<() => Promise<boolean>>;
   };
 
   beforeEach(async () => {
@@ -21,6 +22,7 @@ describe('PublicDashboardShellComponent', () => {
       state: { kind: 'loading' },
       snapshotOrNull: null,
       load: jasmine.createSpy('load').and.resolveTo(),
+      refresh: jasmine.createSpy('refresh').and.resolveTo(false),
     };
     await TestBed.configureTestingModule({
       declarations: [PublicDashboardShellComponent],

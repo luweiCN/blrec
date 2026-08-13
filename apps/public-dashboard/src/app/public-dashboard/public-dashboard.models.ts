@@ -6,6 +6,7 @@ export type SeasonKey =
   | `${number}-${'spring' | 'summer' | 'autumn'}`
   | 'all-time';
 export type MatchResult = 'W' | 'L';
+export type HeroDataScope = 'streamer' | 'environment';
 
 export interface ModeOption {
   readonly key: ModeFilter;
@@ -157,6 +158,7 @@ export interface HeroSynergy {
   readonly name: string;
   readonly matches: number;
   readonly wins: number;
+  readonly delta?: number;
 }
 
 export interface HeroSynergyRanking {
@@ -164,11 +166,17 @@ export interface HeroSynergyRanking {
   readonly worst: readonly HeroSynergy[];
 }
 
+export interface HeroCounterRanking {
+  readonly counters: readonly HeroSynergy[];
+  readonly counteredBy: readonly HeroSynergy[];
+}
+
 export interface HeroStanding {
   readonly id: string;
   readonly name: string;
   readonly modes: Readonly<Record<ModeFilter, HeroPerformance>>;
   readonly synergies?: Readonly<Record<ModeFilter, HeroSynergyRanking>>;
+  readonly counters?: Readonly<Record<ModeFilter, HeroCounterRanking>>;
 }
 
 export interface DashboardMatchPlayer {
@@ -233,11 +241,13 @@ export interface DashboardMatch {
 export interface SeasonStandings {
   readonly players: readonly PlayerStanding[];
   readonly heroes: readonly HeroStanding[];
+  readonly environmentHeroes?: readonly HeroStanding[];
 }
 
 export interface DashboardSnapshot {
   readonly schemaVersion: 3;
   readonly snapshotId: string;
+  readonly contentRevision?: string;
   readonly publicationDate: string;
   readonly generatedAt: string;
   readonly sourceLastMatchId: number;

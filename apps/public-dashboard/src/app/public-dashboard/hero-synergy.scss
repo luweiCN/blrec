@@ -98,3 +98,37 @@
     grid-template-columns: 1fr;
   }
 }
+.hero-data-scope {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  margin: 14px 0 0;
+  padding: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+
+  span {
+    padding: 0 9px;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  button {
+    min-height: 34px;
+    padding: 0 13px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--type-label);
+    font-weight: 720;
+
+    &.active {
+      background: var(--cyan-wash);
+      color: var(--cyan);
+    }
+  }
+}

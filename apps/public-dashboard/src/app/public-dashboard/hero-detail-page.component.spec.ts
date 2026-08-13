@@ -2,6 +2,7 @@ import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
+import { Subject } from 'rxjs';
 
 import { DASHBOARD_MODE_STORAGE } from './dashboard-mode.service';
 import { HeroDetailPageComponent } from './hero-detail-page.component';
@@ -29,7 +30,10 @@ describe('HeroDetailPageComponent', () => {
       providers: [
         {
           provide: DashboardDataService,
-          useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
+          useValue: {
+            snapshot: TEST_DASHBOARD_SNAPSHOT,
+            revision$: new Subject<string>(),
+          },
         },
         {
           provide: ActivatedRoute,

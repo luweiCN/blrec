@@ -1,6 +1,7 @@
 import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
+import { Subject } from 'rxjs';
 
 import {
   DASHBOARD_MODE_STORAGE,
@@ -38,6 +39,7 @@ describe('MatchesPageComponent', () => {
           useValue: {
             snapshot: TEST_DASHBOARD_SNAPSHOT,
             trends: TEST_DASHBOARD_TRENDS,
+            revision$: new Subject<string>(),
           },
         },
         {

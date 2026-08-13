@@ -4,11 +4,12 @@ import hashlib
 import sqlite3
 import time
 import unicodedata
-from datetime import timezone
+from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from blrec_dashboard_publisher.deduplication import exact_match_fingerprint
 from blrec_dashboard_publisher.rating import (
     RATING_MODEL_VERSION,
     calculate_virtual_match_rating_timeline,
@@ -36,6 +37,97 @@ def _match_revision(match: IngestMatch) -> str:
         by_alias=True, exclude_none=False, sort_keys=True, separators=(',', ':')
     )
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _ingest_match_fingerprint(match: IngestMatch) -> Optional[str]:
+    winner_role = 'ally' if match.result == 'W' else 'enemy'
+    teams = []
+    for team in (match.ally, match.enemy):
+        teams.append(
+            {
+                'side': team.side,
+                'kills': team.kills,
+                'economy': team.economy,
+                'players': [
+                    {
+                        'hero_name': player.hero_name,
+                        'kills': player.kills,
+                        'deaths': player.deaths,
+                        'assists': player.assists,
+                        'economy': player.economy,
+                        'last_hits': player.last_hits,
+                    }
+                    for player in team.players
+                ],
+            }
+        )
+    winner_side = match.ally.side if winner_role == 'ally' else match.enemy.side
+    return exact_match_fingerprint(
+        mode=match.mode,
+        duration_seconds=match.duration_seconds,
+        winner_side=winner_side,
+        teams=teams,
+    )
+
+
+def _stored_match_fingerprint(
+    connection: sqlite3.Connection, match_id: int
+) -> Optional[str]:
+    match = connection.execute(
+        'SELECT mode,duration_seconds,result FROM matches WHERE source_match_id=?',
+        (match_id,),
+    ).fetchone()
+    if match is None:
+        return None
+    teams = []
+    winner_side = ''
+    for team in connection.execute(
+        'SELECT role,side,kills,economy FROM match_teams '
+        'WHERE match_id=? ORDER BY role',
+        (match_id,),
+    ).fetchall():
+        role = str(team['role'])
+        side = str(team['side'])
+        if (str(match['result']) == 'W') == (role == 'ally'):
+            winner_side = side
+        players = connection.execute(
+            'SELECT hero_name,kills,deaths,assists,economy,last_hits '
+            'FROM match_participants WHERE match_id=? AND team_role=? '
+            'ORDER BY slot',
+            (match_id, role),
+        ).fetchall()
+        teams.append(
+            {
+                'side': side,
+                'kills': team['kills'],
+                'economy': team['economy'],
+                'players': [dict(player) for player in players],
+            }
+        )
+    return exact_match_fingerprint(
+        mode=str(match['mode']),
+        duration_seconds=int(match['duration_seconds']),
+        winner_side=winner_side,
+        teams=teams,
+    )
+
+
+def _players_for_fingerprints(
+    connection: sqlite3.Connection, fingerprints: Iterable[Optional[str]]
+) -> Set[int]:
+    values = tuple(sorted({value for value in fingerprints if value is not None}))
+    if not values:
+        return set()
+    placeholders = ','.join('?' for _ in values)
+    return {
+        int(row['player_id'])
+        for row in connection.execute(
+            'SELECT DISTINCT player_id FROM matches WHERE exact_fingerprint IN ('
+            + placeholders
+            + ')',
+            values,
+        ).fetchall()
+    }
 
 
 def _utc_iso(value: Any) -> str:
@@ -218,8 +310,10 @@ def _upsert_match(
     connection: sqlite3.Connection, match: IngestMatch, now: int
 ) -> Tuple[bool, Set[int]]:
     revision = _match_revision(match)
+    fingerprint = _ingest_match_fingerprint(match)
     existing = connection.execute(
-        'SELECT revision_sha256,player_id FROM matches WHERE source_match_id=?',
+        'SELECT revision_sha256,player_id,exact_fingerprint FROM matches '
+        'WHERE source_match_id=?',
         (match.id,),
     ).fetchone()
     if existing is not None and str(existing['revision_sha256']) == revision:
@@ -227,6 +321,9 @@ def _upsert_match(
     affected_player_ids = {match.player_id}
     if existing is not None:
         affected_player_ids.add(int(existing['player_id']))
+        affected_player_ids.update(
+            _players_for_fingerprints(connection, (existing['exact_fingerprint'],))
+        )
     replay_kind = None if match.replay is None else match.replay.kind
     replay_url = None if match.replay is None else str(match.replay.url)
     image_url = None if match.result_image is None else str(match.result_image.url)
@@ -238,8 +335,9 @@ def _upsert_match(
         'INSERT INTO matches('
         'source_match_id,revision_sha256,player_id,season_key,mode,played_at,'
         'played_at_epoch,duration_seconds,result,stream_title,replay_kind,replay_url,'
-        'result_image_url,result_image_width,result_image_height,created_at,updated_at'
-        ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+        'result_image_url,result_image_width,result_image_height,exact_fingerprint,'
+        'created_at,updated_at'
+        ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
         'ON CONFLICT(source_match_id) DO UPDATE SET '
         'revision_sha256=excluded.revision_sha256,player_id=excluded.player_id,'
         'season_key=excluded.season_key,mode=excluded.mode,'
@@ -249,6 +347,7 @@ def _upsert_match(
         'replay_url=excluded.replay_url,result_image_url=excluded.result_image_url,'
         'result_image_width=excluded.result_image_width,'
         'result_image_height=excluded.result_image_height,'
+        'exact_fingerprint=excluded.exact_fingerprint,'
         'updated_at=excluded.updated_at',
         (
             match.id,
@@ -266,6 +365,7 @@ def _upsert_match(
             image_url,
             image_width,
             image_height,
+            fingerprint,
             now,
             now,
         ),
@@ -273,6 +373,7 @@ def _upsert_match(
     connection.execute('DELETE FROM match_teams WHERE match_id=?', (match.id,))
     _insert_team(connection, match.id, match.ally)
     _insert_team(connection, match.id, match.enemy)
+    affected_player_ids.update(_players_for_fingerprints(connection, (fingerprint,)))
     connection.execute(
         'DELETE FROM removed_matches WHERE source_match_id=?', (match.id,)
     )
@@ -403,7 +504,8 @@ def _recompute_ratings(
         parameters,
     )
     all_rows = connection.execute(
-        'SELECT source_match_id,player_id,season_key,mode,result,played_at_epoch '
+        'SELECT source_match_id,player_id,season_key,mode,result,played_at_epoch,'
+        'exact_fingerprint '
         'FROM matches WHERE player_id IN ({}) '
         'ORDER BY player_id,played_at_epoch,source_match_id'.format(placeholders),
         parameters,
@@ -412,7 +514,16 @@ def _recompute_ratings(
     for player_id, player_group in groupby(
         all_rows, key=lambda row: int(row['player_id'])
     ):
-        player_rows = list(player_group)
+        player_rows = []
+        seen_fingerprints = set()
+        for row in player_group:
+            fingerprint = row['exact_fingerprint']
+            if fingerprint is not None:
+                value = str(fingerprint)
+                if value in seen_fingerprints:
+                    continue
+                seen_fingerprints.add(value)
+            player_rows.append(row)
         scopes = ('all', '3v3', 'brawl', '5v5')
         for scope in scopes:
             scoped_rows = [
@@ -449,6 +560,50 @@ def _recompute_ratings(
     return inserted
 
 
+def reconcile_match_fingerprints(database_path: Path) -> int:
+    """Backfill exact identities and rebuild ratings after the schema upgrade."""
+
+    connection = connect_database(database_path)
+    try:
+        connection.execute('BEGIN IMMEDIATE')
+        changed = 0
+        for row in connection.execute(
+            'SELECT source_match_id,exact_fingerprint FROM matches '
+            'ORDER BY source_match_id'
+        ).fetchall():
+            match_id = int(row['source_match_id'])
+            fingerprint = _stored_match_fingerprint(connection, match_id)
+            if row['exact_fingerprint'] == fingerprint:
+                continue
+            connection.execute(
+                'UPDATE matches SET exact_fingerprint=? WHERE source_match_id=?',
+                (fingerprint, match_id),
+            )
+            changed += 1
+        if changed:
+            player_ids = [
+                int(row['player_id'])
+                for row in connection.execute(
+                    'SELECT player_id FROM players ORDER BY player_id'
+                ).fetchall()
+            ]
+            _recompute_ratings(connection, player_ids)
+            initialized = connection.execute(
+                'SELECT 1 FROM ingestion_batches LIMIT 1'
+            ).fetchone()
+            if initialized is not None:
+                refresh_dashboard_state(
+                    connection, generated_at=datetime.now(timezone.utc)
+                )
+        connection.commit()
+        return changed
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def apply_ingest_batch(
     database_path: Path, *, idempotency_key: str, batch: IngestBatch
 ) -> Dict[str, Any]:
@@ -483,11 +638,17 @@ def apply_ingest_batch(
         rating_player_ids: Set[int] = set()
         for removed_match_id in batch.removed_match_ids:
             removed = connection.execute(
-                'SELECT player_id FROM matches WHERE source_match_id=?',
+                'SELECT player_id,exact_fingerprint FROM matches '
+                'WHERE source_match_id=?',
                 (removed_match_id,),
             ).fetchone()
             if removed is not None:
                 rating_player_ids.add(int(removed['player_id']))
+                rating_player_ids.update(
+                    _players_for_fingerprints(
+                        connection, (removed['exact_fingerprint'],)
+                    )
+                )
             connection.execute(
                 'DELETE FROM match_search WHERE match_id=?', (removed_match_id,)
             )

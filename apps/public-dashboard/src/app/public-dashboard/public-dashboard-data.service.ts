@@ -1,4 +1,5 @@
 import { Injectable } from '@angular/core';
+import { Subject } from 'rxjs';
 
 import { environment } from '../../environments/environment';
 import {
@@ -11,6 +12,7 @@ import {
   DashboardTrendPublication,
   DashboardTrends,
   HeroPerformance,
+  HeroCounterRanking,
   HeroStanding,
   HeroSynergy,
   HeroSynergyRanking,
@@ -43,6 +45,9 @@ export type DashboardLoadState =
 @Injectable({ providedIn: 'root' })
 export class DashboardDataService {
   state: DashboardLoadState = { kind: 'loading' };
+  private readonly revisionSubject = new Subject<string>();
+  readonly revision$ = this.revisionSubject.asObservable();
+  private refreshPromise: Promise<boolean> | null = null;
 
   get snapshot(): DashboardSnapshot {
     if (this.state.kind !== 'ready') {
@@ -60,6 +65,7 @@ export class DashboardDataService {
   }
 
   async load(): Promise<void> {
+    const previousRevision = this.readyRevision();
     this.state = { kind: 'loading' };
     const apiBaseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
     if (apiBaseUrl !== '') {
@@ -74,6 +80,7 @@ export class DashboardDataService {
           snapshot: document.snapshot,
           trends: document.trends,
         };
+        this.emitRevisionIfChanged(previousRevision);
         return;
       } catch (error: unknown) {
         console.warn(
@@ -104,12 +111,96 @@ export class DashboardDataService {
         snapshot,
         trends,
       };
+      this.emitRevisionIfChanged(previousRevision);
     } catch (error: unknown) {
       console.error('Unable to load dashboard data', error);
       this.state = {
         kind: 'error',
         message: '排行榜数据暂时无法加载，请稍后刷新。',
       };
+    }
+  }
+
+  refresh(): Promise<boolean> {
+    if (this.refreshPromise !== null) {
+      return this.refreshPromise;
+    }
+    this.refreshPromise = this.refreshReadyState().finally(() => {
+      this.refreshPromise = null;
+    });
+    return this.refreshPromise;
+  }
+
+  private async refreshReadyState(): Promise<boolean> {
+    if (this.state.kind !== 'ready') {
+      return false;
+    }
+    const previous = this.state;
+    try {
+      const apiBaseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
+      let next: Extract<DashboardLoadState, { readonly kind: 'ready' }>;
+      if (apiBaseUrl !== '') {
+        const document = parseDashboardApiDocument(
+          await fetchJson(`${apiBaseUrl}/dashboard`, 'no-cache'),
+        );
+        next = {
+          kind: 'ready',
+          source: 'api',
+          manifest: null,
+          snapshot: document.snapshot,
+          trends: document.trends,
+        };
+      } else {
+        const baseUrl = environment.dataBaseUrl.replace(/\/+$/u, '');
+        const manifest = parseManifest(
+          await fetchJson(`${baseUrl}/manifest.json`, 'no-store'),
+        );
+        if (!/^snapshots\/[a-zA-Z0-9-]+\.json$/u.test(manifest.snapshotPath)) {
+          throw new Error('dashboard manifest contains an invalid snapshot path');
+        }
+        if (manifest.snapshotId === previous.snapshot.snapshotId) {
+          return false;
+        }
+        const snapshot = parseSnapshot(
+          await fetchJson(`${baseUrl}/${manifest.snapshotPath}`, 'force-cache'),
+        );
+        if (snapshot.snapshotId !== manifest.snapshotId) {
+          throw new Error('dashboard manifest and snapshot do not match');
+        }
+        next = {
+          kind: 'ready',
+          source: 'static',
+          manifest,
+          snapshot,
+          trends: await loadTrends(baseUrl, snapshot.snapshotId),
+        };
+      }
+      const previousRevision =
+        previous.snapshot.contentRevision ?? previous.snapshot.snapshotId;
+      const nextRevision = next.snapshot.contentRevision ?? next.snapshot.snapshotId;
+      if (nextRevision === previousRevision) {
+        return false;
+      }
+      this.state = next;
+      this.revisionSubject.next(nextRevision);
+      return true;
+    } catch (error: unknown) {
+      console.warn('Unable to refresh dashboard data', error);
+      return false;
+    }
+  }
+
+  private readyRevision(): string | null {
+    if (this.state.kind !== 'ready') {
+      return null;
+    }
+    return this.state.snapshot.contentRevision ?? this.state.snapshot.snapshotId;
+  }
+
+  private emitRevisionIfChanged(previousRevision: string | null): void {
+    const nextRevision = this.readyRevision();
+    if (nextRevision !== null && nextRevision !== previousRevision) {
+      this.revisionSubject.next(nextRevision);
     }
   }
 }
@@ -353,7 +444,21 @@ function isHeroSynergy(value: unknown): value is HeroSynergy {
     value['name'].length > 0 &&
     isNonNegativeInteger(value['matches']) &&
     isNonNegativeInteger(value['wins']) &&
-    value['wins'] <= value['matches']
+    value['wins'] <= value['matches'] &&
+    (value['delta'] === undefined ||
+      (typeof value['delta'] === 'number' &&
+        Number.isFinite(value['delta']) &&
+        Math.abs(value['delta']) <= 1))
+  );
+}
+
+function isHeroCounterRanking(value: unknown): value is HeroCounterRanking {
+  return (
+    isObject(value) &&
+    Array.isArray(value['counters']) &&
+    value['counters'].every(isHeroSynergy) &&
+    Array.isArray(value['counteredBy']) &&
+    value['counteredBy'].every(isHeroSynergy)
   );
 }
 
@@ -376,7 +481,9 @@ function isHeroStanding(value: unknown): value is HeroStanding {
     typeof value['name'] === 'string' &&
     hasModes(value['modes'], isHeroPerformance) &&
     (value['synergies'] === undefined ||
-      hasModes(value['synergies'], isHeroSynergyRanking))
+      hasModes(value['synergies'], isHeroSynergyRanking)) &&
+    (value['counters'] === undefined ||
+      hasModes(value['counters'], isHeroCounterRanking))
   );
 }
 
@@ -672,7 +779,10 @@ function parseSnapshot(value: unknown): DashboardSnapshot {
       !Array.isArray(seasonStandings['players']) ||
       !seasonStandings['players'].every(isPlayerStanding) ||
       !Array.isArray(seasonStandings['heroes']) ||
-      !seasonStandings['heroes'].every(isHeroStanding)
+      !seasonStandings['heroes'].every(isHeroStanding) ||
+      (seasonStandings['environmentHeroes'] !== undefined &&
+        (!Array.isArray(seasonStandings['environmentHeroes']) ||
+          !seasonStandings['environmentHeroes'].every(isHeroStanding)))
     ) {
       throw new Error(`dashboard standings are invalid for ${season.key}`);
     }

@@ -253,6 +253,10 @@ table {
   }
 }
 
+.player-mobile-stats {
+  display: none;
+}
+
 .hero-chip {
   display: inline-flex;
   gap: 8px;
@@ -302,8 +306,13 @@ table {
 }
 
 .rating-score-cell {
-  width: 64px;
-  text-align: center;
+  min-width: 168px;
+}
+
+.player-kda {
+  color: var(--ink-soft) !important;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
 }
 
 .player-detail {
@@ -392,8 +401,8 @@ table {
   flex: none;
   width: 58px;
   height: 64px;
-  padding: 1px;
-  background: var(--cyan);
+  padding: 0;
+  background: transparent;
   clip-path: polygon(18% 0, 82% 0, 100% 18%, 92% 84%, 50% 100%, 8% 84%, 0 18%);
 }
 

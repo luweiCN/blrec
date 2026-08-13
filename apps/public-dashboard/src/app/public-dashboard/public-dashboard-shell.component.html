@@ -68,10 +68,6 @@
     <p *ngIf="data.state.kind === 'ready'" class="data-status">
       <span aria-hidden="true"></span>
       <span class="status-season">{{ currentSeasonLabel }}</span>
-      <span aria-hidden="true">·</span>
-      <span class="status-time">
-        <span class="status-prefix">最后同步 </span>{{ lastUpdatedLabel }}
-      </span>
     </p>
     <p *ngIf="data.state.kind === 'loading'" class="data-status loading">
       <span aria-hidden="true"></span>

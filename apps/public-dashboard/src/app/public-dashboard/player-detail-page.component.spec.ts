@@ -2,6 +2,7 @@ import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
+import { Subject } from 'rxjs';
 
 import {
   DASHBOARD_MODE_STORAGE,
@@ -29,12 +30,14 @@ describe('PlayerDetailPageComponent', () => {
   let dashboardData: {
     snapshot: typeof TEST_DASHBOARD_SNAPSHOT;
     trends: DashboardTrends;
+    revision$: Subject<string>;
   };
 
   beforeEach(async () => {
     dashboardData = {
       snapshot: TEST_DASHBOARD_SNAPSHOT,
       trends: TEST_DASHBOARD_TRENDS,
+      revision$: new Subject<string>(),
     };
     await TestBed.configureTestingModule({
       declarations: [
@@ -209,7 +212,7 @@ describe('PlayerDetailPageComponent', () => {
     expect(
       fixture.nativeElement.querySelector('.rating-trend-heading-actions')
         ?.textContent,
-    ).toContain('显示 30 / 40 次数据发布');
+    ).toContain('显示 30 / 40 天');
 
     const rangeButtons = fixture.nativeElement.querySelectorAll(
       '.trend-range-filter button',

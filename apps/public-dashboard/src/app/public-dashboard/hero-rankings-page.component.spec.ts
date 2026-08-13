@@ -1,6 +1,7 @@
 import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
+import { Subject } from 'rxjs';
 
 import { DASHBOARD_MODE_STORAGE } from './dashboard-mode.service';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
@@ -26,7 +27,10 @@ describe('HeroRankingsPageComponent', () => {
       providers: [
         {
           provide: DashboardDataService,
-          useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
+          useValue: {
+            snapshot: TEST_DASHBOARD_SNAPSHOT,
+            revision$: new Subject<string>(),
+          },
         },
         {
           provide: DASHBOARD_MODE_STORAGE,
@@ -98,9 +102,11 @@ describe('HeroRankingsPageComponent', () => {
 
   it('switches to usage ranking and returns to the first page', () => {
     component.goToPage(2);
-    const usageButton = fixture.nativeElement.querySelectorAll(
-      '.ranking-sort-control button',
-    )[1] as HTMLButtonElement;
+    const usageButton = Array.from(
+      fixture.nativeElement.querySelectorAll(
+        '.ranking-sort-control button',
+      ) as NodeListOf<HTMLButtonElement>,
+    ).find((button) => button.textContent?.includes('使用次数')) as HTMLButtonElement;
     usageButton.click();
     fixture.detectChanges();
     const matches = component.rankingRows.map(

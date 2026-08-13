@@ -21,6 +21,7 @@ from .service import (
     get_match,
     get_match_summary,
     list_matches,
+    reconcile_match_fingerprints,
 )
 from .settings import ApiSettings
 
@@ -55,6 +56,7 @@ def _hero_filters(value: str) -> tuple[str, ...]:
 def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
     active_settings = settings or ApiSettings.from_environment()
     initialize_database(active_settings.database_path)
+    reconcile_match_fingerprints(active_settings.database_path)
     ensure_dashboard_state(active_settings.database_path)
     app = FastAPI(
         title='BLREC Vainglory Dashboard API',

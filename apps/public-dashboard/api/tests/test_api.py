@@ -303,6 +303,63 @@ def test_match_summary_is_filtered_and_precomputed_on_server(tmp_path: Path) -> 
     }
 
 
+def test_exact_replays_only_count_once_for_one_player(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    first = match(1, played_at='2026-06-01T12:00:00Z', result='W')
+    replay = match(
+        2, played_at='2026-06-03T12:00:00Z', result='W', title='重复播放历史结算图'
+    )
+
+    assert ingest(client, batch([first, replay]), 'exact-replay').status_code == 200
+
+    dashboard = client.get('/v1/dashboard').json()['snapshot']
+    standing = dashboard['standings']['2026-summer']['players'][0]
+    assert standing['modes']['3v3']['matches'] == 1
+    assert dashboard['sourceLastMatchId'] == 2
+    assert dashboard['sourceMatchCount'] == 2
+    assert client.get('/v1/matches/1?ratingScope=3v3').json()['rating'] is not None
+    assert client.get('/v1/matches/2?ratingScope=3v3').json()['rating'] is None
+
+
+def test_exact_cross_stream_match_counts_each_player_but_one_environment_match(
+    tmp_path: Path,
+) -> None:
+    client = make_client(tmp_path)
+    first = match(1, played_at='2026-06-01T12:00:00Z', result='W')
+    second = {**match(2, played_at='2026-06-01T12:00:20Z', result='W'), 'playerId': 8}
+    second['ally']['players'][0]['isRecordedPlayer'] = False
+    second['ally']['players'][2]['isRecordedPlayer'] = True
+    payload = batch([first, second])
+    payload['players'] = [player(7, '茉莉'), player(8, '队友甲')]
+
+    assert ingest(client, payload, 'cross-stream-exact').status_code == 200
+
+    summer = client.get('/v1/dashboard').json()['snapshot']['standings']['2026-summer']
+    assert {
+        value['id']: value['modes']['3v3']['matches'] for value in summer['players']
+    } == {7: 1, 8: 1}
+    environment_hero = next(
+        hero for hero in summer['environmentHeroes'] if hero['id'] == '剑圣'
+    )
+    assert environment_hero['modes']['3v3']['matches'] == 1
+    assert environment_hero['modes']['all']['matches'] == 1
+
+
+def test_incomplete_similar_matches_are_kept_separate(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    first = match(1, played_at='2026-06-01T12:00:00Z', result='W')
+    second = match(2, played_at='2026-06-01T12:01:00Z', result='W')
+    first['ally']['players'][1]['lastHits'] = None
+    second['ally']['players'][1]['lastHits'] = None
+
+    assert ingest(client, batch([first, second]), 'uncertain-replay').status_code == 200
+
+    standing = client.get('/v1/dashboard').json()['snapshot']['standings'][
+        '2026-summer'
+    ]['players'][0]
+    assert standing['modes']['3v3']['matches'] == 2
+
+
 def test_ingest_removes_unreferenced_players_missing_from_source(
     tmp_path: Path,
 ) -> None:

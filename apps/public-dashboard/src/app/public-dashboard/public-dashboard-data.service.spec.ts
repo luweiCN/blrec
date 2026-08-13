@@ -67,6 +67,54 @@ describe('DashboardDataService', () => {
     ]);
   });
 
+  it('notifies mounted pages when a manual reload replaces ready data', async () => {
+    environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
+    const nextSnapshot = {
+      ...TEST_DASHBOARD_SNAPSHOT,
+      snapshotId: '20260812T000000Z-refresh',
+      publicationDate: '2026-08-12',
+      generatedAt: '2026-08-12T00:00:00Z',
+      contentRevision: 'b'.repeat(64),
+    };
+    spyOn(window, 'fetch').and.returnValues(
+      Promise.resolve(
+        jsonResponse({
+          snapshot: TEST_DASHBOARD_SNAPSHOT,
+          trends: TRENDS,
+        }),
+      ),
+      Promise.resolve(
+        jsonResponse({
+          snapshot: nextSnapshot,
+          trends: {
+            ...TRENDS,
+            publications: [
+              ...TRENDS.publications,
+              {
+                snapshotId: nextSnapshot.snapshotId,
+                publicationDate: nextSnapshot.publicationDate,
+                sourceLastMatchId: nextSnapshot.sourceLastMatchId,
+                standings: {},
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const service = new DashboardDataService();
+    const revisions: string[] = [];
+    service.revision$.subscribe((revision) => revisions.push(revision));
+
+    await service.load();
+    await service.load();
+
+    expect(revisions).toEqual([
+      TEST_DASHBOARD_SNAPSHOT.contentRevision ?? TEST_DASHBOARD_SNAPSHOT.snapshotId,
+      nextSnapshot.contentRevision,
+    ]);
+    expect(service.snapshot.snapshotId).toBe(nextSnapshot.snapshotId);
+  });
+
   it('falls back to the last static publication when the API is unavailable', async () => {
     environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
     spyOn(console, 'warn');

@@ -12,7 +12,7 @@
       >
         <span class="live-dot" aria-hidden="true"></span>
         <strong>直播中</strong>
-        <span>直播间 {{ roomId }}</span>
+        <span class="room-number">直播间 {{ roomId }}</span>
       </a>
       <small *ngIf="showLiveTitle && live.title" class="live-title">
         {{ live.title }}
@@ -25,7 +25,10 @@
         target="_blank"
         rel="noopener noreferrer"
         [attr.aria-label]="roomAriaLabel(roomId, null)"
-      >直播间 {{ roomId }}</a>
+      >
+        <span>直播间</span>
+        <span class="room-number">{{ roomId }}</span>
+      </a>
     </ng-template>
   </span>
   <span *ngIf="!last" class="room-separator" aria-hidden="true">/</span>

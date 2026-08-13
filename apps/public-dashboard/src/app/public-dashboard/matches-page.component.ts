@@ -35,6 +35,7 @@ export class MatchesPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
   private readonly modeSubscription: Subscription;
+  private readonly revisionSubscription: Subscription;
   private apiSummary: DashboardMatchSummary | null = null;
   private summaryRequestSequence = 0;
 
@@ -54,12 +55,17 @@ export class MatchesPageComponent implements OnDestroy {
       void this.loadSummary();
       this.changeDetector.markForCheck();
     });
+    this.revisionSubscription = data.revision$.subscribe(() => {
+      void this.loadSummary();
+      this.changeDetector.markForCheck();
+    });
     void this.loadSummary();
   }
 
   ngOnDestroy(): void {
     this.summaryRequestSequence += 1;
     this.modeSubscription.unsubscribe();
+    this.revisionSubscription.unsubscribe();
   }
 
   get seasonOptions(): readonly SeasonOption[] {

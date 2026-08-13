@@ -105,6 +105,7 @@
             <th scope="col" title="本站排位分的怀旧映射，不是玩家过去的官方段位">
               站内段位
             </th>
+            <th scope="col" title="仅统计 K / D / A 均识别完整的场次">KDA</th>
             <th scope="col">胜率</th>
           </tr>
         </thead>
@@ -143,6 +144,7 @@
                   <strong>{{ row.player.name }}</strong>
                 </a>
                 <app-player-room-links
+                  class="compact-mobile"
                   [roomIds]="row.player.roomIds"
                   [fallbackLabel]="row.player.roomLabel"
                 ></app-player-room-links>
@@ -190,12 +192,15 @@
                 [provisional]="playerPerformance(row.player).provisional"
               ></app-skill-tier-badge>
             </td>
+            <td data-label="KDA">
+              {{ playerKda(row.player) === null ? "—" : (playerKda(row.player) | number: "1.2-2") }}
+            </td>
             <td class="directory-rate" data-label="胜率">
               {{ winRate(playerPerformance(row.player)) | percent: "1.0-1" }}
             </td>
           </tr>
           <tr *ngIf="visibleRows.length === 0">
-            <td colspan="8" class="empty-state">
+            <td colspan="9" class="empty-state">
               没有找到匹配的玩家，请尝试其他名称或直播间号。
             </td>
           </tr>

@@ -6,6 +6,7 @@ import {
   OnChanges,
   OnDestroy,
 } from '@angular/core';
+import { Subscription } from 'rxjs';
 
 import {
   DashboardMatchApiService,
@@ -29,6 +30,7 @@ import {
   PlayerStanding,
   SeasonKey,
 } from './public-dashboard.models';
+import { DashboardDataService } from './public-dashboard-data.service';
 
 const PAGE_SIZE = 20;
 
@@ -69,11 +71,19 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   readonly loadingRows = Array.from({ length: 6 }, (_, index) => index);
   private requestSequence = 0;
   private searchTimer?: ReturnType<typeof setTimeout>;
+  private readonly revisionSubscription: Subscription;
 
   constructor(
     private readonly matchApi: DashboardMatchApiService,
+    dashboardData: DashboardDataService,
     private readonly changeDetector: ChangeDetectorRef,
-  ) {}
+  ) {
+    this.revisionSubscription = dashboardData.revision$.subscribe(() => {
+      if (this.matchApi.enabled) {
+        void this.loadApiPage();
+      }
+    });
+  }
 
   ngOnChanges(): void {
     this.page = 1;
@@ -88,6 +98,7 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
     if (this.searchTimer !== undefined) {
       clearTimeout(this.searchTimer);
     }
+    this.revisionSubscription.unsubscribe();
   }
 
   get filteredMatches(): readonly DashboardMatch[] {

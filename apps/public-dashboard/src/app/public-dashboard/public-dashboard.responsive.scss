@@ -242,7 +242,13 @@
     table-layout: fixed;
 
     th:nth-child(4),
-    td:nth-child(4) {
+    td:nth-child(4),
+    th:nth-child(5),
+    td:nth-child(5),
+    th:nth-child(7),
+    td:nth-child(7),
+    th:nth-child(8),
+    td:nth-child(8) {
       display: none;
     }
 
@@ -253,20 +259,15 @@
     }
 
     th:nth-child(1) {
-      width: 48px;
+      width: 46px;
     }
 
     th:nth-child(2) {
-      width: 120px;
+      width: auto;
     }
 
-    th:nth-child(5) {
-      width: 43px;
-    }
-
-    th:nth-child(6),
-    th:nth-child(7) {
-      width: 53px;
+    th:nth-child(6) {
+      width: 132px;
     }
   }
 
@@ -279,9 +280,33 @@
       height: 30px;
     }
 
-    small {
-      display: none;
+    strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
+
+    app-player-room-links {
+      display: flex;
+      max-width: 100%;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+  }
+
+  .player-mobile-stats {
+    display: block;
+    grid-column: 2;
+    overflow: hidden;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+    line-height: 1.45;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .rating-score-cell {
+    min-width: 0;
   }
 
   .hero-ranking {

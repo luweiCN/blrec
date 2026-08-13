@@ -36,6 +36,22 @@
       (activeSeasonChange)="selectSeason($event)"
     ></app-leaderboard-filters>
 
+    <div class="hero-data-scope" role="group" aria-label="英雄数据统计范围">
+      <span>统计范围</span>
+      <button
+        type="button"
+        [class.active]="activeScope === 'streamer'"
+        [attr.aria-pressed]="activeScope === 'streamer'"
+        (click)="selectScope('streamer')"
+      >主播使用</button>
+      <button
+        type="button"
+        [class.active]="activeScope === 'environment'"
+        [attr.aria-pressed]="activeScope === 'environment'"
+        (click)="selectScope('environment')"
+      >全场环境</button>
+    </div>
+
     <section class="profile-summary" aria-label="英雄当前数据">
       <div class="profile-context">
         <span>{{ selectedSeason.shortLabel }}</span>
@@ -56,7 +72,7 @@
           <dd>{{ performance.matches }}</dd>
         </div>
         <div>
-          <dt>使用玩家</dt>
+          <dt>{{ activeScope === "streamer" ? "使用玩家" : "识别玩家" }}</dt>
           <dd>{{ performance.players }}</dd>
         </div>
         <div>
@@ -72,7 +88,6 @@
           <h2 id="hero-mode-title">各模式表现</h2>
         </div>
         <span>{{ selectedSeason.label }}</span>
-        <span>{{ selectedSeason.label }}</span>
       </header>
       <ol class="mode-stat-grid">
         <li *ngFor="let record of modeRecords; trackBy: trackMode">
@@ -80,7 +95,7 @@
           <strong>{{ winRate(record.performance) | percent: "1.0-1" }}</strong>
           <small>
             {{ record.performance.matches }} 局 · {{ record.performance.wins }} 胜 ·
-            {{ record.performance.players }} 名玩家
+            {{ record.performance.players }} 名{{ activeScope === "streamer" ? "玩家" : "已识别玩家" }}
           </small>
         </li>
       </ol>
@@ -105,8 +120,8 @@
                 <img [src]="heroImage(synergy.name)" alt="" />
                 <strong>{{ heroName(synergy.name) }}</strong>
               </a>
-              <span>{{ winRate(synergy) | percent: "1.0-1" }}</span>
-              <small>{{ synergy.wins }} 胜 / {{ synergy.matches }} 局</small>
+              <span>{{ relationshipDelta(synergy) }}</span>
+              <small>{{ winRate(synergy) | percent: "1.0-1" }} · {{ synergy.matches }} 局</small>
             </li>
           </ol>
           <p *ngIf="bestSynergies.length === 0" class="profile-empty">
@@ -121,8 +136,8 @@
                 <img [src]="heroImage(synergy.name)" alt="" />
                 <strong>{{ heroName(synergy.name) }}</strong>
               </a>
-              <span>{{ winRate(synergy) | percent: "1.0-1" }}</span>
-              <small>{{ synergy.wins }} 胜 / {{ synergy.matches }} 局</small>
+              <span>{{ relationshipDelta(synergy) }}</span>
+              <small>{{ winRate(synergy) | percent: "1.0-1" }} · {{ synergy.matches }} 局</small>
             </li>
           </ol>
           <p *ngIf="worstSynergies.length === 0" class="profile-empty">
@@ -132,7 +147,46 @@
       </div>
     </section>
 
-    <section class="profile-card profile-table-card" aria-labelledby="hero-players-title">
+    <section class="profile-card hero-synergy-card" aria-labelledby="hero-counter-title">
+      <header>
+        <div>
+          <h2 id="hero-counter-title">阵容克制</h2>
+        </div>
+        <span>全场阵容去重统计 · {{ modeLabel() }}</span>
+      </header>
+      <div class="hero-synergy-columns">
+        <section>
+          <h3>更擅长应对</h3>
+          <ol>
+            <li *ngFor="let opponent of counters; trackBy: trackSynergy">
+              <a [routerLink]="['/heroes', opponent.name]">
+                <img [src]="heroImage(opponent.name)" alt="" />
+                <strong>{{ heroName(opponent.name) }}</strong>
+              </a>
+              <span>{{ relationshipDelta(opponent) }}</span>
+              <small>{{ winRate(opponent) | percent: "1.0-1" }} · {{ opponent.matches }} 局</small>
+            </li>
+          </ol>
+          <p *ngIf="counters.length === 0" class="profile-empty">当前模式还没有达到样本门槛的克制关系。</p>
+        </section>
+        <section class="worst">
+          <h3>更容易被克制</h3>
+          <ol>
+            <li *ngFor="let opponent of counteredBy; trackBy: trackSynergy">
+              <a [routerLink]="['/heroes', opponent.name]">
+                <img [src]="heroImage(opponent.name)" alt="" />
+                <strong>{{ heroName(opponent.name) }}</strong>
+              </a>
+              <span>{{ relationshipDelta(opponent) }}</span>
+              <small>{{ winRate(opponent) | percent: "1.0-1" }} · {{ opponent.matches }} 局</small>
+            </li>
+          </ol>
+          <p *ngIf="counteredBy.length === 0" class="profile-empty">当前模式还没有达到样本门槛的克制关系。</p>
+        </section>
+      </div>
+    </section>
+
+    <section *ngIf="activeScope === 'streamer'" class="profile-card profile-table-card" aria-labelledby="hero-players-title">
       <header>
         <div>
           <h2 id="hero-players-title">玩家熟练度排行</h2>
@@ -170,6 +224,7 @@
                       <strong>{{ record.player.name }}</strong>
                     </a>
                     <app-player-room-links
+                      class="compact-mobile"
                       [roomIds]="record.player.roomIds"
                       [fallbackLabel]="record.player.roomLabel"
                     ></app-player-room-links>
@@ -246,7 +301,7 @@
               <th scope="col">榜单周期</th>
               <th scope="col">胜率排名</th>
               <th scope="col">对局</th>
-              <th scope="col">使用玩家</th>
+              <th scope="col">{{ activeScope === "streamer" ? "使用玩家" : "识别玩家" }}</th>
               <th scope="col">胜率</th>
             </tr>
           </thead>
@@ -255,7 +310,7 @@
               <td data-label="榜单周期"><strong>{{ record.season.label }}</strong></td>
               <td data-label="排名">{{ record.rank === null ? "未入榜" : "#" + record.rank }}</td>
               <td data-label="对局">{{ record.performance.matches }}</td>
-              <td data-label="使用玩家">{{ record.performance.players }}</td>
+              <td [attr.data-label]="activeScope === 'streamer' ? '使用玩家' : '识别玩家'">{{ record.performance.players }}</td>
               <td class="table-rate" data-label="胜率">{{ winRate(record.performance) | percent: "1.0-1" }}</td>
             </tr>
             <tr *ngIf="seasonHistory.length === 0">

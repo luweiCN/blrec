@@ -99,12 +99,13 @@ describe('public dashboard player rankings', () => {
     expect(trend.points.map((point) => point.ratingScore)).toEqual([
       610, 618, 625,
     ]);
+    expect(trend.points.every((point) => point.recorded)).toBeTrue();
     expect(trend.rankDelta).toBe(1);
     expect(trend.ratingDelta).toBe(7);
     expect(getRankMovement(trend)).toEqual({
       kind: 'up',
       text: '↑1',
-      label: '较上次数据发布上升 1 名',
+      label: '今日较昨日上升 1 名',
     });
   });
 
@@ -128,6 +129,44 @@ describe('public dashboard player rankings', () => {
 
     expect(trend.points).toEqual([]);
     expect(getRankMovement(trend).kind).toBe('pending');
+  });
+
+  it('fills missing calendar days by carrying the previous daily result', () => {
+    const trends: DashboardTrends = {
+      schemaVersion: 1,
+      updatedAt: '2026-08-03T02:05:00Z',
+      publications: [
+        trendPublication('snapshot-1', '2026-08-01', 1, 2, 618),
+        trendPublication(
+          TEST_DASHBOARD_SNAPSHOT.snapshotId,
+          '2026-08-03',
+          1,
+          1,
+          625,
+        ),
+      ],
+    };
+
+    const trend = getPlayerTrend(
+      trends,
+      TEST_DASHBOARD_SNAPSHOT.snapshotId,
+      '2026-summer',
+      '3v3',
+      1,
+    );
+
+    expect(trend.points.map((point) => point.publicationDate)).toEqual([
+      '2026-08-01',
+      '2026-08-02',
+      '2026-08-03',
+    ]);
+    expect(trend.points.map((point) => point.ratingScore)).toEqual([
+      618, 618, 625,
+    ]);
+    expect(trend.points.map((point) => point.recorded)).toEqual([
+      true, false, true,
+    ]);
+    expect(trend.ratingDelta).toBe(7);
   });
 
   it('sorts hero popularity by usage without the win-rate sample threshold', () => {

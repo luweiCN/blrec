@@ -32,6 +32,23 @@
       </div>
 
       <div class="directory-actions">
+        <div class="ranking-sort-control hero-scope-control">
+          <span id="hero-scope-label">统计范围</span>
+          <div role="group" aria-labelledby="hero-scope-label">
+            <button
+              type="button"
+              [class.active]="activeScope === 'streamer'"
+              [attr.aria-pressed]="activeScope === 'streamer'"
+              (click)="selectScope('streamer')"
+            >主播使用</button>
+            <button
+              type="button"
+              [class.active]="activeScope === 'environment'"
+              [attr.aria-pressed]="activeScope === 'environment'"
+              (click)="selectScope('environment')"
+            >全场环境</button>
+          </div>
+        </div>
         <div class="ranking-sort-control">
           <span id="hero-ranking-sort-label">排序方式</span>
           <div role="group" aria-labelledby="hero-ranking-sort-label">
@@ -81,9 +98,9 @@
             <th scope="col">英雄</th>
             <th scope="col">对局</th>
             <th scope="col">胜 / 负</th>
-            <th scope="col">使用玩家</th>
+            <th scope="col">{{ activeScope === "streamer" ? "使用玩家" : "识别玩家" }}</th>
             <th scope="col">胜率</th>
-            <th scope="col">最熟练玩家</th>
+            <th *ngIf="activeScope === 'streamer'" scope="col">最熟练玩家</th>
           </tr>
         </thead>
         <tbody>
@@ -111,11 +128,13 @@
                   heroPerformance(row.hero).wins
               }}
             </td>
-            <td data-label="使用玩家">{{ heroPerformance(row.hero).players }}</td>
+            <td [attr.data-label]="activeScope === 'streamer' ? '使用玩家' : '识别玩家'">
+              {{ heroPerformance(row.hero).players }}
+            </td>
             <td class="directory-rate" data-label="胜率">
               {{ winRate(heroPerformance(row.hero)) | percent: "1.0-1" }}
             </td>
-            <td data-label="最熟练玩家">
+            <td *ngIf="activeScope === 'streamer'" data-label="最熟练玩家">
               <ng-container *ngIf="proficiencyLeader(row.hero) as leader; else noProficiencyLeader">
                 <a
                   class="directory-player proficiency-leader"
@@ -141,7 +160,7 @@
             </td>
           </tr>
           <tr *ngIf="visibleRows.length === 0">
-            <td colspan="7" class="empty-state">
+            <td [attr.colspan]="activeScope === 'streamer' ? 7 : 6" class="empty-state">
               没有找到匹配的英雄，请尝试中文名、别名、拼音或英文名。
             </td>
           </tr>

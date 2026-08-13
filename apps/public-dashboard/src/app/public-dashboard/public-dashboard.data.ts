@@ -7,6 +7,7 @@ import {
   DashboardTrendStanding,
   DashboardTrends,
   HeroRankingRow,
+  HeroDataScope,
   HeroStanding,
   HeroUsage,
   ModeBreakdown,
@@ -135,6 +136,7 @@ export interface PlayerTrendPoint {
   readonly publicationDate: string;
   readonly rank: number;
   readonly ratingScore: number;
+  readonly recorded: boolean;
 }
 
 export interface PlayerTrend {
@@ -279,19 +281,38 @@ export function getPlayerTrend(
 
   const points: PlayerTrendPoint[] = [];
   let previous: PlayerTrendPoint | null = null;
-  for (let index = 0; index <= currentIndex; index += 1) {
-    const publication = trends.publications[index];
-    const standing = trendStanding(publication, season, mode, playerId);
-    if (standing === undefined) {
+  let carried: DashboardTrendStanding | null = null;
+  const startDate = new Date(
+    `${trends.publications[0].publicationDate}T00:00:00Z`,
+  );
+  const endDate = new Date(`${currentPublication.publicationDate}T00:00:00Z`);
+  for (
+    const date = new Date(startDate);
+    date <= endDate;
+    date.setUTCDate(date.getUTCDate() + 1)
+  ) {
+    const publicationDate = date.toISOString().slice(0, 10);
+    const publication = trends.publications.find(
+      (value) => value.publicationDate === publicationDate,
+    );
+    const standing: DashboardTrendStanding | null =
+      publication === undefined
+        ? carried
+        : trendStanding(publication, season, mode, playerId) ?? null;
+    if (publication !== undefined) {
+      carried = standing;
+    }
+    if (standing === null) {
       continue;
     }
     const point: PlayerTrendPoint = {
-      publicationDate: publication.publicationDate,
+      publicationDate,
       rank: standing.rank,
       ratingScore: standing.ratingScore,
+      recorded: publication !== undefined,
     };
     points.push(point);
-    if (index < currentIndex) {
+    if (publicationDate < currentPublication.publicationDate) {
       previous = point;
     }
   }
@@ -300,7 +321,7 @@ export function getPlayerTrend(
     points,
     current,
     previous,
-    hasBaseline: currentIndex > 0,
+    hasBaseline: points.length > 1,
     rankDelta: previous === null ? null : previous.rank - current.rank,
     ratingDelta:
       previous === null ? null : current.ratingScore - previous.ratingScore,
@@ -312,34 +333,34 @@ export function getRankMovement(trend: PlayerTrend): RankMovement {
     return {
       kind: 'pending',
       text: '—',
-      label: '趋势将在下一次数据发布后生成',
+      label: '趋势将在明日形成对比基准',
     };
   }
   if (trend.previous === null) {
     return {
       kind: 'new',
       text: '新',
-      label: '较上次数据发布新上榜',
+      label: '今日较昨日新上榜',
     };
   }
   if (trend.rankDelta === null || trend.rankDelta === 0) {
     return {
       kind: 'same',
       text: '—',
-      label: '较上次数据发布排名不变',
+      label: '今日较昨日排名不变',
     };
   }
   if (trend.rankDelta > 0) {
     return {
       kind: 'up',
       text: `↑${trend.rankDelta}`,
-      label: `较上次数据发布上升 ${trend.rankDelta} 名`,
+      label: `今日较昨日上升 ${trend.rankDelta} 名`,
     };
   }
   return {
     kind: 'down',
     text: `↓${Math.abs(trend.rankDelta)}`,
-    label: `较上次数据发布下降 ${Math.abs(trend.rankDelta)} 名`,
+    label: `今日较昨日下降 ${Math.abs(trend.rankDelta)} 名`,
   };
 }
 
@@ -348,8 +369,9 @@ export function getHeroRankings(
   season: SeasonKey,
   mode: ModeFilter,
   sort: HeroRankingSort = 'win-rate',
+  scope: HeroDataScope = 'streamer',
 ): readonly HeroStanding[] {
-  return heroesForSeason(snapshot, season)
+  return heroesForSeason(snapshot, season, scope)
     .filter((hero) =>
       sort === 'win-rate'
         ? hero.modes[mode].matches >= HERO_MIN_MATCHES
@@ -379,8 +401,9 @@ export function getHeroRankingRows(
   season: SeasonKey,
   mode: ModeFilter,
   sort: HeroRankingSort = 'win-rate',
+  scope: HeroDataScope = 'streamer',
 ): readonly HeroRankingRow[] {
-  return getHeroRankings(snapshot, season, mode, sort).map((hero, index) => ({
+  return getHeroRankings(snapshot, season, mode, sort, scope).map((hero, index) => ({
     rank: index + 1,
     hero,
   }));
@@ -665,17 +688,22 @@ export function findPlayer(
 export function heroesForSeason(
   snapshot: DashboardSnapshot,
   season: SeasonKey,
+  scope: HeroDataScope = 'streamer',
 ): readonly HeroStanding[] {
-  return snapshot.standings[season]?.heroes ?? [];
+  const standings = snapshot.standings[season];
+  return scope === 'environment'
+    ? standings?.environmentHeroes ?? []
+    : standings?.heroes ?? [];
 }
 
 export function heroForSeason(
   snapshot: DashboardSnapshot,
   season: SeasonKey,
   heroId: string,
+  scope: HeroDataScope = 'streamer',
 ): HeroStanding | undefined {
   const normalizedId = heroId.toLocaleLowerCase();
-  return heroesForSeason(snapshot, season).find(
+  return heroesForSeason(snapshot, season, scope).find(
     (hero) =>
       hero.id.toLocaleLowerCase() === normalizedId ||
       hero.name.toLocaleLowerCase() === normalizedId,
@@ -687,7 +715,9 @@ export function findHero(
   heroId: string,
 ): HeroStanding | undefined {
   for (const season of snapshot.seasons) {
-    const hero = heroForSeason(snapshot, season.key, heroId);
+    const hero =
+      heroForSeason(snapshot, season.key, heroId) ??
+      heroForSeason(snapshot, season.key, heroId, 'environment');
     if (hero !== undefined) {
       return hero;
     }

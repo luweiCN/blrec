@@ -22,6 +22,7 @@
   color: inherit;
   text-decoration-color: transparent;
   text-underline-offset: 3px;
+  white-space: nowrap;
   transition: color 160ms var(--ease-out), text-decoration-color 160ms var(--ease-out);
 
   &:hover {
@@ -72,4 +73,10 @@
 .room-separator,
 .room-fallback {
   color: inherit;
+}
+
+@media (max-width: 520px) {
+  :host(.compact-mobile) .room-number {
+    display: none;
+  }
 }

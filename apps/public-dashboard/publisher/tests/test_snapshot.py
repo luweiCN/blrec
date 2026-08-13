@@ -633,18 +633,14 @@ async def test_snapshot_calculates_best_and_worst_hero_synergies(
             )
         )
 
-        heroes = snapshot['standings']['2026-summer']['heroes']
+        heroes = snapshot['standings']['2026-summer']['environmentHeroes']
         caine = next(hero for hero in heroes if hero['name'] == 'Caine')
-        assert caine['synergies']['3v3']['best'][0] == {
-            'name': 'Ardan',
-            'matches': 5,
-            'wins': 5,
-        }
-        assert caine['synergies']['3v3']['worst'][0] == {
-            'name': 'Vox',
-            'matches': 5,
-            'wins': 0,
-        }
+        best = caine['synergies']['3v3']['best'][0]
+        assert (best['name'], best['matches'], best['wins']) == ('Ardan', 5, 5)
+        assert best['delta'] > 0
+        worst = caine['synergies']['3v3']['worst'][0]
+        assert (worst['name'], worst['matches'], worst['wins']) == ('Vox', 5, 0)
+        assert worst['delta'] < 0
         assert {item['name'] for item in caine['synergies']['3v3']['best']}.isdisjoint(
             item['name'] for item in caine['synergies']['3v3']['worst']
         )
