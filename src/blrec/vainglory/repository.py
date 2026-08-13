@@ -2073,8 +2073,9 @@ class VaingloryRepository:
         self._remove_result_frame_files(obsolete_frame_paths)
         return discovered
 
-    async def claim_next(self) -> Optional[ScanClaim]:
-        await self.discover_ready_parts()
+    async def claim_next(self, *, discover: bool = True) -> Optional[ScanClaim]:
+        if discover:
+            await self.discover_ready_parts()
         now = self._now()
         recent_cutoff = max(1, now - self._REALTIME_WINDOW_SECONDS)
         season_start = current_season_started_at(now)
@@ -3935,6 +3936,15 @@ class VaingloryRepository:
             )
 
         await self._database.write(request)
+
+    async def requeue_match_rerun(self, match_id: int) -> None:
+        now = self._now()
+        await self._database.execute(
+            "UPDATE vainglory_match_rerun_jobs SET state='pending',"
+            'started_at=NULL,error=NULL,updated_at=? '
+            "WHERE match_id=? AND state='running'",
+            (now, int(match_id)),
+        )
 
     async def claim_next_match_rerun(self) -> Optional[MatchRerunClaim]:
         now = self._now()

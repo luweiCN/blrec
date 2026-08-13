@@ -83,6 +83,27 @@ async def async_bundle(_account_id: int) -> object:
     return object()
 
 
+def enabled_worker(worker_id: str, concurrency: int = 1) -> AnalysisWorkerRecord:
+    return AnalysisWorkerRecord(
+        worker_id=worker_id,
+        display_name='',
+        enabled=True,
+        model_package_id='',
+        pipeline_version='',
+        concurrency=concurrency,
+        first_seen_at=1,
+        last_seen_at=1,
+        completed_task_count=0,
+        failed_task_count=0,
+        total_processing_seconds=0,
+        profiled_task_count=0,
+        profiled_video_seconds=0,
+        total_decode_analysis_seconds=0,
+        total_profiled_task_seconds=0,
+        last_task_finished_at=None,
+    )
+
+
 def test_runtime_log_deduplicates_repeated_stage_messages() -> None:
     service = VaingloryIndexService(
         Repository(),  # type: ignore[arg-type]
@@ -131,6 +152,9 @@ async def test_remote_worker_status_tracks_multiple_nodes_and_task_owner() -> No
         async def recover_stale_remote_work(self, _timeout: int) -> int:
             return 0
 
+        async def discover_ready_parts(self) -> int:
+            return 0
+
         async def register_analysis_worker(
             self,
             worker_id: str,
@@ -164,7 +188,8 @@ async def test_remote_worker_status_tracks_multiple_nodes_and_task_owner() -> No
         async def has_realtime_pending(self) -> bool:
             return True
 
-        async def claim_next(self):
+        async def claim_next(self, *, discover: bool = True):
+            del discover
             return self.claims.pop(0) if self.claims else None
 
         async def update_progress(self, _part_id: int, _progress: float) -> None:
@@ -321,6 +346,9 @@ async def test_pause_waits_for_inflight_claim_before_returning() -> None:
         async def recover_stale_remote_work(self, _timeout: int) -> int:
             return 0
 
+        async def discover_ready_parts(self) -> int:
+            return 0
+
         async def claim_next_match_rerun(self):
             self.claim_entered.set()
             await self.release_claim.wait()
@@ -329,7 +357,8 @@ async def test_pause_waits_for_inflight_claim_before_returning() -> None:
         async def has_realtime_pending(self) -> bool:
             return True
 
-        async def claim_next(self):
+        async def claim_next(self, *, discover: bool = True):
+            del discover
             return None
 
         async def update_analysis_worker(
@@ -358,6 +387,142 @@ async def test_pause_waits_for_inflight_claim_before_returning() -> None:
     paused = await pause
     assert paused.enabled is False
     assert await service.claim_remote_work(worker_id='mac-studio') is None
+
+
+@pytest.mark.asyncio
+async def test_remote_claim_stops_waiting_before_another_request_can_claim() -> None:
+    class BlockingRepository:
+        def __init__(self) -> None:
+            self.claim_entered = asyncio.Event()
+            self.release_claim = asyncio.Event()
+            self.claim_calls = 0
+
+        async def register_analysis_worker(
+            self, worker_id: str, **_metadata: object
+        ) -> AnalysisWorkerRecord:
+            return enabled_worker(worker_id)
+
+        async def recover_stale_remote_work(self, _timeout: int) -> int:
+            return 0
+
+        async def discover_ready_parts(self) -> int:
+            return 0
+
+        async def claim_next_match_rerun(self):
+            self.claim_calls += 1
+            if self.claim_calls == 1:
+                self.claim_entered.set()
+                await self.release_claim.wait()
+            return None
+
+        async def has_realtime_pending(self) -> bool:
+            return True
+
+        async def claim_next(self, *, discover: bool = True):
+            del discover
+            return None
+
+    repository = BlockingRepository()
+    service = VaingloryIndexService(
+        repository, remote_worker_enabled=True  # type: ignore[arg-type]
+    )
+    service._remote_claim_wait_seconds = 0.01
+    first = asyncio.create_task(service.claim_remote_work(worker_id='mac-studio'))
+    try:
+        await repository.claim_entered.wait()
+
+        second = asyncio.create_task(service.claim_remote_work(worker_id='macbook-pro'))
+        second_result = await asyncio.wait_for(asyncio.shield(second), timeout=0.1)
+
+        assert second_result is None
+        assert repository.claim_calls == 1
+    finally:
+        repository.release_claim.set()
+        await first
+
+
+@pytest.mark.asyncio
+async def test_remote_claim_throttles_queue_maintenance() -> None:
+    class IdleRepository:
+        def __init__(self) -> None:
+            self.recovery_calls = 0
+            self.discovery_calls = 0
+            self.claim_discovery_flags = []
+
+        async def register_analysis_worker(
+            self, worker_id: str, **_metadata: object
+        ) -> AnalysisWorkerRecord:
+            return enabled_worker(worker_id, concurrency=3)
+
+        async def recover_stale_remote_work(self, _timeout: int) -> int:
+            self.recovery_calls += 1
+            return 0
+
+        async def discover_ready_parts(self) -> int:
+            self.discovery_calls += 1
+            return 0
+
+        async def claim_next_match_rerun(self):
+            return None
+
+        async def has_realtime_pending(self) -> bool:
+            return True
+
+        async def claim_next(self, *, discover: bool = True):
+            self.claim_discovery_flags.append(discover)
+            return None
+
+    repository = IdleRepository()
+    service = VaingloryIndexService(
+        repository, remote_worker_enabled=True  # type: ignore[arg-type]
+    )
+
+    assert await service.claim_remote_work(worker_id='mac-studio') is None
+    assert await service.claim_remote_work(worker_id='macbook-pro') is None
+
+    assert repository.recovery_calls == 1
+    assert repository.discovery_calls == 1
+    assert repository.claim_discovery_flags == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_remote_claim_requeues_part_when_database_exceeds_deadline() -> None:
+    class SlowRepository:
+        def __init__(self) -> None:
+            self.requeued = []
+
+        async def register_analysis_worker(
+            self, worker_id: str, **_metadata: object
+        ) -> AnalysisWorkerRecord:
+            return enabled_worker(worker_id)
+
+        async def claim_next_match_rerun(self):
+            return None
+
+        async def has_realtime_pending(self) -> bool:
+            return True
+
+        async def claim_next(self, *, discover: bool = True):
+            del discover
+            await asyncio.sleep(0.02)
+            return ScanClaim(
+                session_id=1,
+                part=VideoPart(id=7, index=1, path='/unused'),
+                realtime=True,
+            )
+
+        async def requeue(self, part_id: int) -> None:
+            self.requeued.append(part_id)
+
+    repository = SlowRepository()
+    service = VaingloryIndexService(
+        repository, remote_worker_enabled=True  # type: ignore[arg-type]
+    )
+    service._remote_claim_deadline_seconds = 0.01
+    service._remote_maintenance_due = float('inf')
+
+    assert await service.claim_remote_work(worker_id='mac-studio') is None
+    assert repository.requeued == [7]
 
 
 @pytest.mark.asyncio

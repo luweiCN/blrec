@@ -164,6 +164,10 @@ class VaingloryIndexService:
         self._runtime_lock = threading.Lock()
         self._runtime_status: Dict[int, AnalysisStatus] = {}
         self._runtime_events: Dict[int, List[AnalysisQueueEvent]] = {}
+        self._remote_claim_wait_seconds = 1.0
+        self._remote_claim_deadline_seconds = 20.0
+        self._remote_maintenance_interval_seconds = 30.0
+        self._remote_maintenance_due = 0.0
 
     @property
     def repository(self) -> VaingloryRepository:
@@ -351,6 +355,9 @@ class VaingloryIndexService:
         await self._repository.apply_builtin_hero_labels()
         await self._repository.consolidate_hero_catalog()
         await self._repository.discover_ready_parts()
+        self._remote_maintenance_due = (
+            time.monotonic() + self._remote_maintenance_interval_seconds
+        )
         references = load_hero_references()
         if len(references) != 57:
             logger.warning(
@@ -526,13 +533,26 @@ class VaingloryIndexService:
         pipeline_version: str = '',
         concurrency: int = 0,
     ) -> Optional[RemoteAnalysisClaim]:
-        async with self._remote_claim_lock:
+        deadline = time.monotonic() + self._remote_claim_deadline_seconds
+        try:
+            await asyncio.wait_for(
+                self._remote_claim_lock.acquire(),
+                timeout=self._remote_claim_wait_seconds,
+            )
+        except asyncio.TimeoutError:
+            return None
+        try:
+            if time.monotonic() >= deadline:
+                return None
             return await self._claim_remote_work(
                 worker_id=worker_id,
                 model_package_id=model_package_id,
                 pipeline_version=pipeline_version,
                 concurrency=concurrency,
+                deadline=deadline,
             )
+        finally:
+            self._remote_claim_lock.release()
 
     async def _claim_remote_work(
         self,
@@ -541,6 +561,7 @@ class VaingloryIndexService:
         model_package_id: str,
         pipeline_version: str,
         concurrency: int,
+        deadline: float,
     ) -> Optional[RemoteAnalysisClaim]:
         if worker_id:
             worker = await self._repository.register_analysis_worker(
@@ -557,19 +578,30 @@ class VaingloryIndexService:
                     concurrency=concurrency,
                 )
                 return None
+        if time.monotonic() >= deadline:
+            return None
         self._require_remote_worker(
             worker_id=worker_id,
             model_package_id=model_package_id,
             pipeline_version=pipeline_version,
             concurrency=concurrency,
         )
-        recovered = await self._repository.recover_stale_remote_work(180)
-        if recovered:
-            logger.warning('Recovered stale remote Vainglory work: count={}', recovered)
+        if time.monotonic() >= self._remote_maintenance_due:
+            recovered = await self._repository.recover_stale_remote_work(180)
+            if recovered:
+                logger.warning(
+                    'Recovered stale remote Vainglory work: count={}', recovered
+                )
+            await self._repository.discover_ready_parts()
+            self._remote_maintenance_due = (
+                time.monotonic() + self._remote_maintenance_interval_seconds
+            )
+            if time.monotonic() >= deadline:
+                return None
 
         rerun = await self._repository.claim_next_match_rerun()
         if rerun is not None:
-            return self._assign_remote_work(
+            return await self._finish_remote_claim(
                 RemoteAnalysisClaim(
                     kind='match_rerun',
                     item_id=rerun.match_id,
@@ -579,6 +611,7 @@ class VaingloryIndexService:
                     view_context=rerun.view_context,
                 ),
                 worker_id,
+                deadline,
             )
 
         if not await self._repository.has_realtime_pending():
@@ -588,13 +621,14 @@ class VaingloryIndexService:
                     recorded_player.match_id
                 )
                 if path is not None:
-                    return self._assign_remote_work(
+                    return await self._finish_remote_claim(
                         RemoteAnalysisClaim(
                             kind='recorded_player_backfill',
                             item_id=recorded_player.match_id,
                             frame_png=path.read_bytes(),
                         ),
                         worker_id,
+                        deadline,
                     )
                 await self._repository.complete_recorded_player_backfill(
                     recorded_player.match_id, None
@@ -604,20 +638,21 @@ class VaingloryIndexService:
             if hero is not None:
                 path = await self._repository.result_frame_path(hero.match_id)
                 if path is not None:
-                    return self._assign_remote_work(
+                    return await self._finish_remote_claim(
                         RemoteAnalysisClaim(
                             kind='hero_rematch',
                             item_id=hero.match_id,
                             frame_png=path.read_bytes(),
                         ),
                         worker_id,
+                        deadline,
                     )
                 await self._repository.complete_hero_rematch(hero.match_id, ())
 
-        claim = await self._repository.claim_next()
+        claim = await self._repository.claim_next(discover=False)
         if claim is None:
             return None
-        return self._assign_remote_work(
+        return await self._finish_remote_claim(
             RemoteAnalysisClaim(
                 kind='part',
                 item_id=claim.part.id,
@@ -628,7 +663,19 @@ class VaingloryIndexService:
                 anchor_name=claim.anchor_name,
             ),
             worker_id,
+            deadline,
         )
+
+    async def _finish_remote_claim(
+        self, claim: RemoteAnalysisClaim, worker_id: str, deadline: float
+    ) -> Optional[RemoteAnalysisClaim]:
+        if time.monotonic() < deadline:
+            return self._assign_remote_work(claim, worker_id)
+        if claim.kind == 'part':
+            await self._repository.requeue(claim.item_id)
+        elif claim.kind == 'match_rerun':
+            await self._repository.requeue_match_rerun(claim.item_id)
+        return None
 
     async def heartbeat_remote_work(
         self,
