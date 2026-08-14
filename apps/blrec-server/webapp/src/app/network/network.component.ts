@@ -68,6 +68,11 @@ export class NetworkComponent implements OnInit, OnDestroy {
       help: '每天生成公开排行榜 JSON 并上传到 OSS；整次发布固定使用同一线路，线路故障时停止并稍后重试。',
     },
     {
+      key: 'database',
+      name: '云端主数据库',
+      help: '通过加密隧道连接移动云 PostgreSQL；固定使用所选线路，整次连接不会中途切换出口。',
+    },
+    {
       key: 'cloudCost',
       name: '云成本查询',
       help: '使用只读凭据查询阿里云账单与 CDN、OSS 用量；固定使用所选线路，线路故障时停止查询。',
@@ -237,6 +242,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
       'biliApi',
       'archiveDownload',
       'dashboardPublish',
+      'database',
       'cloudCost',
       'visitorAnalytics',
     ].includes(purpose);
@@ -331,6 +337,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
     copied.upload.failoverEnabled = false;
     copied.archiveDownload.failoverEnabled = false;
     copied.dashboardPublish.failoverEnabled = false;
+    copied.database.failoverEnabled = false;
     copied.cloudCost.failoverEnabled = false;
     copied.visitorAnalytics.failoverEnabled = false;
     return copied;

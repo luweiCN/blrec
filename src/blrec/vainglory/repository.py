@@ -2160,15 +2160,18 @@ class VaingloryRepository:
                 (now, now),
             )
             fine = connection.execute(
-                'SELECT window.id AS item_id,window.session_id,window.part_id,'
-                'window.start_ms,window.end_ms,window.focus_ms,window.mode,'
-                'window.lease_generation,part.part_index,part.source_path,'
+                'SELECT live_window.id AS item_id,live_window.session_id,'
+                'live_window.part_id,live_window.start_ms,live_window.end_ms,'
+                'live_window.focus_ms,live_window.mode,'
+                'live_window.lease_generation,part.part_index,part.source_path,'
                 'session.title '
-                'FROM vainglory_live_analysis_windows window '
-                'JOIN recording_parts part ON part.id=window.part_id '
-                'JOIN recording_sessions session ON session.id=window.session_id '
-                "WHERE window.state='pending' AND window.available_at<=? "
-                'ORDER BY window.created_at,window.id LIMIT 1',
+                'FROM vainglory_live_analysis_windows live_window '
+                'JOIN recording_parts part ON part.id=live_window.part_id '
+                'JOIN recording_sessions session '
+                'ON session.id=live_window.session_id '
+                "WHERE live_window.state='pending' "
+                'AND live_window.available_at<=? '
+                'ORDER BY live_window.created_at,live_window.id LIMIT 1',
                 (now,),
             ).fetchone()
             if fine is not None:
@@ -3367,10 +3370,11 @@ class VaingloryRepository:
                 "WHERE live.state='active') AS stream_count,"
                 '((SELECT COUNT(*) FROM vainglory_live_analysis_state live '
                 "WHERE live.state='active' AND live.lease_owner IS NOT NULL) + "
-                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows window '
-                "WHERE window.state='running')) AS running_count,"
-                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows window '
-                "WHERE window.state='pending') AS pending_window_count,"
+                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows '
+                "live_window WHERE live_window.state='running')) AS running_count,"
+                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows '
+                "live_window WHERE live_window.state='pending') "
+                'AS pending_window_count,'
                 '(SELECT COALESCE(SUM(live.sample_count),0) '
                 'FROM vainglory_live_analysis_state live '
                 "WHERE live.state='active') AS sample_count,"
@@ -4459,7 +4463,8 @@ class VaingloryRepository:
             'FROM recording_sessions session '
             'LEFT JOIN vainglory_matches match ON match.session_id=session.id '
             'LEFT JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
-            'WHERE session.id IN ({}) GROUP BY session.id'.format(
+            'WHERE session.id IN ({}) GROUP BY session.id,scan.custom_title,'
+            'scan.stats_included'.format(
                 winner_color_sql, winner_color_sql, placeholders
             ),
             tuple(session_ids),

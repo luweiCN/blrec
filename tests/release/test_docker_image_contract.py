@@ -14,6 +14,7 @@ def test_dockerfile_builds_frontend_wheel_and_runtime_separately() -> None:
     assert 'scripts/migrate_legacy_settings.py' in dockerfile
     assert 'scripts/migrate_biliupforjava_rooms.py' in dockerfile
     assert 'scripts/backup_blrec_database.py' in dockerfile
+    assert 'postgresql-client-16' in dockerfile
     assert 'scripts/vainglory_reanalysis_recovery_20260812.py' in dockerfile
     assert 'scripts/vainglory_reanalysis_recovery_20260812.jsonl' in dockerfile
     assert 'scripts/vainglory_tail_reanalysis_20260812.py' in dockerfile

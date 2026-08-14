@@ -64,6 +64,21 @@ jobs:
 
   publisher:
     runs-on: ubuntu-latest
+    env:
+      DASHBOARD_PUBLISHER_TEST_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/blrec_dashboard_publisher_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: blrec_dashboard_publisher_test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d blrec_dashboard_publisher_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout

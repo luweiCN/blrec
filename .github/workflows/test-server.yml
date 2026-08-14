@@ -13,6 +13,7 @@ on:
       - pyproject.toml
       - MANIFEST.in
       - compose.synology.yml
+      - compose.postgres.yml
       - synology.env.example
       - .github/workflows/test-server.yml
   pull_request:
@@ -26,6 +27,7 @@ on:
       - pyproject.toml
       - MANIFEST.in
       - compose.synology.yml
+      - compose.postgres.yml
       - synology.env.example
       - .github/workflows/test-server.yml
   workflow_call:
@@ -37,6 +39,21 @@ jobs:
   backend:
     name: Backend (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      BLREC_TEST_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/blrec_core_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: blrec_core_test
+        options: >-
+          --health-cmd "pg_isready -U postgres -d blrec_core_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
     strategy:
       fail-fast: false
       matrix:

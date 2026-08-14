@@ -20,6 +20,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    Union,
 )
 
 from .deduplication import exact_match_fingerprint
@@ -42,6 +43,7 @@ from .rating import (
     calculate_rating_forecast,
     calculate_virtual_match_rating,
 )
+from .source_database import connect_source_database
 
 __all__ = (
     'DashboardExportResult',
@@ -337,12 +339,16 @@ def _season_option(season: _Season, current_key: str) -> Mapping[str, Any]:
 
 
 def _validate_schema(connection: sqlite3.Connection) -> None:
-    tables = {
-        str(row[0])
-        for row in connection.execute(
+    if getattr(connection, 'dialect', 'sqlite') == 'postgresql':
+        table_rows = connection.execute(
+            'SELECT table_name FROM information_schema.tables '
+            "WHERE table_schema=current_schema() AND table_type='BASE TABLE'"
+        ).fetchall()
+    else:
+        table_rows = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
-    }
+    tables = {str(row[0]) for row in table_rows}
     missing = REQUIRED_TABLES - tables
     if missing:
         raise sqlite3.DatabaseError(
@@ -1446,17 +1452,13 @@ def _write_immutable(path: Path, content: bytes) -> None:
 
 
 def export_dashboard_files(
-    database_path: Path, output_directory: Path, *, now: Optional[datetime] = None
+    database_path: Union[Path, str],
+    output_directory: Path,
+    *,
+    now: Optional[datetime] = None,
 ) -> DashboardExportResult:
-    resolved_database = database_path.expanduser().resolve(strict=True)
-    connection = sqlite3.connect(
-        '{}?mode=ro'.format(resolved_database.as_uri()), uri=True
-    )
-    connection.row_factory = sqlite3.Row
+    connection = connect_source_database(database_path)
     try:
-        connection.execute('PRAGMA query_only=ON')
-        connection.execute('PRAGMA foreign_keys=ON')
-        connection.execute('PRAGMA busy_timeout=5000')
         connection.execute('BEGIN')
         snapshot = build_dashboard_snapshot(connection, now=now)
         connection.execute('COMMIT')

@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import shutil
-import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from typing import (
     Protocol,
     Set,
     Tuple,
+    Union,
 )
 
 import requests
@@ -34,6 +34,7 @@ from blrec.networking.requests_session import RoutedRequestsSession
 
 from .api_sync import DashboardApiClient, sync_dashboard_api_once
 from .snapshot import SHANGHAI, DashboardExportResult, export_dashboard_files
+from .source_database import connect_source_database
 
 __all__ = (
     'DashboardPublicationResult',
@@ -675,7 +676,7 @@ def _exclusive_worker_lock(state_directory: Path) -> Iterator[None]:
 
 @dataclass(frozen=True)
 class _WorkerConfiguration:
-    database: Path
+    database: Union[Path, str]
     settings: Path
     state: Path
     endpoint: str
@@ -784,15 +785,20 @@ def _publish(
     return result
 
 
-def _read_source_revision(database: Path) -> Optional[int]:
-    connection = sqlite3.connect(
-        'file:{}?mode=ro'.format(database.expanduser().resolve()), uri=True
-    )
+def _read_source_revision(database: Union[Path, str]) -> Optional[int]:
+    connection = connect_source_database(database)
     try:
-        table = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='dashboard_source_state'"
-        ).fetchone()
+        if getattr(connection, 'dialect', 'sqlite') == 'postgresql':
+            table = connection.execute(
+                'SELECT 1 FROM information_schema.tables '
+                "WHERE table_schema=current_schema() "
+                "AND table_name='dashboard_source_state'"
+            ).fetchone()
+        else:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='dashboard_source_state'"
+            ).fetchone()
         if table is None:
             return None
         row = connection.execute(
@@ -876,8 +882,10 @@ def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         '--database',
-        type=Path,
-        default=Path(os.environ.get('DASHBOARD_DATABASE', '/cfg/blrec.sqlite3')),
+        default=(
+            os.environ.get('DASHBOARD_DATABASE_URL')
+            or os.environ.get('DASHBOARD_DATABASE', '/cfg/blrec.sqlite3')
+        ),
     )
     parser.add_argument(
         '--settings',
@@ -961,7 +969,13 @@ def main() -> None:
     if not arguments.publish_static_data and not arguments.api_url:
         raise DashboardPublishError('关闭静态 JSON 后必须配置排行榜 API')
     configuration = _WorkerConfiguration(
-        database=arguments.database,
+        database=(
+            arguments.database
+            if str(arguments.database).startswith(
+                ('postgresql://', 'postgresql+psycopg://')
+            )
+            else Path(arguments.database)
+        ),
         settings=arguments.settings,
         state=arguments.state,
         endpoint=arguments.endpoint,

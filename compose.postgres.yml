@@ -1,0 +1,41 @@
+services:
+  blrec-next:
+    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.76}
+    depends_on:
+      blrec-database-tunnel:
+        condition: service_healthy
+    environment:
+      BLREC_DATABASE_URL: ${BLREC_DATABASE_URL:?请设置 PostgreSQL 连接地址}
+      BLREC_DATABASE_NAME: ${BLREC_DATABASE_NAME:-blrec_dashboard}
+      BLREC_DATABASE_SCHEMA: ${BLREC_DATABASE_SCHEMA:-core}
+
+  blrec-database-tunnel:
+    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.76}
+    pull_policy: always
+    container_name: blrec-database-tunnel
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ['python', '-m', 'blrec.networking.postgres_tunnel']
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      BLREC_DATABASE_SSH_HOST: ${BLREC_DATABASE_SSH_HOST:?请设置移动云固定 IP}
+      BLREC_DATABASE_SSH_PORT: ${BLREC_DATABASE_SSH_PORT:-22}
+      BLREC_DATABASE_SSH_USER: ${BLREC_DATABASE_SSH_USER:?请设置隧道用户}
+      BLREC_DATABASE_SSH_KEY_PATH: /cfg/postgres-tunnel.key
+      BLREC_DATABASE_SSH_KNOWN_HOSTS_PATH: /cfg/postgres-known-hosts
+      BLREC_DATABASE_TUNNEL_LOCAL_PORT: ${BLREC_DATABASE_TUNNEL_LOCAL_PORT:-15432}
+      BLREC_DATABASE_TUNNEL_REMOTE_HOST: 127.0.0.1
+      BLREC_DATABASE_TUNNEL_REMOTE_PORT: ${BLREC_DATABASE_TUNNEL_REMOTE_PORT:-5432}
+      BLREC_DEFAULT_SETTINGS_FILE: /cfg/settings.toml
+    volumes:
+      - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec-next/config}:/cfg:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,socket; socket.create_connection(('127.0.0.1', int(os.environ['BLREC_DATABASE_TUNNEL_LOCAL_PORT'])), 3).close()"
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 6

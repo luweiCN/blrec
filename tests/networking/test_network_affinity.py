@@ -185,13 +185,15 @@ def test_account_and_upload_routes_reject_round_robin_configuration() -> None:
         NetworkSettings(archive_download={'mode': 'round_robin'})
     with pytest.raises(ValidationError):
         NetworkSettings(dashboard_publish={'mode': 'round_robin'})
+    with pytest.raises(ValueError, match='database network route'):
+        NetworkSettings(database={'mode': 'round_robin'})
     with pytest.raises(ValueError, match='cloud_cost network route'):
         NetworkSettings(cloud_cost={'mode': 'round_robin'})
     with pytest.raises(ValueError, match='visitor_analytics network route'):
         NetworkSettings(visitor_analytics={'mode': 'round_robin'})
 
 
-@pytest.mark.parametrize('purpose', ['cloud_cost', 'visitor_analytics'])
+@pytest.mark.parametrize('purpose', ['database', 'cloud_cost', 'visitor_analytics'])
 def test_observability_routes_are_fixed_and_never_fail_over(
     purpose: NetworkPurpose,
 ) -> None:

@@ -34,6 +34,7 @@ export interface NetworkSettings {
   biliApi: NetworkRouteSettings;
   archiveDownload: NetworkRouteSettings;
   dashboardPublish: NetworkRouteSettings;
+  database: NetworkRouteSettings;
   cloudCost: NetworkRouteSettings;
   visitorAnalytics: NetworkRouteSettings;
 }

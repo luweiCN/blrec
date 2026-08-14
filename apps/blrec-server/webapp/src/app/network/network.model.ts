@@ -6,6 +6,7 @@ export type NetworkPurpose =
   | 'biliApi'
   | 'archiveDownload'
   | 'dashboardPublish'
+  | 'database'
   | 'cloudCost'
   | 'visitorAnalytics';
 

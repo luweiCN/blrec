@@ -702,8 +702,11 @@ class UploadTaskActionManager:
         )
         if decision == 'skip':
             connection.execute(
-                'INSERT OR REPLACE INTO upload_suppressions('
-                'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?)',
+                'INSERT INTO upload_suppressions('
+                'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?) '
+                'ON CONFLICT(session_id) DO UPDATE SET '
+                'reason=excluded.reason,manager_subject=excluded.manager_subject,'
+                'created_at=excluded.created_at',
                 (session_id, 'manager_skipped', manager_subject, now),
             )
             message = '本场录像已设为不上传'
@@ -955,8 +958,11 @@ class UploadTaskActionManager:
         self._delete_job_children(connection, job_id)
         connection.execute('DELETE FROM upload_jobs WHERE id=?', (job_id,))
         connection.execute(
-            'INSERT OR REPLACE INTO upload_suppressions('
-            'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?)',
+            'INSERT INTO upload_suppressions('
+            'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?) '
+            'ON CONFLICT(session_id) DO UPDATE SET '
+            'reason=excluded.reason,manager_subject=excluded.manager_subject,'
+            'created_at=excluded.created_at',
             (session_id, 'manager_skipped', manager_subject, now),
         )
         connection.execute(

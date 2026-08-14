@@ -31,7 +31,16 @@ RUN python -m pip wheel --no-cache-dir \
 FROM python:3.11-slim-bookworm AS runtime
 WORKDIR /app
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg iproute2 && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    install -d /usr/share/postgresql-common/pgdg && \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc && \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ffmpeg iproute2 openssh-client postgresql-client-16 && \
+    apt-get purge -y --auto-remove curl && \
     rm -rf /var/lib/apt/lists/*
 COPY apps/blrec-server/requirements.txt /tmp/server-requirements.txt
 RUN --mount=type=bind,from=dependency-builder,source=/dependency-wheels,target=/dependency-wheels \
@@ -51,6 +60,8 @@ RUN --mount=type=bind,from=wheel-builder,source=/wheels,target=/wheels \
 COPY scripts/migrate_legacy_settings.py /app/scripts/migrate_legacy_settings.py
 COPY scripts/migrate_biliupforjava_rooms.py /app/scripts/migrate_biliupforjava_rooms.py
 COPY scripts/backup_blrec_database.py /app/scripts/backup_blrec_database.py
+COPY scripts/migrate_blrec_sqlite_to_postgres.py \
+     /app/scripts/migrate_blrec_sqlite_to_postgres.py
 COPY scripts/vainglory_reanalysis_recovery_20260812.py \
      /app/scripts/vainglory_reanalysis_recovery_20260812.py
 COPY scripts/vainglory_reanalysis_recovery_20260812.jsonl \

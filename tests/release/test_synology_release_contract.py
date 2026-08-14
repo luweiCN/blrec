@@ -8,7 +8,7 @@ def test_synology_compose_pulls_one_pinned_public_image() -> None:
     assert 'build:' not in compose
     assert (
         'ghcr.io/luweicn/blrec-server:'
-        '${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.47}' in compose
+        '${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.76}' in compose
     )
     assert 'container_name: blrec-next' in compose
     assert 'network_mode: host' in compose
@@ -20,12 +20,54 @@ def test_synology_compose_pulls_one_pinned_public_image() -> None:
 
 def test_environment_example_contains_no_credential() -> None:
     example = (ROOT / 'synology.env.example').read_text(encoding='utf8')
-    assert 'BLREC_SERVER_IMAGE_TAG=3.0.0-beta.47' in example
+    assert 'BLREC_SERVER_IMAGE_TAG=3.0.0-beta.76' in example
     assert 'BLREC_ADMIN_USERNAME=admin' in example
     assert 'BLREC_API_KEY=\n' in example
     assert 'BLREC_CREDENTIAL_KEY=' not in example
     for directory in ('config', 'log', 'rec', 'favorites', 'clips'):
         assert f'/volume1/docker/blrec-next/{directory}' in example
+
+
+def test_postgres_overlay_uses_a_fixed_encrypted_tunnel() -> None:
+    compose = (ROOT / 'compose.postgres.yml').read_text(encoding='utf8')
+    assert 'build:' not in compose
+    assert 'blrec-database-tunnel:' in compose
+    assert compose.count('ghcr.io/luweicn/blrec-server:') == 2
+    assert 'network_mode: host' in compose
+    assert "entrypoint: ['python', '-m', 'blrec.networking.postgres_tunnel']" in compose
+    assert 'condition: service_healthy' in compose
+    assert 'BLREC_DATABASE_URL: ${BLREC_DATABASE_URL:?' in compose
+    assert 'BLREC_DATABASE_SSH_HOST: ${BLREC_DATABASE_SSH_HOST:?' in compose
+    assert 'BLREC_DATABASE_SSH_USER: ${BLREC_DATABASE_SSH_USER:?' in compose
+    assert '/cfg/postgres-tunnel.key' in compose
+    assert '/cfg/postgres-known-hosts' in compose
+    assert 'BLREC_DATABASE_NAME: ${BLREC_DATABASE_NAME:-blrec_dashboard}' in compose
+    assert 'BLREC_DATABASE_SCHEMA: ${BLREC_DATABASE_SCHEMA:-core}' in compose
+
+
+def test_postgres_runbook_has_backup_cutover_and_rollback() -> None:
+    document = (ROOT / 'docs/operations/postgresql-main-database.md').read_text(
+        encoding='utf8'
+    )
+    for heading in ('## 数据边界', '## 首次迁移', '## 验收', '## 回滚'):
+        assert heading in document
+    assert 'backup_blrec_database.py' in document
+    assert 'migrate_blrec_sqlite_to_postgres.py' in document
+    assert '-f compose.synology.yml -f compose.postgres.yml' in document
+    assert '不能让 PostgreSQL 和 SQLite 同时写入' in document
+
+
+def test_dashboard_publisher_reads_the_postgres_core_schema() -> None:
+    compose = (ROOT / 'apps/public-dashboard/deploy/nas/compose.yml').read_text(
+        encoding='utf8'
+    )
+    environment = (
+        ROOT / 'apps/public-dashboard/deploy/nas/dashboard-publisher.env.example'
+    ).read_text(encoding='utf8')
+    assert 'DASHBOARD_DATABASE:' not in compose
+    assert 'dashboard-publisher.env' in compose
+    assert 'DASHBOARD_DATABASE_URL=postgresql://' in environment
+    assert 'options=-csearch_path%3Dcore' in environment
 
 
 def test_synology_documentation_has_install_upgrade_and_rollback() -> None:

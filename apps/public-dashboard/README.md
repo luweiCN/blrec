@@ -2,8 +2,8 @@
 
 这是独立于 BLREC 管理后台的公开静态站点。它单独安装依赖、构建和发布，不会被打进 NAS 上的后台管理页面。
 
-首先在仓库根目录安装共享核心和 Dashboard Publisher，再从 SQLite 生成只读静态
-快照：
+首先在仓库根目录安装共享核心和 Dashboard Publisher，再从 SQLite 或 PostgreSQL
+生成只读静态快照：
 
 ```bash
 python -m pip install -e .
@@ -19,6 +19,9 @@ blrec-dashboard-export \
 生成完成后，会按玩家绑定的直播间从 B 站公开接口同步头像并压缩为 256px
 JPEG。该导出仅用于本地预览或应急恢复；临时离线导出时可以追加
 `--skip-player-avatars`。
+
+生产环境通过 `DASHBOARD_DATABASE_URL` 读取移动云 PostgreSQL 的 `core` schema；
+SQLite 参数只保留给本地开发和离线恢复检查。
 
 开发与验证：
 

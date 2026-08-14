@@ -26,6 +26,11 @@
 `acs:oss:*:*:luwei-vainglory/*` 资源范围已经覆盖该前缀，无需创建“目录”或新增
 资源授权。
 
+同一凭据文件中的 `DASHBOARD_DATABASE_URL` 必须使用移动云主数据库的只读账号，
+连接 NAS 主机上的 `127.0.0.1:15432` 隧道，并把 `search_path` 固定为 `core`。
+Publisher 不再读取 `/cfg/blrec.sqlite3`；数据库隧道未就绪时会停止同步，不会回退到
+旧 SQLite 形成两套数据源。
+
 ## 首次部署与升级
 
 即使 worker 只读数据库，首次启动或更新镜像前也必须执行 BLREC 数据库备份。
@@ -37,8 +42,9 @@ docker exec blrec-next python scripts/backup_blrec_database.py \
   --label dashboard-publisher-<commit>
 ```
 
-只有命令成功、输出备份文件非零字节且脚本内的 `PRAGMA quick_check` 为 `ok`
-时才能继续。然后仅启动独立 worker：
+迁移 PostgreSQL 前，脚本会生成 SQLite 备份并执行 `PRAGMA quick_check`；迁移后，
+脚本会生成 PostgreSQL 自定义格式备份并用 `pg_restore --list` 验证。只有命令成功、
+输出备份文件非零字节且显示 `integrity=ok` 时才能继续。然后仅启动独立 worker：
 
 ```bash
 cd /volume1/docker/blrec-next/dashboard-publisher

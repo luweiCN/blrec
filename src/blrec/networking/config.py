@@ -48,8 +48,28 @@ class NetworkSettings(_NetworkModel):
     bili_api: NetworkRouteSettings = NetworkRouteSettings()
     archive_download: NetworkRouteSettings = NetworkRouteSettings()
     dashboard_publish: NetworkRouteSettings = NetworkRouteSettings()
+    database: NetworkRouteSettings = NetworkRouteSettings()
     cloud_cost: NetworkRouteSettings = NetworkRouteSettings()
     visitor_analytics: NetworkRouteSettings = NetworkRouteSettings()
+
+    @root_validator(pre=True)
+    def _inherit_database_route(cls, values: Dict[str, object]) -> Dict[str, object]:
+        migrated = dict(values)
+        if 'database' in migrated:
+            return migrated
+        dashboard_publish = migrated.get(
+            'dashboard_publish', migrated.get('dashboardPublish')
+        )
+        source = (
+            dashboard_publish
+            if dashboard_publish is not None
+            else migrated.get('upload')
+        )
+        if isinstance(source, dict):
+            migrated['database'] = dict(source)
+        elif isinstance(source, NetworkRouteSettings):
+            migrated['database'] = source.dict()
+        return migrated
 
     @root_validator(pre=True)
     def _inherit_visitor_analytics_route(
@@ -135,6 +155,7 @@ class NetworkSettings(_NetworkModel):
             'upload',
             'bili_api',
             'dashboard_publish',
+            'database',
             'cloud_cost',
             'visitor_analytics',
         ):
@@ -158,6 +179,7 @@ class NetworkSettings(_NetworkModel):
             'upload',
             'archive_download',
             'dashboard_publish',
+            'database',
             'cloud_cost',
             'visitor_analytics',
         ):

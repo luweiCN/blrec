@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple, Union
 
 import requests
 from PIL import Image
@@ -17,6 +17,7 @@ from blrec.networking.manager import NetworkRouteManager, RouteSelection
 from blrec.networking.requests_session import RoutedRequestsSession
 
 from .snapshot import build_dashboard_api_source
+from .source_database import connect_source_database
 
 
 class DashboardApiSyncError(RuntimeError):
@@ -221,7 +222,7 @@ def _send_outbox(
 
 def sync_dashboard_api_once(
     *,
-    database_path: Path,
+    database_path: Union[Path, str],
     state_directory: Path,
     result_frame_directory: Path,
     public_data_base_url: str,
@@ -238,9 +239,7 @@ def sync_dashboard_api_once(
     if pending:
         return _send_outbox(pending[0], state_path=state_path, post_batch=post_batch)
 
-    connection = sqlite3.connect(
-        'file:{}?mode=ro'.format(database_path.expanduser().resolve()), uri=True
-    )
+    connection = connect_source_database(database_path)
     try:
         source = source_builder(connection)
     finally:

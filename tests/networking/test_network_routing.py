@@ -80,6 +80,7 @@ def test_purposes_have_independent_routes() -> None:
         bili_api={'interface': 'lan1'},
         archive_download={'interface': 'lan2'},
         dashboard_publish={'interface': 'lan1'},
+        database={'interface': 'lan2'},
         cloud_cost={'interface': 'lan2'},
         visitor_analytics={'interface': 'lan1'},
     )
@@ -92,6 +93,7 @@ def test_purposes_have_independent_routes() -> None:
     assert manager.select('bili_api').interface_name == 'lan1'
     assert manager.select('archive_download').interface_name == 'lan2'
     assert manager.select('dashboard_publish').interface_name == 'lan1'
+    assert manager.select('database').interface_name == 'lan2'
     assert manager.select('cloud_cost').interface_name == 'lan2'
     assert manager.select('visitor_analytics').interface_name == 'lan1'
 
@@ -112,6 +114,20 @@ def test_dashboard_publish_route_inherits_a_parsed_upload_route() -> None:
     )
 
     assert settings.dashboard_publish.interface == 'lan1'
+
+
+def test_database_route_inherits_existing_dashboard_publish_route() -> None:
+    settings = NetworkSettings(
+        dashboard_publish={
+            'mode': 'fixed',
+            'interface': 'lan2',
+            'failoverEnabled': False,
+        }
+    )
+
+    assert settings.database.mode == 'fixed'
+    assert settings.database.interface == 'lan2'
+    assert settings.database.failover_enabled is False
 
 
 def test_cloud_cost_route_inherits_existing_dashboard_publish_route() -> None:
@@ -142,7 +158,11 @@ def test_observability_routes_resolve_and_record_the_system_default() -> None:
     settings = NetworkSettings()
     manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
 
-    purposes: Tuple[NetworkPurpose, ...] = ('cloud_cost', 'visitor_analytics')
+    purposes: Tuple[NetworkPurpose, ...] = (
+        'database',
+        'cloud_cost',
+        'visitor_analytics',
+    )
     for purpose in purposes:
         selection = manager.select(purpose)
         assert selection.interface_name == 'lan1'

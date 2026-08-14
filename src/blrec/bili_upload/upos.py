@@ -960,7 +960,7 @@ class UposUploader:
                 size = min(chunk_size, total_size - offset)
                 connection.execute(
                     'INSERT INTO upload_chunks('
-                    'part_id,chunk_no,offset,size,state,attempt) '
+                    'part_id,chunk_no,"offset",size,state,attempt) '
                     "VALUES(?,?,?,?,'prepared',0)",
                     (part_id, chunk_no, offset, size),
                 )
@@ -1008,7 +1008,7 @@ class UposUploader:
     ) -> List[_Chunk]:
         await self._normalize_in_flight(part_id, session_json, claim)
         rows = await self._database.fetchall(
-            'SELECT chunk_no,offset,size,state,attempt FROM upload_chunks '
+            'SELECT chunk_no,"offset",size,state,attempt FROM upload_chunks '
             'WHERE part_id=? ORDER BY chunk_no',
             (part_id,),
         )

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
     Dict,
     List,
@@ -244,11 +245,10 @@ class VisitorAnalyticsArchive:
             }
 
         values = await self._database.read(read)
-        totals = values['totals']
-        assert isinstance(totals, sqlite3.Row)
-        trend = cast(Sequence[sqlite3.Row], values['trend'])
-        dimensions = cast(Dict[str, Sequence[sqlite3.Row]], values['dimensions'])
-        recent = cast(Sequence[sqlite3.Row], values['recent'])
+        totals = cast(Mapping[str, Any], values['totals'])
+        trend = cast(Sequence[Mapping[str, Any]], values['trend'])
+        dimensions = cast(Dict[str, Sequence[Mapping[str, Any]]], values['dimensions'])
+        recent = cast(Sequence[Mapping[str, Any]], values['recent'])
         warnings: List[str] = []
         if not archive_status.initial_sync_complete:
             warnings.append('本地访问日志仍在首次同步，较早数据可能暂不完整')
@@ -511,12 +511,12 @@ def _required_datetime(value: int) -> datetime:
     return datetime.fromtimestamp(value, timezone.utc)
 
 
-def _row_integer(row: sqlite3.Row, key: str) -> int:
+def _row_integer(row: Mapping[str, Any], key: str) -> int:
     value = row[key]
     return 0 if value is None else max(0, int(value))
 
 
-def _dimensions(rows: Sequence[sqlite3.Row]) -> List[VisitorDimensionPoint]:
+def _dimensions(rows: Sequence[Mapping[str, Any]]) -> List[VisitorDimensionPoint]:
     return [
         VisitorDimensionPoint(
             value=str(row['dimension']),

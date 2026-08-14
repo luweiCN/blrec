@@ -317,10 +317,14 @@ class MediaIndexWorker:
         if cursor.rowcount != 1:
             return 0
         connection.execute(
-            'INSERT OR REPLACE INTO owner_handoff_outcomes('
+            'INSERT INTO owner_handoff_outcomes('
             'owner_kind,owner_id,side_effect_key,source_generation,'
             'outcome_state,outcome_json,acknowledged_at) '
-            "VALUES('media_index',?,?,?,'cancelled_local','{}',?)",
+            "VALUES('media_index',?,?,?,'cancelled_local','{}',?) "
+            'ON CONFLICT(owner_kind,owner_id,side_effect_key,source_generation) '
+            'DO UPDATE SET outcome_state=excluded.outcome_state,'
+            'outcome_json=excluded.outcome_json,'
+            'acknowledged_at=excluded.acknowledged_at',
             (claimed.id, side_effect_key, claimed.cancellation_generation, now),
         )
         return cursor.rowcount

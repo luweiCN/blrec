@@ -84,6 +84,7 @@ describe('NetworkComponent', () => {
       biliApi: routeSettings(),
       archiveDownload: { ...routeSettings(), failoverEnabled: true },
       dashboardPublish: { ...routeSettings(), failoverEnabled: true },
+      database: { ...routeSettings(), failoverEnabled: true },
       cloudCost: { ...routeSettings(), failoverEnabled: true },
       visitorAnalytics: { ...routeSettings(), failoverEnabled: true },
     };
@@ -152,6 +153,12 @@ describe('NetworkComponent', () => {
   it('always displays dashboard publishing failover as disabled', () => {
     expect(
       fixture.componentInstance.route('dashboardPublish').failoverEnabled,
+    ).toBeFalse();
+  });
+
+  it('always displays database failover as disabled', () => {
+    expect(
+      fixture.componentInstance.route('database').failoverEnabled,
     ).toBeFalse();
   });
 

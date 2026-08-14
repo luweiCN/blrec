@@ -47,7 +47,7 @@ def test_server_release_has_independent_exact_image_contract() -> None:
     assert ':latest' not in workflow
     assert 'gh release create' in workflow
     assert 'browser-extension' not in workflow
-    assert 'compose.synology.yml synology.env.example' in workflow
+    assert 'compose.synology.yml compose.postgres.yml synology.env.example' in workflow
 
 
 def test_vision_lab_has_independent_test_and_release_workflows() -> None:

@@ -37,6 +37,7 @@ NetworkPurpose = Literal[
     'bili_api',
     'archive_download',
     'dashboard_publish',
+    'database',
     'cloud_cost',
     'visitor_analytics',
 ]
@@ -289,6 +290,7 @@ class NetworkRouteManager:
             'bili_api',
             'archive_download',
             'dashboard_publish',
+            'database',
             'cloud_cost',
             'visitor_analytics',
         )
@@ -305,6 +307,7 @@ class NetworkRouteManager:
                 'upload',
                 'archive_download',
                 'dashboard_publish',
+                'database',
                 'cloud_cost',
                 'visitor_analytics',
             ):
@@ -396,6 +399,7 @@ class NetworkRouteManager:
             'bili_api',
             'archive_download',
             'dashboard_publish',
+            'database',
             'cloud_cost',
             'visitor_analytics',
         )
@@ -514,6 +518,7 @@ class NetworkRouteManager:
                 'upload',
                 'archive_download',
                 'dashboard_publish',
+                'database',
                 'cloud_cost',
                 'visitor_analytics',
             )

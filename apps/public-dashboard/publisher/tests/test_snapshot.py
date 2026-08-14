@@ -1,15 +1,20 @@
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode, urlsplit
 
+import psycopg
 import pytest
 from blrec_dashboard_publisher.snapshot import (
     build_dashboard_api_source,
     build_dashboard_snapshot,
     export_dashboard_files,
 )
+from blrec_dashboard_publisher.source_database import connect_source_database
 
 from blrec.bili_upload.database import BiliUploadDatabase
+from scripts.migrate_blrec_sqlite_to_postgres import migrate
 
 SHANGHAI = timezone(timedelta(hours=8))
 
@@ -233,6 +238,58 @@ async def test_dashboard_api_source_tracks_active_bound_live_rooms(
         assert offline_source['players'][0]['liveRooms'] == []
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_source_matches_the_sqlite_snapshot(tmp_path: Path) -> None:
+    database_url = os.environ.get('DASHBOARD_PUBLISHER_TEST_POSTGRES_URL', '').strip()
+    if not database_url:
+        pytest.skip('DASHBOARD_PUBLISHER_TEST_POSTGRES_URL is not configured')
+    database_name = urlsplit(database_url).path.lstrip('/')
+    assert database_name == 'blrec_dashboard_publisher_test'
+    source_path = tmp_path / 'blrec.sqlite3'
+    database = BiliUploadDatabase(str(source_path))
+    await database.open()
+    try:
+        await seed_player(database, 10, '主播', 100)
+        await seed_match(
+            database,
+            tmp_path,
+            match_id=1,
+            room_id=100,
+            started_at=timestamp(2026, 8, 1),
+            game_mode='3v3',
+            won=True,
+            hero_id=None,
+            anchor_name='主播',
+        )
+        now = datetime(2026, 8, 3, 10, 30, tzinfo=SHANGHAI)
+        expected = await database.read(
+            lambda connection: build_dashboard_snapshot(connection, now=now)
+        )
+    finally:
+        await database.close()
+
+    with psycopg.connect(database_url, autocommit=True) as target:
+        target.execute('CREATE SCHEMA core')
+    separator = '&' if '?' in database_url else '?'
+    core_database_url = '{}{}{}'.format(
+        database_url, separator, urlencode({'options': '-csearch_path=core'})
+    )
+    migrate(
+        source_path,
+        core_database_url,
+        expected_database=database_name,
+        expected_schema='core',
+        backup_directory=tmp_path / 'backups',
+    )
+    connection = connect_source_database(core_database_url)
+    try:
+        actual = build_dashboard_snapshot(connection, now=now)
+    finally:
+        connection.close()
+
+    assert actual == expected
 
 
 @pytest.mark.asyncio

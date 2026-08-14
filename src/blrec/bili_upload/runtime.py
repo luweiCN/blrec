@@ -69,6 +69,7 @@ from .media_index import MediaIndexWorker
 from .media_library import MediaLibrary, MediaLibraryConflict
 from .models import FeatureUnavailable, validate_feature_gate
 from .policies import RoomUploadPolicyCommand, RoomUploadPolicyManager
+from .postgres_database import create_bili_upload_database
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
 from .recording_content import RecordingContentReader
 from .remote_media import RemoteMediaCache
@@ -337,7 +338,11 @@ class BiliAccountRuntime:
             return False
         assert self._credential_key is not None
 
-        database = BiliUploadDatabase(self._settings.database_path)
+        database = create_bili_upload_database(
+            os.environ.get('BLREC_DATABASE_URL', self._settings.database_path),
+            local_state_path=self._settings.database_path,
+            network_route_manager=self._network_route_manager,
+        )
         highlight_service: Optional[HighlightService] = None
         remote_media_cache: Optional[RemoteMediaCache] = None
         vainglory_service: Optional[VaingloryIndexService] = None

@@ -2,10 +2,15 @@
 
 此部署使用主机网络模式，让容器直接看到群晖的物理网卡、内网 IP 和网关。管理页面会监听 `0.0.0.0:2233`，因此两个内网均可通过各自的 NAS IP 访问。应用只为连接绑定源 IP，不会修改群晖路由表。
 
-本文中的 `compose.synology.yml` 只运行一个 `blrec-next` 服务，并从独立的公开镜像
+本文中的基础文件 `compose.synology.yml` 只运行一个 `blrec-next` 服务，并从独立的公开镜像
 `ghcr.io/luweicn/blrec-server` 拉取固定版本。镜像由 GitHub Actions 构建，NAS
 直接从 GHCR 拉取；Container Manager“项目”导入的也是同一份 Compose，不要另建
 容器配置。
+
+生产业务库迁到移动云 PostgreSQL 后，必须同时叠加 `compose.postgres.yml`。该文件只
+增加固定出口的加密数据库隧道和主库环境，不改变 `/cfg`、`/log`、`/rec`、
+`/favorites`、`/clips` 与 `/result-frames` 的挂载。完整迁移与回滚步骤见
+[移动云 PostgreSQL 主库](postgresql-main-database.md)。
 
 ## 前置设置
 
