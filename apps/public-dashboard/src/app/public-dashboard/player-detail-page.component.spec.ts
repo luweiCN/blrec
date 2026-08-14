@@ -14,6 +14,7 @@ import { MatchDetailModalComponent } from './match-detail-modal.component';
 import { MatchExplorerComponent } from './match-explorer.component';
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
+import { PlayerRatingTrendChartComponent } from './player-rating-trend-chart.component';
 import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { DashboardTrends } from './public-dashboard.models';
@@ -48,6 +49,7 @@ describe('PlayerDetailPageComponent', () => {
         MatchExplorerComponent,
         PlayerAvatarComponent,
         PlayerRoomLinksComponent,
+        PlayerRatingTrendChartComponent,
         SkillTierBadgeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
@@ -131,14 +133,11 @@ describe('PlayerDetailPageComponent', () => {
       page.querySelectorAll('.profile-hero-link'),
     ).map((element) => element.textContent ?? '');
     expect(heroLinks.some((value) => value.includes('凯恩'))).toBeTrue();
-    expect(page.querySelectorAll('.trend-point').length).toBe(3);
-    expect(page.querySelector('.trend-point')?.tagName).toBe('BUTTON');
+    expect(page.querySelectorAll('.trend-chart-data tbody tr').length).toBe(3);
+    expect(page.querySelector('.trend-chart-shell canvas')).not.toBeNull();
     expect(
-      (page.querySelector('.trend-point') as HTMLElement).style.left,
-    ).toContain('%');
-    expect(page.querySelector('.trend-point-tooltip')?.textContent).toContain(
-      '2,016',
-    );
+      page.querySelector('.trend-chart-data')?.textContent,
+    ).toContain('2,016');
     expect(page.querySelectorAll('.trend-range-filter button').length).toBe(3);
     expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
       '+18',
@@ -206,9 +205,9 @@ describe('PlayerDetailPageComponent', () => {
     fixture.detectChanges();
 
     expect(component.visibleTrendPoints.length).toBe(30);
-    expect(fixture.nativeElement.querySelectorAll('.trend-point').length).toBe(
-      30,
-    );
+    expect(
+      fixture.nativeElement.querySelectorAll('.trend-chart-data tbody tr').length,
+    ).toBe(30);
     expect(
       fixture.nativeElement.querySelector('.rating-trend-heading-actions')
         ?.textContent,
@@ -220,9 +219,9 @@ describe('PlayerDetailPageComponent', () => {
     rangeButtons[0].click();
     fixture.detectChanges();
     expect(component.visibleTrendPoints.length).toBe(7);
-    expect(fixture.nativeElement.querySelectorAll('.trend-point').length).toBe(
-      7,
-    );
+    expect(
+      fixture.nativeElement.querySelectorAll('.trend-chart-data tbody tr').length,
+    ).toBe(7);
 
     rangeButtons[2].click();
     fixture.detectChanges();

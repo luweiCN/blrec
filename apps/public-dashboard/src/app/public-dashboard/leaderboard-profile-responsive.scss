@@ -386,17 +386,7 @@
     }
   }
 
-  .rating-trend-frame {
-    grid-template-columns: 30px minmax(0, 1fr);
-    gap: 8px;
-  }
-
-  .rating-trend-plot svg {
-    height: 142px;
-  }
-
   .trend-start-note {
-    margin-left: 38px;
     line-height: 1.55;
   }
 }

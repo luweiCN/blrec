@@ -130,7 +130,7 @@
                 </ng-container>
               </ng-container>
             </td>
-            <td data-label="玩家">
+            <td class="directory-player-cell" data-label="玩家">
               <div class="directory-player">
                 <a
                   class="directory-player-main"
@@ -144,13 +144,12 @@
                   <strong>{{ row.player.name }}</strong>
                 </a>
                 <app-player-room-links
-                  class="compact-mobile"
                   [roomIds]="row.player.roomIds"
                   [fallbackLabel]="row.player.roomLabel"
                 ></app-player-room-links>
               </div>
             </td>
-            <td data-label="代表英雄">
+            <td class="directory-top-hero" data-label="代表英雄">
               <a
                 class="directory-hero"
                 [routerLink]="[
@@ -167,7 +166,7 @@
                 </span>
               </a>
             </td>
-            <td data-label="近五局">
+            <td class="directory-recent-form" data-label="近五局">
               <span class="directory-form" aria-label="近五局战绩">
                 <span
                   *ngFor="let result of row.player.form; trackBy: trackResult"
@@ -178,8 +177,8 @@
                 </span>
               </span>
             </td>
-            <td data-label="对局">{{ playerPerformance(row.player).matches }}</td>
-            <td data-label="胜 / 负">
+            <td class="directory-matches" data-label="对局">{{ playerPerformance(row.player).matches }}</td>
+            <td class="directory-record" data-label="胜 / 负">
               {{ playerPerformance(row.player).wins }} /
               {{
                 playerPerformance(row.player).matches -
@@ -192,7 +191,7 @@
                 [provisional]="playerPerformance(row.player).provisional"
               ></app-skill-tier-badge>
             </td>
-            <td data-label="KDA">
+            <td class="directory-kda" data-label="KDA">
               {{ playerKda(row.player) === null ? "—" : (playerKda(row.player) | number: "1.2-2") }}
             </td>
             <td class="directory-rate" data-label="胜率">

@@ -12,6 +12,7 @@ import { MatchExplorerComponent } from './match-explorer.component';
 import { MatchesPageComponent } from './matches-page.component';
 import { PlayGuidePageComponent } from './play-guide-page.component';
 import { PlayerAvatarComponent } from './player-avatar.component';
+import { PlayerRatingTrendChartComponent } from './player-rating-trend-chart.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
 import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
@@ -30,6 +31,7 @@ import { SkillTierBadgeComponent } from './skill-tier-badge.component';
     LeaderboardFiltersComponent,
     LeaderboardSeasonSelectComponent,
     PlayerAvatarComponent,
+    PlayerRatingTrendChartComponent,
     PlayerRoomLinksComponent,
     MatchDetailModalComponent,
     MatchExplorerComponent,
