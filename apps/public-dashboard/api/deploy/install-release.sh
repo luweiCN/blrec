@@ -129,7 +129,7 @@ PY
     exit 1
   fi
   postgres_backup="$database_backup_root/dashboard-$release_id.dump"
-  pg_dump --format=custom --file="$postgres_backup" "$postgres_url"
+  pg_dump --schema=public --format=custom --file="$postgres_backup" "$postgres_url"
   if [[ ! -s "$postgres_backup" ]]; then
     echo "PostgreSQL database backup is empty" >&2
     exit 1

@@ -30,6 +30,14 @@ _DATA_TABLES = (
 )
 
 
+def test_deployment_backup_is_limited_to_public_schema() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / 'deploy' / 'install-release.sh'
+    ).read_text(encoding='utf-8')
+
+    assert 'pg_dump --schema=public --format=custom' in script
+
+
 def _empty_postgres(database_url: str) -> None:
     initialize_database(database_url)
     connection = connect_database(database_url)
