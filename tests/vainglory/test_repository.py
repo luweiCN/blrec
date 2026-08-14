@@ -15,6 +15,7 @@ from blrec.vainglory.analyzer import (
 from blrec.vainglory.hero_recognition import HeroReference
 from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
 from blrec.vainglory.repository import (
+    LiveFrameObservation,
     VaingloryConflict,
     VaingloryNotFound,
     VaingloryRepository,
@@ -73,6 +74,222 @@ async def seed_part(
         "VALUES(?,?,?,?,?,1,'ready',1,1)",
         (part_id, session_id, 'run:{}'.format(session_id), part_index, str(path)),
     )
+
+
+async def seed_live_session(
+    database: BiliUploadDatabase, path: Path, *, session_id: int
+) -> None:
+    await seed_session(database, path, session_id=session_id, state='open')
+    await database.execute(
+        "UPDATE recording_parts SET artifact_state='recording',"
+        'file_size_bytes=1000,record_duration_seconds=60 WHERE id=?',
+        (session_id,),
+    )
+
+
+def live_observation(
+    *,
+    match_flow_label: str,
+    match_flow_confidence: float = 0.95,
+    observed_at_ms: int = 60_000,
+) -> LiveFrameObservation:
+    return LiveFrameObservation(
+        observed_at_ms=observed_at_ms,
+        stage=0,
+        stage_confidence=0.95,
+        match_flow_label=match_flow_label,
+        match_flow_confidence=match_flow_confidence,
+        hero_select_label='not_select',
+        hero_select_confidence=0.97,
+        match_mode_label='3v3',
+        match_mode_confidence=0.9,
+        result_confidence=0.02,
+        hero_lineup=('A', 'B', 'C', 'D', 'E', 'F'),
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_queue_claims_multiple_streams_without_touching_batch_queue(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_live_session(database, tmp_path / 'one.flv', session_id=1)
+        await seed_live_session(database, tmp_path / 'two.flv', session_id=2)
+        repository = VaingloryRepository(database, clock=lambda: 1_000)
+
+        first = await repository.claim_live_analysis('worker-a')
+        second = await repository.claim_live_analysis('worker-b')
+
+        assert first is not None and first.kind == 'coarse'
+        assert second is not None and second.kind == 'coarse'
+        assert {first.part.id, second.part.id} == {1, 2}
+        assert await repository.claim_next() is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_coarse_samples_do_not_accumulate_while_next_tick_is_not_due(
+    tmp_path: Path,
+) -> None:
+    now = [1_000]
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_live_session(database, tmp_path / 'one.flv', session_id=1)
+        repository = VaingloryRepository(database, clock=lambda: now[0])
+        claim = await repository.claim_live_analysis('worker-a')
+        assert claim is not None
+
+        await repository.complete_live_observation(
+            claim, live_observation(match_flow_label='not_match_flow')
+        )
+
+        assert await repository.claim_live_analysis('worker-a') is None
+        now[0] += 30
+        next_claim = await repository.claim_live_analysis('worker-a')
+        assert next_claim is not None and next_claim.part.id == 1
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM vainglory_live_analysis_state WHERE part_id=1'
+            )
+            == 1
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_transition_creates_durable_fine_window_before_next_coarse_tick(
+    tmp_path: Path,
+) -> None:
+    now = [1_000]
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_live_session(database, tmp_path / 'one.flv', session_id=1)
+        repository = VaingloryRepository(database, clock=lambda: now[0])
+        first = await repository.claim_live_analysis('worker-a')
+        assert first is not None
+        await repository.complete_live_observation(
+            first,
+            live_observation(match_flow_label='match_flow', observed_at_ms=60_000),
+        )
+        now[0] += 30
+        second = await repository.claim_live_analysis('worker-a')
+        assert second is not None and second.kind == 'coarse'
+        await repository.complete_live_observation(
+            second,
+            live_observation(match_flow_label='not_match_flow', observed_at_ms=90_000),
+        )
+
+        assert await repository.claim_live_analysis('worker-a') is None
+        now[0] += 35
+        fine = await repository.claim_live_analysis('worker-a')
+
+        assert fine is not None and fine.kind == 'fine'
+        assert fine.window_start_ms == 50_000
+        assert fine.window_end_ms == 120_000
+        assert fine.window_focus_ms == 90_000
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM vainglory_live_analysis_windows "
+                "WHERE state='running'"
+            )
+            == 1
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_claim_is_recovered_after_lease_expiry(tmp_path: Path) -> None:
+    now = [1_000]
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_live_session(database, tmp_path / 'one.flv', session_id=1)
+        repository = VaingloryRepository(database, clock=lambda: now[0])
+        first = await repository.claim_live_analysis('worker-a', lease_seconds=10)
+        assert first is not None
+
+        now[0] += 11
+        recovered = await repository.claim_live_analysis('worker-b', lease_seconds=10)
+
+        assert recovered is not None
+        assert recovered.part.id == first.part.id
+        assert recovered.lease_generation == first.lease_generation + 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_final_part_analysis_replaces_live_provisional_result(
+    tmp_path: Path,
+) -> None:
+    now = [1_000]
+    video = tmp_path / 'one.flv'
+    video.write_bytes(b'video')
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_live_session(database, video, session_id=1)
+        repository = VaingloryRepository(database, clock=lambda: now[0])
+        first = await repository.claim_live_analysis('worker-a')
+        assert first is not None
+        await repository.complete_live_observation(
+            first,
+            live_observation(match_flow_label='match_flow', observed_at_ms=60_000),
+        )
+        now[0] += 30
+        second = await repository.claim_live_analysis('worker-a')
+        assert second is not None
+        await repository.complete_live_observation(
+            second,
+            live_observation(match_flow_label='not_match_flow', observed_at_ms=90_000),
+        )
+        now[0] += 35
+        fine = await repository.claim_live_analysis('worker-a')
+        assert fine is not None and fine.kind == 'fine'
+
+        await repository.complete_live_window(
+            fine, (replace(analyzed_match(), result_at_ms=80_000),)
+        )
+
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM vainglory_matches "
+                "WHERE analysis_state='provisional'"
+            )
+            == 1
+        )
+        live_status = await repository.analysis_queue_status()
+        assert live_status.live_stream_count == 1
+        assert live_status.live_running_count == 0
+        assert live_status.live_pending_window_count == 0
+        assert live_status.live_sample_count == 2
+        assert live_status.live_provisional_match_count == 1
+        assert live_status.live_last_observed_at == 1_030
+        await database.execute(
+            "UPDATE recording_sessions SET state='closed' WHERE id=1"
+        )
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='ready' WHERE id=1"
+        )
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+
+        rows = await database.fetchall(
+            'SELECT analysis_state,result_at_ms FROM vainglory_matches'
+        )
+        assert [
+            (str(row['analysis_state']), int(row['result_at_ms'])) for row in rows
+        ] == [('final', 123_500)]
+    finally:
+        await database.close()
 
 
 def test_new_model_candidates_map_directly_to_unified_suggestions() -> None:

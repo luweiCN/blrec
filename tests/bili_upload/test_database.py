@@ -77,6 +77,9 @@ REQUIRED_TABLES = {
     'vainglory_publication_comments',
     'vainglory_publication_stale_comments',
     'vainglory_publication_revisions',
+    'vainglory_live_analysis_state',
+    'vainglory_live_analysis_windows',
+    'vainglory_live_observations',
     'archive_migration_jobs',
     'archive_migration_items',
     'dashboard_source_state',
@@ -1886,7 +1889,9 @@ async def test_unsupported_shared_filesystem_is_rejected(
 
 
 @pytest.mark.asyncio
-async def test_reads_and_writes_share_one_database_actor(tmp_path: Path) -> None:
+async def test_reads_use_query_only_connection_separate_from_writer(
+    tmp_path: Path,
+) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
     try:
@@ -1894,9 +1899,47 @@ async def test_reads_and_writes_share_one_database_actor(tmp_path: Path) -> None
         read_thread = await database.read(lambda _: threading.get_ident())
         write_thread = await database.write(lambda _: threading.get_ident())
 
-        assert read_thread == write_thread
+        assert read_thread != write_thread
         assert read_thread != caller_thread
+        assert write_thread != caller_thread
+        assert await database.scalar('PRAGMA query_only') == 1
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            await database.read(
+                lambda connection: connection.execute(
+                    "INSERT INTO event_journal(id,event_type,room_id,payload_json,"
+                    "occurred_at) VALUES('read-write','test',1,'{}',1)"
+                )
+            )
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_long_write_does_not_queue_independent_read(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def hold_write(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "INSERT INTO event_journal(id,event_type,room_id,payload_json,occurred_at) "
+            "VALUES('held-write','test',1,'{}',1)"
+        )
+        write_started.set()
+        assert release_write.wait(timeout=2)
+
+    try:
+        write_task = asyncio.create_task(database.write(hold_write))
+        loop = asyncio.get_running_loop()
+        assert await loop.run_in_executor(None, write_started.wait, 1)
+
+        assert await asyncio.wait_for(database.scalar('SELECT 1'), timeout=0.5) == 1
+
+        release_write.set()
+        await write_task
+    finally:
+        release_write.set()
         await database.close()
 
 

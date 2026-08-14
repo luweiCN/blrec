@@ -2,6 +2,8 @@ from io import BytesIO
 from queue import Queue
 from typing import Iterator, List, Optional, Tuple
 
+import pytest
+
 from blrec.vainglory.sampling import (
     CoarseObservation,
     FfmpegSampler,
@@ -40,6 +42,26 @@ def observation(
 
 def test_default_hud_probe_interval_is_five_seconds() -> None:
     assert FfmpegSampler()._coarse_interval_seconds == 5
+
+
+def test_sampler_accepts_only_configured_remote_media_origin() -> None:
+    sampler = FfmpegSampler(trusted_remote_origin='http://nas:2234')
+
+    assert (
+        sampler._media_input('http://nas:2234/api/media?token=one')
+        == 'http://nas:2234/api/media?token=one'
+    )
+    with pytest.raises(ValueError):
+        sampler._media_input('http://attacker.invalid/video.flv')
+    with pytest.raises(ValueError):
+        sampler._media_input('http://user:password@nas:2234/video.flv')
+    with pytest.raises(ValueError):
+        sampler._media_input('http://nas:2234/video.flv#fragment')
+
+
+def test_sampler_rejects_remote_media_when_no_origin_is_configured() -> None:
+    with pytest.raises(ValueError):
+        FfmpegSampler()._media_input('http://nas:2234/video.flv')
 
 
 def test_classification_window_uses_five_second_local_keyframe_scan(

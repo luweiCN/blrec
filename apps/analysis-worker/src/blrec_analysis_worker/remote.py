@@ -84,6 +84,22 @@ def _analysis_summary(dense: DenseScanResult) -> Dict[str, Any]:
     }
 
 
+def _live_claim_identity(claim: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        'kind': str(claim['kind']),
+        'itemId': int(claim['itemId']),
+        'partId': int(claim['partId']),
+        'partIndex': int(claim['partIndex']),
+        'sessionId': int(claim['sessionId']),
+        'leaseOwner': str(claim['leaseOwner']),
+        'leaseGeneration': int(claim['leaseGeneration']),
+        'windowStartMs': claim.get('windowStartMs'),
+        'windowEndMs': claim.get('windowEndMs'),
+        'windowFocusMs': claim.get('windowFocusMs'),
+        'mode': str(claim.get('mode', 'unknown')),
+    }
+
+
 class AnalysisWorkerClient:
     def __init__(
         self,
@@ -119,6 +135,21 @@ class AnalysisWorkerClient:
             return None
         response.raise_for_status()
         return cast(Dict[str, Any], response.json())
+
+    def claim_live(self) -> Optional[Dict[str, Any]]:
+        response = self._session.post(
+            self._url('api/v1/vainglory/worker/live/claim'),
+            headers=self._headers,
+            json=self._registration,
+            timeout=(10, 30),
+        )
+        if response.status_code == 204:
+            return None
+        response.raise_for_status()
+        return cast(Dict[str, Any], response.json())
+
+    def media_url(self, media_path: str) -> str:
+        return urljoin(self._server_url, media_path.lstrip('/'))
 
     def download(self, media_path: str, destination: Path) -> None:
         temporary = destination.with_suffix(destination.suffix + '.download')
@@ -169,6 +200,31 @@ class AnalysisWorkerClient:
             headers=self._headers,
             json=body,
             timeout=(10, 120),
+        )
+        response.raise_for_status()
+
+    def complete_live(self, payload: Mapping[str, Any]) -> None:
+        body = dict(payload)
+        body.update(self._registration)
+        response = self._session.post(
+            self._url('api/v1/vainglory/worker/live/complete'),
+            headers=self._headers,
+            json=body,
+            timeout=(10, 120),
+        )
+        response.raise_for_status()
+
+    def fail_live(self, claim: Mapping[str, Any], error: str) -> None:
+        response = self._session.post(
+            self._url('api/v1/vainglory/worker/live/fail'),
+            headers=self._headers,
+            json={
+                **self._registration,
+                **_live_claim_identity(claim),
+                'error': error[:500],
+                'retry': True,
+            },
+            timeout=(10, 30),
         )
         response.raise_for_status()
 
@@ -323,7 +379,7 @@ class RemoteAnalysisWorker:
             self._cache_dir,
             self._concurrency,
         )
-        if once or self._concurrency == 1:
+        if once:
             client = self._client_factory()
             try:
                 self._run_loop(client, worker_id=0, once=once)
@@ -339,6 +395,13 @@ class RemoteAnalysisWorker:
             )
             for index in range(self._concurrency)
         ]
+        threads.append(
+            threading.Thread(
+                target=self._live_worker_thread,
+                name='analysis-worker-live',
+                daemon=True,
+            )
+        )
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -348,6 +411,13 @@ class RemoteAnalysisWorker:
         client = self._client_factory()
         try:
             self._run_loop(client, worker_id=worker_id, once=False)
+        finally:
+            client.close()
+
+    def _live_worker_thread(self) -> None:
+        client = self._client_factory()
+        try:
+            self._run_live_loop(client)
         finally:
             client.close()
 
@@ -377,6 +447,88 @@ class RemoteAnalysisWorker:
             self._process_claim(client, claim, worker_id=worker_id)
             if once:
                 return
+
+    def _run_live_loop(self, client: AnalysisWorkerClient) -> None:
+        logger.info('独立实时分析线程已启动：worker_id={}', self._worker_id)
+        while not self._stop.is_set():
+            try:
+                claim = client.claim_live()
+            except requests.RequestException as error:
+                logger.warning('实时线程无法从 NAS 领取任务：{!r}', error)
+                if self._stop.wait(self._poll_seconds):
+                    return
+                continue
+            if claim is None:
+                if self._stop.wait(self._poll_seconds):
+                    return
+                continue
+            self._process_live_claim(client, claim)
+
+    def _process_live_claim(
+        self, client: AnalysisWorkerClient, claim: Mapping[str, Any]
+    ) -> None:
+        kind = str(claim['kind'])
+        item_id = int(claim['itemId'])
+        started = time.monotonic()
+        try:
+            part = VideoPart(
+                id=int(claim['partId']),
+                index=int(claim['partIndex']),
+                path=client.media_url(str(claim['mediaPath'])),
+            )
+            if kind == 'coarse':
+                result = self._analyzer.classify_live_point(
+                    part, at_ms=int(claim['targetAtMs'])
+                )
+                payload = {
+                    **_live_claim_identity(claim),
+                    'observation': {
+                        'observedAtMs': result.observed_at_ms,
+                        'stage': result.stage,
+                        'stageConfidence': result.stage_confidence,
+                        'matchFlowLabel': result.match_flow_label,
+                        'matchFlowConfidence': result.match_flow_confidence,
+                        'heroSelectLabel': result.hero_select_label,
+                        'heroSelectConfidence': result.hero_select_confidence,
+                        'matchModeLabel': result.match_mode_label,
+                        'matchModeConfidence': result.match_mode_confidence,
+                        'resultConfidence': result.result_confidence,
+                        'heroLineup': list(result.hero_lineup),
+                    },
+                    'imageJpeg': base64.b64encode(result.image_jpeg).decode('ascii'),
+                    'modelVersion': result.model_version,
+                }
+            elif kind == 'fine':
+                matches = self._analyzer.analyze_live_window(
+                    part,
+                    start_ms=int(claim['windowStartMs']),
+                    end_ms=int(claim['windowEndMs']),
+                    focus_ms=(
+                        None
+                        if claim.get('windowFocusMs') is None
+                        else int(claim['windowFocusMs'])
+                    ),
+                    mode=str(claim.get('mode', 'unknown')),
+                )
+                payload = {
+                    **_live_claim_identity(claim),
+                    'matches': [encode_match(match) for match in matches],
+                }
+            else:
+                raise ValueError('未知实时任务类型：{}'.format(kind))
+            client.complete_live(payload)
+            logger.info(
+                '实时分析任务完成：kind={} item_id={} elapsed_seconds={:.3f}',
+                kind,
+                item_id,
+                time.monotonic() - started,
+            )
+        except Exception as error:
+            logger.exception('实时分析任务失败：kind={} item_id={}', kind, item_id)
+            try:
+                client.fail_live(claim, '{}: {}'.format(type(error).__name__, error))
+            except requests.RequestException as report_error:
+                logger.warning('实时失败状态未能写回 NAS：{!r}', report_error)
 
     def _process_claim(
         self, client: AnalysisWorkerClient, claim: Mapping[str, Any], *, worker_id: int
@@ -549,9 +701,7 @@ class RemoteAnalysisWorker:
                 'kind': kind,
                 'itemId': item_id,
                 'candidateCount': len(dense.scanned_part.candidate_times_ms),
-                'videoDurationSeconds': (
-                    dense.scanned_part.video_duration_ms / 1_000
-                ),
+                'videoDurationSeconds': (dense.scanned_part.video_duration_ms / 1_000),
                 'decodeAnalysisSeconds': decode_analysis_seconds,
                 'matches': [encode_match(match) for match in matches],
                 'analysisSummary': _analysis_summary(dense),

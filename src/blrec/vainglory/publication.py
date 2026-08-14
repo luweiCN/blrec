@@ -1350,7 +1350,9 @@ class VaingloryPublicationService:
             page = await self._repository.list_matches(
                 session_id=session_id, limit=100, offset=offset
             )
-            matches.extend(page.items)
+            matches.extend(
+                match for match in page.items if match.analysis_state == 'final'
+            )
             offset += len(page.items)
             if offset >= page.total or not page.items:
                 return tuple(matches)

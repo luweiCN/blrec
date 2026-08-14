@@ -153,6 +153,12 @@ describe('AnalysisTaskCenterComponent', () => {
       archivePending: 0,
       migrationPending: 0,
       backlogPending: 0,
+      liveStreamCount: 0,
+      liveRunningCount: 0,
+      livePendingWindowCount: 0,
+      liveSampleCount: 0,
+      liveProvisionalMatchCount: 0,
+      liveLastObservedAt: null,
     } satisfies VaingloryAnalysisQueue;
 
     expect(component.workerModelMismatch(queue, queue.workers[0])).toBeFalse();

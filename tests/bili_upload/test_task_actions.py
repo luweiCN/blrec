@@ -755,9 +755,10 @@ async def test_job_batch_uses_one_transaction_and_isolates_rejected_items(
             lambda: wakeups.append('wake')
         )
         statements: List[str] = []
-        await database.read(
+        await database.write(
             lambda connection: connection.set_trace_callback(statements.append)
         )
+        statements.clear()
         original_write = database.write
         write_calls = 0
 

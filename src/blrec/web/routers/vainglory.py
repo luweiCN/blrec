@@ -20,7 +20,7 @@ from blrec.vainglory.analysis_protocol import (
     decode_recorded_player,
     decode_training_candidates,
 )
-from blrec.vainglory.analyzer import AnalysisStatus
+from blrec.vainglory.analyzer import AnalysisStatus, VideoPart
 from blrec.vainglory.archive_backfill import (
     ArchiveBackfillItem,
     ArchiveBackfillNotFound,
@@ -39,6 +39,8 @@ from blrec.vainglory.repository import (
     GameModeStatsRecord,
     HeroRecord,
     HeroStatsRecord,
+    LiveAnalysisClaim,
+    LiveFrameObservation,
     MatchPlayerRecord,
     MatchRecord,
     MatchSessionRecord,
@@ -53,6 +55,7 @@ from blrec.vainglory.repository import (
 from blrec.vainglory.service import VaingloryIndexService
 
 from .. import security
+from . import recording_sessions as recording_sessions_router
 from .bili_accounts import authenticated_manager_subject
 
 service: Optional[VaingloryIndexService] = None
@@ -178,6 +181,62 @@ class AnalysisWorkerFailureRequest(ApiModel):
     failure_kind: Literal['task_error', 'unusable_media'] = 'task_error'
 
 
+class LiveAnalysisObservationRequest(ApiModel):
+    observed_at_ms: int = Field(..., ge=0)
+    stage: int = Field(..., ge=0)
+    stage_confidence: float = Field(..., ge=0, le=1)
+    match_flow_label: str = Field(..., max_length=40)
+    match_flow_confidence: float = Field(..., ge=0, le=1)
+    hero_select_label: str = Field(..., max_length=40)
+    hero_select_confidence: float = Field(..., ge=0, le=1)
+    match_mode_label: str = Field(..., max_length=40)
+    match_mode_confidence: float = Field(..., ge=0, le=1)
+    result_confidence: float = Field(..., ge=0, le=1)
+    hero_lineup: List[str] = Field(default_factory=list, max_items=10)
+
+
+class LiveAnalysisCompletionRequest(ApiModel):
+    worker_id: str = Field('', max_length=100)
+    model_package_id: str = Field('', max_length=100)
+    pipeline_version: str = Field('', max_length=40)
+    concurrency: int = Field(0, ge=0, le=64)
+    kind: Literal['coarse', 'fine']
+    item_id: int = Field(..., ge=1)
+    part_id: int = Field(..., ge=1)
+    part_index: int = Field(..., ge=1)
+    session_id: int = Field(..., ge=1)
+    lease_owner: str = Field(..., min_length=1, max_length=100)
+    lease_generation: int = Field(..., ge=1)
+    window_start_ms: Optional[int] = Field(None, ge=0)
+    window_end_ms: Optional[int] = Field(None, ge=0)
+    window_focus_ms: Optional[int] = Field(None, ge=0)
+    mode: str = Field('unknown', max_length=20)
+    observation: Optional[LiveAnalysisObservationRequest] = None
+    image_jpeg: str = Field('', max_length=1_500_000)
+    model_version: str = Field('', max_length=100)
+    matches: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class LiveAnalysisFailureRequest(ApiModel):
+    worker_id: str = Field('', max_length=100)
+    model_package_id: str = Field('', max_length=100)
+    pipeline_version: str = Field('', max_length=40)
+    concurrency: int = Field(0, ge=0, le=64)
+    kind: Literal['coarse', 'fine']
+    item_id: int = Field(..., ge=1)
+    part_id: int = Field(..., ge=1)
+    part_index: int = Field(..., ge=1)
+    session_id: int = Field(..., ge=1)
+    lease_owner: str = Field(..., min_length=1, max_length=100)
+    lease_generation: int = Field(..., ge=1)
+    window_start_ms: Optional[int] = Field(None, ge=0)
+    window_end_ms: Optional[int] = Field(None, ge=0)
+    window_focus_ms: Optional[int] = Field(None, ge=0)
+    mode: str = Field('unknown', max_length=20)
+    error: str = Field(..., min_length=1, max_length=500)
+    retry: bool = True
+
+
 class MatchPlayerResponse(ApiModel):
     side: str
     slot: int
@@ -235,6 +294,7 @@ class MatchResponse(ApiModel):
     ]
     rerun_state: Optional[Literal['pending', 'running', 'failed']]
     rerun_error: Optional[str]
+    analysis_state: Literal['provisional', 'final'] = 'final'
     players: List[MatchPlayerResponse]
 
 
@@ -632,6 +692,7 @@ def _match(value: MatchRecord) -> MatchResponse:
             Optional[Literal['pending', 'running', 'failed']], value.rerun_state
         ),
         rerun_error=value.rerun_error,
+        analysis_state=value.analysis_state,
         players=[_player(player) for player in value.players],
     )
 
@@ -821,6 +882,35 @@ def _remote_media_path(part_id: int) -> str:
     return '/api/v1/recording-sessions/parts/{}/media?{}'.format(part_id, query)
 
 
+def _live_media_path(
+    part_id: int, access: recording_sessions_router.MediaAccessResponse
+) -> str:
+    values: Dict[str, Any] = {
+        'media_token': access.token,
+        'media_expires': access.expires_at,
+    }
+    if access.snapshot_id is not None:
+        values['media_snapshot'] = access.snapshot_id
+    return '/api/v1/recording-sessions/parts/{}/media?{}'.format(
+        part_id, urlencode(values)
+    )
+
+
+def _live_repository_claim(payload: Any) -> LiveAnalysisClaim:
+    return LiveAnalysisClaim(
+        kind=payload.kind,
+        item_id=payload.item_id,
+        session_id=payload.session_id,
+        part=VideoPart(id=payload.part_id, index=payload.part_index, path=''),
+        lease_owner=payload.lease_owner,
+        lease_generation=payload.lease_generation,
+        window_start_ms=payload.window_start_ms,
+        window_end_ms=payload.window_end_ms,
+        window_focus_ms=payload.window_focus_ms,
+        mode=payload.mode,
+    )
+
+
 @router.get('/workers')
 async def list_analysis_workers(
     _subject: str = Depends(authenticated_manager_subject),
@@ -925,6 +1015,136 @@ async def claim_analysis_work(
     if claim.frame_png:
         payload['framePng'] = base64.b64encode(claim.frame_png).decode('ascii')
     return JSONResponse(payload)
+
+
+@router.post('/worker/live/claim', response_model=None)
+async def claim_live_analysis_work(
+    registration: Optional[AnalysisWorkerClaimRequest] = None,
+    _worker: str = Depends(security.authenticated_analysis_worker),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        claim = await index.claim_remote_live_work(
+            worker_id='' if registration is None else registration.worker_id,
+            model_package_id=(
+                '' if registration is None else registration.model_package_id
+            ),
+            pipeline_version=(
+                '' if registration is None else registration.pipeline_version
+            ),
+            concurrency=0 if registration is None else registration.concurrency,
+        )
+    except VaingloryConflict as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    if claim is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    try:
+        access = await recording_sessions_router.create_recording_media_access(
+            claim.part.id,
+            _subject=_worker,
+            reader=recording_sessions_router.get_content_reader(),
+        )
+        if claim.kind == 'coarse' and (
+            access.duration_ms is None or access.duration_ms <= 0
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='活动录制快照还没有可分析的完整画面',
+            )
+    except HTTPException as error:
+        await index.fail_remote_live_work(claim, str(error.detail), retry=True)
+        raise
+    target_at_ms = 0 if access.duration_ms is None else max(0, access.duration_ms - 500)
+    return JSONResponse(
+        {
+            'kind': claim.kind,
+            'itemId': claim.item_id,
+            'partId': claim.part.id,
+            'partIndex': claim.part.index,
+            'sessionId': claim.session_id,
+            'leaseOwner': claim.lease_owner,
+            'leaseGeneration': claim.lease_generation,
+            'windowStartMs': claim.window_start_ms,
+            'windowEndMs': claim.window_end_ms,
+            'windowFocusMs': claim.window_focus_ms,
+            'mode': claim.mode,
+            'targetAtMs': target_at_ms,
+            'snapshotDurationMs': access.duration_ms,
+            'mediaPath': _live_media_path(claim.part.id, access),
+        }
+    )
+
+
+@router.post('/worker/live/complete', status_code=status.HTTP_204_NO_CONTENT)
+async def complete_live_analysis_work(
+    payload: LiveAnalysisCompletionRequest,
+    _worker: str = Depends(security.authenticated_analysis_worker),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    index.register_remote_worker_activity(
+        worker_id=payload.worker_id,
+        model_package_id=payload.model_package_id,
+        pipeline_version=payload.pipeline_version,
+        concurrency=payload.concurrency,
+    )
+    claim = _live_repository_claim(payload)
+    try:
+        if payload.kind == 'coarse':
+            if payload.observation is None:
+                raise ValueError('实时粗扫缺少单帧分类结果')
+            observation = payload.observation
+            image_jpeg = (
+                b''
+                if not payload.image_jpeg
+                else base64.b64decode(payload.image_jpeg, validate=True)
+            )
+            await index.complete_remote_live_observation(
+                claim,
+                LiveFrameObservation(
+                    observed_at_ms=observation.observed_at_ms,
+                    stage=observation.stage,
+                    stage_confidence=observation.stage_confidence,
+                    match_flow_label=observation.match_flow_label,
+                    match_flow_confidence=observation.match_flow_confidence,
+                    hero_select_label=observation.hero_select_label,
+                    hero_select_confidence=observation.hero_select_confidence,
+                    match_mode_label=observation.match_mode_label,
+                    match_mode_confidence=observation.match_mode_confidence,
+                    result_confidence=observation.result_confidence,
+                    hero_lineup=tuple(observation.hero_lineup),
+                ),
+                image_jpeg=image_jpeg,
+                model_version=payload.model_version,
+            )
+        else:
+            await index.complete_remote_live_window(
+                claim, decode_matches(payload.matches)
+            )
+    except (KeyError, TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Worker 返回的实时结果无效：{}'.format(error),
+        ) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post('/worker/live/fail', status_code=status.HTTP_204_NO_CONTENT)
+async def fail_live_analysis_work(
+    payload: LiveAnalysisFailureRequest,
+    _worker: str = Depends(security.authenticated_analysis_worker),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    index.register_remote_worker_activity(
+        worker_id=payload.worker_id,
+        model_package_id=payload.model_package_id,
+        pipeline_version=payload.pipeline_version,
+        concurrency=payload.concurrency,
+    )
+    await index.fail_remote_live_work(
+        _live_repository_claim(payload), payload.error, retry=payload.retry
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post('/worker/heartbeat', status_code=status.HTTP_204_NO_CONTENT)

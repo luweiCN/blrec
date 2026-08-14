@@ -902,6 +902,23 @@ class TimelinePoint:
 
 
 @dataclass(frozen=True)
+class LiveFrameResult:
+    observed_at_ms: int
+    stage: int
+    stage_confidence: float
+    match_flow_label: str
+    match_flow_confidence: float
+    hero_select_label: str
+    hero_select_confidence: float
+    match_mode_label: str
+    match_mode_confidence: float
+    result_confidence: float
+    hero_lineup: Tuple[str, ...] = ()
+    model_version: str = ''
+    image_jpeg: bytes = b''
+
+
+@dataclass(frozen=True)
 class TimelineSegment:
     start_ms: int
     end_ms: int
@@ -1311,6 +1328,77 @@ class VaingloryVideoAnalyzer:
             progress=recognition_progress,
             status_callback=status_callback,
             cancelled=cancelled,
+        )
+
+    def classify_live_point(self, part: VideoPart, *, at_ms: int) -> LiveFrameResult:
+        if self._stage_classifier is None:
+            raise RuntimeError('实时粗扫需要阶段分类模型')
+        profile = self._sampler.probe(part.path)
+        observed_at_ms = max(0, min(int(at_ms), max(0, profile.duration_ms - 1)))
+        frame = self._sampler.frame_at(part.path, observed_at_ms)
+        prediction = self._stage_classifier.classify(frame)
+        lineup: Tuple[str, ...] = ()
+        if prediction.match_flow_label == 'match_flow':
+            team_size: Optional[TeamSize] = (
+                5
+                if prediction.match_mode_label == '5v5'
+                else (3 if prediction.match_mode_label in ('3v3', 'aram') else None)
+            )
+            if team_size is not None:
+                lineup = self._recognize_detected_hud_lineup(
+                    normalize_gameplay_frame(frame), team_size=team_size
+                )
+        return LiveFrameResult(
+            observed_at_ms=observed_at_ms,
+            stage=prediction.stage,
+            stage_confidence=prediction.stage_conf,
+            match_flow_label=prediction.match_flow_label,
+            match_flow_confidence=prediction.match_flow_conf,
+            hero_select_label=prediction.hero_select_label,
+            hero_select_confidence=prediction.hero_select_conf,
+            match_mode_label=prediction.match_mode_label,
+            match_mode_confidence=prediction.match_mode_conf,
+            result_confidence=prediction.result_conf,
+            hero_lineup=lineup,
+            model_version=prediction.model_version,
+            image_jpeg=_high_quality_training_jpeg(frame),
+        )
+
+    def analyze_live_window(
+        self,
+        part: VideoPart,
+        *,
+        start_ms: int,
+        end_ms: int,
+        focus_ms: Optional[int] = None,
+        mode: str = 'unknown',
+    ) -> Tuple[AnalyzedMatch, ...]:
+        profile = self._sampler.probe(part.path)
+        bounded_start = max(0, min(int(start_ms), profile.duration_ms))
+        bounded_end = max(bounded_start, min(int(end_ms), profile.duration_ms))
+        if bounded_end <= bounded_start:
+            return ()
+        bounded_focus = (
+            None
+            if focus_ms is None
+            else max(bounded_start, min(int(focus_ms), bounded_end))
+        )
+        window = ScanWindow(
+            start_ms=bounded_start, end_ms=bounded_end, focus_ms=bounded_focus
+        )
+        scanned = self._scan_window(part.path, window, part_id=part.id)
+        if not scanned.hits:
+            return ()
+        candidate_mode = mode if mode in ('3v3', 'aram', '5v5') else 'unknown'
+        return self.recognize_scanned_part(
+            part,
+            ScannedPart(
+                video_duration_ms=profile.duration_ms,
+                candidate_times_ms=tuple(hit.at_ms for hit in scanned.hits),
+                candidate_view_contexts=tuple(hit.view_context for hit in scanned.hits),
+                candidate_hero_lineups=tuple(hit.hero_lineup for hit in scanned.hits),
+                candidate_modes=tuple(candidate_mode for _hit in scanned.hits),
+            ),
         )
 
     def recognize_candidate(

@@ -91,6 +91,9 @@ class Client:
                 return None
             return dict(self._queue.pop(0))
 
+    def claim_live(self) -> Optional[Dict[str, Any]]:
+        return None
+
     def download(self, media_path: str, destination: Path) -> None:
         destination.write_bytes(b'x')
 
@@ -101,6 +104,15 @@ class Client:
 
     def complete(self, payload: Mapping[str, Any]) -> None:
         self.completed_payloads.append(dict(payload))
+
+    def complete_live(self, payload: Mapping[str, Any]) -> None:
+        self.completed_payloads.append(dict(payload))
+
+    def fail_live(self, claim: Mapping[str, Any], error: str) -> None:
+        self.failures.append({'claim': dict(claim), 'error': error})
+
+    def media_url(self, media_path: str) -> str:
+        return 'http://nas:2234{}'.format(media_path)
 
     def fail(
         self, *, kind: str, item_id: int, error: str, failure_kind: str = 'task_error'
@@ -165,6 +177,36 @@ def test_client_reports_loaded_model_while_polling_for_work() -> None:
             'modelPackageId': 'vg-vision-v2',
             'pipelineVersion': 'timeline-v2',
             'concurrency': 0,
+        },
+        timeout=(10, 30),
+    )
+
+
+def test_client_uses_dedicated_live_queue_endpoint() -> None:
+    response = mock.Mock(status_code=204)
+    session = mock.Mock()
+    session.post.return_value = response
+    with mock.patch(
+        'blrec_analysis_worker.remote.requests.Session', return_value=session
+    ):
+        client = AnalysisWorkerClient(
+            'http://nas:2234',
+            'token',
+            worker_id='mac-studio',
+            model_package_id='vg-vision-v2',
+            pipeline_version='timeline-v2',
+            concurrency=3,
+        )
+
+    assert client.claim_live() is None
+    session.post.assert_called_once_with(
+        'http://nas:2234/api/v1/vainglory/worker/live/claim',
+        headers={'X-BLREC-Analysis-Worker-Token': 'token'},
+        json={
+            'workerId': 'mac-studio',
+            'modelPackageId': 'vg-vision-v2',
+            'pipelineVersion': 'timeline-v2',
+            'concurrency': 3,
         },
         timeout=(10, 30),
     )
@@ -248,7 +290,7 @@ def test_parallel_workers_process_claims_concurrently(tmp_path: Path) -> None:
     thread.start()
     assert _wait_until(lambda: analyzer.completed >= 2)
     assert analyzer.max_active >= 2, '两个任务没有真正并行处理'
-    assert len(clients) == 2, '每个并发线程应创建独立的 client'
+    assert len(clients) == 3, '两个录播线程和一个实时线程应各有独立 client'
     worker.stop()
     thread.join(timeout=5)
     assert not thread.is_alive()

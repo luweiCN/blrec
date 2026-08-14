@@ -329,17 +329,17 @@ async def test_status_aggregates_persisted_live_sizes_without_file_io(
         manager = RetentionManager(database, root, capacity_bytes=lambda: 1_000)
         database_calls = []
         filesystem_calls = []
-        original_run = database._run
+        original_run_read = database._run_read
 
-        async def counting_run(operation, *args):
+        async def counting_run_read(operation, *args):
             database_calls.append(operation.__name__)
-            return await original_run(operation, *args)
+            return await original_run_read(operation, *args)
 
         def forbidden_paths_size(paths) -> int:
             filesystem_calls.append(tuple(paths))
             raise AssertionError('retention status must not inspect recording paths')
 
-        monkeypatch.setattr(database, '_run', counting_run)
+        monkeypatch.setattr(database, '_run_read', counting_run_read)
         monkeypatch.setattr(manager, '_paths_size', forbidden_paths_size)
 
         status = await manager.status()

@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Queue
 from typing import IO, Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 from .vision import RgbFrame
 
@@ -441,6 +442,7 @@ class FfmpegSampler:
         coarse_interval_seconds: int = 5,
         fine_frames_per_second: int = 4,
         maximum_keyframe_distance_ms: Optional[int] = None,
+        trusted_remote_origin: Optional[str] = None,
     ) -> None:
         if coarse_interval_seconds < 1:
             raise ValueError('coarse interval must be positive')
@@ -457,17 +459,28 @@ class FfmpegSampler:
         self._fine_frames_per_second = fine_frames_per_second
         self._maximum_keyframe_distance_ms = maximum_keyframe_distance_ms
         self._profile_cache: Dict[str, Tuple[int, int, VideoProfile]] = {}
+        self._remote_profile_cache: Dict[str, VideoProfile] = {}
+        self._trusted_remote_origin = self._normalize_remote_origin(
+            trusted_remote_origin
+        )
 
     @property
     def coarse_interval_seconds(self) -> int:
         return self._coarse_interval_seconds
 
     def probe(self, path: str) -> VideoProfile:
-        resolved = self._regular_file(path)
-        stat = Path(resolved).stat()
-        cached = self._profile_cache.get(resolved)
-        if cached is not None and cached[:2] == (stat.st_mtime_ns, stat.st_size):
-            return cached[2]
+        resolved = self._media_input(path)
+        remote = self._is_remote_input(resolved)
+        if remote:
+            remote_cached = self._remote_profile_cache.get(resolved)
+            if remote_cached is not None:
+                return remote_cached
+            stat = None
+        else:
+            stat = Path(resolved).stat()
+            cached = self._profile_cache.get(resolved)
+            if cached is not None and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+                return cached[2]
         command = [
             self._ffprobe,
             '-v',
@@ -505,7 +518,11 @@ class FfmpegSampler:
         if duration_ms <= 0 or width <= 0 or height <= 0:
             raise UnusableVideoError('视频尺寸或时长无效')
         profile = VideoProfile(width=width, height=height, duration_ms=duration_ms)
-        self._profile_cache[resolved] = (stat.st_mtime_ns, stat.st_size, profile)
+        if remote:
+            self._remote_profile_cache[resolved] = profile
+        else:
+            assert stat is not None
+            self._profile_cache[resolved] = (stat.st_mtime_ns, stat.st_size, profile)
         return profile
 
     def coarse_frames(self, path: str) -> Iterator[TimedFrame]:
@@ -628,7 +645,7 @@ class FfmpegSampler:
             bin_expression, previous_bin_expression
         )
         selection = '{}*({})'.format(within_distance, first_in_bin)
-        resolved = self._regular_file(path)
+        resolved = self._media_input(path)
         command = [
             self._ffmpeg,
             '-nostdin',
@@ -714,7 +731,7 @@ class FfmpegSampler:
     def _seek_frame(
         self, path: str, at_ms: int, *, width: int, height: int
     ) -> TimedFrame:
-        resolved = self._regular_file(path)
+        resolved = self._media_input(path)
         command = [
             self._ffmpeg,
             '-nostdin',
@@ -795,7 +812,7 @@ class FfmpegSampler:
     def frame_at(self, path: str, at_ms: int) -> RgbFrame:
         if at_ms < 0:
             raise ValueError('frame time must not be negative')
-        resolved = self._regular_file(path)
+        resolved = self._media_input(path)
         profile = self.probe(path)
         width, height = fit_frame_dimensions(profile.width, profile.height, 1920, 1080)
         command = [
@@ -927,7 +944,7 @@ class FfmpegSampler:
         sample_source: Literal['decoded', 'keyframe', 'seek_fill'] = 'decoded',
         variable_frame_rate: bool = False,
     ) -> Iterator[TimedFrame]:
-        resolved = self._regular_file(path)
+        resolved = self._media_input(path)
         command = [self._ffmpeg, '-nostdin', '-v', 'error', '-threads', str(threads)]
         if skip_frame is not None:
             command.extend(('-skip_frame', skip_frame))
@@ -1011,6 +1028,44 @@ class FfmpegSampler:
         if not resolved.is_file():
             raise ValueError('video path must be an existing regular file')
         return str(resolved)
+
+    @staticmethod
+    def _is_remote_input(path: str) -> bool:
+        return urlsplit(path).scheme in ('http', 'https')
+
+    @staticmethod
+    def _normalize_remote_origin(origin: Optional[str]) -> Optional[str]:
+        if origin is None or not origin.strip():
+            return None
+        parsed = urlsplit(origin.strip())
+        if (
+            parsed.scheme not in ('http', 'https')
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in ('', '/')
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError('trusted remote media origin must be an HTTP origin')
+        return '{}://{}'.format(parsed.scheme.lower(), parsed.netloc.lower())
+
+    def _media_input(self, path: str) -> str:
+        parsed = urlsplit(path)
+        if parsed.scheme in ('http', 'https'):
+            if (
+                parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                raise ValueError('remote video URL contains forbidden components')
+            origin = '{}://{}'.format(parsed.scheme.lower(), parsed.netloc.lower())
+            if self._trusted_remote_origin != origin:
+                raise ValueError('remote video URL is not from the configured server')
+            return path
+        if parsed.scheme:
+            raise ValueError('video input scheme is not supported')
+        return self._regular_file(path)
 
     @staticmethod
     def _run_ffmpeg(

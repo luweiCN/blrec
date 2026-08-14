@@ -349,6 +349,12 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
         'archivePending': 0,
         'migrationPending': 0,
         'backlogPending': 0,
+        'liveStreamCount': 0,
+        'liveRunningCount': 0,
+        'livePendingWindowCount': 0,
+        'liveSampleCount': 0,
+        'liveProvisionalMatchCount': 0,
+        'liveLastObservedAt': None,
     }
     index_summary: Dict[str, int] = {
         'matchCount': 0,
@@ -519,6 +525,12 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
             'archivePending': queue_status.archive_pending,
             'migrationPending': queue_status.migration_pending,
             'backlogPending': queue_status.backlog_pending,
+            'liveStreamCount': queue_status.live_stream_count,
+            'liveRunningCount': queue_status.live_running_count,
+            'livePendingWindowCount': queue_status.live_pending_window_count,
+            'liveSampleCount': queue_status.live_sample_count,
+            'liveProvisionalMatchCount': queue_status.live_provisional_match_count,
+            'liveLastObservedAt': queue_status.live_last_observed_at,
         }
         index_summary = {
             'matchCount': summary.match_count,

@@ -570,6 +570,47 @@
     </ol>
   </section>
 
+  <section class="analysis-task-section" aria-labelledby="live-analysis-title">
+    <header class="analysis-section-heading">
+      <div>
+        <h3 id="live-analysis-title">直播预分析</h3>
+        <span>独立队列，每 30 秒抽取直播画面</span>
+      </div>
+    </header>
+    <dl class="analysis-queue-counts">
+      <div>
+        <dt>直播中</dt>
+        <dd>{{ taskQueue.liveStreamCount }}</dd>
+      </div>
+      <div>
+        <dt>正在分析</dt>
+        <dd>{{ taskQueue.liveRunningCount }}</dd>
+      </div>
+      <div>
+        <dt>待精扫</dt>
+        <dd>{{ taskQueue.livePendingWindowCount }}</dd>
+      </div>
+      <div>
+        <dt>已抽帧</dt>
+        <dd>{{ taskQueue.liveSampleCount }}</dd>
+      </div>
+      <div>
+        <dt>临时对局</dt>
+        <dd>{{ taskQueue.liveProvisionalMatchCount }}</dd>
+      </div>
+      <div>
+        <dt>最近抽帧</dt>
+        <dd>
+          {{
+            taskQueue.liveLastObservedAt === null
+              ? '—'
+              : (taskQueue.liveLastObservedAt * 1000 | date: 'HH:mm:ss')
+          }}
+        </dd>
+      </div>
+    </dl>
+  </section>
+
   <section class="analysis-task-section" aria-labelledby="queue-summary-title">
     <header class="analysis-section-heading">
       <div>

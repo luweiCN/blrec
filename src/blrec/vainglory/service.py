@@ -45,6 +45,8 @@ from .repository import (
     AnchorStatsRecord,
     HeroStatsRecord,
     IndexSummary,
+    LiveAnalysisClaim,
+    LiveFrameObservation,
     ManualMatchMarkerRecord,
     MatchPage,
     MatchRecord,
@@ -161,6 +163,7 @@ class VaingloryIndexService:
         self._ocr_task: Optional[asyncio.Task[None]] = None
         self._analysis_lock = asyncio.Lock()
         self._remote_claim_lock = asyncio.Lock()
+        self._remote_live_claim_lock = asyncio.Lock()
         self._runtime_lock = threading.Lock()
         self._runtime_status: Dict[int, AnalysisStatus] = {}
         self._runtime_events: Dict[int, List[AnalysisQueueEvent]] = {}
@@ -553,6 +556,102 @@ class VaingloryIndexService:
             )
         finally:
             self._remote_claim_lock.release()
+
+    async def claim_remote_live_work(
+        self,
+        *,
+        worker_id: str = '',
+        model_package_id: str = '',
+        pipeline_version: str = '',
+        concurrency: int = 0,
+    ) -> Optional[LiveAnalysisClaim]:
+        try:
+            await asyncio.wait_for(
+                self._remote_live_claim_lock.acquire(),
+                timeout=self._remote_claim_wait_seconds,
+            )
+        except asyncio.TimeoutError:
+            return None
+        try:
+            if worker_id:
+                worker = await self._repository.register_analysis_worker(
+                    worker_id,
+                    model_package_id=model_package_id,
+                    pipeline_version=pipeline_version,
+                    concurrency=concurrency,
+                )
+                if not worker.enabled:
+                    self._require_remote_worker(
+                        worker_id=worker_id,
+                        model_package_id=model_package_id,
+                        pipeline_version=pipeline_version,
+                        concurrency=concurrency,
+                    )
+                    return None
+            self._require_remote_worker(
+                worker_id=worker_id,
+                model_package_id=model_package_id,
+                pipeline_version=pipeline_version,
+                concurrency=concurrency,
+            )
+            claim = await self._repository.claim_live_analysis(
+                worker_id.strip() or 'remote-live-worker'
+            )
+            if claim is None:
+                return None
+            self._assign_remote_live_work(claim, worker_id)
+            return claim
+        finally:
+            self._remote_live_claim_lock.release()
+
+    def _assign_remote_live_work(
+        self, claim: LiveAnalysisClaim, worker_id: str
+    ) -> None:
+        if not worker_id:
+            return
+        with self._runtime_lock:
+            now = time.monotonic()
+            self._remote_task_workers[('live_{}'.format(claim.kind), claim.item_id)] = (
+                _RemoteWorkAssignment(
+                    worker_id=worker_id, started_at=now, last_seen=now
+                )
+            )
+
+    async def complete_remote_live_observation(
+        self,
+        claim: LiveAnalysisClaim,
+        observation: LiveFrameObservation,
+        *,
+        image_jpeg: bytes = b'',
+        model_version: str = '',
+    ) -> bool:
+        self._require_remote_worker()
+        selected = await self._repository.complete_live_observation(
+            claim, observation, image_jpeg=image_jpeg, model_version=model_version
+        )
+        await self._record_remote_work_result(
+            'live_coarse', claim.item_id, succeeded=True
+        )
+        return selected
+
+    async def complete_remote_live_window(
+        self, claim: LiveAnalysisClaim, matches: Sequence[AnalyzedMatch]
+    ) -> int:
+        self._require_remote_worker()
+        stored = await self._repository.complete_live_window(claim, matches)
+        await self._record_remote_work_result(
+            'live_fine', claim.item_id, succeeded=True
+        )
+        return stored
+
+    async def fail_remote_live_work(
+        self, claim: LiveAnalysisClaim, error: str, *, retry: bool = True
+    ) -> None:
+        self._require_remote_worker()
+        await self._repository.fail_live_analysis(claim, error, retry=retry)
+        await self._record_remote_work_result(
+            'live_{}'.format(claim.kind), claim.item_id, succeeded=False
+        )
 
     async def _claim_remote_work(
         self,

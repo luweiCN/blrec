@@ -5,6 +5,7 @@ import fcntl
 import os
 import sqlite3
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -62,9 +63,10 @@ _T = TypeVar('_T')
 
 
 class BiliUploadDatabase:
-    LATEST_SCHEMA_VERSION = 72
+    LATEST_SCHEMA_VERSION = 73
     LEASE_TTL_SECONDS = 120
     RENEW_WINDOW_SECONDS = 60
+    READ_WORKERS = 4
     _CLAIM_TABLES = frozenset(
         ('upload_jobs', 'comment_items', 'danmaku_items', 'highlight_clips')
     )
@@ -77,7 +79,12 @@ class BiliUploadDatabase:
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix='blrec-upload-db'
         )
+        self._read_executor = ThreadPoolExecutor(
+            max_workers=self.READ_WORKERS, thread_name_prefix='blrec-upload-db-read'
+        )
         self._connection: Optional[sqlite3.Connection] = None
+        self._read_connections: Dict[int, sqlite3.Connection] = {}
+        self._read_connections_lock = threading.Lock()
         self._lock_file: Optional[BinaryIO] = None
         self._lifecycle_lock = asyncio.Lock()
         self._executor_closed = False
@@ -99,6 +106,8 @@ class BiliUploadDatabase:
             if self._executor_closed:
                 return
             try:
+                self._read_executor.shutdown(wait=True)
+                self._close_read_connections_sync()
                 await self._run(self._close_sync)
             finally:
                 self._executor.shutdown(wait=True)
@@ -108,7 +117,7 @@ class BiliUploadDatabase:
         await self._run(self._checkpoint_sync)
 
     async def read(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
-        return await self._run(self._read_sync, operation)
+        return await self._run_read(self._read_sync, operation)
 
     async def write(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
         return await self._run(self._write_sync, operation)
@@ -119,12 +128,12 @@ class BiliUploadDatabase:
     async def fetchone(
         self, sql: str, parameters: Sequence[Any] = ()
     ) -> Optional[sqlite3.Row]:
-        return await self._run(self._fetchone_sync, sql, tuple(parameters))
+        return await self._run_read(self._fetchone_sync, sql, tuple(parameters))
 
     async def fetchall(
         self, sql: str, parameters: Sequence[Any] = ()
     ) -> List[sqlite3.Row]:
-        return await self._run(self._fetchall_sync, sql, tuple(parameters))
+        return await self._run_read(self._fetchall_sync, sql, tuple(parameters))
 
     async def scalar(self, sql: str, parameters: Sequence[Any] = ()) -> Any:
         row = await self.fetchone(sql, parameters)
@@ -224,6 +233,18 @@ class BiliUploadDatabase:
         finally:
             record_database_call(time.perf_counter() - started)
 
+    async def _run_read(self, operation: Callable[..., _T], *args: Any) -> _T:
+        if self._executor_closed:
+            raise RuntimeError('database has been closed')
+        loop = asyncio.get_running_loop()
+        started = time.perf_counter()
+        try:
+            return await loop.run_in_executor(
+                self._read_executor, partial(operation, *args)
+            )
+        finally:
+            record_database_call(time.perf_counter() - started)
+
     def _open_sync(self) -> None:
         self._directory.mkdir(parents=True, mode=0o700, exist_ok=True)
         os.chmod(self._directory, 0o700)
@@ -265,13 +286,20 @@ class BiliUploadDatabase:
             finally:
                 lock_file.close()
 
+    def _close_read_connections_sync(self) -> None:
+        with self._read_connections_lock:
+            connections = tuple(self._read_connections.values())
+            self._read_connections.clear()
+        for connection in connections:
+            connection.close()
+
     def _checkpoint_sync(self) -> None:
         connection = self._require_connection()
         connection.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
         self._secure_database_files()
 
     def _read_sync(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
-        return operation(self._require_connection())
+        return operation(self._read_connection())
 
     def _write_sync(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
         connection = self._require_connection()
@@ -293,12 +321,12 @@ class BiliUploadDatabase:
     def _fetchone_sync(
         self, sql: str, parameters: Tuple[Any, ...]
     ) -> Optional[sqlite3.Row]:
-        return self._require_connection().execute(sql, parameters).fetchone()
+        return self._read_connection().execute(sql, parameters).fetchone()
 
     def _fetchall_sync(
         self, sql: str, parameters: Tuple[Any, ...]
     ) -> List[sqlite3.Row]:
-        return list(self._require_connection().execute(sql, parameters).fetchall())
+        return list(self._read_connection().execute(sql, parameters).fetchall())
 
     def _claim_sync(
         self,
@@ -571,6 +599,27 @@ class BiliUploadDatabase:
         ):
             if path.exists():
                 os.chmod(path, 0o600)
+
+    def _read_connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise RuntimeError('database is not open')
+        thread_id = threading.get_ident()
+        with self._read_connections_lock:
+            existing = self._read_connections.get(thread_id)
+            if existing is not None:
+                return existing
+            connection = sqlite3.connect(
+                self._path.as_uri() + '?mode=ro',
+                uri=True,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute('PRAGMA query_only=ON')
+            connection.execute('PRAGMA foreign_keys=ON')
+            connection.execute('PRAGMA busy_timeout=5000')
+            self._read_connections[thread_id] = connection
+            return connection
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:

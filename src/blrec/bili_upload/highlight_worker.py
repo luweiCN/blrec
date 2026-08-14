@@ -313,18 +313,22 @@ class HighlightWorker:
             if state == 'processing' and (
                 str(row['deletion_state']) != 'none' or deleting_source
             ):
-                self._remove_work_files(video_path, xml_path, include_final=False)
                 owner = row['lease_owner']
-                if owner is not None:
-                    claim = _ClaimedClip(
-                        id=clip_id,
-                        lease_owner=str(owner),
-                        lease_generation=int(row['lease_generation']),
-                        lease_until=int(row['lease_until'] or 0),
-                        attempt=int(row['attempt']),
-                        cancellation_generation=owner_source_generation,
-                    )
+                if owner is None:
+                    continue
+                claim = _ClaimedClip(
+                    id=clip_id,
+                    lease_owner=str(owner),
+                    lease_generation=int(row['lease_generation']),
+                    lease_until=int(row['lease_until'] or 0),
+                    attempt=int(row['attempt']),
+                    cancellation_generation=owner_source_generation,
+                )
+                try:
                     await self._complete_cancelled(claim, 'ffmpeg_cut')
+                except LeaseLost:
+                    continue
+                self._remove_work_files(video_path, xml_path, include_final=False)
                 recovered += 1
                 audit(
                     'highlight_clip_recovered',

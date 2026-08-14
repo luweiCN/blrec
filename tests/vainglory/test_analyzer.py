@@ -86,6 +86,49 @@ def analyzed_match(at_ms: int, duration_seconds: int) -> AnalyzedMatch:
     )
 
 
+def test_live_point_uses_snapshot_timestamp_and_new_model_outputs(monkeypatch) -> None:
+    frame = RgbFrame(2, 1, b'\x00\x00\x00' * 2)
+
+    class Sampler:
+        def probe(self, _path: str) -> VideoProfile:
+            return VideoProfile(width=2, height=1, duration_ms=60_000)
+
+        def frame_at(self, _path: str, at_ms: int) -> RgbFrame:
+            assert at_ms == 59_999
+            return frame
+
+    class Classifier:
+        def classify(self, _frame: RgbFrame) -> StagePrediction:
+            return StagePrediction(
+                content=CONTENT_VAINGLORY,
+                content_conf=0.99,
+                stage=STAGE_OUT_OF_MATCH,
+                stage_conf=0.96,
+                mode=MODE_3V3,
+                mode_conf=0.8,
+                model_version='package-v1',
+                match_flow_label='not_match_flow',
+                match_flow_conf=0.94,
+                hero_select_label='not_select',
+                hero_select_conf=0.93,
+                match_mode_label='3v3',
+                match_mode_conf=0.8,
+                result_conf=0.03,
+            )
+
+    monkeypatch.setattr(analyzer_module, '_high_quality_training_jpeg', lambda _f: b'j')
+    analyzer = VaingloryVideoAnalyzer(sampler=Sampler(), stage_classifier=Classifier())
+
+    result = analyzer.classify_live_point(
+        VideoPart(id=1, index=1, path='snapshot'), at_ms=90_000
+    )
+
+    assert result.observed_at_ms == 59_999
+    assert result.match_flow_label == 'not_match_flow'
+    assert result.model_version == 'package-v1'
+    assert result.image_jpeg == b'j'
+
+
 def test_result_hits_collapse_repeated_frames_and_overlapping_windows() -> None:
     collapsed = collapse_result_hits(
         (

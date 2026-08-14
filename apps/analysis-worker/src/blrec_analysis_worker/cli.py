@@ -10,6 +10,7 @@ import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -87,7 +88,11 @@ def _execution_providers(name: str) -> Tuple[str, ...]:
 
 
 def _build_analyzer(
-    *, ocr_url: str, providers: Sequence[str], model_package_path: Optional[Path]
+    *,
+    ocr_url: str,
+    providers: Sequence[str],
+    model_package_path: Optional[Path],
+    trusted_remote_origin: Optional[str] = None,
 ) -> Tuple[VaingloryVideoAnalyzer, ModelPackage]:
     if model_package_path is None:
         raise ValueError(
@@ -99,6 +104,7 @@ def _build_analyzer(
         coarse_interval_seconds=max(1, package.runtime.coarse_interval_ms // 1_000),
         fine_frames_per_second=package.runtime.result_scan_fps,
         maximum_keyframe_distance_ms=package.runtime.maximum_keyframe_distance_ms,
+        trusted_remote_origin=trusted_remote_origin,
     )
     logger.info(
         '已加载视觉模型包：package_id={} pipeline_version={} models={}',
@@ -273,8 +279,13 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
         raise ValueError('Worker ID 不能为空')
     token = load_worker_token(arguments.token_file)
     providers = _execution_providers(arguments.execution_provider)
+    parsed_server = urlsplit(server_url)
+    trusted_remote_origin = '{}://{}'.format(parsed_server.scheme, parsed_server.netloc)
     analyzer, package = _build_analyzer(
-        ocr_url=ocr_url, providers=providers, model_package_path=arguments.model_package
+        ocr_url=ocr_url,
+        providers=providers,
+        model_package_path=arguments.model_package,
+        trusted_remote_origin=trusted_remote_origin,
     )
     RemoteAnalysisWorker(
         lambda: AnalysisWorkerClient(

@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from blrec.vainglory.analyzer import VideoPart
 from blrec.vainglory.archive_backfill import (
     ArchiveContentReview,
     ArchiveContentReviewPage,
@@ -17,6 +18,7 @@ from blrec.vainglory.repository import (
     AnchorStatsRecord,
     GameModeStatsRecord,
     HeroStatsRecord,
+    LiveAnalysisClaim,
     MatchPage,
     MatchPlayerRecord,
     MatchRecord,
@@ -961,3 +963,52 @@ def test_worker_completion_forwards_efficiency_metrics() -> None:
         video_duration_seconds=3_600,
         decode_analysis_seconds=120,
     )
+
+
+def test_live_worker_claim_uses_frozen_recording_snapshot(monkeypatch) -> None:
+    service = SimpleNamespace(
+        claim_remote_live_work=AsyncMock(
+            return_value=LiveAnalysisClaim(
+                kind='coarse',
+                item_id=7,
+                session_id=9,
+                part=VideoPart(id=7, index=2, path='/recording.flv'),
+                lease_owner='mac-studio',
+                lease_generation=3,
+            )
+        ),
+        fail_remote_live_work=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        vainglory.recording_sessions_router, 'get_content_reader', lambda: object()
+    )
+    monkeypatch.setattr(
+        vainglory.recording_sessions_router,
+        'create_recording_media_access',
+        AsyncMock(
+            return_value=SimpleNamespace(
+                token='signed',
+                expires_at=2_000,
+                snapshot_id='snapshot-one',
+                duration_ms=60_000,
+            )
+        ),
+    )
+    application = FastAPI()
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[
+        vainglory.security.authenticated_analysis_worker
+    ] = lambda: 'analysis-worker'
+    application.dependency_overrides[vainglory.get_service] = lambda: service
+
+    with TestClient(application) as client:
+        response = client.post(
+            '/api/v1/vainglory/worker/live/claim',
+            json={'workerId': 'mac-studio', 'concurrency': 3},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['targetAtMs'] == 59_500
+    assert 'media_snapshot=snapshot-one' in payload['mediaPath']
+    assert 'media_token=signed' in payload['mediaPath']

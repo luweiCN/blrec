@@ -313,6 +313,12 @@ export interface VaingloryAnalysisQueue {
   readonly archivePending: number;
   readonly migrationPending: number;
   readonly backlogPending: number;
+  readonly liveStreamCount: number;
+  readonly liveRunningCount: number;
+  readonly livePendingWindowCount: number;
+  readonly liveSampleCount: number;
+  readonly liveProvisionalMatchCount: number;
+  readonly liveLastObservedAt: number | null;
 }
 
 export interface VaingloryIndexSummary {

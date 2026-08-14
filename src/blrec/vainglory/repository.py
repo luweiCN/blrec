@@ -336,6 +336,35 @@ class ScanClaim:
 
 
 @dataclass(frozen=True)
+class LiveAnalysisClaim:
+    kind: Literal['coarse', 'fine']
+    item_id: int
+    session_id: int
+    part: VideoPart
+    lease_owner: str
+    lease_generation: int
+    window_start_ms: Optional[int] = None
+    window_end_ms: Optional[int] = None
+    window_focus_ms: Optional[int] = None
+    mode: str = 'unknown'
+
+
+@dataclass(frozen=True)
+class LiveFrameObservation:
+    observed_at_ms: int
+    stage: int
+    stage_confidence: float
+    match_flow_label: str
+    match_flow_confidence: float
+    hero_select_label: str
+    hero_select_confidence: float
+    match_mode_label: str
+    match_mode_confidence: float
+    result_confidence: float
+    hero_lineup: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class OcrClaim:
     session_id: int
     part: VideoPart
@@ -449,6 +478,12 @@ class AnalysisQueueStatus:
     migration_pending: int
     backlog_pending: int
     recent_completions: Tuple[AnalysisQueueCompletion, ...] = ()
+    live_stream_count: int = 0
+    live_running_count: int = 0
+    live_pending_window_count: int = 0
+    live_sample_count: int = 0
+    live_provisional_match_count: int = 0
+    live_last_observed_at: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -574,6 +609,7 @@ class MatchRecord:
     previous_archive_page: Optional[int] = None
     previous_archive_duration_seconds: Optional[int] = None
     previous_archive_segments: Tuple[Tuple[int, int], ...] = ()
+    analysis_state: Literal['provisional', 'final'] = 'final'
 
 
 @dataclass(frozen=True)
@@ -964,7 +1000,7 @@ class VaingloryRepository:
         'match.left_kills,match.right_kills,match.left_economy,'
         'match.right_economy,match.confidence,match.game_mode,match.team_size,'
         'match.match_kind,match.view_context,match.stats_eligible,'
-        'match.stats_exclusion_reason,'
+        'match.stats_exclusion_reason,match.analysis_state,'
         'match.started_at_ms,match.custom_title,'
         'match.result_frame_path,match.recorded_player_confidence,'
         'match.recorded_player_source,match.recorded_player_detection_version,'
@@ -2073,6 +2109,684 @@ class VaingloryRepository:
         self._remove_result_frame_files(obsolete_frame_paths)
         return discovered
 
+    async def claim_live_analysis(
+        self, worker_id: str, *, lease_seconds: int = 300
+    ) -> Optional[LiveAnalysisClaim]:
+        owner = worker_id.strip()
+        if not owner:
+            raise ValueError('live analysis worker ID must not be empty')
+        if lease_seconds < 1:
+            raise ValueError('live analysis lease must be positive')
+        now = self._now()
+        lease_until = now + int(lease_seconds)
+
+        def claim(connection: sqlite3.Connection) -> Optional[LiveAnalysisClaim]:
+            connection.execute(
+                'INSERT OR IGNORE INTO vainglory_live_analysis_state('
+                'part_id,session_id,state,next_sample_at,created_at,updated_at) '
+                "SELECT part.id,part.session_id,'active',?,?,? "
+                'FROM recording_parts part '
+                'JOIN recording_sessions session ON session.id=part.session_id '
+                "WHERE part.artifact_state='recording' "
+                "AND session.state='open' AND part.video_deleted_at IS NULL",
+                (now, now, now),
+            )
+            connection.execute(
+                "UPDATE vainglory_live_analysis_state SET state='active',updated_at=? "
+                "WHERE state='closed' AND EXISTS("
+                'SELECT 1 FROM recording_parts part '
+                'JOIN recording_sessions session ON session.id=part.session_id '
+                'WHERE part.id=vainglory_live_analysis_state.part_id '
+                "AND part.artifact_state='recording' AND session.state='open' "
+                'AND part.video_deleted_at IS NULL)',
+                (now,),
+            )
+            connection.execute(
+                "UPDATE vainglory_live_analysis_state SET state='closed',"
+                'lease_owner=NULL,lease_until=NULL,updated_at=? '
+                "WHERE state='active' AND NOT EXISTS("
+                'SELECT 1 FROM recording_parts part '
+                'JOIN recording_sessions session ON session.id=part.session_id '
+                'WHERE part.id=vainglory_live_analysis_state.part_id '
+                "AND part.artifact_state='recording' AND session.state='open' "
+                'AND part.video_deleted_at IS NULL)',
+                (now,),
+            )
+            connection.execute(
+                "UPDATE vainglory_live_analysis_windows SET state='pending',"
+                'lease_owner=NULL,lease_until=NULL,updated_at=? '
+                "WHERE state='running' AND lease_until<?",
+                (now, now),
+            )
+            fine = connection.execute(
+                'SELECT window.id AS item_id,window.session_id,window.part_id,'
+                'window.start_ms,window.end_ms,window.focus_ms,window.mode,'
+                'window.lease_generation,part.part_index,part.source_path,'
+                'session.title '
+                'FROM vainglory_live_analysis_windows window '
+                'JOIN recording_parts part ON part.id=window.part_id '
+                'JOIN recording_sessions session ON session.id=window.session_id '
+                "WHERE window.state='pending' AND window.available_at<=? "
+                'ORDER BY window.created_at,window.id LIMIT 1',
+                (now,),
+            ).fetchone()
+            if fine is not None:
+                generation = int(fine['lease_generation']) + 1
+                updated = connection.execute(
+                    "UPDATE vainglory_live_analysis_windows SET state='running',"
+                    'lease_owner=?,lease_generation=?,lease_until=?,attempt=attempt+1,'
+                    'error=NULL,updated_at=? '
+                    "WHERE id=? AND state='pending'",
+                    (owner, generation, lease_until, now, int(fine['item_id'])),
+                )
+                if updated.rowcount == 1:
+                    return LiveAnalysisClaim(
+                        kind='fine',
+                        item_id=int(fine['item_id']),
+                        session_id=int(fine['session_id']),
+                        part=VideoPart(
+                            id=int(fine['part_id']),
+                            index=int(fine['part_index']),
+                            path=str(fine['source_path']),
+                            title=str(fine['title'] or ''),
+                        ),
+                        lease_owner=owner,
+                        lease_generation=generation,
+                        window_start_ms=int(fine['start_ms']),
+                        window_end_ms=int(fine['end_ms']),
+                        window_focus_ms=(
+                            None if fine['focus_ms'] is None else int(fine['focus_ms'])
+                        ),
+                        mode=str(fine['mode']),
+                    )
+
+            coarse = connection.execute(
+                'SELECT state.part_id AS item_id,state.session_id,'
+                'state.lease_generation,part.part_index,part.source_path,'
+                'session.title '
+                'FROM vainglory_live_analysis_state state '
+                'JOIN recording_parts part ON part.id=state.part_id '
+                'JOIN recording_sessions session ON session.id=state.session_id '
+                "WHERE state.state='active' AND state.next_sample_at<=? "
+                'AND (state.lease_until IS NULL OR state.lease_until<?) '
+                'ORDER BY state.next_sample_at,state.part_id LIMIT 1',
+                (now, now),
+            ).fetchone()
+            if coarse is None:
+                return None
+            generation = int(coarse['lease_generation']) + 1
+            updated = connection.execute(
+                'UPDATE vainglory_live_analysis_state SET lease_owner=?,'
+                'lease_generation=?,lease_until=?,last_error=NULL,updated_at=? '
+                'WHERE part_id=? AND state=\'active\' '
+                'AND (lease_until IS NULL OR lease_until<?)',
+                (owner, generation, lease_until, now, int(coarse['item_id']), now),
+            )
+            if updated.rowcount != 1:
+                return None
+            return LiveAnalysisClaim(
+                kind='coarse',
+                item_id=int(coarse['item_id']),
+                session_id=int(coarse['session_id']),
+                part=VideoPart(
+                    id=int(coarse['item_id']),
+                    index=int(coarse['part_index']),
+                    path=str(coarse['source_path']),
+                    title=str(coarse['title'] or ''),
+                ),
+                lease_owner=owner,
+                lease_generation=generation,
+            )
+
+        return await self._database.write(claim)
+
+    async def complete_live_observation(
+        self,
+        claim: LiveAnalysisClaim,
+        observation: LiveFrameObservation,
+        *,
+        image_jpeg: bytes = b'',
+        model_version: str = '',
+    ) -> bool:
+        if claim.kind != 'coarse' or claim.item_id != claim.part.id:
+            raise ValueError('live observation requires a coarse claim')
+        if observation.observed_at_ms < 0:
+            raise ValueError('live observation timestamp must not be negative')
+        confidences = (
+            observation.stage_confidence,
+            observation.match_flow_confidence,
+            observation.hero_select_confidence,
+            observation.match_mode_confidence,
+            observation.result_confidence,
+        )
+        if any(value < 0 or value > 1 for value in confidences):
+            raise ValueError('live observation confidence must be between zero and one')
+        now = self._now()
+
+        def complete(connection: sqlite3.Connection) -> Dict[str, Any]:
+            state = connection.execute(
+                'SELECT live.*,session.title,session.anchor_name,session.room_id '
+                'FROM vainglory_live_analysis_state live '
+                'JOIN recording_sessions session ON session.id=live.session_id '
+                'WHERE live.part_id=?',
+                (claim.part.id,),
+            ).fetchone()
+            if state is None:
+                raise VaingloryNotFound('实时分析状态不存在')
+            if (
+                state['lease_owner'] != claim.lease_owner
+                or int(state['lease_generation']) != claim.lease_generation
+            ):
+                raise VaingloryConflict('实时分析租约已经失效')
+            previous_label = str(state['last_match_flow_label'] or '')
+            previous_confidence = float(state['last_match_flow_confidence'] or 0)
+            last_in_match_at_ms = (
+                None
+                if state['last_in_match_at_ms'] is None
+                else int(state['last_in_match_at_ms'])
+            )
+            sample_count = int(state['sample_count'])
+            reliable_transition = (
+                previous_label == 'match_flow'
+                and previous_confidence >= 0.6
+                and observation.match_flow_label != 'match_flow'
+                and observation.match_flow_confidence >= 0.6
+                and last_in_match_at_ms is not None
+                and observation.observed_at_ms > last_in_match_at_ms
+            )
+            mode = (
+                observation.match_mode_label
+                if observation.match_mode_label in ('3v3', 'aram', '5v5')
+                else 'unknown'
+            )
+            if reliable_transition:
+                connection.execute(
+                    'INSERT OR IGNORE INTO vainglory_live_analysis_windows('
+                    'part_id,session_id,start_ms,end_ms,focus_ms,mode,'
+                    'available_at,state,'
+                    'created_at,updated_at) '
+                    "VALUES(?,?,?,?,?,?,?,'pending',?,?)",
+                    (
+                        claim.part.id,
+                        claim.session_id,
+                        max(0, int(last_in_match_at_ms) - 10_000),
+                        observation.observed_at_ms + 30_000,
+                        observation.observed_at_ms,
+                        mode,
+                        now + 35,
+                        now,
+                        now,
+                    ),
+                )
+            uncertain = any(0.35 <= value <= 0.75 for value in confidences[1:])
+            label_changed = bool(previous_label) and (
+                previous_label != observation.match_flow_label
+            )
+            selected = bool(
+                image_jpeg
+                and (
+                    sample_count % 20 == 0
+                    or uncertain
+                    or label_changed
+                    or observation.result_confidence >= 0.3
+                )
+            )
+            lineup_json = json.dumps(
+                tuple(observation.hero_lineup),
+                ensure_ascii=False,
+                separators=(',', ':'),
+            )
+            connection.execute(
+                'INSERT INTO vainglory_live_observations('
+                'part_id,session_id,observed_at_ms,stage,stage_confidence,'
+                'match_flow_label,match_flow_confidence,hero_select_label,'
+                'hero_select_confidence,match_mode_label,match_mode_confidence,'
+                'result_confidence,hero_lineup_json,model_version,'
+                'selected_for_review,created_at) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                'ON CONFLICT(part_id,observed_at_ms) DO UPDATE SET '
+                'stage=excluded.stage,stage_confidence=excluded.stage_confidence,'
+                'match_flow_label=excluded.match_flow_label,'
+                'match_flow_confidence=excluded.match_flow_confidence,'
+                'hero_select_label=excluded.hero_select_label,'
+                'hero_select_confidence=excluded.hero_select_confidence,'
+                'match_mode_label=excluded.match_mode_label,'
+                'match_mode_confidence=excluded.match_mode_confidence,'
+                'result_confidence=excluded.result_confidence,'
+                'hero_lineup_json=excluded.hero_lineup_json,'
+                'model_version=excluded.model_version,'
+                'selected_for_review=excluded.selected_for_review',
+                (
+                    claim.part.id,
+                    claim.session_id,
+                    observation.observed_at_ms,
+                    observation.stage,
+                    observation.stage_confidence,
+                    observation.match_flow_label,
+                    observation.match_flow_confidence,
+                    observation.hero_select_label,
+                    observation.hero_select_confidence,
+                    observation.match_mode_label,
+                    observation.match_mode_confidence,
+                    observation.result_confidence,
+                    lineup_json,
+                    model_version[:100],
+                    int(selected),
+                    now,
+                ),
+            )
+            next_last_in_match = (
+                observation.observed_at_ms
+                if observation.match_flow_label == 'match_flow'
+                and observation.match_flow_confidence >= 0.6
+                else last_in_match_at_ms
+            )
+            connection.execute(
+                'UPDATE vainglory_live_analysis_state SET next_sample_at=?,'
+                'last_sample_at=?,last_observed_at_ms=?,last_match_flow_label=?,'
+                'last_match_flow_confidence=?,last_in_match_at_ms=?,'
+                'last_hero_lineup_json=?,sample_count=sample_count+1,'
+                'lease_owner=NULL,lease_until=NULL,last_error=NULL,updated_at=? '
+                'WHERE part_id=? AND lease_owner=? AND lease_generation=?',
+                (
+                    now + 30,
+                    now,
+                    observation.observed_at_ms,
+                    observation.match_flow_label[:40],
+                    observation.match_flow_confidence,
+                    next_last_in_match,
+                    lineup_json,
+                    now,
+                    claim.part.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            return {
+                'selected': selected,
+                'title': str(state['title'] or ''),
+                'anchor_name': str(state['anchor_name'] or ''),
+                'room_id': int(state['room_id'] or 0),
+                'selection_reason': (
+                    '模型置信度临界或状态发生变化'
+                    if uncertain or label_changed
+                    else '直播时间线定期代表帧'
+                ),
+            }
+
+        stored = await self._database.write(complete)
+        if bool(stored['selected']):
+            self._write_live_training_candidate(
+                claim,
+                observation,
+                image_jpeg,
+                model_version=model_version,
+                title=str(stored['title']),
+                anchor_name=str(stored['anchor_name']),
+                room_id=int(stored['room_id']),
+                selection_reason=str(stored['selection_reason']),
+                created_at=now,
+            )
+        return bool(stored['selected'])
+
+    def _write_live_training_candidate(
+        self,
+        claim: LiveAnalysisClaim,
+        observation: LiveFrameObservation,
+        image_jpeg: bytes,
+        *,
+        model_version: str,
+        title: str,
+        anchor_name: str,
+        room_id: int,
+        selection_reason: str,
+        created_at: int,
+    ) -> None:
+        relative_path = self._training_candidate_relative_path(
+            session_id=claim.session_id,
+            part_id=claim.part.id,
+            at_ms=observation.observed_at_ms,
+            content=image_jpeg,
+        )
+        metadata_relative_path = self._training_candidate_metadata_relative_path(
+            session_id=claim.session_id,
+            part_id=claim.part.id,
+            at_ms=observation.observed_at_ms,
+            content=image_jpeg,
+        )
+        metadata = {
+            'schema_version': 3,
+            'task': 'unified_review',
+            'source_id': 'live-part-{}:{}:{}'.format(
+                claim.part.id,
+                observation.observed_at_ms,
+                hashlib.sha256(image_jpeg).hexdigest()[:16],
+            ),
+            'session_id': claim.session_id,
+            'part_id': claim.part.id,
+            'part_index': claim.part.index,
+            'at_ms': observation.observed_at_ms,
+            'segment_start_ms': max(0, observation.observed_at_ms - 30_000),
+            'streamer': anchor_name,
+            'room_id': str(room_id),
+            'session_title': title,
+            'filename': Path(claim.part.path).name,
+            'suggestions': {
+                'match_flow': {
+                    'label': observation.match_flow_label,
+                    'confidence': observation.match_flow_confidence,
+                    'model_version': model_version,
+                    'reason': selection_reason,
+                },
+                'hero_select': {
+                    'label': observation.hero_select_label,
+                    'confidence': observation.hero_select_confidence,
+                    'model_version': model_version,
+                    'reason': selection_reason,
+                },
+                'match_mode': {
+                    'label': observation.match_mode_label,
+                    'confidence': observation.match_mode_confidence,
+                    'model_version': model_version,
+                    'reason': selection_reason,
+                },
+                'result_panel': {
+                    'label': (
+                        'result_panel'
+                        if observation.result_confidence >= 0.5
+                        else 'no_result_panel'
+                    ),
+                    'confidence': max(
+                        observation.result_confidence, 1 - observation.result_confidence
+                    ),
+                    'model_version': model_version,
+                    'reason': selection_reason,
+                },
+            },
+            'suggested_boxes': [],
+            'model_outputs': [
+                {
+                    'task': 'live_timeline',
+                    'model_version': model_version,
+                    'match_flow_label': observation.match_flow_label,
+                    'match_flow_confidence': observation.match_flow_confidence,
+                    'hero_select_label': observation.hero_select_label,
+                    'hero_select_confidence': observation.hero_select_confidence,
+                    'match_mode_label': observation.match_mode_label,
+                    'match_mode_confidence': observation.match_mode_confidence,
+                    'result_confidence': observation.result_confidence,
+                    'hero_lineup': list(observation.hero_lineup),
+                    'selection_reason': selection_reason,
+                }
+            ],
+            'image_path': relative_path,
+            'image_sha256': hashlib.sha256(image_jpeg).hexdigest(),
+            'created_at': created_at,
+        }
+        self._write_training_candidate(
+            self._resolve_training_candidate_path(relative_path),
+            image_jpeg,
+            metadata,
+            self._resolve_training_candidate_path(metadata_relative_path),
+        )
+
+    async def complete_live_window(
+        self, claim: LiveAnalysisClaim, matches: Sequence[AnalyzedMatch]
+    ) -> int:
+        if claim.kind != 'fine':
+            raise ValueError('live result completion requires a fine claim')
+        now = self._now()
+        written_paths: List[Path] = []
+        obsolete_frame_paths: List[str] = []
+
+        def complete(connection: sqlite3.Connection) -> int:
+            window = connection.execute(
+                'SELECT * FROM vainglory_live_analysis_windows WHERE id=?',
+                (claim.item_id,),
+            ).fetchone()
+            if window is None:
+                raise VaingloryNotFound('实时精扫任务不存在')
+            if (
+                str(window['state']) != 'running'
+                or window['lease_owner'] != claim.lease_owner
+                or int(window['lease_generation']) != claim.lease_generation
+            ):
+                raise VaingloryConflict('实时精扫租约已经失效')
+            self._ensure_scan_job(connection, claim.session_id, now)
+            stored = 0
+            heroes = self._existing_heroes(connection)
+            for match in matches:
+                if match.part_id != claim.part.id:
+                    raise VaingloryConflict('实时结算页不属于当前分 P')
+                if (
+                    claim.window_start_ms is not None
+                    and match.result_at_ms < claim.window_start_ms - 5_000
+                ) or (
+                    claim.window_end_ms is not None
+                    and match.result_at_ms > claim.window_end_ms + 5_000
+                ):
+                    raise VaingloryConflict('实时结算页不在当前精扫区间内')
+                final = connection.execute(
+                    'SELECT 1 FROM vainglory_matches '
+                    "WHERE result_part_id=? AND analysis_state='final' "
+                    'AND ABS(result_at_ms-?)<=30000 LIMIT 1',
+                    (claim.part.id, match.result_at_ms),
+                ).fetchone()
+                if final is not None:
+                    continue
+                nearby = connection.execute(
+                    'SELECT id,result_frame_path FROM vainglory_matches '
+                    "WHERE result_part_id=? AND analysis_state='provisional' "
+                    'AND ABS(result_at_ms-?)<=30000',
+                    (claim.part.id, match.result_at_ms),
+                ).fetchall()
+                obsolete_frame_paths.extend(
+                    str(row['result_frame_path'])
+                    for row in nearby
+                    if row['result_frame_path'] is not None
+                )
+                for row in nearby:
+                    connection.execute(
+                        'DELETE FROM vainglory_matches WHERE id=?', (int(row['id']),)
+                    )
+                self._insert_live_match(
+                    connection,
+                    claim.session_id,
+                    match,
+                    heroes=heroes,
+                    now=now,
+                    written_paths=written_paths,
+                )
+                stored += 1
+            if stored:
+                self._ensure_session_player(connection, claim.session_id, now)
+                self._consolidate_heroes(connection, now)
+            connection.execute(
+                "UPDATE vainglory_live_analysis_windows SET state='ready',"
+                'lease_owner=NULL,lease_until=NULL,match_count=?,error=NULL,'
+                'completed_at=?,updated_at=? '
+                'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (
+                    stored,
+                    now,
+                    now,
+                    claim.item_id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            connection.execute(
+                'UPDATE vainglory_live_analysis_state '
+                'SET fine_scan_count=fine_scan_count+1,updated_at=? WHERE part_id=?',
+                (now, claim.part.id),
+            )
+            return stored
+
+        stored = await self._database.write(complete)
+        self._remove_result_frame_files(obsolete_frame_paths, keep=written_paths)
+        return stored
+
+    def _insert_live_match(
+        self,
+        connection: sqlite3.Connection,
+        session_id: int,
+        match: AnalyzedMatch,
+        *,
+        heroes: Dict[str, Tuple[int, str]],
+        now: int,
+        written_paths: List[Path],
+    ) -> int:
+        hero_ids: Dict[Tuple[str, int], Optional[int]] = {}
+        for hero in match.heroes:
+            hero_ids[(hero.side, hero.slot)] = self._resolve_hero(
+                connection, hero, heroes, now
+            )
+        header = match.ocr.header
+        team_size = max((player.slot for player in match.ocr.players), default=0)
+        normalized_team_size = team_size if 1 <= team_size <= 5 else None
+        recorded_player = (
+            match.recorded_player if normalized_team_size in (3, 5) else None
+        )
+        game_mode = match.game_mode
+        if game_mode not in ('aram', 'other', '3v3', '5v5'):
+            game_mode = (
+                '3v3'
+                if normalized_team_size == 3
+                else '5v5' if normalized_team_size == 5 else 'unknown'
+            )
+        match_kind = (
+            match.match_kind
+            if match.match_kind in ('pvp', 'bot', 'practice')
+            else 'unknown'
+        )
+        view_context = (
+            match.view_context
+            if match.view_context in ('played', 'observed')
+            else 'unknown'
+        )
+        stats_eligible = bool(match.stats_eligible)
+        stats_exclusion_reason = (
+            None
+            if stats_eligible
+            else match.stats_exclusion_reason.strip()[:64] or 'classification'
+        )
+        result_frame_path: Optional[str] = None
+        if match.result_frame_png:
+            result_frame_path = self._result_frame_relative_path(
+                session_id=session_id,
+                part_id=match.part_id,
+                result_at_ms=match.result_at_ms,
+                content=match.result_frame_png,
+            )
+            destination = self._resolve_result_frame_path(result_frame_path)
+            self._write_result_frame(destination, match.result_frame_png)
+            written_paths.append(destination)
+        cursor = connection.execute(
+            'INSERT INTO vainglory_matches('
+            'session_id,result_part_id,result_at_ms,duration_seconds,result_text,'
+            'end_reason,left_color,right_color,winner_side,left_kills,right_kills,'
+            'left_economy,right_economy,confidence,created_at,game_mode,team_size,'
+            'started_at_ms,result_frame_path,hero_recognition_version,'
+            'recorded_player_side,recorded_player_slot,recorded_player_confidence,'
+            'recorded_player_detection_version,match_kind,view_context,'
+            'stats_eligible,stats_exclusion_reason,analysis_state) '
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+            "'provisional')",
+            (
+                session_id,
+                match.part_id,
+                match.result_at_ms,
+                header.duration_seconds,
+                header.result_text,
+                header.end_reason,
+                match.layout.left_color,
+                match.layout.right_color,
+                match.layout.winner_side,
+                header.left_kills,
+                header.right_kills,
+                header.left_economy,
+                header.right_economy,
+                match.confidence,
+                now,
+                game_mode,
+                normalized_team_size,
+                max(0, match.result_at_ms - (header.duration_seconds or 0) * 1_000),
+                result_frame_path,
+                self.HERO_RECOGNITION_VERSION,
+                None if recorded_player is None else recorded_player.side,
+                None if recorded_player is None else recorded_player.slot,
+                None if recorded_player is None else recorded_player.confidence,
+                self.RECORDED_PLAYER_DETECTION_VERSION,
+                match_kind,
+                view_context,
+                int(stats_eligible),
+                stats_exclusion_reason,
+            ),
+        )
+        match_id = int(cursor.lastrowid)
+        for player in match.ocr.players:
+            connection.execute(
+                'INSERT INTO vainglory_match_players('
+                'match_id,side,slot,player_name,normalized_name,hero_id,hero_source,'
+                'kills,deaths,assists,economy,last_hits,confidence) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (
+                    match_id,
+                    player.side,
+                    player.slot,
+                    player.name,
+                    player.normalized_name,
+                    hero_ids.get((player.side, player.slot)),
+                    'automatic',
+                    player.stats.kills,
+                    player.stats.deaths,
+                    player.stats.assists,
+                    player.stats.economy,
+                    player.stats.last_hits,
+                    player.confidence,
+                ),
+            )
+        return match_id
+
+    async def fail_live_analysis(
+        self, claim: LiveAnalysisClaim, error: str, *, retry: bool = True
+    ) -> None:
+        now = self._now()
+        message = error.strip()[:500] or '实时分析失败'
+
+        def fail(connection: sqlite3.Connection) -> None:
+            if claim.kind == 'coarse':
+                connection.execute(
+                    'UPDATE vainglory_live_analysis_state SET lease_owner=NULL,'
+                    'lease_until=NULL,next_sample_at=?,last_error=?,updated_at=? '
+                    'WHERE part_id=? AND lease_owner=? AND lease_generation=?',
+                    (
+                        now + (5 if retry else 30),
+                        message,
+                        now,
+                        claim.part.id,
+                        claim.lease_owner,
+                        claim.lease_generation,
+                    ),
+                )
+                return
+            state = 'pending' if retry else 'failed'
+            connection.execute(
+                'UPDATE vainglory_live_analysis_windows SET state=?,'
+                'lease_owner=NULL,lease_until=NULL,error=?,updated_at=? '
+                'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (
+                    state,
+                    message,
+                    now,
+                    claim.item_id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+
+        await self._database.write(fail)
+
     async def claim_next(self, *, discover: bool = True) -> Optional[ScanClaim]:
         if discover:
             await self.discover_ready_parts()
@@ -2646,6 +3360,27 @@ class VaingloryRepository:
                 queued_select + ' ORDER BY priority,sort_time DESC,2 LIMIT ?',
                 (recent_cutoff, recent_cutoff, season_start, season_start, limit),
             ).fetchall()
+            live_status = connection.execute(
+                'SELECT '
+                "(SELECT COUNT(*) FROM vainglory_live_analysis_state live "
+                "WHERE live.state='active') AS stream_count,"
+                '((SELECT COUNT(*) FROM vainglory_live_analysis_state live '
+                "WHERE live.state='active' AND live.lease_owner IS NOT NULL) + "
+                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows window '
+                "WHERE window.state='running')) AS running_count,"
+                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows window '
+                "WHERE window.state='pending') AS pending_window_count,"
+                '(SELECT COALESCE(SUM(live.sample_count),0) '
+                'FROM vainglory_live_analysis_state live '
+                "WHERE live.state='active') AS sample_count,"
+                '(SELECT COUNT(*) FROM vainglory_matches match '
+                "WHERE match.analysis_state='provisional') "
+                'AS provisional_match_count,'
+                '(SELECT MAX(observation.created_at) '
+                'FROM vainglory_live_observations observation) '
+                'AS last_observed_at'
+            ).fetchone()
+            assert live_status is not None
             completion_rows = connection.execute(
                 'SELECT job.completed_at,job.started_at,job.session_id,job.part_id,'
                 'part.part_index,session.title,part.record_duration_seconds,'
@@ -2884,6 +3619,18 @@ class VaingloryRepository:
                 migration_pending=counts.get('migration', 0),
                 backlog_pending=counts.get('backlog', 0),
                 recent_completions=tuple(completion(row) for row in completion_rows),
+                live_stream_count=int(live_status['stream_count']),
+                live_running_count=int(live_status['running_count']),
+                live_pending_window_count=int(live_status['pending_window_count']),
+                live_sample_count=int(live_status['sample_count']),
+                live_provisional_match_count=int(
+                    live_status['provisional_match_count']
+                ),
+                live_last_observed_at=(
+                    None
+                    if live_status['last_observed_at'] is None
+                    else int(live_status['last_observed_at'])
+                ),
             )
 
         return await self._database.read(read)
@@ -6225,6 +6972,9 @@ class VaingloryRepository:
             previous_archive_page=previous_archive_page,
             previous_archive_duration_seconds=previous_archive_duration_seconds,
             previous_archive_segments=previous_archive_segments,
+            analysis_state=cast(
+                Literal['provisional', 'final'], str(row['analysis_state'])
+            ),
         )
 
     @staticmethod
