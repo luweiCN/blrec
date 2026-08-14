@@ -226,6 +226,63 @@ def test_showinfo_reader_preserves_real_source_pts() -> None:
     assert timestamps.get_nowait() is None
 
 
+def test_sampler_uses_modern_passthrough_frame_rate_option(monkeypatch) -> None:
+    commands = []
+
+    class EmptyProcess:
+        def __init__(self) -> None:
+            self.stdout = BytesIO()
+            self.stderr = BytesIO()
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+    def popen(command, **_kwargs):
+        commands.append(command)
+        return EmptyProcess()
+
+    sampler = FfmpegSampler()
+    monkeypatch.setattr(sampler, '_media_input', lambda _path: '/video')
+    monkeypatch.setattr('blrec.vainglory.sampling.subprocess.Popen', popen)
+    monkeypatch.setattr(
+        'blrec.vainglory.sampling._read_exact', lambda _stream, _size, **_kwargs: b''
+    )
+
+    assert (
+        tuple(
+            sampler._selected_keyframe_frames(
+                '/ignored',
+                width=2,
+                height=1,
+                interval_ms=5_000,
+                maximum_keyframe_distance_ms=2_500,
+            )
+        )
+        == ()
+    )
+    assert (
+        tuple(
+            sampler._frames(
+                '/ignored',
+                width=2,
+                height=1,
+                filter_value='null',
+                frame_step_ms=1_000,
+                variable_frame_rate=True,
+            )
+        )
+        == ()
+    )
+    assert len(commands) == 2
+    for command in commands:
+        assert '-vsync' not in command
+        option_index = command.index('-fps_mode')
+        assert command[option_index + 1] == 'passthrough'
+
+
 def test_sustained_hud_loss_scans_only_boundary_and_visual_changes() -> None:
     dark = '0' * 32
     changed = 'f' * 32

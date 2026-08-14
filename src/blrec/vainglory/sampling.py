@@ -668,8 +668,8 @@ class FfmpegSampler:
             'rawvideo',
             '-pix_fmt',
             'rgb24',
-            '-vsync',
-            '0',
+            '-fps_mode',
+            'passthrough',
             'pipe:1',
         ]
         timestamps: Queue[Optional[int]] = Queue()
@@ -967,7 +967,7 @@ class FfmpegSampler:
             )
         )
         if variable_frame_rate:
-            command.extend(('-vsync', '0'))
+            command.extend(('-fps_mode', 'passthrough'))
         command.append('pipe:1')
         frame_size = width * height * 3
         with tempfile.TemporaryFile() as stderr:
