@@ -225,6 +225,18 @@ async def test_postgres_backend_migrates_schema_and_preserves_writes(
         assert match_sessions.total == 1
         assert len(match_sessions.items) == 1
         assert await vainglory.recover_interrupted() == 0
+        await vainglory.register_analysis_worker(
+            'postgres-probe-worker',
+            model_package_id='package-v1',
+            pipeline_version='pipeline-v1',
+            concurrency=3,
+        )
+        registered_worker = await vainglory.register_analysis_worker(
+            'postgres-probe-worker'
+        )
+        assert registered_worker.model_package_id == 'package-v1'
+        assert registered_worker.pipeline_version == 'pipeline-v1'
+        assert registered_worker.concurrency == 3
         archive = VisitorAnalyticsArchive(target)
         archive_status = await archive.status()
         now = datetime.now(timezone.utc)

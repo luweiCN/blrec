@@ -1230,12 +1230,16 @@ class VaingloryRepository:
                 'first_seen_at,last_seen_at,created_at,updated_at) '
                 'VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(worker_id) DO UPDATE SET '
                 'model_package_id=CASE WHEN excluded.model_package_id<>\'\' '
-                'THEN excluded.model_package_id ELSE model_package_id END,'
+                'THEN excluded.model_package_id '
+                'ELSE vainglory_analysis_workers.model_package_id END,'
                 'pipeline_version=CASE WHEN excluded.pipeline_version<>\'\' '
-                'THEN excluded.pipeline_version ELSE pipeline_version END,'
+                'THEN excluded.pipeline_version '
+                'ELSE vainglory_analysis_workers.pipeline_version END,'
                 'concurrency=CASE WHEN excluded.concurrency>0 '
-                'THEN excluded.concurrency ELSE concurrency END,'
-                'first_seen_at=COALESCE(first_seen_at,excluded.first_seen_at),'
+                'THEN excluded.concurrency '
+                'ELSE vainglory_analysis_workers.concurrency END,'
+                'first_seen_at=COALESCE('
+                'vainglory_analysis_workers.first_seen_at,excluded.first_seen_at),'
                 'last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at',
                 (
                     worker_id,
