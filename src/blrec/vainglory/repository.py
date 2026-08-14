@@ -2804,9 +2804,11 @@ class VaingloryRepository:
 
         def claim(connection: sqlite3.Connection) -> Optional[ScanClaim]:
             row = connection.execute(
+                'SELECT ranked.* FROM ('
                 'SELECT job.part_id,job.session_id,part.part_index,'
                 'part.source_path,part.final_path,session.title AS session_title,'
                 'session.anchor_name AS session_anchor_name,'
+                'part.created_at AS part_created_at,'
                 'part.record_duration_seconds,'
                 '(SELECT GROUP_CONCAT(marker.at_ms) '
                 'FROM vainglory_manual_match_markers marker '
@@ -2826,7 +2828,10 @@ class VaingloryRepository:
                 'WHEN session.started_at>=? THEN 5 '
                 "WHEN source.origin IS NULL OR (source.origin!='archive' "
                 'AND source.cache_path IS NULL) THEN 6 '
-                'ELSE 7 END AS priority '
+                'ELSE 7 END AS priority,'
+                'COALESCE(archive_import.recording_started_at,'
+                'archive_import.published_at,migration_item.published_at,'
+                'session.started_at) AS priority_sort_at '
                 'FROM vainglory_part_jobs job '
                 'JOIN recording_parts part ON part.id=job.part_id '
                 'JOIN recording_sessions session ON session.id=job.session_id '
@@ -2851,13 +2856,11 @@ class VaingloryRepository:
                 'AND (archive_part.import_id IS NULL OR NOT EXISTS('
                 'SELECT 1 FROM vainglory_archive_parts sibling_archive '
                 'WHERE sibling_archive.import_id=archive_part.import_id '
-                "AND sibling_archive.state NOT IN ('analyzing','ready'))) "
-                'ORDER BY priority,'
-                'CASE WHEN priority>=3 THEN COALESCE('
-                'archive_import.recording_started_at,'
-                'archive_import.published_at,migration_item.published_at,'
-                'session.started_at) END DESC,'
-                'job.session_id,part.part_index,part.created_at,job.part_id LIMIT 1',
+                "AND sibling_archive.state NOT IN ('analyzing','ready')))"
+                ') ranked ORDER BY ranked.priority,'
+                'CASE WHEN ranked.priority>=3 THEN ranked.priority_sort_at END DESC,'
+                'ranked.session_id,ranked.part_index,ranked.part_created_at,'
+                'ranked.part_id LIMIT 1',
                 (recent_cutoff, season_start, season_start),
             ).fetchone()
             if row is None:
@@ -2973,10 +2976,12 @@ class VaingloryRepository:
 
         def claim(connection: sqlite3.Connection) -> Optional[OcrClaim]:
             row = connection.execute(
+                'SELECT ranked.* FROM ('
                 'SELECT ocr.part_id,ocr.session_id,ocr.video_duration_ms,'
                 'ocr.candidate_times_json,part.part_index,part.source_path,'
                 'part.final_path,session.title AS session_title,'
                 'job.started_at AS analysis_started_at,'
+                'ocr.requested_at AS ocr_requested_at,'
                 'part.record_duration_seconds,'
                 '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,'
                 '0)),0) FROM recording_parts all_part '
@@ -2987,7 +2992,10 @@ class VaingloryRepository:
                 'AND migration_item.id IS NULL AND session.started_at>=? THEN 1 '
                 "WHEN job.request_kind='manual' THEN 2 "
                 'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
-                "WHEN source.origin='archive' THEN 4 ELSE 5 END AS priority "
+                "WHEN source.origin='archive' THEN 4 ELSE 5 END AS priority,"
+                'COALESCE(archive_import.published_at,'
+                'migration_item.published_at,session.started_at) '
+                'AS priority_sort_at '
                 'FROM vainglory_ocr_jobs ocr '
                 'JOIN vainglory_part_jobs job ON job.part_id=ocr.part_id '
                 'JOIN recording_parts part ON part.id=ocr.part_id '
@@ -3010,12 +3018,11 @@ class VaingloryRepository:
                 'AND NOT EXISTS(SELECT 1 FROM vainglory_scan_suppressions '
                 'suppression WHERE suppression.session_id=session.id) '
                 "AND (source.origin IS NULL OR source.origin!='archive' "
-                'OR COALESCE(archive_sync.operator_paused,0)=0) '
-                'ORDER BY priority,'
-                'CASE WHEN priority>=3 THEN COALESCE('
-                'archive_import.published_at,migration_item.published_at,'
-                'session.started_at) END DESC,'
-                'ocr.session_id,part.part_index,ocr.requested_at,ocr.part_id LIMIT 1',
+                'OR COALESCE(archive_sync.operator_paused,0)=0)'
+                ') ranked ORDER BY ranked.priority,'
+                'CASE WHEN ranked.priority>=3 THEN ranked.priority_sort_at END DESC,'
+                'ranked.session_id,ranked.part_index,ranked.ocr_requested_at,'
+                'ranked.part_id LIMIT 1',
                 (recent_cutoff,),
             ).fetchone()
             if row is None:

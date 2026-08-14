@@ -293,6 +293,16 @@ async def test_postgres_backend_migrates_schema_and_preserves_writes(
         scan_claim = await vainglory.claim_next(discover=False)
         assert scan_claim is not None
         assert scan_claim.part.manual_candidate_times_ms == (100, 900)
+        await target.execute(
+            'INSERT INTO vainglory_ocr_jobs('
+            'part_id,session_id,state,video_duration_ms,candidate_times_json,'
+            'candidate_count,requested_at,started_at,updated_at) '
+            "VALUES(?,?,\'pending\',?,?,?,?,NULL,?)",
+            (404, 202, 1_000, '[100]', 1, 1, 1),
+        )
+        ocr_claim = await vainglory.claim_next_ocr()
+        assert ocr_claim is not None
+        assert ocr_claim.part.id == 404
         archive = VisitorAnalyticsArchive(target)
         archive_status = await archive.status()
         now = datetime.now(timezone.utc)
