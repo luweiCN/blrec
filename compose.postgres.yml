@@ -1,6 +1,6 @@
 services:
   blrec-next:
-    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.81}
+    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.82}
     depends_on:
       blrec-database-tunnel:
         condition: service_healthy
@@ -10,7 +10,7 @@ services:
       BLREC_DATABASE_SCHEMA: ${BLREC_DATABASE_SCHEMA:-core}
 
   blrec-database-tunnel:
-    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.81}
+    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.82}
     pull_policy: always
     container_name: blrec-database-tunnel
     network_mode: host
