@@ -85,6 +85,30 @@ describe('PublicDashboardComponent', () => {
     expect(page.textContent).not.toContain('段位分');
   });
 
+  it('keeps every overview ranking field available for the mobile card layout', () => {
+    const firstRow = fixture.nativeElement.querySelector(
+      '.overview-player-table tbody tr',
+    ) as HTMLTableRowElement;
+    const labels = Array.from(firstRow.querySelectorAll('td')).map((cell) =>
+      cell.getAttribute('data-label'),
+    );
+
+    expect(labels).toEqual([
+      '排名',
+      '玩家',
+      '代表英雄',
+      '近五局',
+      '对局',
+      '站内段位',
+      'KDA',
+      '胜率',
+    ]);
+    expect(firstRow.querySelector('.player-mobile-stats')).toBeNull();
+    expect(
+      firstRow.querySelector('app-player-room-links.compact-mobile'),
+    ).toBeNull();
+  });
+
   it('updates the ranking when the global game mode changes', () => {
     dashboardMode.selectMode('brawl');
     fixture.detectChanges();

@@ -103,7 +103,7 @@
 
     <div class="ranking-panel">
       <div class="ranking-table-wrap">
-        <table>
+        <table class="overview-player-table">
           <caption>
             {{
               modeLabel()
@@ -131,7 +131,11 @@
                 trackBy: trackPlayer
               "
             >
-              <td class="rank-cell" [class.medal]="rank < 3">
+              <td
+                class="rank-cell overview-rank-cell"
+                data-label="排名"
+                [class.medal]="rank < 3"
+              >
                 <strong>{{ (rank + 1).toString().padStart(2, "0") }}</strong>
                 <ng-container *ngIf="rankMovement(player) as movement">
                   <small
@@ -145,7 +149,7 @@
                   >{{ movement.text }}</small>
                 </ng-container>
               </td>
-              <td>
+              <td class="overview-player-cell" data-label="玩家">
                 <div class="player-select">
                   <a
                     class="player-select-main"
@@ -160,18 +164,12 @@
                     <strong>{{ player.name }}</strong>
                   </a>
                   <app-player-room-links
-                    class="compact-mobile"
                     [roomIds]="player.roomIds"
                     [fallbackLabel]="player.roomLabel"
                   ></app-player-room-links>
-                  <span class="player-mobile-stats">
-                    {{ playerPerformance(player).matches }} 局 · KDA
-                    {{ playerKda(player) === null ? "—" : (playerKda(player) | number: "1.2-2") }}
-                    · 胜率 {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
-                  </span>
                 </div>
               </td>
-              <td class="optional-column">
+              <td class="optional-column overview-hero-cell" data-label="代表英雄">
                 <a
                   class="hero-chip"
                   [routerLink]="['/heroes', playerPerformance(player).topHero]"
@@ -185,7 +183,7 @@
                   </span>
                 </a>
               </td>
-              <td>
+              <td class="overview-form-cell" data-label="近五局">
                 <span class="recent-form" aria-label="近五局战绩">
                   <span
                     *ngFor="let result of player.form; trackBy: trackResult"
@@ -196,17 +194,19 @@
                   </span>
                 </span>
               </td>
-              <td>{{ playerPerformance(player).matches }}</td>
-              <td class="rating-score-cell">
+              <td class="overview-matches-cell" data-label="对局">
+                {{ playerPerformance(player).matches }}
+              </td>
+              <td class="rating-score-cell overview-tier-cell" data-label="站内段位">
                 <app-skill-tier-badge
                   [ratingScore]="playerPerformance(player).ratingScore"
                   [provisional]="playerPerformance(player).provisional"
                 ></app-skill-tier-badge>
               </td>
-              <td class="player-kda" data-label="KDA">
+              <td class="player-kda overview-kda-cell" data-label="KDA">
                 {{ playerKda(player) === null ? "—" : (playerKda(player) | number: "1.2-2") }}
               </td>
-              <td class="win-rate">
+              <td class="win-rate overview-win-rate-cell" data-label="胜率">
                 {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
               </td>
             </tr>
