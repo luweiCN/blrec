@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
 import sqlite3
 import tempfile
@@ -18,6 +19,8 @@ from blrec.networking.requests_session import RoutedRequestsSession
 
 from .snapshot import build_dashboard_asset_source
 from .source_database import connect_source_database
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DashboardApiSyncError(RuntimeError):
@@ -133,6 +136,28 @@ def _load_state(path: Path) -> Mapping[str, Any]:
     return value
 
 
+def _archive_legacy_outboxes(state_directory: Path) -> Optional[Path]:
+    outbox_directory = state_directory / 'api-outbox'
+    archive_directory = state_directory / 'legacy-api-outbox'
+    for path in sorted(outbox_directory.glob('*.json')):
+        try:
+            envelope = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return path
+        batch = envelope.get('batch') if isinstance(envelope, Mapping) else None
+        if not (
+            isinstance(batch, Mapping)
+            and 'images' not in batch
+            and isinstance(batch.get('matches'), list)
+        ):
+            return path
+        archive_directory.mkdir(parents=True, exist_ok=True)
+        archived = archive_directory / path.name
+        os.replace(path, archived)
+        LOGGER.info('archived legacy dashboard outbox batch=%s', path.stem)
+    return None
+
+
 def _resolve_frame(
     root: Path, relative_path: Optional[str]
 ) -> Tuple[Optional[Path], str]:
@@ -233,10 +258,9 @@ def sync_dashboard_api_once(
 ) -> DashboardApiSyncResult:
     state_directory = state_directory.expanduser().resolve()
     state_path = state_directory / 'api-sync-state.json'
-    outbox_directory = state_directory / 'api-outbox'
-    pending = sorted(outbox_directory.glob('*.json'))
-    if pending:
-        return _send_outbox(pending[0], state_path=state_path, post_batch=post_batch)
+    pending = _archive_legacy_outboxes(state_directory)
+    if pending is not None:
+        return _send_outbox(pending, state_path=state_path, post_batch=post_batch)
 
     connection = connect_source_database(database_path)
     try:
@@ -332,6 +356,6 @@ def sync_dashboard_api_once(
         'nextState': next_state,
         'uploadedImageBytes': uploaded_image_bytes,
     }
-    outbox_path = outbox_directory / '{}.json'.format(batch_id)
+    outbox_path = state_directory / 'api-outbox' / '{}.json'.format(batch_id)
     _atomic_json(outbox_path, envelope)
     return _send_outbox(outbox_path, state_path=state_path, post_batch=post_batch)

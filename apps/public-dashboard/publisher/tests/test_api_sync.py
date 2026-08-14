@@ -119,6 +119,57 @@ def test_failed_request_keeps_outbox_and_reuses_the_same_idempotency_key(
     assert (tmp_path / 'state' / 'api-sync-state.json').is_file()
 
 
+def test_sync_archives_a_legacy_full_data_outbox_before_sending_assets(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / 'source.sqlite3'
+    sqlite3.connect(database).close()
+    state_directory = tmp_path / 'state'
+    outbox_directory = state_directory / 'api-outbox'
+    outbox_directory.mkdir(parents=True)
+    legacy_path = outbox_directory / 'dashboard-legacy.json'
+    legacy_path.write_text(
+        json.dumps(
+            {
+                'schemaVersion': 1,
+                'batchId': 'dashboard-legacy',
+                'batch': {
+                    'schemaVersion': 1,
+                    'players': [],
+                    'matches': [],
+                    'removedMatchIds': [],
+                },
+                'nextState': {'schemaVersion': 1, 'matches': {}},
+            }
+        ),
+        encoding='utf-8',
+    )
+    image_path = tmp_path / 'frames' / 'session' / 'result.png'
+    image_path.parent.mkdir(parents=True)
+    Image.new('RGB', (300, 200), '#102030').save(image_path)
+    requests: List[Mapping[str, Any]] = []
+
+    def post_batch(_key: str, content: bytes) -> Mapping[str, Any]:
+        requests.append(json.loads(content))
+        return {'status': 'applied'}
+
+    result = sync_dashboard_api_once(
+        database_path=database,
+        state_directory=state_directory,
+        result_frame_directory=tmp_path / 'frames',
+        public_data_base_url='https://vg.luwei.host/data',
+        image_store=FakeImageStore(),
+        post_batch=post_batch,
+        source_builder=lambda _connection: source([match()]),
+    )
+
+    assert result.synced is True
+    assert len(requests) == 1
+    assert requests[0]['images'][0]['matchId'] == 10
+    assert not legacy_path.exists()
+    assert (state_directory / 'legacy-api-outbox' / legacy_path.name).is_file()
+
+
 def test_sync_sends_removed_match_ids(tmp_path: Path) -> None:
     database = tmp_path / 'source.sqlite3'
     sqlite3.connect(database).close()
