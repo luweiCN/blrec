@@ -68,44 +68,62 @@ def _ingest_match_fingerprint(match: IngestMatch) -> Optional[str]:
     )
 
 
-def _stored_match_fingerprint(connection: Any, match_id: int) -> Optional[str]:
-    match = connection.execute(
-        'SELECT mode,duration_seconds,result FROM matches WHERE source_match_id=?',
-        (match_id,),
-    ).fetchone()
-    if match is None:
-        return None
-    teams = []
-    winner_side = ''
-    for team in connection.execute(
-        'SELECT role,side,kills,economy FROM match_teams '
-        'WHERE match_id=? ORDER BY role',
-        (match_id,),
+def _stored_match_fingerprints(
+    connection: Any,
+) -> Iterable[Tuple[int, Optional[str], Optional[str]]]:
+    players_by_team: Dict[Tuple[int, str], List[Dict[str, Any]]] = {}
+    for player in connection.execute(
+        'SELECT match_id,team_role,hero_name,kills,deaths,assists,economy,last_hits '
+        'FROM match_participants ORDER BY match_id,team_role,slot'
     ).fetchall():
-        role = str(team['role'])
-        side = str(team['side'])
-        if (str(match['result']) == 'W') == (role == 'ally'):
-            winner_side = side
-        players = connection.execute(
-            'SELECT hero_name,kills,deaths,assists,economy,last_hits '
-            'FROM match_participants WHERE match_id=? AND team_role=? '
-            'ORDER BY slot',
-            (match_id, role),
-        ).fetchall()
-        teams.append(
+        key = (int(player['match_id']), str(player['team_role']))
+        players_by_team.setdefault(key, []).append(
             {
-                'side': side,
-                'kills': team['kills'],
-                'economy': team['economy'],
-                'players': [dict(player) for player in players],
+                'hero_name': player['hero_name'],
+                'kills': player['kills'],
+                'deaths': player['deaths'],
+                'assists': player['assists'],
+                'economy': player['economy'],
+                'last_hits': player['last_hits'],
             }
         )
-    return exact_match_fingerprint(
-        mode=str(match['mode']),
-        duration_seconds=int(match['duration_seconds']),
-        winner_side=winner_side,
-        teams=teams,
-    )
+
+    teams_by_match: Dict[int, List[Dict[str, Any]]] = {}
+    for team in connection.execute(
+        'SELECT match_id,role,side,kills,economy FROM match_teams '
+        'ORDER BY match_id,role'
+    ).fetchall():
+        match_id = int(team['match_id'])
+        role = str(team['role'])
+        teams_by_match.setdefault(match_id, []).append(
+            {
+                'role': role,
+                'side': str(team['side']),
+                'kills': team['kills'],
+                'economy': team['economy'],
+                'players': players_by_team.get((match_id, role), []),
+            }
+        )
+
+    for match in connection.execute(
+        'SELECT source_match_id,exact_fingerprint,mode,duration_seconds,result '
+        'FROM matches ORDER BY source_match_id'
+    ).fetchall():
+        match_id = int(match['source_match_id'])
+        teams = teams_by_match.get(match_id, [])
+        winner_side = ''
+        for team in teams:
+            if (str(match['result']) == 'W') == (team['role'] == 'ally'):
+                winner_side = str(team['side'])
+                break
+        fingerprint = exact_match_fingerprint(
+            mode=str(match['mode']),
+            duration_seconds=int(match['duration_seconds']),
+            winner_side=winner_side,
+            teams=teams,
+        )
+        stored = match['exact_fingerprint']
+        yield match_id, None if stored is None else str(stored), fingerprint
 
 
 def _players_for_fingerprints(
@@ -557,13 +575,10 @@ def reconcile_match_fingerprints(database_target: DatabaseTarget) -> int:
     try:
         connection.execute('BEGIN IMMEDIATE')
         changed = 0
-        for row in connection.execute(
-            'SELECT source_match_id,exact_fingerprint FROM matches '
-            'ORDER BY source_match_id'
-        ).fetchall():
-            match_id = int(row['source_match_id'])
-            fingerprint = _stored_match_fingerprint(connection, match_id)
-            if row['exact_fingerprint'] == fingerprint:
+        for match_id, stored_fingerprint, fingerprint in _stored_match_fingerprints(
+            connection
+        ):
+            if stored_fingerprint == fingerprint:
                 continue
             connection.execute(
                 'UPDATE matches SET exact_fingerprint=? WHERE source_match_id=?',

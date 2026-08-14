@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
+from blrec_dashboard_api import service
 from blrec_dashboard_api.app import create_app
 from blrec_dashboard_api.realtime import (
     DashboardRealtimeBroker,
@@ -152,6 +153,54 @@ def test_database_url_rejects_non_postgresql_servers(tmp_path: Path) -> None:
             ingest_token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
             cors_origins=('https://vg.luwei.host',),
         )
+
+
+def test_fingerprint_reconciliation_prefetches_lineups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / 'dashboard.sqlite3'
+    client = make_client(tmp_path)
+    response = ingest(
+        client,
+        batch(
+            [
+                match(1, played_at='2026-08-11T00:00:00Z', result='W'),
+                match(2, played_at='2026-08-11T01:00:00Z', result='L'),
+            ]
+        ),
+    )
+    assert response.status_code == 200
+    client.close()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute('UPDATE matches SET exact_fingerprint=NULL')
+
+    statements: List[str] = []
+    original_connect = service.connect_database
+
+    class TrackingConnection:
+        def __init__(self, connection: Any) -> None:
+            self._connection = connection
+
+        def execute(self, statement: str, parameters: Any = ()) -> Any:
+            statements.append(statement)
+            return self._connection.execute(statement, parameters)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._connection, name)
+
+    def tracked_connect(target: Any) -> TrackingConnection:
+        return TrackingConnection(original_connect(target))
+
+    monkeypatch.setattr(service, 'connect_database', tracked_connect)
+
+    assert service.reconcile_match_fingerprints(database_path) == 2
+    assert (
+        sum('FROM match_participants ORDER BY match_id' in sql for sql in statements)
+        == 1
+    )
+    assert not any(
+        'FROM match_participants WHERE match_id=' in sql for sql in statements
+    )
 
 
 def ingest(client: TestClient, payload: Dict[str, Any], key: str = 'batch-1') -> Any:
