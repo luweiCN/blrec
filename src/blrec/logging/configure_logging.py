@@ -65,10 +65,14 @@ def configure_logger(
                 TqdmOutputStream(),
                 level=console_log_level,
                 format=LOGURU_CONSOLE_FORMAT,
+                diagnose=False,
             )
         else:
             _console_handler_id = logger.add(
-                sys.stderr, level=console_log_level, format=LOGURU_CONSOLE_FORMAT
+                sys.stderr,
+                level=console_log_level,
+                format=LOGURU_CONSOLE_FORMAT,
+                diagnose=False,
             )
 
         _old_console_log_level = console_log_level
