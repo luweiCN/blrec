@@ -2810,7 +2810,7 @@ class VaingloryRepository:
                 'part.record_duration_seconds,'
                 '(SELECT GROUP_CONCAT(marker.at_ms) '
                 'FROM vainglory_manual_match_markers marker '
-                'WHERE marker.part_id=job.part_id ORDER BY marker.at_ms) '
+                'WHERE marker.part_id=job.part_id) '
                 'AS manual_candidate_times_ms,'
                 '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,'
                 '0)),0) FROM recording_parts all_part '

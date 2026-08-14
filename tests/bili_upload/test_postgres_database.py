@@ -237,6 +237,62 @@ async def test_postgres_backend_migrates_schema_and_preserves_writes(
         assert registered_worker.model_package_id == 'package-v1'
         assert registered_worker.pipeline_version == 'pipeline-v1'
         assert registered_worker.concurrency == 3
+        await target.execute(
+            'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+            'VALUES(?,?,?,?,?)',
+            ('postgres-probe-run', 202, 'finished', 1, 2),
+        )
+        await target.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,record_start_time,'
+            'artifact_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+            (
+                404,
+                202,
+                'postgres-probe-run',
+                1,
+                '/tmp/postgres-probe.flv',
+                1,
+                'ready',
+                1,
+                1,
+            ),
+        )
+        await target.execute(
+            'INSERT INTO vainglory_part_jobs('
+            'part_id,session_id,state,request_kind,progress,algorithm_version,'
+            'match_count,error,requested_at,started_at,completed_at,updated_at) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                404,
+                202,
+                'pending',
+                'manual',
+                0,
+                vainglory.ALGORITHM_VERSION,
+                0,
+                None,
+                1,
+                None,
+                None,
+                1,
+            ),
+        )
+        await target.execute(
+            'INSERT INTO vainglory_manual_match_markers('
+            'id,session_id,part_id,at_ms,source,created_at,updated_at) '
+            'VALUES(?,?,?,?,?,?,?)',
+            (501, 202, 404, 900, 'dashboard', 1, 1),
+        )
+        await target.execute(
+            'INSERT INTO vainglory_manual_match_markers('
+            'id,session_id,part_id,at_ms,source,created_at,updated_at) '
+            'VALUES(?,?,?,?,?,?,?)',
+            (502, 202, 404, 100, 'dashboard', 1, 1),
+        )
+        scan_claim = await vainglory.claim_next(discover=False)
+        assert scan_claim is not None
+        assert scan_claim.part.manual_candidate_times_ms == (100, 900)
         archive = VisitorAnalyticsArchive(target)
         archive_status = await archive.status()
         now = datetime.now(timezone.utc)
