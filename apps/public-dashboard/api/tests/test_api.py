@@ -341,7 +341,7 @@ def test_dashboard_is_materialized_from_server_matches_without_embedding_archive
 
     assert response.status_code == 200
     assert response.headers['cache-control'] == 'public, no-cache'
-    assert response.headers['etag'].startswith('"')
+    assert response.headers['etag'].startswith('W/"')
     document = response.json()
     snapshot = document['snapshot']
     trends = document['trends']
@@ -365,6 +365,13 @@ def test_dashboard_is_materialized_from_server_matches_without_embedding_archive
         '/v1/dashboard', headers={'If-None-Match': response.headers['etag']}
     )
     assert not_modified.status_code == 304
+    assert (
+        client.get(
+            '/v1/dashboard',
+            headers={'If-None-Match': response.headers['etag'].removeprefix('W/')},
+        ).status_code
+        == 304
+    )
 
 
 def test_dashboard_response_reuses_the_current_revision_cache(

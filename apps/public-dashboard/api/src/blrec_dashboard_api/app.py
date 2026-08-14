@@ -83,6 +83,19 @@ def _hero_filters(value: str) -> tuple[str, ...]:
     return heroes
 
 
+def _etag_matches(if_none_match: Optional[str], revision: str) -> bool:
+    expected = '"{}"'.format(revision)
+    for candidate in (if_none_match or '').split(','):
+        normalized = candidate.strip()
+        if normalized == '*':
+            return True
+        if normalized.startswith('W/'):
+            normalized = normalized[2:].lstrip()
+        if normalized == expected:
+            return True
+    return False
+
+
 def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
     active_settings = settings or ApiSettings.from_environment()
     database_target = active_settings.database_target
@@ -166,9 +179,9 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
                 status_code=503, detail='dashboard is waiting for its first publication'
             )
         payload, revision = current
-        etag = '"{}"'.format(revision)
+        etag = 'W/"{}"'.format(revision)
         headers = {'Cache-Control': 'public, no-cache', 'ETag': etag}
-        if if_none_match == etag:
+        if _etag_matches(if_none_match, revision):
             return Response(status_code=304, headers=headers)
         return Response(content=payload, media_type='application/json', headers=headers)
 
@@ -192,7 +205,7 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
             'Cache-Control': 'public, max-age=15, stale-while-revalidate=30',
             'ETag': etag,
         }
-        if if_none_match == etag:
+        if _etag_matches(if_none_match, revision):
             return Response(status_code=304, headers=headers)
         return JSONResponse(content=document, headers=headers)
 
