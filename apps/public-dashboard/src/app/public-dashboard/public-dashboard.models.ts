@@ -22,17 +22,6 @@ export interface SeasonOption {
   readonly current: boolean;
 }
 
-export interface DashboardManifest {
-  readonly schemaVersion: 1;
-  readonly snapshotId: string;
-  readonly snapshotPath: string;
-  readonly publicationDate: string;
-  readonly generatedAt: string;
-  readonly sourceLastMatchId: number;
-  readonly sha256: string;
-  readonly bytes: number;
-}
-
 export interface DashboardTrendStanding {
   readonly playerId: number;
   readonly rank: number;

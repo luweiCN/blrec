@@ -5,7 +5,7 @@
 NAS 的在线业务数据统一写入移动云 PostgreSQL 数据库 `blrec_dashboard`：
 
 - `core` schema 是唯一业务主库，保存稿件、分 P、录像会话、上传任务、对局、模型结果、实时预分析、Worker 状态、训练候选元数据和访问日志归档。
-- `public` schema 只保存外网页面需要的公开投影，由 Public Dashboard API 使用；它不能读取 `core` 中的账号凭据和内部任务状态。
+- Public Dashboard API 直接只读 `core` 中经过批准的公开业务表；当前榜单和对局不再复制到另一套投影表。`public` schema 只保存结构化历史趋势、结算图片元数据和写入幂等记录。
 - 录像、结算截图、训练图片、模型文件、日志和缓存仍是 NAS 文件，数据库只保存路径、摘要和状态。
 - `auth.sqlite3` 与 `control.sqlite3` 继续留在 `/cfg`。它们体积很小，分别负责后台登录会话和断网时的本机控制幂等性，不参与业务查询。
 - 原 `blrec.sqlite3` 在切换后只作为回滚快照，不再接受在线写入。
@@ -21,7 +21,7 @@ PostgreSQL 只监听移动云的 `127.0.0.1:5432`，不向公网开放。NAS 使
 - `postgres-tunnel.key` 权限为 `0600`，`postgres-known-hosts` 固定校验主机密钥；
 - 移动云地址必须填固定 IPv4，NAS 端按“云端主数据库”的网络配置绑定源地址；
 - 一条数据库连接从建立到断开始终使用同一出口，网络设置变化时重建隧道；
-- 主应用使用 `blrec_core`，Publisher 使用只读的 `blrec_core_reader`，外网 API 继续使用仅能访问 `public` 的账号。
+- 主应用使用 `blrec_core`，Publisher 使用只读的 `blrec_core_reader`。外网 API 账号拥有 `public` 的读写权限，并且只对 `grant-core-read.sql` 明列的 `core` 表拥有 `SELECT`；不得授予 `core` schema 的通配写权限。
 
 生产连接串必须包含 `connect_timeout=5`，并用
 `options=-csearch_path%3Dcore` 把 schema 固定为 `core`。连接串只保存在权限为 `0600`
@@ -84,7 +84,7 @@ Compose 项目。不得再配置 `DASHBOARD_DATABASE=/cfg/blrec.sqlite3`。
 1. 数据库隧道健康，PostgreSQL 实际 `current_database()` 为 `blrec_dashboard`、`current_schema()` 为 `core`、schema 版本与应用一致。
 2. SQLite 与 PostgreSQL 的 68 张表及逐表行数一致，关键的稿件、分 P、对局、Worker、实时分析队列数量一致。
 3. 管理页登录、列表、任务领取与心跳、实时预分析、录播分析和 Publisher 各完成一次真实读写。
-4. Public Dashboard 快照与迁移前相同，外网页面的 SSE 更新正常。
+4. Public Dashboard API 能直接读取 `core`，榜单与迁移前相同；修改业务数据后 revision 增长、进程缓存刷新且外网页面的 SSE 更新正常。
 5. 切换后执行一次 PostgreSQL 备份；输出必须非空并显示 `integrity=ok`。
 
 ```bash

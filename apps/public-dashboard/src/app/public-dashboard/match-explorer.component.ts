@@ -71,14 +71,14 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   readonly loadingRows = Array.from({ length: 6 }, (_, index) => index);
   private requestSequence = 0;
   private searchTimer?: ReturnType<typeof setTimeout>;
-  private readonly revisionSubscription: Subscription;
+  private readonly matchRevisionSubscription: Subscription;
 
   constructor(
     private readonly matchApi: DashboardMatchApiService,
     dashboardData: DashboardDataService,
     private readonly changeDetector: ChangeDetectorRef,
   ) {
-    this.revisionSubscription = dashboardData.revision$.subscribe(() => {
+    this.matchRevisionSubscription = dashboardData.matchRevision$.subscribe(() => {
       if (this.matchApi.enabled) {
         void this.loadApiPage();
       }
@@ -98,7 +98,7 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
     if (this.searchTimer !== undefined) {
       clearTimeout(this.searchTimer);
     }
-    this.revisionSubscription.unsubscribe();
+    this.matchRevisionSubscription.unsubscribe();
   }
 
   get filteredMatches(): readonly DashboardMatch[] {

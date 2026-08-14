@@ -8,6 +8,8 @@ import psycopg
 import pytest
 from blrec_dashboard_publisher.snapshot import (
     build_dashboard_api_source,
+    build_dashboard_asset_source,
+    build_dashboard_runtime_source,
     build_dashboard_snapshot,
     export_dashboard_files,
 )
@@ -236,6 +238,45 @@ async def test_dashboard_api_source_tracks_active_bound_live_rooms(
             )
         )
         assert offline_source['players'][0]['liveRooms'] == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_and_asset_sources_read_the_core_tables_directly(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_player(database, 10, '主播', 100)
+        await seed_match(
+            database,
+            tmp_path,
+            match_id=1,
+            room_id=100,
+            started_at=timestamp(2026, 8, 1),
+            game_mode='3v3',
+            won=True,
+            hero_id=None,
+            anchor_name='主播',
+        )
+        await database.execute(
+            "UPDATE vainglory_matches SET result_frame_path='1/result.png' WHERE id=1"
+        )
+        now = datetime(2026, 8, 3, 10, 30, tzinfo=SHANGHAI)
+
+        runtime = await database.read(
+            lambda connection: build_dashboard_runtime_source(connection, now=now)
+        )
+        assets = await database.read(
+            lambda connection: build_dashboard_asset_source(connection, now=now)
+        )
+
+        assert runtime['snapshot']['sourceMatchCount'] == 1
+        assert runtime['snapshot']['matches'] == []
+        assert runtime['matches'][0]['id'] == 1
+        assert assets['matches'] == [{'id': 1, 'resultFramePath': '1/result.png'}]
     finally:
         await database.close()
 

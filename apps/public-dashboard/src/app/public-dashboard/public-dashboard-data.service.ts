@@ -3,7 +3,6 @@ import { Subject } from 'rxjs';
 
 import { environment } from '../../environments/environment';
 import {
-  DashboardManifest,
   DashboardMatch,
   DashboardMatchPlayer,
   DashboardMatchReplay,
@@ -35,8 +34,6 @@ export type DashboardLoadState =
   | { readonly kind: 'loading' }
   | {
       readonly kind: 'ready';
-      readonly source: 'api' | 'static';
-      readonly manifest: DashboardManifest | null;
       readonly snapshot: DashboardSnapshot;
       readonly trends: DashboardTrends | null;
     }
@@ -46,7 +43,9 @@ export type DashboardLoadState =
 export class DashboardDataService {
   state: DashboardLoadState = { kind: 'loading' };
   private readonly revisionSubject = new Subject<string>();
+  private readonly matchRevisionSubject = new Subject<void>();
   readonly revision$ = this.revisionSubject.asObservable();
+  readonly matchRevision$ = this.matchRevisionSubject.asObservable();
   private refreshPromise: Promise<boolean> | null = null;
 
   get snapshot(): DashboardSnapshot {
@@ -68,48 +67,17 @@ export class DashboardDataService {
     const previousRevision = this.readyRevision();
     this.state = { kind: 'loading' };
     const apiBaseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
-    if (apiBaseUrl !== '') {
-      try {
-        const document = parseDashboardApiDocument(
-          await fetchJson(`${apiBaseUrl}/dashboard`, 'no-cache'),
-        );
-        this.state = {
-          kind: 'ready',
-          source: 'api',
-          manifest: null,
-          snapshot: document.snapshot,
-          trends: document.trends,
-        };
-        this.emitRevisionIfChanged(previousRevision);
-        return;
-      } catch (error: unknown) {
-        console.warn(
-          'Unable to load dashboard API, falling back to static data',
-          error,
-        );
-      }
-    }
     try {
-      const baseUrl = environment.dataBaseUrl.replace(/\/+$/u, '');
-      const manifest = parseManifest(
-        await fetchJson(`${baseUrl}/manifest.json`, 'no-store'),
-      );
-      if (!/^snapshots\/[a-zA-Z0-9-]+\.json$/u.test(manifest.snapshotPath)) {
-        throw new Error('dashboard manifest contains an invalid snapshot path');
+      if (apiBaseUrl === '') {
+        throw new Error('dashboard API is not configured');
       }
-      const snapshot = parseSnapshot(
-        await fetchJson(`${baseUrl}/${manifest.snapshotPath}`, 'force-cache'),
+      const document = parseDashboardApiDocument(
+        await fetchJson(`${apiBaseUrl}/dashboard`, 'no-cache'),
       );
-      if (snapshot.snapshotId !== manifest.snapshotId) {
-        throw new Error('dashboard manifest and snapshot do not match');
-      }
-      const trends = await loadTrends(baseUrl, snapshot.snapshotId);
       this.state = {
         kind: 'ready',
-        source: 'static',
-        manifest,
-        snapshot,
-        trends,
+        snapshot: document.snapshot,
+        trends: document.trends,
       };
       this.emitRevisionIfChanged(previousRevision);
     } catch (error: unknown) {
@@ -131,6 +99,10 @@ export class DashboardDataService {
     return this.refreshPromise;
   }
 
+  notifyMatchDataChanged(): void {
+    this.matchRevisionSubject.next();
+  }
+
   private async refreshReadyState(): Promise<boolean> {
     if (this.state.kind !== 'ready') {
       return false;
@@ -138,43 +110,17 @@ export class DashboardDataService {
     const previous = this.state;
     try {
       const apiBaseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
-      let next: Extract<DashboardLoadState, { readonly kind: 'ready' }>;
-      if (apiBaseUrl !== '') {
-        const document = parseDashboardApiDocument(
-          await fetchJson(`${apiBaseUrl}/dashboard`, 'no-cache'),
-        );
-        next = {
-          kind: 'ready',
-          source: 'api',
-          manifest: null,
-          snapshot: document.snapshot,
-          trends: document.trends,
-        };
-      } else {
-        const baseUrl = environment.dataBaseUrl.replace(/\/+$/u, '');
-        const manifest = parseManifest(
-          await fetchJson(`${baseUrl}/manifest.json`, 'no-store'),
-        );
-        if (!/^snapshots\/[a-zA-Z0-9-]+\.json$/u.test(manifest.snapshotPath)) {
-          throw new Error('dashboard manifest contains an invalid snapshot path');
-        }
-        if (manifest.snapshotId === previous.snapshot.snapshotId) {
-          return false;
-        }
-        const snapshot = parseSnapshot(
-          await fetchJson(`${baseUrl}/${manifest.snapshotPath}`, 'force-cache'),
-        );
-        if (snapshot.snapshotId !== manifest.snapshotId) {
-          throw new Error('dashboard manifest and snapshot do not match');
-        }
-        next = {
-          kind: 'ready',
-          source: 'static',
-          manifest,
-          snapshot,
-          trends: await loadTrends(baseUrl, snapshot.snapshotId),
-        };
+      if (apiBaseUrl === '') {
+        throw new Error('dashboard API is not configured');
       }
+      const document = parseDashboardApiDocument(
+        await fetchJson(`${apiBaseUrl}/dashboard`, 'no-cache'),
+      );
+      const next: Extract<DashboardLoadState, { readonly kind: 'ready' }> = {
+        kind: 'ready',
+        snapshot: document.snapshot,
+        trends: document.trends,
+      };
       const previousRevision =
         previous.snapshot.contentRevision ?? previous.snapshot.snapshotId;
       const nextRevision = next.snapshot.contentRevision ?? next.snapshot.snapshotId;
@@ -663,45 +609,6 @@ function parseTrends(value: unknown): DashboardTrends {
     throw new Error('dashboard trend publications are not chronological');
   }
   return value as unknown as DashboardTrends;
-}
-
-async function loadTrends(
-  baseUrl: string,
-  snapshotId: string,
-): Promise<DashboardTrends | null> {
-  try {
-    const value = await fetchJson(
-      `${baseUrl}/trends.json?v=${encodeURIComponent(snapshotId)}`,
-      'no-store',
-    );
-    const trends = parseTrends(value);
-    return trends.publications.some(
-      (publication) => publication.snapshotId === snapshotId,
-    )
-      ? trends
-      : null;
-  } catch (error: unknown) {
-    console.warn('Unable to load dashboard trends', error);
-    return null;
-  }
-}
-
-function parseManifest(value: unknown): DashboardManifest {
-  if (
-    !isObject(value) ||
-    value['schemaVersion'] !== 1 ||
-    typeof value['snapshotId'] !== 'string' ||
-    typeof value['snapshotPath'] !== 'string' ||
-    typeof value['publicationDate'] !== 'string' ||
-    typeof value['generatedAt'] !== 'string' ||
-    !isNonNegativeInteger(value['sourceLastMatchId']) ||
-    typeof value['sha256'] !== 'string' ||
-    !/^[0-9a-f]{64}$/u.test(value['sha256']) ||
-    !isNonNegativeInteger(value['bytes'])
-  ) {
-    throw new Error('dashboard manifest has an unsupported format');
-  }
-  return value as unknown as DashboardManifest;
 }
 
 function roomIdsFromLegacyLabel(value: unknown): readonly number[] {

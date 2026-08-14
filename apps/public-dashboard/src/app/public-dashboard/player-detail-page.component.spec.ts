@@ -32,6 +32,7 @@ describe('PlayerDetailPageComponent', () => {
     snapshot: typeof TEST_DASHBOARD_SNAPSHOT;
     trends: DashboardTrends;
     revision$: Subject<string>;
+    matchRevision$: Subject<void>;
   };
 
   beforeEach(async () => {
@@ -39,6 +40,7 @@ describe('PlayerDetailPageComponent', () => {
       snapshot: TEST_DASHBOARD_SNAPSHOT,
       trends: TEST_DASHBOARD_TRENDS,
       revision$: new Subject<string>(),
+      matchRevision$: new Subject<void>(),
     };
     await TestBed.configureTestingModule({
       declarations: [

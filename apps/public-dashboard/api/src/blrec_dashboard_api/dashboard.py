@@ -1,114 +1,12 @@
 from __future__ import annotations
 
-import json
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-
-from blrec_dashboard_publisher.snapshot import build_dashboard_snapshot_from_records
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 from .database import DatabaseTarget, connect_database
 
 _TREND_MODES = ('all', '3v3', 'brawl', '5v5')
 _MAX_TREND_PUBLICATIONS = 180
-
-
-def _json_text(value: Mapping[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-
-
-def _player_metadata(
-    connection: Any,
-) -> Tuple[Mapping[int, Mapping[str, Any]], Mapping[int, List[str]]]:
-    players: Dict[int, Dict[str, Any]] = {}
-    for row in connection.execute(
-        'SELECT player_id,name FROM players ORDER BY player_id'
-    ).fetchall():
-        players[int(row['player_id'])] = {'name': str(row['name']), 'rooms': []}
-    for row in connection.execute(
-        'SELECT player_id,room_id FROM player_rooms ORDER BY player_id,room_id'
-    ).fetchall():
-        player = players.get(int(row['player_id']))
-        if player is not None:
-            player['rooms'].append(int(row['room_id']))
-    aliases: Dict[int, List[str]] = {player_id: [] for player_id in players}
-    for row in connection.execute(
-        'SELECT player_id,alias FROM player_aliases '
-        'ORDER BY player_id,lower(alias),alias'
-    ).fetchall():
-        aliases.setdefault(int(row['player_id']), []).append(str(row['alias']))
-    return players, aliases
-
-
-def _ranking_rows(connection: Any) -> List[Mapping[str, Any]]:
-    rows = connection.execute(
-        'SELECT match.source_match_id AS match_id,match.player_id,'
-        'match.exact_fingerprint,'
-        'match.mode AS game_mode,match.played_at_epoch AS played_at,'
-        'match.duration_seconds,match.result,ally.side AS recorded_player_side,'
-        'enemy.side AS enemy_side,COALESCE(recorded.hero_name,\'\') AS hero_name,'
-        'recorded.kills,recorded.deaths,recorded.assists,recorded.economy '
-        'FROM matches match '
-        'JOIN match_teams ally ON ally.match_id=match.source_match_id '
-        "AND ally.role='ally' "
-        'JOIN match_teams enemy ON enemy.match_id=match.source_match_id '
-        "AND enemy.role='enemy' "
-        'LEFT JOIN match_participants recorded '
-        'ON recorded.match_id=match.source_match_id '
-        "AND recorded.team_role='ally' AND recorded.is_recorded_player=1 "
-        'ORDER BY match.played_at_epoch,match.source_match_id'
-    ).fetchall()
-    values: List[Mapping[str, Any]] = []
-    for row in rows:
-        value = dict(row)
-        value['winner_side'] = (
-            str(row['recorded_player_side'])
-            if str(row['result']) == 'W'
-            else str(row['enemy_side'])
-        )
-        values.append(value)
-    return values
-
-
-def _environment_rows(connection: Any) -> List[Mapping[str, Any]]:
-    rows = connection.execute(
-        'SELECT match.source_match_id AS match_id,match.mode AS game_mode,'
-        'match.played_at_epoch AS played_at,match.duration_seconds,'
-        'match.exact_fingerprint,ally.side AS recorded_player_side,'
-        'enemy.side AS enemy_side,match.result '
-        'FROM matches match '
-        'JOIN match_teams ally ON ally.match_id=match.source_match_id '
-        "AND ally.role='ally' "
-        'JOIN match_teams enemy ON enemy.match_id=match.source_match_id '
-        "AND enemy.role='enemy' "
-        'ORDER BY match.played_at_epoch,match.source_match_id'
-    ).fetchall()
-    values: List[Mapping[str, Any]] = []
-    for row in rows:
-        value = dict(row)
-        value['winner_side'] = (
-            str(row['recorded_player_side'])
-            if str(row['result']) == 'W'
-            else str(row['enemy_side'])
-        )
-        values.append(value)
-    return values
-
-
-def _lineups_by_match(connection: Any) -> Mapping[int, List[Mapping[str, Any]]]:
-    lineups: Dict[int, List[Mapping[str, Any]]] = {}
-    rows = connection.execute(
-        'SELECT participant.match_id,team.side,participant.slot,'
-        'participant.player_name,participant.hero_name,participant.kills,'
-        'participant.deaths,participant.assists,participant.economy,'
-        'participant.last_hits FROM match_participants participant '
-        'JOIN match_teams team ON team.match_id=participant.match_id '
-        'AND team.role=participant.team_role '
-        'ORDER BY participant.match_id,team.side,participant.slot'
-    ).fetchall()
-    for row in rows:
-        lineups.setdefault(int(row['match_id']), []).append(dict(row))
-    return lineups
 
 
 def _ranked_trend_rows(
@@ -135,8 +33,7 @@ def _ranked_trend_rows(
 
 def _trend_standings(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
     values: Dict[str, Mapping[str, Any]] = {}
-    standings = snapshot['standings']
-    for season_key, season_standings in standings.items():
+    for season_key, season_standings in snapshot['standings'].items():
         players = season_standings['players']
         values[str(season_key)] = {
             mode: _ranked_trend_rows(players, mode) for mode in _TREND_MODES
@@ -144,79 +41,93 @@ def _trend_standings(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
     return values
 
 
-def refresh_dashboard_state(
-    connection: Any, *, generated_at: datetime
+def current_dashboard_publication(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    return {
+        'snapshotId': str(snapshot['snapshotId']),
+        'publicationDate': str(snapshot['publicationDate']),
+        'sourceLastMatchId': int(snapshot['sourceLastMatchId']),
+        'standings': _trend_standings(snapshot),
+    }
+
+
+def merge_current_dashboard_publication(
+    trends: Mapping[str, Any], snapshot: Mapping[str, Any]
 ) -> Mapping[str, Any]:
-    if generated_at.tzinfo is None or generated_at.utcoffset() is None:
-        raise ValueError('dashboard generation time must include a timezone')
-    players, aliases = _player_metadata(connection)
-    snapshot = build_dashboard_snapshot_from_records(
-        players=players,
-        aliases=aliases,
-        rows=_ranking_rows(connection),
-        environment_rows=_environment_rows(connection),
-        lineups=_lineups_by_match(connection),
-        public_matches=(),
-        generated_at=generated_at,
-    )
+    current = current_dashboard_publication(snapshot)
+    publication_date = str(current['publicationDate'])
+    publications = [
+        publication
+        for publication in trends.get('publications', ())
+        if str(publication.get('publicationDate')) != publication_date
+    ]
+    publications.append(current)
+    publications.sort(key=lambda publication: str(publication['publicationDate']))
+    return {
+        'schemaVersion': 1,
+        'updatedAt': str(snapshot['generatedAt']),
+        'publications': publications[-_MAX_TREND_PUBLICATIONS:],
+    }
+
+
+def persist_dashboard_publication(
+    database_target: DatabaseTarget,
+    *,
+    source_revision: int,
+    snapshot: Mapping[str, Any],
+) -> None:
     now = int(time.time())
-    snapshot_id = str(snapshot['snapshotId'])
-    generated_at_text = str(snapshot['generatedAt'])
-    connection.execute(
-        'INSERT INTO dashboard_state('
-        'singleton_id,snapshot_id,content_revision,generated_at,snapshot_json,'
-        'updated_at) VALUES(1,?,?,?,?,?) '
-        'ON CONFLICT(singleton_id) DO UPDATE SET '
-        'snapshot_id=excluded.snapshot_id,'
-        'content_revision=excluded.content_revision,'
-        'generated_at=excluded.generated_at,snapshot_json=excluded.snapshot_json,'
-        'updated_at=excluded.updated_at',
-        (
-            snapshot_id,
-            str(snapshot['contentRevision']),
-            generated_at_text,
-            _json_text(snapshot),
-            now,
-        ),
-    )
-    connection.execute(
-        'INSERT INTO dashboard_trend_publications('
-        'publication_date,snapshot_id,generated_at,source_last_match_id,'
-        'standings_json,updated_at) VALUES(?,?,?,?,?,?) '
-        'ON CONFLICT(publication_date) DO UPDATE SET '
-        'snapshot_id=excluded.snapshot_id,generated_at=excluded.generated_at,'
-        'source_last_match_id=excluded.source_last_match_id,'
-        'standings_json=excluded.standings_json,updated_at=excluded.updated_at',
-        (
-            str(snapshot['publicationDate']),
-            snapshot_id,
-            generated_at_text,
-            int(snapshot['sourceLastMatchId']),
-            _json_text(_trend_standings(snapshot)),
-            now,
-        ),
-    )
-    connection.execute(
-        'DELETE FROM dashboard_trend_publications WHERE publication_date NOT IN('
-        'SELECT publication_date FROM dashboard_trend_publications '
-        'ORDER BY publication_date DESC LIMIT ?)',
-        (_MAX_TREND_PUBLICATIONS,),
-    )
-    return snapshot
-
-
-def ensure_dashboard_state(database_target: DatabaseTarget) -> None:
+    publication_date = str(snapshot['publicationDate'])
     connection = connect_database(database_target)
     try:
         connection.execute('BEGIN IMMEDIATE')
-        initialized = connection.execute(
-            'SELECT 1 FROM ingestion_batches LIMIT 1'
-        ).fetchone()
-        state = connection.execute(
-            'SELECT 1 FROM dashboard_state WHERE singleton_id=1'
-        ).fetchone()
-        if initialized is not None and state is None:
-            refresh_dashboard_state(connection, generated_at=datetime.now(timezone.utc))
+        connection.execute(
+            'INSERT INTO dashboard_publications('
+            'publication_date,source_revision,snapshot_id,generated_at,'
+            'source_last_match_id,updated_at) VALUES(?,?,?,?,?,?) '
+            'ON CONFLICT(publication_date) DO UPDATE SET '
+            'source_revision=excluded.source_revision,'
+            'snapshot_id=excluded.snapshot_id,generated_at=excluded.generated_at,'
+            'source_last_match_id=excluded.source_last_match_id,'
+            'updated_at=excluded.updated_at',
+            (
+                publication_date,
+                source_revision,
+                str(snapshot['snapshotId']),
+                str(snapshot['generatedAt']),
+                int(snapshot['sourceLastMatchId']),
+                now,
+            ),
+        )
+        connection.execute(
+            'DELETE FROM dashboard_publication_standings WHERE publication_date=?',
+            (publication_date,),
+        )
+        rows: List[Tuple[str, str, str, int, int, int]] = []
+        for season_key, modes in _trend_standings(snapshot).items():
+            for mode, standings in modes.items():
+                rows.extend(
+                    (
+                        publication_date,
+                        season_key,
+                        mode,
+                        int(standing['playerId']),
+                        int(standing['rank']),
+                        int(standing['ratingScore']),
+                    )
+                    for standing in standings
+                )
+        connection.executemany(
+            'INSERT INTO dashboard_publication_standings('
+            'publication_date,season_key,mode,player_id,rank,rating_score'
+            ') VALUES(?,?,?,?,?,?)',
+            rows,
+        )
+        connection.execute(
+            'DELETE FROM dashboard_publications WHERE publication_date NOT IN('
+            'SELECT publication_date FROM dashboard_publications '
+            'ORDER BY publication_date DESC LIMIT ?)',
+            (_MAX_TREND_PUBLICATIONS,),
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -225,42 +136,49 @@ def ensure_dashboard_state(database_target: DatabaseTarget) -> None:
         connection.close()
 
 
-def get_dashboard_document(
-    database_target: DatabaseTarget,
-) -> Optional[Tuple[Mapping[str, Any], str]]:
+def load_dashboard_trends(database_target: DatabaseTarget) -> Mapping[str, Any]:
     connection = connect_database(database_target)
     try:
-        state = connection.execute(
-            'SELECT snapshot_json,content_revision,generated_at '
-            'FROM dashboard_state WHERE singleton_id=1'
-        ).fetchone()
-        if state is None:
-            return None
-        snapshot = json.loads(str(state['snapshot_json']))
-        publications = []
-        for row in connection.execute(
-            'SELECT publication_date,snapshot_id,generated_at,'
-            'source_last_match_id,standings_json '
-            'FROM dashboard_trend_publications ORDER BY publication_date'
-        ).fetchall():
-            publications.append(
-                {
-                    'snapshotId': str(row['snapshot_id']),
-                    'publicationDate': str(row['publication_date']),
-                    'sourceLastMatchId': int(row['source_last_match_id']),
-                    'standings': json.loads(str(row['standings_json'])),
-                }
-            )
-        return (
-            {
-                'snapshot': snapshot,
-                'trends': {
-                    'schemaVersion': 1,
-                    'updatedAt': str(state['generated_at']),
-                    'publications': publications,
-                },
-            },
-            str(state['content_revision']),
-        )
+        publications = connection.execute(
+            'SELECT publication_date,snapshot_id,generated_at,source_last_match_id '
+            'FROM dashboard_publications ORDER BY publication_date'
+        ).fetchall()
+        rows = connection.execute(
+            'SELECT publication_date,season_key,mode,player_id,rank,rating_score '
+            'FROM dashboard_publication_standings '
+            'ORDER BY publication_date,season_key,mode,rank'
+        ).fetchall()
     finally:
         connection.close()
+    standings_by_date: Dict[str, Dict[str, Dict[str, List[Mapping[str, int]]]]] = {}
+    for row in rows:
+        publication_date = str(row['publication_date'])
+        season_key = str(row['season_key'])
+        mode = str(row['mode'])
+        standings_by_date.setdefault(publication_date, {}).setdefault(
+            season_key, {}
+        ).setdefault(mode, []).append(
+            {
+                'playerId': int(row['player_id']),
+                'rank': int(row['rank']),
+                'ratingScore': int(row['rating_score']),
+            }
+        )
+    values = []
+    for publication in publications:
+        publication_date = str(publication['publication_date'])
+        values.append(
+            {
+                'snapshotId': str(publication['snapshot_id']),
+                'publicationDate': publication_date,
+                'sourceLastMatchId': int(publication['source_last_match_id']),
+                'standings': standings_by_date.get(publication_date, {}),
+            }
+        )
+    return {
+        'schemaVersion': 1,
+        'updatedAt': (
+            '' if not publications else str(publications[-1]['generated_at'])
+        ),
+        'publications': values,
+    }

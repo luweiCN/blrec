@@ -142,6 +142,9 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
           this.changeDetector.markForCheck();
         }
       }
+      if (update === 'resync' || update === 'matches') {
+        this.data.notifyMatchDataChanged();
+      }
     } finally {
       this.finishRealtimeRefresh();
     }

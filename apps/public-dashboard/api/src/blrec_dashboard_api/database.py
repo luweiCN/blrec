@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Iterator, Mapping, Sequence, Union, overload
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 DatabaseTarget = Union[Path, str]
 _POSTGRES_POOLS: dict[str, Any] = {}
 _POSTGRES_POOLS_LOCK = Lock()
@@ -22,10 +22,10 @@ class DatabaseRow(Mapping[str, Any]):
         self._mapping = dict(zip(self._names, self._values))
 
     @overload
-    def __getitem__(self, key: str) -> Any: ...
+    def __getitem__(self, key: str) -> Any: ...  # noqa: E704
 
     @overload
-    def __getitem__(self, key: int) -> Any: ...
+    def __getitem__(self, key: int) -> Any: ...  # noqa: E704
 
     def __getitem__(self, key: object) -> Any:
         if isinstance(key, int):
@@ -198,7 +198,8 @@ def _initialize_postgres(target: DatabaseTarget) -> None:
 def _migration_text(directory: str, version: int) -> str:
     return (
         resources.files('blrec_dashboard_api')
-        .joinpath(directory, '{:04d}_initial.sql'.format(version))
+        .joinpath(directory)
+        .joinpath('{:04d}_initial.sql'.format(version))
         .read_text(encoding='utf-8')
     )
 

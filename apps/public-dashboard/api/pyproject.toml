@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "blrec-dashboard-api"
 version = "0.1.0"
-description = "Public match API and rating ledger for the BLREC dashboard"
+description = "Database-backed public API for the BLREC dashboard"
 requires-python = ">=3.10"
 dependencies = [
   "blrec-dashboard-publisher==0.1.0",

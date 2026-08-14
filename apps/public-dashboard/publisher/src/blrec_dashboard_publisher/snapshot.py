@@ -47,7 +47,9 @@ from .source_database import connect_source_database
 
 __all__ = (
     'DashboardExportResult',
+    'build_dashboard_asset_source',
     'build_dashboard_api_source',
+    'build_dashboard_runtime_source',
     'build_dashboard_snapshot',
     'build_dashboard_snapshot_from_records',
     'export_dashboard_files',
@@ -828,6 +830,104 @@ def build_dashboard_api_source(
     }
 
 
+def build_dashboard_runtime_source(
+    connection: sqlite3.Connection, *, now: Optional[datetime] = None
+) -> Mapping[str, Any]:
+    """Read one consistent source snapshot for the database-backed public API."""
+
+    connection.row_factory = sqlite3.Row
+    _validate_schema(connection)
+    generated_at = now or datetime.now(timezone.utc)
+    if generated_at.tzinfo is None:
+        raise ValueError('dashboard runtime source time must include a timezone')
+    players, aliases = _player_metadata(connection)
+    live_rooms = _live_rooms_by_player(connection)
+    rows = _match_rows(connection)
+    lineups = _lineups_by_match(connection, rows)
+    publications = _publications_by_session(connection, rows)
+    publication_parts = _publication_parts(connection, publications)
+    public_matches = _public_matches(rows, lineups, publications, publication_parts)
+    runtime_players = []
+    for player_id, metadata in sorted(players.items()):
+        name = str(metadata['name'])
+        runtime_players.append(
+            {
+                'id': player_id,
+                'name': name,
+                'initial': name[:1],
+                'roomLabel': _room_label(list(metadata['rooms'])),
+                'roomIds': list(metadata['rooms']),
+                'liveRooms': list(live_rooms.get(player_id, ())),
+                'aliases': list(aliases.get(player_id, ())),
+                'avatarUrl': None,
+            }
+        )
+    return {
+        'snapshot': build_dashboard_snapshot_from_records(
+            players=players,
+            aliases=aliases,
+            rows=rows,
+            environment_rows=rows,
+            lineups=lineups,
+            public_matches=(),
+            generated_at=generated_at,
+        ),
+        'players': runtime_players,
+        'matches': public_matches,
+    }
+
+
+def build_dashboard_asset_source(
+    connection: sqlite3.Connection, *, now: Optional[datetime] = None
+) -> Mapping[str, Any]:
+    """Read only the NAS-local result frames that still need external hosting."""
+
+    connection.row_factory = sqlite3.Row
+    _validate_schema(connection)
+    generated_at = now or datetime.now(timezone.utc)
+    if generated_at.tzinfo is None:
+        raise ValueError('dashboard asset source time must include a timezone')
+    rows = connection.execute(
+        'SELECT match.id AS match_id,match.result_frame_path '
+        'FROM recording_sessions session '
+        'LEFT JOIN vainglory_player_rooms room '
+        'ON room.room_id=session.room_id AND session.room_id>0 '
+        'LEFT JOIN vainglory_player_sessions direct '
+        'ON direct.session_id=session.id '
+        'JOIN vainglory_players player '
+        'ON player.id=COALESCE(room.player_id,direct.player_id) '
+        'JOIN vainglory_matches match ON match.session_id=session.id '
+        'JOIN recording_parts part ON part.id=match.result_part_id '
+        'JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
+        'WHERE scan.stats_included=1 AND match.stats_eligible=1 '
+        "AND match.game_mode IN ('3v3','5v5','aram','other') "
+        "AND match.recorded_player_side IN ('left','right') "
+        'AND match.recorded_player_slot BETWEEN 1 AND match.team_size '
+        "AND ((match.game_mode='3v3' AND match.team_size=3) "
+        "OR (match.game_mode='5v5' AND match.team_size=5) "
+        "OR match.game_mode IN ('aram','other')) "
+        "AND CASE match.winner_side WHEN 'left' THEN match.left_color "
+        "WHEN 'right' THEN match.right_color END IN ('teal','orange') "
+        'ORDER BY match.id'
+    ).fetchall()
+    return {
+        'schemaVersion': 1,
+        'generatedAt': _utc_iso(generated_at),
+        'sourceLastMatchId': max((int(row['match_id']) for row in rows), default=0),
+        'matches': [
+            {
+                'id': int(row['match_id']),
+                'resultFramePath': (
+                    None
+                    if row['result_frame_path'] is None
+                    else str(row['result_frame_path'])
+                ),
+            }
+            for row in rows
+        ],
+    }
+
+
 def _empty_player_modes() -> Dict[str, _Performance]:
     return {mode: _Performance() for mode in PUBLIC_MODES}
 
@@ -1059,7 +1159,7 @@ def _environment_heroes(
                     names.setdefault('all', set()).add(participant_name.casefold())
 
     synergies, counters = _hero_relationships(rows, lineups)
-    values = []
+    values: List[Mapping[str, Any]] = []
     for hero_name, modes in sorted(
         hero_modes.items(), key=lambda item: (item[0].casefold(), item[0])
     ):

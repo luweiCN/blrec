@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Mapping, Set
+from typing import Any, AsyncIterator, Mapping, Set
 
 from fastapi import Request
 from fastapi.responses import StreamingResponse

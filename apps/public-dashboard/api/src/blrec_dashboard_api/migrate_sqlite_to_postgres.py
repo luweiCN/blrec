@@ -15,19 +15,10 @@ from psycopg.conninfo import conninfo_to_dict
 from .database import initialize_database
 
 _TABLES = (
-    'ingestion_batches',
-    'players',
-    'player_rooms',
-    'player_aliases',
-    'matches',
-    'match_teams',
-    'match_participants',
-    'rating_events',
-    'match_search',
-    'removed_matches',
-    'dashboard_state',
-    'dashboard_trend_publications',
-    'player_live_rooms',
+    'dashboard_publications',
+    'dashboard_publication_standings',
+    'match_assets',
+    'asset_batches',
 )
 _IDENTIFIER_PATTERN = re.compile(r'^[a-z][a-z0-9_]*$')
 
@@ -150,16 +141,6 @@ def migrate(
                             table, actual, expected
                         )
                     )
-            source_state = source.execute(
-                'SELECT content_revision FROM dashboard_state WHERE singleton_id=1'
-            ).fetchone()
-            target_state = target.execute(
-                'SELECT content_revision FROM dashboard_state WHERE singleton_id=1'
-            ).fetchone()
-            if (None if source_state is None else source_state[0]) != (
-                None if target_state is None else target_state[0]
-            ):
-                raise RuntimeError('dashboard revision differs after migration')
     finally:
         target.close()
         source.close()

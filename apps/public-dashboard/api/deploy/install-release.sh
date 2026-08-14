@@ -105,6 +105,8 @@ if [[ -n "$database_url" ]]; then
   systemctl enable blrec-dashboard-db-tunnel.service >/dev/null
   systemctl restart blrec-dashboard-db-tunnel.service
   postgres_url="${database_url/postgresql+psycopg:\/\//postgresql:\/\/}"
+  source_database_url="${DASHBOARD_API_SOURCE_DATABASE_URL:-$postgres_url}"
+  source_database_url="${source_database_url/postgresql+psycopg:\/\//postgresql:\/\/}"
   postgres_ready=false
   for _attempt in {1..30}; do
     if "$release/venv/bin/python" - "$postgres_url" <<'PY'
@@ -126,6 +128,41 @@ PY
   done
   if [[ "$postgres_ready" != "true" ]]; then
     echo "PostgreSQL SSH tunnel did not become ready" >&2
+    exit 1
+  fi
+  if ! "$release/venv/bin/python" - "$source_database_url" <<'PY'
+import sys
+
+import psycopg
+
+tables = (
+    'schema_migrations',
+    'dashboard_source_state',
+    'recording_sessions',
+    'recording_parts',
+    'upload_parts',
+    'vainglory_players',
+    'vainglory_player_rooms',
+    'vainglory_player_sessions',
+    'vainglory_matches',
+    'vainglory_match_players',
+    'vainglory_heroes',
+    'vainglory_scan_jobs',
+    'vainglory_publications',
+    'vainglory_archive_imports',
+    'vainglory_archive_parts',
+)
+with psycopg.connect(sys.argv[1], connect_timeout=5) as connection:
+    for table in tables:
+        connection.execute(f'SELECT 1 FROM core.{table} LIMIT 0')
+    revision = connection.execute(
+        'SELECT revision FROM core.dashboard_source_state WHERE singleton_id=1'
+    ).fetchone()
+    if revision is None or int(revision[0]) <= 0:
+        raise RuntimeError('dashboard core source revision is missing')
+PY
+  then
+    echo "API database role cannot read the approved core dashboard tables" >&2
     exit 1
   fi
   postgres_backup="$database_backup_root/dashboard-$release_id.dump"

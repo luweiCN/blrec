@@ -40,6 +40,7 @@ describe('MatchesPageComponent', () => {
             snapshot: TEST_DASHBOARD_SNAPSHOT,
             trends: TEST_DASHBOARD_TRENDS,
             revision$: new Subject<string>(),
+            matchRevision$: new Subject<void>(),
           },
         },
         {

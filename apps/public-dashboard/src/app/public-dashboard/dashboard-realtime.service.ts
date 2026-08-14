@@ -6,7 +6,8 @@ import { environment } from '../../environments/environment';
 export type DashboardRealtimeUpdate =
   | 'resync'
   | 'dashboard'
-  | 'live_rooms';
+  | 'live_rooms'
+  | 'matches';
 
 export interface DashboardEventSource {
   addEventListener(type: string, listener: () => void): void;
@@ -46,7 +47,12 @@ export class DashboardRealtimeService {
       return;
     }
     const eventSource = this.eventSourceFactory(`${apiBaseUrl}/events`);
-    for (const update of ['resync', 'dashboard', 'live_rooms'] as const) {
+    for (const update of [
+      'resync',
+      'dashboard',
+      'live_rooms',
+      'matches',
+    ] as const) {
       eventSource.addEventListener(update, () => {
         this.updatesSubject.next(update);
       });

@@ -16,7 +16,7 @@ from PIL import Image
 from blrec.networking.manager import NetworkRouteManager, RouteSelection
 from blrec.networking.requests_session import RoutedRequestsSession
 
-from .snapshot import build_dashboard_api_source
+from .snapshot import build_dashboard_asset_source
 from .source_database import connect_source_database
 
 
@@ -33,7 +33,7 @@ class MatchImageStore(Protocol):
 class DashboardApiSyncResult:
     synced: bool
     batch_id: Optional[str]
-    match_count: int
+    image_count: int
     removed_match_count: int
     uploaded_image_bytes: int
 
@@ -47,10 +47,10 @@ class DashboardApiClient:
             raise DashboardApiSyncError('排行榜 API 必须使用 HTTPS')
         if not token:
             raise DashboardApiSyncError('排行榜 API 写入密钥不能为空')
-        self._url = normalized_url + '/v1/ingest/batches'
+        self._url = normalized_url + '/v1/assets/batches'
         self._token = token
         self._route_manager = route_manager
-        self._affinity_key = 'dashboard-api-ingest'
+        self._affinity_key = 'dashboard-api-assets'
         self.selection: RouteSelection = route_manager.select(
             'dashboard_publish', anonymous=False, affinity_key=self._affinity_key
         )
@@ -119,15 +119,14 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 
 def _load_state(path: Path) -> Mapping[str, Any]:
     if not path.is_file():
-        return {'schemaVersion': 1, 'playersRevision': '', 'matches': {}}
+        return {'schemaVersion': 2, 'matches': {}}
     try:
         value = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise DashboardApiSyncError('排行榜 API 同步状态损坏') from exc
     if (
         not isinstance(value, Mapping)
-        or value.get('schemaVersion') != 1
-        or not isinstance(value.get('playersRevision'), str)
+        or value.get('schemaVersion') not in (1, 2)
         or not isinstance(value.get('matches'), Mapping)
     ):
         raise DashboardApiSyncError('排行榜 API 同步状态版本无效')
@@ -209,12 +208,12 @@ def _send_outbox(
     post_batch(batch_id, _canonical_bytes(batch))
     _atomic_json(state_path, next_state)
     path.unlink()
-    matches = batch.get('matches')
+    images = batch.get('images')
     removed = batch.get('removedMatchIds')
     return DashboardApiSyncResult(
         synced=True,
         batch_id=batch_id,
-        match_count=len(matches) if isinstance(matches, list) else 0,
+        image_count=len(images) if isinstance(images, list) else 0,
         removed_match_count=len(removed) if isinstance(removed, list) else 0,
         uploaded_image_bytes=uploaded_image_bytes,
     )
@@ -229,7 +228,7 @@ def sync_dashboard_api_once(
     image_store: MatchImageStore,
     post_batch: Callable[[str, bytes], Mapping[str, Any]],
     source_builder: Callable[[sqlite3.Connection], Mapping[str, Any]] = (
-        build_dashboard_api_source
+        build_dashboard_asset_source
     ),
 ) -> DashboardApiSyncResult:
     state_directory = state_directory.expanduser().resolve()
@@ -244,20 +243,16 @@ def sync_dashboard_api_once(
         source = source_builder(connection)
     finally:
         connection.close()
-    players = source.get('players')
     source_matches = source.get('matches')
-    if not isinstance(players, list) or not isinstance(source_matches, list):
+    if not isinstance(source_matches, list):
         raise DashboardApiSyncError('排行榜 API 数据源字段无效')
 
     previous_state = _load_state(state_path)
     previous_matches = previous_state['matches']
     assert isinstance(previous_matches, Mapping)
-    players_revision = hashlib.sha256(
-        _canonical_bytes({'players': players})
-    ).hexdigest()
-    changed_players = players_revision != previous_state['playersRevision']
     next_matches: Dict[str, Mapping[str, Any]] = {}
-    changed_matches = []
+    changed_images = []
+    removed_match_ids = []
     uploaded_image_bytes = 0
     for source_match in source_matches:
         if (
@@ -266,29 +261,22 @@ def sync_dashboard_api_once(
         ):
             raise DashboardApiSyncError('排行榜 API 对局字段无效')
         match_id = int(source_match['id'])
-        public_match = json.loads(json.dumps(source_match, ensure_ascii=False))
-        relative_frame = public_match.pop('resultFramePath', None)
+        relative_frame = source_match.get('resultFramePath')
         if relative_frame is not None and not isinstance(relative_frame, str):
             raise DashboardApiSyncError('结算图路径字段无效')
         frame_path, frame_signature = _resolve_frame(
             result_frame_directory, relative_frame
         )
-        revision = hashlib.sha256(
-            _canonical_bytes({'match': public_match, 'frameSignature': frame_signature})
-        ).hexdigest()
         previous = previous_matches.get(str(match_id))
-        if isinstance(previous, Mapping) and previous.get('revision') == revision:
+        if (
+            isinstance(previous, Mapping)
+            and previous.get('frameSignature') == frame_signature
+        ):
             next_matches[str(match_id)] = previous
             continue
 
         image: Optional[Mapping[str, Any]] = None
-        if (
-            isinstance(previous, Mapping)
-            and previous.get('frameSignature') == frame_signature
-            and isinstance(previous.get('image'), Mapping)
-        ):
-            image = previous['image']
-        elif frame_path is not None:
+        if frame_path is not None:
             image, uploaded = _image_value(
                 match_id=match_id,
                 path=frame_path,
@@ -297,43 +285,46 @@ def sync_dashboard_api_once(
             )
             uploaded_image_bytes += uploaded
         if image is not None:
-            public_match['resultImage'] = {
-                key: image[key] for key in ('url', 'width', 'height')
-            }
+            changed_images.append(
+                {
+                    'matchId': match_id,
+                    **{key: image[key] for key in ('url', 'width', 'height', 'sha256')},
+                }
+            )
+        elif isinstance(previous, Mapping) and isinstance(
+            previous.get('image'), Mapping
+        ):
+            removed_match_ids.append(match_id)
         next_matches[str(match_id)] = {
-            'revision': revision,
             'frameSignature': frame_signature,
             'image': image,
         }
-        changed_matches.append(public_match)
 
     current_ids = set(next_matches)
-    removed_match_ids = sorted(
-        int(match_id) for match_id in set(previous_matches).difference(current_ids)
+    removed_match_ids.extend(
+        int(match_id)
+        for match_id in set(previous_matches).difference(current_ids)
+        if isinstance(previous_matches.get(match_id), Mapping)
+        and isinstance(previous_matches[match_id].get('image'), Mapping)
     )
-    if not changed_players and not changed_matches and not removed_match_ids:
+    removed_match_ids = sorted(set(removed_match_ids))
+    if not changed_images and not removed_match_ids:
         return DashboardApiSyncResult(
             synced=False,
             batch_id=None,
-            match_count=0,
+            image_count=0,
             removed_match_count=0,
             uploaded_image_bytes=0,
         )
     batch = {
         'schemaVersion': 1,
         'generatedAt': source.get('generatedAt'),
-        'sourceLastMatchId': source.get('sourceLastMatchId'),
-        'players': players,
-        'matches': changed_matches,
+        'images': changed_images,
         'removedMatchIds': removed_match_ids,
     }
     batch_content = _canonical_bytes(batch)
     batch_id = 'dashboard-{}'.format(hashlib.sha256(batch_content).hexdigest()[:40])
-    next_state = {
-        'schemaVersion': 1,
-        'playersRevision': players_revision,
-        'matches': next_matches,
-    }
+    next_state = {'schemaVersion': 2, 'matches': next_matches}
     envelope = {
         'schemaVersion': 1,
         'batchId': batch_id,

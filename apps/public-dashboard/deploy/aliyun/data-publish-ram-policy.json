@@ -4,22 +4,12 @@
     {
       "Effect": "Allow",
       "Action": "oss:GetObject",
-      "Resource": [
-        "acs:oss:*:1159986474652925:luwei-vainglory/data/manifest.json",
-        "acs:oss:*:1159986474652925:luwei-vainglory/data/trends.json",
-        "acs:oss:*:1159986474652925:luwei-vainglory/data/match-images/*",
-        "acs:oss:*:1159986474652925:luwei-vainglory/data/snapshots/*"
-      ]
+      "Resource": "acs:oss:*:1159986474652925:luwei-vainglory/data/match-images/*"
     },
     {
       "Effect": "Allow",
       "Action": "oss:PutObject",
-      "Resource": [
-        "acs:oss:*:1159986474652925:luwei-vainglory/data/manifest.json",
-        "acs:oss:*:1159986474652925:luwei-vainglory/data/trends.json",
-        "acs:oss:*:1159986474652925:luwei-vainglory/data/match-images/*",
-        "acs:oss:*:1159986474652925:luwei-vainglory/data/snapshots/*"
-      ]
+      "Resource": "acs:oss:*:1159986474652925:luwei-vainglory/data/match-images/*"
     }
   ]
 }

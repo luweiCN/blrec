@@ -47,11 +47,12 @@ describe('DashboardRealtimeService', () => {
     source.emit('resync');
     source.emit('dashboard');
     source.emit('live_rooms');
+    source.emit('matches');
 
     expect(factory).toHaveBeenCalledOnceWith(
       'https://vg-api.luwei.host/v1/events',
     );
-    expect(updates).toEqual(['resync', 'dashboard', 'live_rooms']);
+    expect(updates).toEqual(['resync', 'dashboard', 'live_rooms', 'matches']);
 
     service.stop();
     expect(source.closed).toBeTrue();

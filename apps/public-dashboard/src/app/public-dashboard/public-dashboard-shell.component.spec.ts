@@ -19,12 +19,15 @@ import { SiteStatsService } from './site-stats.service';
 
 describe('PublicDashboardShellComponent', () => {
   let fixture: ComponentFixture<PublicDashboardShellComponent>;
-  let realtimeUpdates: Subject<'resync' | 'dashboard' | 'live_rooms'>;
+  let realtimeUpdates: Subject<
+    'resync' | 'dashboard' | 'live_rooms' | 'matches'
+  >;
   let data: {
     state: { kind: 'loading' | 'ready' };
     snapshotOrNull: null;
     load: jasmine.Spy<() => Promise<void>>;
     refresh: jasmine.Spy<() => Promise<boolean>>;
+    notifyMatchDataChanged: jasmine.Spy<() => void>;
   };
 
   beforeEach(async () => {
@@ -34,6 +37,7 @@ describe('PublicDashboardShellComponent', () => {
       snapshotOrNull: null,
       load: jasmine.createSpy('load').and.resolveTo(),
       refresh: jasmine.createSpy('refresh').and.resolveTo(false),
+      notifyMatchDataChanged: jasmine.createSpy('notifyMatchDataChanged'),
     };
     await TestBed.configureTestingModule({
       declarations: [PublicDashboardShellComponent],
@@ -107,6 +111,14 @@ describe('PublicDashboardShellComponent', () => {
     fixture.detectChanges();
     expect(status.textContent).toContain('数据已更新');
 
+    tick(1800);
+  }));
+
+  it('notifies mounted match views after an image asset update', fakeAsync(() => {
+    realtimeUpdates.next('matches');
+    flushMicrotasks();
+
+    expect(data.notifyMatchDataChanged).toHaveBeenCalledTimes(1);
     tick(1800);
   }));
 });

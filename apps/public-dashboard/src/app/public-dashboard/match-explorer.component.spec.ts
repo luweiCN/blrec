@@ -8,6 +8,7 @@ import {
 } from './dashboard-match-api.service';
 import { MatchDetailModalComponent } from './match-detail-modal.component';
 import { MatchExplorerComponent } from './match-explorer.component';
+import { DashboardDataService } from './public-dashboard-data.service';
 import { DashboardMatch } from './public-dashboard.models';
 import {
   TEST_DASHBOARD_MATCHES,
@@ -247,5 +248,15 @@ describe('MatchExplorerComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.match-list-loading')).toBeNull();
+  });
+
+  it('reloads the API page when result-image metadata changes', async () => {
+    matchApi.enabled = true;
+    matchApi.list.and.resolveTo({ items: [], page: 1, pageSize: 20, total: 0 });
+
+    TestBed.inject(DashboardDataService).notifyMatchDataChanged();
+    await fixture.whenStable();
+
+    expect(matchApi.list).toHaveBeenCalledTimes(1);
   });
 });

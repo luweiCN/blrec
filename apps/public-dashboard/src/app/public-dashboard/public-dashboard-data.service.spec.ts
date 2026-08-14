@@ -1,21 +1,7 @@
-import { DashboardDataService } from './public-dashboard-data.service';
 import { environment } from '../../environments/environment';
-import {
-  DashboardManifest,
-  DashboardTrends,
-} from './public-dashboard.models';
+import { DashboardDataService } from './public-dashboard-data.service';
+import { DashboardTrends } from './public-dashboard.models';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
-
-const MANIFEST: DashboardManifest = {
-  schemaVersion: 1,
-  snapshotId: TEST_DASHBOARD_SNAPSHOT.snapshotId,
-  snapshotPath: `snapshots/${TEST_DASHBOARD_SNAPSHOT.snapshotId}.json`,
-  publicationDate: TEST_DASHBOARD_SNAPSHOT.publicationDate,
-  generatedAt: TEST_DASHBOARD_SNAPSHOT.generatedAt,
-  sourceLastMatchId: TEST_DASHBOARD_SNAPSHOT.sourceLastMatchId,
-  sha256: 'a'.repeat(64),
-  bytes: 1024,
-};
 
 const TRENDS: DashboardTrends = {
   schemaVersion: 1,
@@ -29,6 +15,13 @@ const TRENDS: DashboardTrends = {
     },
   ],
 };
+
+function apiDocument(
+  snapshot = TEST_DASHBOARD_SNAPSHOT,
+  trends: DashboardTrends = TRENDS,
+): object {
+  return { snapshot, trends };
+}
 
 function jsonResponse(value: unknown): Response {
   return {
@@ -45,14 +38,13 @@ describe('DashboardDataService', () => {
     environment.apiBaseUrl = originalApiBaseUrl;
   });
 
-  it('loads the server materialized dashboard before static publications', async () => {
+  it('loads the database-backed dashboard API directly', async () => {
     environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
     const fetchSpy = spyOn(window, 'fetch').and.returnValue(
       Promise.resolve(
-        jsonResponse({
-          snapshot: { ...TEST_DASHBOARD_SNAPSHOT, matches: [] },
-          trends: TRENDS,
-        }),
+        jsonResponse(
+          apiDocument({ ...TEST_DASHBOARD_SNAPSHOT, matches: [] }),
+        ),
       ),
     );
     const service = new DashboardDataService();
@@ -67,7 +59,24 @@ describe('DashboardDataService', () => {
     ]);
   });
 
-  it('notifies mounted pages when a manual reload replaces ready data', async () => {
+  it('does not fall back to a stale static JSON file', async () => {
+    environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
+    spyOn(console, 'error');
+    const fetchSpy = spyOn(window, 'fetch').and.returnValue(
+      Promise.reject(new Error('API unavailable')),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('error');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.calls.mostRecent().args[0]).toBe(
+      'https://vg-api.luwei.host/v1/dashboard',
+    );
+  });
+
+  it('notifies mounted pages only when the database revision changes', async () => {
     environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
     const nextSnapshot = {
       ...TEST_DASHBOARD_SNAPSHOT,
@@ -76,202 +85,67 @@ describe('DashboardDataService', () => {
       generatedAt: '2026-08-12T00:00:00Z',
       contentRevision: 'b'.repeat(64),
     };
+    const nextTrends: DashboardTrends = {
+      ...TRENDS,
+      publications: [
+        ...TRENDS.publications,
+        {
+          snapshotId: nextSnapshot.snapshotId,
+          publicationDate: nextSnapshot.publicationDate,
+          sourceLastMatchId: nextSnapshot.sourceLastMatchId,
+          standings: {},
+        },
+      ],
+    };
     spyOn(window, 'fetch').and.returnValues(
-      Promise.resolve(
-        jsonResponse({
-          snapshot: TEST_DASHBOARD_SNAPSHOT,
-          trends: TRENDS,
-        }),
-      ),
-      Promise.resolve(
-        jsonResponse({
-          snapshot: nextSnapshot,
-          trends: {
-            ...TRENDS,
-            publications: [
-              ...TRENDS.publications,
-              {
-                snapshotId: nextSnapshot.snapshotId,
-                publicationDate: nextSnapshot.publicationDate,
-                sourceLastMatchId: nextSnapshot.sourceLastMatchId,
-                standings: {},
-              },
-            ],
-          },
-        }),
-      ),
+      Promise.resolve(jsonResponse(apiDocument())),
+      Promise.resolve(jsonResponse(apiDocument(nextSnapshot, nextTrends))),
     );
     const service = new DashboardDataService();
     const revisions: string[] = [];
     service.revision$.subscribe((revision) => revisions.push(revision));
 
     await service.load();
-    await service.load();
+    const changed = await service.refresh();
 
+    expect(changed).toBeTrue();
     expect(revisions).toEqual([
-      TEST_DASHBOARD_SNAPSHOT.contentRevision ?? TEST_DASHBOARD_SNAPSHOT.snapshotId,
+      TEST_DASHBOARD_SNAPSHOT.contentRevision ??
+        TEST_DASHBOARD_SNAPSHOT.snapshotId,
       nextSnapshot.contentRevision,
     ]);
-    expect(service.snapshot.snapshotId).toBe(nextSnapshot.snapshotId);
   });
 
-  it('falls back to the last static publication when the API is unavailable', async () => {
+  it('keeps the current data when a realtime refresh fails', async () => {
     environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
     spyOn(console, 'warn');
-    const fetchSpy = spyOn(window, 'fetch').and.returnValues(
-      Promise.reject(new Error('API unavailable')),
-      Promise.resolve(jsonResponse(MANIFEST)),
-      Promise.resolve(jsonResponse(TEST_DASHBOARD_SNAPSHOT)),
-      Promise.resolve(jsonResponse(TRENDS)),
-    );
-    const service = new DashboardDataService();
-
-    await service.load();
-
-    expect(service.state.kind).toBe('ready');
-    expect(service.snapshot.snapshotId).toBe(TEST_DASHBOARD_SNAPSHOT.snapshotId);
-    expect(fetchSpy.calls.argsFor(1)[0]).toBe('data/manifest.json');
-  });
-
-  it('loads the manifest before its immutable snapshot', async () => {
-    const fetchSpy = spyOn(window, 'fetch').and.returnValues(
-      Promise.resolve(jsonResponse(MANIFEST)),
-      Promise.resolve(jsonResponse(TEST_DASHBOARD_SNAPSHOT)),
-      Promise.resolve(jsonResponse(TRENDS)),
-    );
-    const service = new DashboardDataService();
-
-    await service.load();
-
-    expect(service.state.kind).toBe('ready');
-    expect(service.snapshot.snapshotId).toBe(MANIFEST.snapshotId);
-    expect(fetchSpy.calls.argsFor(0)).toEqual([
-      'data/manifest.json',
-      { cache: 'no-store' },
-    ]);
-    expect(fetchSpy.calls.argsFor(1)).toEqual([
-      `data/${MANIFEST.snapshotPath}`,
-      { cache: 'force-cache' },
-    ]);
-    expect(fetchSpy.calls.argsFor(2)).toEqual([
-      `data/trends.json?v=${TEST_DASHBOARD_SNAPSHOT.snapshotId}`,
-      { cache: 'no-store' },
-    ]);
-    expect(service.trends).toBe(TRENDS);
-  });
-
-  it('keeps accepting version 1 snapshots during the rollout', async () => {
-    const legacySnapshot = {
-      ...TEST_DASHBOARD_SNAPSHOT,
-      ratingModel: {
-        version: 1,
-        priorMatches: 20,
-        carryoverRate: 0.25,
-        credibleLevel: 0.9,
-        provisionalMatches: 5,
-      },
-    };
     spyOn(window, 'fetch').and.returnValues(
-      Promise.resolve(jsonResponse(MANIFEST)),
-      Promise.resolve(jsonResponse(legacySnapshot)),
-      Promise.resolve(jsonResponse(TRENDS)),
+      Promise.resolve(jsonResponse(apiDocument())),
+      Promise.reject(new Error('temporary failure')),
     );
     const service = new DashboardDataService();
 
     await service.load();
+    const changed = await service.refresh();
 
+    expect(changed).toBeFalse();
     expect(service.state.kind).toBe('ready');
-  });
-
-  it('keeps accepting version 2 snapshots without match details', async () => {
-    const legacyStandings: Record<string, unknown> = {};
-    for (const [seasonKey, standings] of Object.entries(
-      TEST_DASHBOARD_SNAPSHOT.standings,
-    )) {
-      legacyStandings[seasonKey] = {
-        ...standings,
-        players: standings.players.map((player, index) => {
-          const legacyPlayer = {
-            ...player,
-            roomLabel:
-              index === 0
-                ? '直播间 26024031 / 27721563'
-                : player.roomLabel,
-          } as Record<string, unknown>;
-          delete legacyPlayer['roomIds'];
-          return legacyPlayer;
-        }),
-      };
-    }
-    const legacySnapshot = {
-      ...TEST_DASHBOARD_SNAPSHOT,
-      standings: legacyStandings,
-    } as Record<
-      string,
-      unknown
-    >;
-    legacySnapshot['schemaVersion'] = 2;
-    delete legacySnapshot['matches'];
-    spyOn(window, 'fetch').and.returnValues(
-      Promise.resolve(jsonResponse(MANIFEST)),
-      Promise.resolve(jsonResponse(legacySnapshot)),
-      Promise.resolve(jsonResponse(TRENDS)),
+    expect(service.snapshot.snapshotId).toBe(
+      TEST_DASHBOARD_SNAPSHOT.snapshotId,
     );
-    const service = new DashboardDataService();
-
-    await service.load();
-
-    expect(service.state.kind).toBe('ready');
-    expect(service.snapshot.schemaVersion).toBe(3);
-    expect(service.snapshot.matches).toEqual([]);
-    expect(
-      service.snapshot.standings['all-time'].players[0].roomIds,
-    ).toEqual([26024031, 27721563]);
   });
 
-  it('keeps the ranking available when trend data is missing or invalid', async () => {
-    spyOn(console, 'warn');
-    spyOn(window, 'fetch').and.returnValues(
-      Promise.resolve(jsonResponse(MANIFEST)),
-      Promise.resolve(jsonResponse(TEST_DASHBOARD_SNAPSHOT)),
-      Promise.resolve(jsonResponse({ schemaVersion: 99 })),
-    );
-    const service = new DashboardDataService();
-
-    await service.load();
-
-    expect(service.state.kind).toBe('ready');
-    expect(service.trends).toBeNull();
-  });
-
-  it('rejects version 2 rating metadata without its outcome delta', async () => {
-    spyOn(console, 'error');
-    const invalidSnapshot = {
-      ...TEST_DASHBOARD_SNAPSHOT,
-      ratingModel: {
-        version: 2,
-        priorMatches: 20,
-        carryoverRate: 0.25,
-        credibleLevel: 0.9,
-        provisionalMatches: 5,
-      },
-    };
-    spyOn(window, 'fetch').and.returnValues(
-      Promise.resolve(jsonResponse(MANIFEST)),
-      Promise.resolve(jsonResponse(invalidSnapshot)),
-    );
-    const service = new DashboardDataService();
-
-    await service.load();
-
-    expect(service.state.kind).toBe('error');
-  });
-
-  it('rejects a manifest that points outside the data directory', async () => {
+  it('rejects an API document whose trend history omits the current result', async () => {
+    environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
     spyOn(console, 'error');
     spyOn(window, 'fetch').and.returnValue(
       Promise.resolve(
-        jsonResponse({ ...MANIFEST, snapshotPath: '../private.json' }),
+        jsonResponse(
+          apiDocument(TEST_DASHBOARD_SNAPSHOT, {
+            ...TRENDS,
+            publications: [],
+          }),
+        ),
       ),
     );
     const service = new DashboardDataService();
@@ -279,31 +153,5 @@ describe('DashboardDataService', () => {
     await service.load();
 
     expect(service.state.kind).toBe('error');
-    expect(service.snapshotOrNull).toBeNull();
-  });
-
-  it('rejects replay links outside a public Bilibili video', async () => {
-    spyOn(console, 'error');
-    const invalidSnapshot = {
-      ...TEST_DASHBOARD_SNAPSHOT,
-      matches: TEST_DASHBOARD_SNAPSHOT.matches.map((match, index) =>
-        index === 0
-          ? {
-              ...match,
-              replay: { kind: 'match', url: 'javascript:alert(1)' },
-            }
-          : match,
-      ),
-    };
-    spyOn(window, 'fetch').and.returnValues(
-      Promise.resolve(jsonResponse(MANIFEST)),
-      Promise.resolve(jsonResponse(invalidSnapshot)),
-    );
-    const service = new DashboardDataService();
-
-    await service.load();
-
-    expect(service.state.kind).toBe('error');
-    expect(service.snapshotOrNull).toBeNull();
   });
 });
