@@ -1,4 +1,6 @@
+import asyncio
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -707,6 +709,64 @@ async def test_training_candidate_storage_failure_does_not_fail_analysis(
             'SELECT state FROM vainglory_part_jobs WHERE part_id=1'
         )
         assert state == 'ready'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_training_candidate_storage_does_not_hold_database_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        candidate = TrainingCandidate(
+            at_ms=12_000,
+            segment_start_ms=10_000,
+            image_jpeg=b'\xff\xd8candidate\xff\xd9',
+            model_version='multi-v2',
+            suggested_label='bp_3v3',
+            suggestion_confidence=0.8,
+            stage_class='pre_match',
+            stage_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.8,
+            selection_reason='worker 测试候选',
+        )
+        storage_started = threading.Event()
+        release_storage = threading.Event()
+
+        def slow_candidate_write(*_args: object) -> None:
+            storage_started.set()
+            if not release_storage.wait(2):
+                raise RuntimeError('测试没有释放候选文件写入')
+
+        monkeypatch.setattr(
+            repository, '_write_training_candidate', slow_candidate_write
+        )
+        completion = asyncio.create_task(
+            repository.complete_part(1, (), training_candidates=(candidate,))
+        )
+        try:
+            loop = asyncio.get_running_loop()
+            started = await loop.run_in_executor(None, storage_started.wait, 1)
+            assert started is True
+            await asyncio.wait_for(
+                database.execute(
+                    'UPDATE recording_sessions SET title=? WHERE id=1',
+                    ('候选文件仍在写入',),
+                ),
+                timeout=0.5,
+            )
+        finally:
+            release_storage.set()
+            await completion
     finally:
         await database.close()
 

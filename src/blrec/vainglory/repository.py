@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -3772,24 +3773,44 @@ class VaingloryRepository:
         written_paths: List[Path] = []
         written_training_candidates: List[Path] = []
         obsolete_frame_paths: List[str] = []
+        job_sql = (
+            'SELECT job.state,job.session_id,job.request_kind,'
+            'job.algorithm_version,session.title,session.anchor_name,'
+            'session.room_id,part.part_index,'
+            "COALESCE(NULLIF(part.final_path,''),part.source_path) AS source_path "
+            'FROM vainglory_part_jobs job '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            'JOIN recording_parts part ON part.id=job.part_id '
+            'WHERE job.part_id=?'
+        )
+        storage_job = await self._database.fetchone(job_sql, (int(part_id),))
+        if storage_job is None:
+            raise VaingloryNotFound('分析任务不存在')
+        if str(storage_job['state']) != 'analyzing':
+            raise VaingloryConflict('分析任务当前不能写入结果')
+        storage_session_id = int(storage_job['session_id'])
+        storage_part_index = int(storage_job['part_index'])
+        storage_source_path = str(storage_job['source_path'] or '')
+        storage_streamer = str(storage_job['anchor_name'] or '')
+        storage_room_id = str(storage_job['room_id'] or '')
+        storage_session_title = str(storage_job['title'] or '')
+        for match in matches:
+            if int(match.part_id) != int(part_id):
+                raise VaingloryConflict('结算页不属于当前分 P')
 
-        def complete(connection: sqlite3.Connection) -> None:
-            job = connection.execute(
-                'SELECT job.state,job.session_id,job.request_kind,'
-                'job.algorithm_version,session.title,session.anchor_name,'
-                'session.room_id,part.part_index,'
-                "COALESCE(NULLIF(part.final_path,''),part.source_path) AS source_path "
-                'FROM vainglory_part_jobs job '
-                'JOIN recording_sessions session ON session.id=job.session_id '
-                'JOIN recording_parts part ON part.id=job.part_id '
-                'WHERE job.part_id=?',
-                (int(part_id),),
-            ).fetchone()
-            if job is None:
-                raise VaingloryNotFound('分析任务不存在')
-            if str(job['state']) != 'analyzing':
-                raise VaingloryConflict('分析任务当前不能写入结果')
-            session_id = int(job['session_id'])
+        def store_completion_files() -> None:
+            for match in matches:
+                if not match.result_frame_png:
+                    continue
+                relative_path = self._result_frame_relative_path(
+                    session_id=storage_session_id,
+                    part_id=part_id,
+                    result_at_ms=match.result_at_ms,
+                    content=match.result_frame_png,
+                )
+                destination = self._resolve_result_frame_path(relative_path)
+                self._write_result_frame(destination, match.result_frame_png)
+
             for candidate_group in _training_candidate_groups(training_candidates):
                 primary = max(
                     candidate_group,
@@ -3800,7 +3821,7 @@ class VaingloryRepository:
                 )
                 try:
                     relative_path = self._training_candidate_relative_path(
-                        session_id=session_id,
+                        session_id=storage_session_id,
                         part_id=part_id,
                         at_ms=primary.at_ms,
                         content=primary.image_jpeg,
@@ -3808,7 +3829,7 @@ class VaingloryRepository:
                     destination = self._resolve_training_candidate_path(relative_path)
                     metadata_relative_path = (
                         self._training_candidate_metadata_relative_path(
-                            session_id=session_id,
+                            session_id=storage_session_id,
                             part_id=part_id,
                             at_ms=primary.at_ms,
                             content=primary.image_jpeg,
@@ -3817,9 +3838,8 @@ class VaingloryRepository:
                     metadata_destination = self._resolve_training_candidate_path(
                         metadata_relative_path
                     )
-                    source_path = str(job['source_path'] or '')
-                    filename = Path(source_path).name or 'part-{}'.format(
-                        int(job['part_index'])
+                    filename = Path(storage_source_path).name or 'part-{}'.format(
+                        storage_part_index
                     )
                     digest = hashlib.sha256(primary.image_jpeg).hexdigest()
                     boxes = []
@@ -3845,16 +3865,16 @@ class VaingloryRepository:
                         'source_id': 'part-{}:{}:{}'.format(
                             part_id, primary.at_ms, digest[:16]
                         ),
-                        'session_id': session_id,
+                        'session_id': storage_session_id,
                         'part_id': int(part_id),
-                        'part_index': int(job['part_index']),
+                        'part_index': storage_part_index,
                         'at_ms': int(primary.at_ms),
                         'segment_start_ms': min(
                             int(item.segment_start_ms) for item in candidate_group
                         ),
-                        'streamer': str(job['anchor_name'] or ''),
-                        'room_id': str(job['room_id'] or ''),
-                        'session_title': str(job['title'] or ''),
+                        'streamer': storage_streamer,
+                        'room_id': storage_room_id,
+                        'session_title': storage_session_title,
                         'filename': filename,
                         'suggestions': _unified_training_suggestions(candidate_group),
                         'suggested_boxes': boxes,
@@ -3863,7 +3883,7 @@ class VaingloryRepository:
                                 'task': item.task,
                                 'model_version': item.model_version,
                                 'suggested_label': item.suggested_label,
-                                'suggestion_confidence': (item.suggestion_confidence),
+                                'suggestion_confidence': item.suggestion_confidence,
                                 'stage_class': item.stage_class,
                                 'stage_confidence': item.stage_confidence,
                                 'mode_class': item.mode_class,
@@ -3888,6 +3908,16 @@ class VaingloryRepository:
                         primary.at_ms,
                         error,
                     )
+
+        await asyncio.get_running_loop().run_in_executor(None, store_completion_files)
+
+        def complete(connection: sqlite3.Connection) -> None:
+            job = connection.execute(job_sql, (int(part_id),)).fetchone()
+            if job is None:
+                raise VaingloryNotFound('分析任务不存在')
+            if str(job['state']) != 'analyzing':
+                raise VaingloryConflict('分析任务当前不能写入结果')
+            session_id = int(job['session_id'])
             suppressed_times = tuple(
                 int(row['at_ms'])
                 for row in connection.execute(
@@ -4017,7 +4047,6 @@ class VaingloryRepository:
                         content=match.result_frame_png,
                     )
                     destination = self._resolve_result_frame_path(result_frame_path)
-                    self._write_result_frame(destination, match.result_frame_png)
                     written_paths.append(destination)
                 cursor = connection.execute(
                     'INSERT INTO vainglory_matches('
