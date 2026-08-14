@@ -144,6 +144,7 @@ async def test_postgres_backend_migrates_schema_and_preserves_writes(
         assert await target.scalar('SELECT MAX(?,?)', (3, 7)) == 7
         assert await target.scalar('SELECT MIN(?,?)', (3, 7)) == 3
         assert await target.scalar('SELECT MAX(NULL,?)', (7,)) is None
+        assert await target.scalar('SELECT TRUE OR ?', (True,)) is True
 
         def insert_player(connection: sqlite3.Connection) -> int:
             cursor = connection.execute(

@@ -1000,7 +1000,7 @@ class VaingloryPublicationService:
                 EXCLUDED_TITLE_MARKER,
                 EXCLUDED_TITLE_MARKER,
                 self._now(),
-                int(include_audit),
+                include_audit,
             ),
         )
         if row is not None:
