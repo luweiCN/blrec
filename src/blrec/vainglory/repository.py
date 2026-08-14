@@ -2299,7 +2299,7 @@ class VaingloryRepository:
                 if observation.match_mode_label in ('3v3', 'aram', '5v5')
                 else 'unknown'
             )
-            if reliable_transition:
+            if reliable_transition and last_in_match_at_ms is not None:
                 connection.execute(
                     'INSERT OR IGNORE INTO vainglory_live_analysis_windows('
                     'part_id,session_id,start_ms,end_ms,focus_ms,mode,'
@@ -2632,7 +2632,7 @@ class VaingloryRepository:
         session_id: int,
         match: AnalyzedMatch,
         *,
-        heroes: Dict[str, Tuple[int, str]],
+        heroes: List[Tuple[int, str, str]],
         now: int,
         written_paths: List[Path],
     ) -> int:
