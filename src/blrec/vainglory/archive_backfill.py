@@ -6,7 +6,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, List, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.errors import BiliApiError
@@ -1372,6 +1372,7 @@ class ArchiveBackfillService:
 
         def reconcile(connection: sqlite3.Connection) -> bool:
             changed = False
+            dirty_import_ids: Set[int] = set()
             untimed = connection.execute(
                 'SELECT id,title,published_at FROM vainglory_archive_imports '
                 'WHERE recording_started_at IS NULL LIMIT 500'
@@ -1393,7 +1394,8 @@ class ArchiveBackfillService:
                 )
                 changed = True
             rows = connection.execute(
-                'SELECT archive.id,archive.state,archive.progress,archive.error,'
+                'SELECT archive.id,archive.import_id,archive.state,'
+                'archive.progress,archive.error,'
                 'source.state AS source_state,source.progress AS source_progress,'
                 'source.error AS source_error,analysis.state AS analysis_state,'
                 'analysis.progress AS analysis_progress,'
@@ -1420,18 +1422,29 @@ class ArchiveBackfillService:
                     'error=?,updated_at=? WHERE id=?',
                     (state, progress, error, now, int(row['id'])),
                 )
+                dirty_import_ids.add(int(row['import_id']))
                 changed = True
             imports = connection.execute(
-                'SELECT id,session_id,state,attempt_count '
+                'SELECT id,session_id,state,progress,completed_page_count,error,'
+                'content_classification,classification_reason,retryable,'
+                'next_retry_at,attempt_count '
                 'FROM vainglory_archive_imports '
                 "WHERE state IN ('downloading','analyzing')"
             ).fetchall()
+            parts_by_import_id: Dict[int, List[Mapping[str, Any]]] = {}
+            active_parts = connection.execute(
+                'SELECT part.import_id,part.state,part.progress,part.error '
+                'FROM vainglory_archive_parts part '
+                'JOIN vainglory_archive_imports imported '
+                'ON imported.id=part.import_id '
+                "WHERE imported.state IN ('downloading','analyzing') "
+                'ORDER BY part.import_id,part.page'
+            ).fetchall()
+            for part in active_parts:
+                parts_by_import_id.setdefault(int(part['import_id']), []).append(part)
             for imported in imports:
-                parts = connection.execute(
-                    'SELECT state,progress,error FROM vainglory_archive_parts '
-                    'WHERE import_id=? ORDER BY page',
-                    (int(imported['id']),),
-                ).fetchall()
+                import_id = int(imported['id'])
+                parts = parts_by_import_id.get(import_id, [])
                 if not parts:
                     continue
                 terminal = all(
@@ -1464,13 +1477,23 @@ class ArchiveBackfillService:
                     else:
                         classification = 'suspected_non_vainglory'
                         classification_reason = '所有分P分析完成，但未发现虚荣对局结算'
-                if state != str(imported['state']) or terminal or completed > 0:
-                    retryable = 1 if state == 'failed' else 0
-                    next_retry_at = (
-                        now + self._retry_delay_seconds(int(imported['attempt_count']))
-                        if retryable
-                        else None
-                    )
+                retryable = 1 if state == 'failed' else 0
+                next_retry_at = (
+                    now + self._retry_delay_seconds(int(imported['attempt_count']))
+                    if retryable
+                    else None
+                )
+                import_changed = (
+                    state != str(imported['state'])
+                    or abs(progress - float(imported['progress'])) >= 0.001
+                    or completed != int(imported['completed_page_count'])
+                    or error != imported['error']
+                    or classification != str(imported['content_classification'])
+                    or classification_reason != imported['classification_reason']
+                    or retryable != int(imported['retryable'])
+                    or next_retry_at != imported['next_retry_at']
+                )
+                if import_changed:
                     connection.execute(
                         'UPDATE vainglory_archive_imports SET state=?,progress=?,'
                         'completed_page_count=?,error=?,content_classification=?,'
@@ -1486,12 +1509,14 @@ class ArchiveBackfillService:
                             retryable,
                             next_retry_at,
                             now,
-                            int(imported['id']),
+                            import_id,
                         ),
                     )
                     if terminal:
                         changed = True
-                if imported['session_id'] is not None:
+                if imported['session_id'] is not None and (
+                    import_changed or import_id in dirty_import_ids
+                ):
                     refresh_session_scan_job(
                         connection, int(imported['session_id']), now
                     )

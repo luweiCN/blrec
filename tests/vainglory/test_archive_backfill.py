@@ -412,6 +412,50 @@ async def test_discovers_materializes_and_queues_each_archive_page(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_refreshes_only_changed_archive_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    cache = FakeRemoteMediaCache()
+    refreshed = []
+    try:
+        await seed_account(database)
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=cache,
+            clock=lambda: 1_000,
+        )
+        await service.request(1)
+        for _ in range(4):
+            assert await service.run_once() is True
+        session_id = int(
+            await database.scalar('SELECT session_id FROM vainglory_archive_imports')
+        )
+        monkeypatch.setattr(
+            'blrec.vainglory.archive_backfill.refresh_session_scan_job',
+            lambda _connection, selected_session_id, _now: refreshed.append(
+                selected_session_id
+            ),
+        )
+
+        assert await service._reconcile() is False
+        assert refreshed == []
+
+        await database.execute(
+            "UPDATE vainglory_video_sources SET state='downloading',progress=0.2 "
+            'WHERE part_id=(SELECT recording_part_id '
+            'FROM vainglory_archive_parts ORDER BY page LIMIT 1)'
+        )
+        assert await service._reconcile() is True
+        assert refreshed == [session_id]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_reads_public_viewer_pages_without_creator_metadata(
     tmp_path: Path,
 ) -> None:
