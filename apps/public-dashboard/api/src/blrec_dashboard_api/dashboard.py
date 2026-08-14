@@ -155,9 +155,10 @@ def load_dashboard_trends(database_target: DatabaseTarget) -> Mapping[str, Any]:
         publication_date = str(row['publication_date'])
         season_key = str(row['season_key'])
         mode = str(row['mode'])
-        standings_by_date.setdefault(publication_date, {}).setdefault(
-            season_key, {}
-        ).setdefault(mode, []).append(
+        season_modes = standings_by_date.setdefault(publication_date, {}).setdefault(
+            season_key, {trend_mode: [] for trend_mode in _TREND_MODES}
+        )
+        season_modes.setdefault(mode, []).append(
             {
                 'playerId': int(row['player_id']),
                 'rank': int(row['rank']),

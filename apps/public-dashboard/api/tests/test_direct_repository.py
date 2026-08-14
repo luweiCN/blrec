@@ -11,6 +11,7 @@ from typing import Any, Dict, Mapping
 import pytest
 from blrec_dashboard_api import direct as direct_module
 from blrec_dashboard_api.app import create_app
+from blrec_dashboard_api.dashboard import load_dashboard_trends
 from blrec_dashboard_api.database import (
     _migration_text,
     connect_database,
@@ -306,6 +307,13 @@ def test_schema_upgrade_converts_legacy_trend_json_to_rows(tmp_path: Path) -> No
         'rank': 1,
         'rating_score': 612,
     }
+    modes = load_dashboard_trends(database_path)['publications'][0]['standings'][
+        '2026-summer'
+    ]
+    assert tuple(modes) == ('all', '3v3', 'brawl', '5v5')
+    assert modes['3v3'] == []
+    assert modes['brawl'] == []
+    assert modes['5v5'] == []
 
 
 def test_asset_write_is_transactional_and_visible_without_rebuilding_source(
