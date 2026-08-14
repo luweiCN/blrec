@@ -104,6 +104,7 @@
           <span class="match-outcome" [class.loss]="match.result === 'L'">
             <strong>{{ match.result === "W" ? "胜" : "负" }}</strong>
             <small>{{ modeName(match.mode) }}</small>
+            <small *ngIf="match.analysisProvisional">直播预识别</small>
           </span>
 
           <span class="match-time">

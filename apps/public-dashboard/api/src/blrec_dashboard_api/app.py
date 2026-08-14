@@ -4,16 +4,19 @@ import hashlib
 import hmac
 import json
 import re
+from functools import partial
 from typing import Literal, Optional
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Query, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from .dashboard import ensure_dashboard_state, get_dashboard_document
 from .database import database_session, initialize_database
 from .models import IngestBatch
+from .realtime import DashboardRealtimeBroker, event_response
 from .service import (
     IdempotencyConflict,
     apply_ingest_batch,
@@ -55,9 +58,10 @@ def _hero_filters(value: str) -> tuple[str, ...]:
 
 def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
     active_settings = settings or ApiSettings.from_environment()
-    initialize_database(active_settings.database_path)
-    reconcile_match_fingerprints(active_settings.database_path)
-    ensure_dashboard_state(active_settings.database_path)
+    database_target = active_settings.database_target
+    initialize_database(database_target)
+    reconcile_match_fingerprints(database_target)
+    ensure_dashboard_state(database_target)
     app = FastAPI(
         title='BLREC Vainglory Dashboard API',
         version='1.0.0',
@@ -73,15 +77,17 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
         allow_headers=['Accept', 'Content-Type'],
         max_age=86400,
     )
+    realtime_broker = DashboardRealtimeBroker()
+    app.state.realtime_broker = realtime_broker
 
     @app.get('/v1/health')
     def health() -> dict:
-        with database_session(active_settings.database_path) as connection:
+        with database_session(database_target) as connection:
             connection.execute('SELECT 1').fetchone()
         return {'status': 'ok'}
 
     @app.post('/v1/ingest/batches')
-    def ingest_batch(
+    async def ingest_batch(
         batch: IngestBatch,
         authorization: Optional[str] = Header(default=None),
         idempotency_key: Optional[str] = Header(
@@ -94,22 +100,34 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
         ):
             raise HTTPException(status_code=422, detail='invalid idempotency key')
         try:
-            return apply_ingest_batch(
-                active_settings.database_path,
-                idempotency_key=idempotency_key,
-                batch=batch,
+            result = await run_in_threadpool(
+                partial(
+                    apply_ingest_batch,
+                    database_target,
+                    idempotency_key=idempotency_key,
+                    batch=batch,
+                )
             )
         except IdempotencyConflict as error:
             raise HTTPException(
                 status_code=409,
                 detail='idempotency key was already used for another payload',
             ) from error
+        current = await run_in_threadpool(get_dashboard_document, database_target)
+        revision = '' if current is None else current[1]
+        await realtime_broker.publish('dashboard', {'revision': revision})
+        await realtime_broker.publish('live_rooms', {'revision': revision})
+        return result
+
+    @app.get('/v1/events')
+    async def events(request: Request) -> StreamingResponse:
+        return event_response(request, realtime_broker)
 
     @app.get('/v1/dashboard')
     def dashboard(
         if_none_match: Optional[str] = Header(default=None, alias='If-None-Match')
     ) -> Response:
-        current = get_dashboard_document(active_settings.database_path)
+        current = get_dashboard_document(database_target)
         if current is None:
             raise HTTPException(
                 status_code=503, detail='dashboard is waiting for its first publication'
@@ -128,7 +146,7 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
     def live_rooms(
         if_none_match: Optional[str] = Header(default=None, alias='If-None-Match')
     ) -> Response:
-        document = get_live_rooms(active_settings.database_path)
+        document = get_live_rooms(database_target)
         if document is None:
             raise HTTPException(
                 status_code=503,
@@ -168,7 +186,7 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
             regex=r'^(all-time|\d{4}-(spring|summer|autumn))$',
         ),
     ) -> dict:
-        with database_session(active_settings.database_path) as connection:
+        with database_session(database_target) as connection:
             initialized = connection.execute(
                 'SELECT 1 FROM ingestion_batches LIMIT 1'
             ).fetchone()
@@ -178,7 +196,7 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
                 detail='match archive is waiting for its first publication',
             )
         return list_matches(
-            active_settings.database_path,
+            database_target,
             page=page,
             page_size=page_size,
             season=None if season == 'all-time' else season,
@@ -198,7 +216,7 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
         mode: Optional[Literal['3v3', 'brawl', '5v5']] = None,
         player_id: Optional[int] = Query(default=None, alias='playerId', gt=0),
     ) -> dict:
-        with database_session(active_settings.database_path) as connection:
+        with database_session(database_target) as connection:
             initialized = connection.execute(
                 'SELECT 1 FROM ingestion_batches LIMIT 1'
             ).fetchone()
@@ -208,7 +226,7 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
                 detail='match archive is waiting for its first publication',
             )
         return get_match_summary(
-            active_settings.database_path,
+            database_target,
             season=None if season == 'all-time' else season,
             mode=mode,
             player_id=player_id,
@@ -228,7 +246,7 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
     ) -> dict:
         try:
             return get_match(
-                active_settings.database_path,
+                database_target,
                 match_id,
                 rating_scope=rating_scope,
                 rating_season=rating_season,

@@ -5,12 +5,89 @@ import time
 from contextlib import contextmanager
 from importlib import resources
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator, Mapping, Sequence, Union, overload
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
+DatabaseTarget = Union[Path, str]
 
 
-def connect_database(path: Path) -> sqlite3.Connection:
+class DatabaseRow(Mapping[str, Any]):
+    def __init__(self, names: Sequence[str], values: Sequence[Any]) -> None:
+        self._names = tuple(names)
+        self._values = tuple(values)
+        self._mapping = dict(zip(self._names, self._values))
+
+    @overload
+    def __getitem__(self, key: str) -> Any: ...
+
+    @overload
+    def __getitem__(self, key: int) -> Any: ...
+
+    def __getitem__(self, key: object) -> Any:
+        if isinstance(key, int):
+            return self._values[key]
+        if isinstance(key, str):
+            return self._mapping[key]
+        raise TypeError('database row indexes must be strings or integers')
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._names)
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+
+def _postgres_row_factory(cursor: Any) -> Any:
+    names = tuple(column.name for column in (cursor.description or ()))
+    return lambda values: DatabaseRow(names, values)
+
+
+def _postgres_sql(sql: str) -> str:
+    return sql.replace('BEGIN IMMEDIATE', 'BEGIN').replace('?', '%s')
+
+
+class PostgresConnection:
+    dialect = 'postgresql'
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+
+    def execute(self, sql: str, parameters: Sequence[Any] = ()) -> Any:
+        statement = _postgres_sql(sql)
+        if parameters:
+            return self._connection.execute(statement, tuple(parameters))
+        return self._connection.execute(statement)
+
+    def executemany(self, sql: str, parameters: Any) -> Any:
+        cursor = self._connection.cursor()
+        cursor.executemany(_postgres_sql(sql), parameters)
+        return cursor
+
+    def commit(self) -> None:
+        self._connection.commit()
+
+    def rollback(self) -> None:
+        self._connection.rollback()
+
+    def close(self) -> None:
+        self._connection.close()
+
+
+def is_postgres(target: DatabaseTarget) -> bool:
+    return isinstance(target, str) and target.startswith(
+        ('postgresql://', 'postgresql+psycopg://')
+    )
+
+
+def connect_database(target: DatabaseTarget) -> Any:
+    if is_postgres(target):
+        import psycopg
+
+        database_url = str(target).replace('postgresql+psycopg://', 'postgresql://', 1)
+        return PostgresConnection(
+            psycopg.connect(database_url, row_factory=_postgres_row_factory)
+        )
+    path = Path(target)
     connection = sqlite3.connect(str(path), timeout=30.0)
     connection.row_factory = sqlite3.Row
     connection.execute('PRAGMA foreign_keys=ON')
@@ -18,7 +95,11 @@ def connect_database(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def initialize_database(path: Path) -> None:
+def initialize_database(target: DatabaseTarget) -> None:
+    if is_postgres(target):
+        _initialize_postgres(target)
+        return
+    path = Path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = connect_database(path)
     try:
@@ -35,12 +116,7 @@ def initialize_database(path: Path) -> None:
             ).fetchone()
             current_version = 0 if row is None else int(row[0])
         for version in range(current_version + 1, LATEST_SCHEMA_VERSION + 1):
-            migration_name = f'{version:04d}_initial.sql'
-            migration = (
-                resources.files('blrec_dashboard_api')
-                .joinpath('migrations', migration_name)
-                .read_text(encoding='utf-8')
-            )
+            migration = _migration_text('migrations', version)
             connection.executescript(
                 'BEGIN IMMEDIATE;\n'
                 + migration
@@ -57,9 +133,44 @@ def initialize_database(path: Path) -> None:
         connection.close()
 
 
+def _initialize_postgres(target: DatabaseTarget) -> None:
+    connection = connect_database(target)
+    try:
+        connection.execute('BEGIN')
+        connection.execute('SELECT pg_advisory_xact_lock(8675309001)')
+        connection.execute(
+            'CREATE TABLE IF NOT EXISTS schema_migrations('
+            'version INTEGER PRIMARY KEY,applied_at BIGINT NOT NULL)'
+        )
+        row = connection.execute(
+            'SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations'
+        ).fetchone()
+        current_version = 0 if row is None else int(row['version'])
+        for version in range(current_version + 1, LATEST_SCHEMA_VERSION + 1):
+            connection.execute(_migration_text('postgres_migrations', version))
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)',
+                (version, int(time.time())),
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _migration_text(directory: str, version: int) -> str:
+    return (
+        resources.files('blrec_dashboard_api')
+        .joinpath(directory, '{:04d}_initial.sql'.format(version))
+        .read_text(encoding='utf-8')
+    )
+
+
 @contextmanager
-def database_session(path: Path) -> Iterator[sqlite3.Connection]:
-    connection = connect_database(path)
+def database_session(target: DatabaseTarget) -> Iterator[Any]:
+    connection = connect_database(target)
     try:
         yield connection
     finally:

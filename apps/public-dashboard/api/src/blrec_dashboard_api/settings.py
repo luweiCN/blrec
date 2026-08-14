@@ -13,12 +13,21 @@ class ApiSettings:
     database_path: Path
     ingest_token_sha256: str
     cors_origins: tuple[str, ...]
+    database_url: str = ''
 
     def __post_init__(self) -> None:
         if not _SHA256_PATTERN.fullmatch(self.ingest_token_sha256):
             raise ValueError('dashboard API ingest token SHA-256 is invalid')
         if not self.cors_origins:
             raise ValueError('dashboard API requires at least one CORS origin')
+        if self.database_url and not self.database_url.startswith(
+            ('postgresql://', 'postgresql+psycopg://')
+        ):
+            raise ValueError('dashboard API database URL must use PostgreSQL')
+
+    @property
+    def database_target(self) -> Path | str:
+        return self.database_url or self.database_path
 
     @classmethod
     def from_environment(cls) -> 'ApiSettings':
@@ -26,6 +35,7 @@ class ApiSettings:
             'DASHBOARD_API_DATABASE_PATH',
             '/var/lib/blrec-dashboard-api/dashboard.sqlite3',
         )
+        database_url = os.environ.get('DASHBOARD_API_DATABASE_URL', '').strip()
         token_sha256 = os.environ.get('DASHBOARD_API_INGEST_TOKEN_SHA256', '')
         cors_origins = tuple(
             value.strip()
@@ -38,4 +48,5 @@ class ApiSettings:
             database_path=Path(database_path),
             ingest_token_sha256=token_sha256,
             cors_origins=cors_origins,
+            database_url=database_url,
         )

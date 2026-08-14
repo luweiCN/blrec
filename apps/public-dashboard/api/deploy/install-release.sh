@@ -53,6 +53,7 @@ test -s "$release/runtime-requirements.txt"
 test -d "$release/wheelhouse"
 test -d "$release/wheels"
 test -s "$release/deploy/blrec-dashboard-api.service"
+test -s "$release/deploy/blrec-dashboard-db-tunnel.service"
 test -s "$release/deploy/vg-api.luwei.host.nginx.conf"
 
 python3 -m venv "$release/venv"
@@ -83,11 +84,66 @@ set -a
 source /etc/blrec-dashboard-api/api.env
 set +a
 database_path="${DASHBOARD_API_DATABASE_PATH:-$database_root/dashboard.sqlite3}"
-if [[ "$database_path" != "$database_root/"* ]]; then
-  echo "API database path must stay below $database_root" >&2
-  exit 1
+database_url="${DASHBOARD_API_DATABASE_URL:-}"
+if [[ -n "$database_url" ]]; then
+  if [[ "$database_url" != postgresql://* && "$database_url" != postgresql+psycopg://* ]]; then
+    echo "API database URL must use PostgreSQL" >&2
+    exit 1
+  fi
+  if ! command -v pg_dump >/dev/null || ! command -v pg_restore >/dev/null; then
+    echo "PostgreSQL client tools are required for API database backup" >&2
+    exit 1
+  fi
+  if [[ ! -s /etc/blrec-dashboard-api/db-tunnel-ssh.conf ]]; then
+    echo "PostgreSQL SSH tunnel configuration is missing" >&2
+    exit 1
+  fi
+  install -m 0644 -o root -g root \
+    "$release/deploy/blrec-dashboard-db-tunnel.service" \
+    /etc/systemd/system/blrec-dashboard-db-tunnel.service
+  systemctl daemon-reload
+  systemctl enable blrec-dashboard-db-tunnel.service >/dev/null
+  systemctl restart blrec-dashboard-db-tunnel.service
+  postgres_url="${database_url/postgresql+psycopg:\/\//postgresql:\/\/}"
+  postgres_ready=false
+  for _attempt in {1..30}; do
+    if "$release/venv/bin/python" - "$postgres_url" <<'PY'
+import sys
+
+import psycopg
+
+try:
+    with psycopg.connect(sys.argv[1], connect_timeout=2) as connection:
+        connection.execute('SELECT 1').fetchone()
+except psycopg.Error:
+    raise SystemExit(1)
+PY
+    then
+      postgres_ready=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$postgres_ready" != "true" ]]; then
+    echo "PostgreSQL SSH tunnel did not become ready" >&2
+    exit 1
+  fi
+  postgres_backup="$database_backup_root/dashboard-$release_id.dump"
+  pg_dump --format=custom --file="$postgres_backup" "$postgres_url"
+  if [[ ! -s "$postgres_backup" ]]; then
+    echo "PostgreSQL database backup is empty" >&2
+    exit 1
+  fi
+  pg_restore --list "$postgres_backup" >/dev/null
+  chown blrec-dashboard-api:blrec-dashboard-api "$postgres_backup"
+  chmod 0640 "$postgres_backup"
+else
+  if [[ "$database_path" != "$database_root/"* ]]; then
+    echo "API database path must stay below $database_root" >&2
+    exit 1
+  fi
 fi
-if [[ -e "$database_path" ]]; then
+if [[ -z "$database_url" && -e "$database_path" ]]; then
   if [[ ! -f "$database_path" || -L "$database_path" ]]; then
     echo "API database path is not a regular file" >&2
     exit 1

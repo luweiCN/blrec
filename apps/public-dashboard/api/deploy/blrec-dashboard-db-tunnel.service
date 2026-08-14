@@ -1,19 +1,18 @@
 [Unit]
-Description=BLREC public dashboard match API
-After=network-online.target blrec-dashboard-db-tunnel.service
+Description=BLREC public dashboard PostgreSQL SSH tunnel
+After=network-online.target
 Wants=network-online.target
+Before=blrec-dashboard-api.service
 
 [Service]
 Type=simple
 User=blrec-dashboard-api
 Group=blrec-dashboard-api
-EnvironmentFile=/etc/blrec-dashboard-api/api.env
-WorkingDirectory=/opt/blrec-dashboard-api/current
-ExecStart=/opt/blrec-dashboard-api/current/venv/bin/blrec-dashboard-api
-Restart=on-failure
+ExecStart=/usr/bin/ssh -F /etc/blrec-dashboard-api/db-tunnel-ssh.conf -NT blrec-dashboard-db
+Restart=always
 RestartSec=3s
 TimeoutStartSec=30s
-TimeoutStopSec=30s
+TimeoutStopSec=15s
 UMask=0077
 NoNewPrivileges=true
 PrivateDevices=true
@@ -23,7 +22,6 @@ ProtectHome=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/blrec-dashboard-api
 RestrictSUIDSGID=true
 LockPersonality=true
 LimitCORE=0

@@ -231,6 +231,7 @@ export interface DashboardMatch {
   readonly durationSeconds: number;
   readonly result: MatchResult;
   readonly streamTitle?: string;
+  readonly analysisProvisional?: boolean;
   readonly ally: DashboardMatchTeam;
   readonly enemy: DashboardMatchTeam;
   readonly replay?: DashboardMatchReplay | null;

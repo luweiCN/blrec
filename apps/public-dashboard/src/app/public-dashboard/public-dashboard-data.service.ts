@@ -588,6 +588,8 @@ export function isDashboardMatch(value: unknown): value is DashboardMatch {
     (value['result'] === 'W' || value['result'] === 'L') &&
     (value['streamTitle'] === undefined ||
       typeof value['streamTitle'] === 'string') &&
+    (value['analysisProvisional'] === undefined ||
+      typeof value['analysisProvisional'] === 'boolean') &&
     isMatchTeam(value['ally']) &&
     isMatchTeam(value['enemy']) &&
     value['ally'].side !== value['enemy'].side &&

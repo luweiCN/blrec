@@ -115,6 +115,7 @@ class IngestMatch(StrictModel):
     duration_seconds: int = Field(alias='durationSeconds', gt=0, le=86400)
     result: Literal['W', 'L']
     stream_title: str = Field(alias='streamTitle', max_length=240)
+    analysis_provisional: bool = Field(default=False, alias='analysisProvisional')
     ally: IngestMatchTeam
     enemy: IngestMatchTeam
     replay: Optional[IngestReplay] = None

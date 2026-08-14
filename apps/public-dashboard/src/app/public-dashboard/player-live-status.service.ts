@@ -16,14 +16,12 @@ interface LiveRoomsDocument {
   readonly rooms: readonly PlayerLiveRoomStatus[];
 }
 
-const LIVE_STATUS_POLL_INTERVAL_MS = 30_000;
-
 @Injectable({ providedIn: 'root' })
 export class PlayerLiveStatusService implements OnDestroy {
   private readonly roomStatusesSubject = new BehaviorSubject<
     ReadonlyMap<number, PlayerLiveRoomStatus>
   >(new Map());
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private started = false;
   private refreshing = false;
 
   readonly roomStatuses$: Observable<
@@ -31,30 +29,24 @@ export class PlayerLiveStatusService implements OnDestroy {
   > = this.roomStatusesSubject.asObservable();
 
   start(): void {
-    this.stop();
+    this.started = true;
     if (environment.apiBaseUrl.trim() === '') {
       this.roomStatusesSubject.next(new Map());
       return;
     }
     void this.refresh();
-    this.pollTimer = setInterval(() => {
-      void this.refresh();
-    }, LIVE_STATUS_POLL_INTERVAL_MS);
   }
 
   stop(): void {
-    if (this.pollTimer !== null) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    this.started = false;
   }
 
   ngOnDestroy(): void {
     this.stop();
   }
 
-  private async refresh(): Promise<void> {
-    if (this.refreshing) {
+  async refresh(): Promise<void> {
+    if (!this.started || this.refreshing) {
       return;
     }
     this.refreshing = true;

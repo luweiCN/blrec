@@ -1,4 +1,6 @@
 fastapi==0.99.1
 pydantic==1.10.26
 pypinyin==0.55.0
+psycopg==3.2.9
+psycopg-binary==3.2.9
 uvicorn==0.23.2

@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from blrec_dashboard_publisher.snapshot import build_dashboard_snapshot_from_records
 
-from .database import connect_database
+from .database import DatabaseTarget, connect_database
 
 _TREND_MODES = ('all', '3v3', 'brawl', '5v5')
 _MAX_TREND_PUBLICATIONS = 180
@@ -20,7 +18,7 @@ def _json_text(value: Mapping[str, Any]) -> str:
 
 
 def _player_metadata(
-    connection: sqlite3.Connection,
+    connection: Any,
 ) -> Tuple[Mapping[int, Mapping[str, Any]], Mapping[int, List[str]]]:
     players: Dict[int, Dict[str, Any]] = {}
     for row in connection.execute(
@@ -36,13 +34,13 @@ def _player_metadata(
     aliases: Dict[int, List[str]] = {player_id: [] for player_id in players}
     for row in connection.execute(
         'SELECT player_id,alias FROM player_aliases '
-        'ORDER BY player_id,alias COLLATE NOCASE'
+        'ORDER BY player_id,lower(alias),alias'
     ).fetchall():
         aliases.setdefault(int(row['player_id']), []).append(str(row['alias']))
     return players, aliases
 
 
-def _ranking_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
+def _ranking_rows(connection: Any) -> List[Mapping[str, Any]]:
     rows = connection.execute(
         'SELECT match.source_match_id AS match_id,match.player_id,'
         'match.exact_fingerprint,'
@@ -72,7 +70,7 @@ def _ranking_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
     return values
 
 
-def _environment_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
+def _environment_rows(connection: Any) -> List[Mapping[str, Any]]:
     rows = connection.execute(
         'SELECT match.source_match_id AS match_id,match.mode AS game_mode,'
         'match.played_at_epoch AS played_at,match.duration_seconds,'
@@ -97,9 +95,7 @@ def _environment_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]
     return values
 
 
-def _lineups_by_match(
-    connection: sqlite3.Connection,
-) -> Mapping[int, List[Mapping[str, Any]]]:
+def _lineups_by_match(connection: Any) -> Mapping[int, List[Mapping[str, Any]]]:
     lineups: Dict[int, List[Mapping[str, Any]]] = {}
     rows = connection.execute(
         'SELECT participant.match_id,team.side,participant.slot,'
@@ -149,7 +145,7 @@ def _trend_standings(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def refresh_dashboard_state(
-    connection: sqlite3.Connection, *, generated_at: datetime
+    connection: Any, *, generated_at: datetime
 ) -> Mapping[str, Any]:
     if generated_at.tzinfo is None or generated_at.utcoffset() is None:
         raise ValueError('dashboard generation time must include a timezone')
@@ -209,8 +205,8 @@ def refresh_dashboard_state(
     return snapshot
 
 
-def ensure_dashboard_state(database_path: Path) -> None:
-    connection = connect_database(database_path)
+def ensure_dashboard_state(database_target: DatabaseTarget) -> None:
+    connection = connect_database(database_target)
     try:
         connection.execute('BEGIN IMMEDIATE')
         initialized = connection.execute(
@@ -230,9 +226,9 @@ def ensure_dashboard_state(database_path: Path) -> None:
 
 
 def get_dashboard_document(
-    database_path: Path,
+    database_target: DatabaseTarget,
 ) -> Optional[Tuple[Mapping[str, Any], str]]:
-    connection = connect_database(database_path)
+    connection = connect_database(database_target)
     try:
         state = connection.execute(
             'SELECT snapshot_json,content_revision,generated_at '

@@ -12,6 +12,7 @@ dependencies = [
   "fastapi>=0.95.0,<0.100.0",
   "pydantic>=1.10.0,<2.0.0",
   "pypinyin>=0.49.0,<1.0.0",
+  "psycopg[binary]>=3.2.0,<4.0.0",
   "uvicorn>=0.22.0,<0.24.0",
 ]
 
@@ -25,7 +26,7 @@ blrec-dashboard-api = "blrec_dashboard_api.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-blrec_dashboard_api = ["migrations/*.sql"]
+blrec_dashboard_api = ["migrations/*.sql", "postgres_migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

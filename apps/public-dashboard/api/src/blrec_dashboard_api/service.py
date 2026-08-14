@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 import time
 import unicodedata
 from datetime import datetime, timezone
 from itertools import groupby
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from blrec_dashboard_publisher.deduplication import exact_match_fingerprint
@@ -17,7 +15,7 @@ from blrec_dashboard_publisher.rating import (
 from pypinyin import Style, lazy_pinyin
 
 from .dashboard import refresh_dashboard_state
-from .database import connect_database
+from .database import DatabaseTarget, connect_database, is_postgres
 from .models import IngestBatch, IngestMatch, IngestMatchTeam, IngestPlayer
 
 
@@ -70,9 +68,7 @@ def _ingest_match_fingerprint(match: IngestMatch) -> Optional[str]:
     )
 
 
-def _stored_match_fingerprint(
-    connection: sqlite3.Connection, match_id: int
-) -> Optional[str]:
+def _stored_match_fingerprint(connection: Any, match_id: int) -> Optional[str]:
     match = connection.execute(
         'SELECT mode,duration_seconds,result FROM matches WHERE source_match_id=?',
         (match_id,),
@@ -113,7 +109,7 @@ def _stored_match_fingerprint(
 
 
 def _players_for_fingerprints(
-    connection: sqlite3.Connection, fingerprints: Iterable[Optional[str]]
+    connection: Any, fingerprints: Iterable[Optional[str]]
 ) -> Set[int]:
     values = tuple(sorted({value for value in fingerprints if value is not None}))
     if not values:
@@ -138,9 +134,7 @@ def _utc_iso(value: Any) -> str:
     )
 
 
-def _upsert_player(
-    connection: sqlite3.Connection, player: IngestPlayer, now: int
-) -> Set[int]:
+def _upsert_player(connection: Any, player: IngestPlayer, now: int) -> Set[int]:
     existing = connection.execute(
         'SELECT name,initial,room_label,avatar_url FROM players WHERE player_id=?',
         (player.id,),
@@ -229,8 +223,8 @@ def _upsert_player(
     return affected_player_ids
 
 
-def get_live_rooms(database_path: Path) -> Optional[Dict[str, Any]]:
-    connection = connect_database(database_path)
+def get_live_rooms(database_target: DatabaseTarget) -> Optional[Dict[str, Any]]:
+    connection = connect_database(database_target)
     try:
         state = connection.execute(
             'SELECT generated_at FROM dashboard_state WHERE singleton_id=1'
@@ -260,7 +254,7 @@ def get_live_rooms(database_path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _delete_unreferenced_players(
-    connection: sqlite3.Connection, current_player_ids: Sequence[int]
+    connection: Any, current_player_ids: Sequence[int]
 ) -> None:
     parameters = tuple(sorted(current_player_ids))
     current_filter = ''
@@ -274,9 +268,7 @@ def _delete_unreferenced_players(
     )
 
 
-def _insert_team(
-    connection: sqlite3.Connection, match_id: int, team: IngestMatchTeam
-) -> None:
+def _insert_team(connection: Any, match_id: int, team: IngestMatchTeam) -> None:
     connection.execute(
         'INSERT INTO match_teams(match_id,role,side,color,kills,economy) '
         'VALUES(?,?,?,?,?,?)',
@@ -307,7 +299,7 @@ def _insert_team(
 
 
 def _upsert_match(
-    connection: sqlite3.Connection, match: IngestMatch, now: int
+    connection: Any, match: IngestMatch, now: int
 ) -> Tuple[bool, Set[int]]:
     revision = _match_revision(match)
     fingerprint = _ingest_match_fingerprint(match)
@@ -336,8 +328,8 @@ def _upsert_match(
         'source_match_id,revision_sha256,player_id,season_key,mode,played_at,'
         'played_at_epoch,duration_seconds,result,stream_title,replay_kind,replay_url,'
         'result_image_url,result_image_width,result_image_height,exact_fingerprint,'
-        'created_at,updated_at'
-        ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+        'analysis_provisional,created_at,updated_at'
+        ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
         'ON CONFLICT(source_match_id) DO UPDATE SET '
         'revision_sha256=excluded.revision_sha256,player_id=excluded.player_id,'
         'season_key=excluded.season_key,mode=excluded.mode,'
@@ -348,6 +340,7 @@ def _upsert_match(
         'result_image_width=excluded.result_image_width,'
         'result_image_height=excluded.result_image_height,'
         'exact_fingerprint=excluded.exact_fingerprint,'
+        'analysis_provisional=excluded.analysis_provisional,'
         'updated_at=excluded.updated_at',
         (
             match.id,
@@ -366,6 +359,7 @@ def _upsert_match(
             image_width,
             image_height,
             fingerprint,
+            int(match.analysis_provisional),
             now,
             now,
         ),
@@ -393,9 +387,7 @@ def _search_forms(value: str) -> Tuple[str, str, str]:
     )
 
 
-def _rebuild_match_search(
-    connection: sqlite3.Connection, match_ids: Iterable[int]
-) -> None:
+def _rebuild_match_search(connection: Any, match_ids: Iterable[int]) -> None:
     for match_id in sorted(set(match_ids)):
         connection.execute('DELETE FROM match_search WHERE match_id=?', (match_id,))
         match = connection.execute(
@@ -447,8 +439,8 @@ def _rebuild_match_search(
 
 
 def _insert_rating_timeline(
-    connection: sqlite3.Connection,
-    rows: Sequence[sqlite3.Row],
+    connection: Any,
+    rows: Sequence[Any],
     *,
     scope: str,
     season_key: str,
@@ -492,9 +484,7 @@ def _insert_rating_timeline(
     return final.ability, final.evidence
 
 
-def _recompute_ratings(
-    connection: sqlite3.Connection, player_ids: Iterable[int]
-) -> int:
+def _recompute_ratings(connection: Any, player_ids: Iterable[int]) -> int:
     parameters = tuple(sorted(set(player_ids)))
     if not parameters:
         return 0
@@ -560,10 +550,10 @@ def _recompute_ratings(
     return inserted
 
 
-def reconcile_match_fingerprints(database_path: Path) -> int:
+def reconcile_match_fingerprints(database_target: DatabaseTarget) -> int:
     """Backfill exact identities and rebuild ratings after the schema upgrade."""
 
-    connection = connect_database(database_path)
+    connection = connect_database(database_target)
     try:
         connection.execute('BEGIN IMMEDIATE')
         changed = 0
@@ -605,11 +595,11 @@ def reconcile_match_fingerprints(database_path: Path) -> int:
 
 
 def apply_ingest_batch(
-    database_path: Path, *, idempotency_key: str, batch: IngestBatch
+    database_target: DatabaseTarget, *, idempotency_key: str, batch: IngestBatch
 ) -> Dict[str, Any]:
     payload_sha256 = _payload_sha256(batch)
     now = int(time.time())
-    connection = connect_database(database_path)
+    connection = connect_database(database_target)
     try:
         connection.execute('BEGIN IMMEDIATE')
         previous = connection.execute(
@@ -715,7 +705,7 @@ def apply_ingest_batch(
         connection.close()
 
 
-def _row_player(connection: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+def _row_player(connection: Any, player_id: int) -> Dict[str, Any]:
     row = connection.execute(
         'SELECT player_id,name,initial,room_label,avatar_url FROM players '
         'WHERE player_id=?',
@@ -746,9 +736,7 @@ def _row_player(connection: sqlite3.Connection, player_id: int) -> Dict[str, Any
     }
 
 
-def _row_team(
-    connection: sqlite3.Connection, match_id: int, role: str
-) -> Dict[str, Any]:
+def _row_team(connection: Any, match_id: int, role: str) -> Dict[str, Any]:
     team = connection.execute(
         'SELECT side,color,kills,economy FROM match_teams '
         'WHERE match_id=? AND role=?',
@@ -785,7 +773,7 @@ def _row_team(
 
 
 def _row_rating(
-    connection: sqlite3.Connection, match_id: int, *, scope: str, season_key: str
+    connection: Any, match_id: int, *, scope: str, season_key: str
 ) -> Optional[Dict[str, Any]]:
     row = connection.execute(
         'SELECT score_before,score_delta,score_after,match_number,provisional,'
@@ -808,11 +796,7 @@ def _row_rating(
 
 
 def _row_match(
-    connection: sqlite3.Connection,
-    row: sqlite3.Row,
-    *,
-    rating_scope: str,
-    rating_season: Optional[str],
+    connection: Any, row: Any, *, rating_scope: str, rating_season: Optional[str]
 ) -> Dict[str, Any]:
     match_id = int(row['source_match_id'])
     season_key = str(row['season_key']) if rating_season is None else rating_season
@@ -836,6 +820,7 @@ def _row_match(
         'durationSeconds': int(row['duration_seconds']),
         'result': str(row['result']),
         'streamTitle': str(row['stream_title']),
+        'analysisProvisional': bool(row['analysis_provisional']),
         'ally': _row_team(connection, match_id, 'ally'),
         'enemy': _row_team(connection, match_id, 'enemy'),
         'rating': _row_rating(
@@ -846,11 +831,11 @@ def _row_match(
     }
 
 
-def _search_clause(query: str, parameters: List[Any]) -> str:
+def _search_clause(query: str, parameters: List[Any], *, postgres: bool = False) -> str:
     normalized = _normalize_search(query)
     if not normalized:
         return ''
-    if len(normalized) >= 3:
+    if len(normalized) >= 3 and not postgres:
         parameters.append('"' + normalized.replace('"', '""') + '"')
         return (
             ' AND EXISTS(SELECT 1 FROM match_search search '
@@ -858,16 +843,22 @@ def _search_clause(query: str, parameters: List[Any]) -> str:
             'AND match_search MATCH ?)'
         )
     parameters.extend((normalized, normalized, normalized))
+    contains = 'strpos' if postgres else 'instr'
     return (
         ' AND EXISTS(SELECT 1 FROM match_search search '
         'WHERE search.match_id=matches.source_match_id '
-        'AND (instr(search.normalized,?)>0 OR instr(search.pinyin,?)>0 '
-        'OR instr(search.initials,?)>0))'
+        'AND ('
+        + contains
+        + '(search.normalized,?)>0 OR '
+        + contains
+        + '(search.pinyin,?)>0 OR '
+        + contains
+        + '(search.initials,?)>0))'
     )
 
 
 def list_matches(
-    database_path: Path,
+    database_target: DatabaseTarget,
     *,
     page: int,
     page_size: int,
@@ -890,15 +881,17 @@ def list_matches(
     if player_id is not None:
         conditions += ' AND matches.player_id=?'
         parameters.append(player_id)
-    conditions += _search_clause(query, parameters)
+    conditions += _search_clause(
+        query, parameters, postgres=is_postgres(database_target)
+    )
     for hero in heroes:
         conditions += (
             ' AND EXISTS(SELECT 1 FROM match_participants participant '
             'WHERE participant.match_id=matches.source_match_id '
-            'AND participant.hero_name=? COLLATE NOCASE)'
+            'AND lower(participant.hero_name)=lower(?))'
         )
         parameters.append(hero)
-    connection = connect_database(database_path)
+    connection = connect_database(database_target)
     try:
         total_row = connection.execute(
             'SELECT COUNT(*) FROM matches' + conditions, parameters
@@ -929,13 +922,13 @@ def list_matches(
 
 
 def get_match(
-    database_path: Path,
+    database_target: DatabaseTarget,
     match_id: int,
     *,
     rating_scope: str,
     rating_season: Optional[str],
 ) -> Dict[str, Any]:
-    connection = connect_database(database_path)
+    connection = connect_database(database_target)
     try:
         row = connection.execute(
             'SELECT * FROM matches WHERE source_match_id=?', (match_id,)
@@ -950,7 +943,7 @@ def get_match(
 
 
 def get_match_summary(
-    database_path: Path,
+    database_target: DatabaseTarget,
     *,
     season: Optional[str],
     mode: Optional[str],
@@ -967,7 +960,7 @@ def get_match_summary(
     if player_id is not None:
         conditions += ' AND player_id=?'
         parameters.append(player_id)
-    connection = connect_database(database_path)
+    connection = connect_database(database_target)
     try:
         row = connection.execute(
             'SELECT COUNT(*) AS matches,'

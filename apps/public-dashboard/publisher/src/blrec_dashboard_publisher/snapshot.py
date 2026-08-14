@@ -450,7 +450,7 @@ def _match_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
     rows = connection.execute(
         'SELECT player.id AS player_id,player.name AS player_name,'
         'session.id AS session_id,session.started_at,session.title AS stream_title,'
-        'match.id AS match_id,match.result_frame_path,'
+        'match.id AS match_id,match.result_frame_path,match.analysis_state,'
         'match.result_part_id,part.part_index,part.record_start_time,'
         'match.result_at_ms,match.started_at_ms,match.duration_seconds,'
         'match.game_mode,match.winner_side,match.recorded_player_side,'
@@ -758,6 +758,7 @@ def _public_matches(
             'durationSeconds': int(row['duration_seconds']),
             'result': ('W' if str(row['winner_side']) == recorded_side else 'L'),
             'streamTitle': str(row['stream_title'] or ''),
+            'analysisProvisional': str(row['analysis_state']) == 'provisional',
             'ally': team_value(recorded_side),
             'enemy': team_value(enemy_side),
         }

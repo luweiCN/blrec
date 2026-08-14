@@ -6,11 +6,16 @@ import {
   OnInit,
 } from '@angular/core';
 import { Router } from '@angular/router';
+import { Subscription } from 'rxjs';
 
-import { seasonOption } from './public-dashboard.data';
-import { DashboardDataService } from './public-dashboard-data.service';
+import {
+  DashboardRealtimeService,
+  DashboardRealtimeUpdate,
+} from './dashboard-realtime.service';
 import { DashboardModeService } from './dashboard-mode.service';
 import { PlayerLiveStatusService } from './player-live-status.service';
+import { DashboardDataService } from './public-dashboard-data.service';
+import { seasonOption } from './public-dashboard.data';
 import { SiteAnalyticsService } from './site-analytics.service';
 import { SiteStatsState } from './site-stats.models';
 import { SiteStatsService } from './site-stats.service';
@@ -25,10 +30,11 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   siteStatsState: SiteStatsState = { kind: 'loading' };
 
   private destroyed = false;
-  private refreshTimer?: ReturnType<typeof setInterval>;
+  private realtimeSubscription?: Subscription;
   private readonly visibilityHandler = (): void => {
     if (document.visibilityState === 'visible') {
       void this.refreshDashboard();
+      void this.playerLiveStatus.refresh();
     }
   };
 
@@ -39,6 +45,7 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
     private readonly siteAnalytics: SiteAnalyticsService,
     private readonly siteStats: SiteStatsService,
     private readonly playerLiveStatus: PlayerLiveStatusService,
+    private readonly realtime: DashboardRealtimeService,
     private readonly changeDetector: ChangeDetectorRef,
   ) {}
 
@@ -46,11 +53,10 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
     void this.loadDashboard();
     this.siteAnalytics.start();
     document.addEventListener('visibilitychange', this.visibilityHandler);
-    this.refreshTimer = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void this.refreshDashboard();
-      }
-    }, 60_000);
+    this.realtimeSubscription = this.realtime.updates$.subscribe((update) => {
+      void this.handleRealtimeUpdate(update);
+    });
+    this.realtime.start();
     void this.siteStats.load().then((state) => {
       if (this.destroyed) {
         return;
@@ -62,9 +68,8 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.destroyed = true;
-    if (this.refreshTimer !== undefined) {
-      clearInterval(this.refreshTimer);
-    }
+    this.realtimeSubscription?.unsubscribe();
+    this.realtime.stop();
     document.removeEventListener('visibilitychange', this.visibilityHandler);
     this.playerLiveStatus.stop();
     this.siteAnalytics.stop();
@@ -104,6 +109,20 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
     const changed = await this.data.refresh();
     if (changed && !this.destroyed) {
       this.changeDetector.markForCheck();
+    }
+  }
+
+  private async handleRealtimeUpdate(
+    update: DashboardRealtimeUpdate,
+  ): Promise<void> {
+    if (update === 'resync' || update === 'dashboard') {
+      await this.refreshDashboard();
+    }
+    if (update === 'resync' || update === 'live_rooms') {
+      await this.playerLiveStatus.refresh();
+      if (!this.destroyed) {
+        this.changeDetector.markForCheck();
+      }
     }
   }
 }

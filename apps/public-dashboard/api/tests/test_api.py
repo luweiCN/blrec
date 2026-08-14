@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List
 
+import pytest
 from blrec_dashboard_api.app import create_app
+from blrec_dashboard_api.realtime import (
+    DashboardRealtimeBroker,
+    encode_event,
+    event_response,
+)
 from blrec_dashboard_api.settings import ApiSettings
 from fastapi.testclient import TestClient
 
@@ -124,12 +131,71 @@ def make_client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
+def test_database_url_takes_precedence_over_the_sqlite_fallback(tmp_path: Path) -> None:
+    settings = ApiSettings(
+        database_path=tmp_path / 'dashboard.sqlite3',
+        database_url='postgresql://dashboard:secret@127.0.0.1/dashboard',
+        ingest_token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
+        cors_origins=('https://vg.luwei.host',),
+    )
+
+    assert settings.database_target == (
+        'postgresql://dashboard:secret@127.0.0.1/dashboard'
+    )
+
+
+def test_database_url_rejects_non_postgresql_servers(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match='PostgreSQL'):
+        ApiSettings(
+            database_path=tmp_path / 'dashboard.sqlite3',
+            database_url='mysql://dashboard:secret@127.0.0.1/dashboard',
+            ingest_token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
+            cors_origins=('https://vg.luwei.host',),
+        )
+
+
 def ingest(client: TestClient, payload: Dict[str, Any], key: str = 'batch-1') -> Any:
     return client.post(
         '/v1/ingest/batches',
         headers={'Authorization': f'Bearer {TOKEN}', 'X-Idempotency-Key': key},
         json=payload,
     )
+
+
+def test_realtime_broker_coalesces_a_slow_subscriber_to_resync() -> None:
+    async def exercise() -> None:
+        broker = DashboardRealtimeBroker(queue_size=1)
+        subscription = broker.subscribe()
+
+        await broker.publish('dashboard', {'revision': 'first'})
+        await broker.publish('dashboard', {'revision': 'second'})
+
+        event = await asyncio.wait_for(subscription.get(), timeout=1)
+        assert event.type == 'resync'
+        assert event.data == {}
+
+    asyncio.run(exercise())
+
+
+def test_realtime_event_encoding_is_valid_sse() -> None:
+    assert encode_event('dashboard', {'revision': 'abc'}) == (
+        b'event: dashboard\ndata: {"revision":"abc"}\n\n'
+    )
+
+
+def test_realtime_endpoint_has_proxy_safe_streaming_headers(tmp_path: Path) -> None:
+    class Request:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    response = event_response(  # type: ignore[arg-type]
+        Request(), DashboardRealtimeBroker()
+    )
+
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/event-stream')
+    assert response.headers['cache-control'] == 'no-cache'
+    assert response.headers['x-accel-buffering'] == 'no'
 
 
 def test_match_list_waits_for_first_publication(tmp_path: Path) -> None:
@@ -535,6 +601,22 @@ def test_match_response_separates_teams_replay_and_result_image(tmp_path: Path) 
     assert item['streamTitle'] == '茉莉深夜排位'
     assert item['replay']['kind'] == 'match'
     assert item['resultImage']['width'] == 1600
+
+
+def test_live_preanalysis_is_marked_until_final_ingest_replaces_it(
+    tmp_path: Path,
+) -> None:
+    client = make_client(tmp_path)
+    preliminary = match(71, played_at='2026-08-11T10:30:00+08:00', result='W')
+    preliminary['analysisProvisional'] = True
+
+    assert ingest(client, batch([preliminary])).status_code == 200
+    assert client.get('/v1/matches/71').json()['analysisProvisional'] is True
+
+    finalized = dict(preliminary)
+    finalized['analysisProvisional'] = False
+    assert ingest(client, batch([finalized]), key='batch-2').status_code == 200
+    assert client.get('/v1/matches/71').json()['analysisProvisional'] is False
 
 
 def test_ingest_keeps_partially_recognized_lineups(tmp_path: Path) -> None:

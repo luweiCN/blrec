@@ -297,6 +297,7 @@
               <span class="detail-match-result" [class.loss]="match.result === 'L'">
                 {{ match.result === "W" ? "胜" : "负" }}
               </span>
+              <small *ngIf="match.analysisProvisional">直播预识别</small>
               <img
                 *ngIf="recordedMatchPlayer(match) as recorded"
                 [src]="heroImage(recorded.heroName)"

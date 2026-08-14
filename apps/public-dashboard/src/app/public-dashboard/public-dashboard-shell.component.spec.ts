@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import { DashboardModeService } from './dashboard-mode.service';
+import { DashboardRealtimeService } from './dashboard-realtime.service';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
 import { SiteAnalyticsService } from './site-analytics.service';
@@ -40,6 +41,14 @@ describe('PublicDashboardShellComponent', () => {
         {
           provide: SiteStatsService,
           useValue: { load: () => Promise.resolve({ kind: 'unavailable' }) },
+        },
+        {
+          provide: DashboardRealtimeService,
+          useValue: {
+            updates$: { subscribe: () => ({ unsubscribe: () => undefined }) },
+            start: () => undefined,
+            stop: () => undefined,
+          },
         },
       ],
       schemas: [NO_ERRORS_SCHEMA],
