@@ -720,130 +720,159 @@ def apply_ingest_batch(
         connection.close()
 
 
-def _row_player(connection: Any, player_id: int) -> Dict[str, Any]:
-    row = connection.execute(
+def _rows_matches(
+    connection: Any,
+    rows: Sequence[Any],
+    *,
+    rating_scope: str,
+    rating_season: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not rows:
+        return []
+    match_ids = tuple(int(row['source_match_id']) for row in rows)
+    player_ids = tuple(sorted({int(row['player_id']) for row in rows}))
+    match_placeholders = ','.join('?' for _ in match_ids)
+    player_placeholders = ','.join('?' for _ in player_ids)
+
+    players: Dict[int, Dict[str, Any]] = {}
+    for player in connection.execute(
         'SELECT player_id,name,initial,room_label,avatar_url FROM players '
-        'WHERE player_id=?',
-        (player_id,),
-    ).fetchone()
-    if row is None:
-        raise LookupError('player not found')
-    return {
-        'id': int(row['player_id']),
-        'name': str(row['name']),
-        'initial': str(row['initial']),
-        'roomLabel': str(row['room_label']),
-        'roomIds': [
-            int(value['room_id'])
-            for value in connection.execute(
-                'SELECT room_id FROM player_rooms WHERE player_id=? ORDER BY room_id',
-                (player_id,),
-            ).fetchall()
-        ],
-        'aliases': [
-            str(value['alias'])
-            for value in connection.execute(
-                'SELECT alias FROM player_aliases WHERE player_id=? ORDER BY alias',
-                (player_id,),
-            ).fetchall()
-        ],
-        'avatarUrl': None if row['avatar_url'] is None else str(row['avatar_url']),
-    }
-
-
-def _row_team(connection: Any, match_id: int, role: str) -> Dict[str, Any]:
-    team = connection.execute(
-        'SELECT side,color,kills,economy FROM match_teams '
-        'WHERE match_id=? AND role=?',
-        (match_id, role),
-    ).fetchone()
-    if team is None:
-        raise LookupError('match team not found')
-    players = connection.execute(
-        'SELECT slot,player_name,hero_name,kills,deaths,assists,economy,'
-        'last_hits,is_recorded_player FROM match_participants '
-        'WHERE match_id=? AND team_role=? ORDER BY slot',
-        (match_id, role),
-    ).fetchall()
-    return {
-        'side': str(team['side']),
-        'color': str(team['color']),
-        'kills': team['kills'],
-        'economy': team['economy'],
-        'players': [
-            {
-                'slot': int(player['slot']),
-                'name': str(player['player_name']),
-                'heroName': str(player['hero_name']),
-                'kills': player['kills'],
-                'deaths': player['deaths'],
-                'assists': player['assists'],
-                'economy': player['economy'],
-                'lastHits': player['last_hits'],
-                'isRecordedPlayer': bool(player['is_recorded_player']),
-            }
-            for player in players
-        ],
-    }
-
-
-def _row_rating(
-    connection: Any, match_id: int, *, scope: str, season_key: str
-) -> Optional[Dict[str, Any]]:
-    row = connection.execute(
-        'SELECT score_before,score_delta,score_after,match_number,provisional,'
-        'model_version FROM rating_events '
-        'WHERE match_id=? AND scope=? AND season_key=?',
-        (match_id, scope, season_key),
-    ).fetchone()
-    if row is None:
-        return None
-    return {
-        'scope': scope,
-        'seasonKey': season_key,
-        'matchNumber': int(row['match_number']),
-        'scoreBefore': int(row['score_before']),
-        'scoreDelta': int(row['score_delta']),
-        'scoreAfter': int(row['score_after']),
-        'provisional': bool(row['provisional']),
-        'modelVersion': int(row['model_version']),
-    }
-
-
-def _row_match(
-    connection: Any, row: Any, *, rating_scope: str, rating_season: Optional[str]
-) -> Dict[str, Any]:
-    match_id = int(row['source_match_id'])
-    season_key = str(row['season_key']) if rating_season is None else rating_season
-    replay = None
-    if row['replay_url'] is not None:
-        replay = {'kind': str(row['replay_kind']), 'url': str(row['replay_url'])}
-    result_image = None
-    if row['result_image_url'] is not None:
-        result_image = {
-            'url': str(row['result_image_url']),
-            'width': int(row['result_image_width']),
-            'height': int(row['result_image_height']),
+        'WHERE player_id IN (' + player_placeholders + ')',
+        player_ids,
+    ).fetchall():
+        player_id = int(player['player_id'])
+        players[player_id] = {
+            'id': player_id,
+            'name': str(player['name']),
+            'initial': str(player['initial']),
+            'roomLabel': str(player['room_label']),
+            'roomIds': [],
+            'aliases': [],
+            'avatarUrl': (
+                None if player['avatar_url'] is None else str(player['avatar_url'])
+            ),
         }
-    return {
-        'id': match_id,
-        'playerId': int(row['player_id']),
-        'player': _row_player(connection, int(row['player_id'])),
-        'seasonKey': str(row['season_key']),
-        'mode': str(row['mode']),
-        'playedAt': str(row['played_at']),
-        'durationSeconds': int(row['duration_seconds']),
-        'result': str(row['result']),
-        'streamTitle': str(row['stream_title']),
-        'analysisProvisional': bool(row['analysis_provisional']),
-        'ally': _row_team(connection, match_id, 'ally'),
-        'enemy': _row_team(connection, match_id, 'enemy'),
-        'rating': _row_rating(
-            connection, match_id, scope=rating_scope, season_key=season_key
-        ),
-        'replay': replay,
-        'resultImage': result_image,
+    for room in connection.execute(
+        'SELECT player_id,room_id FROM player_rooms WHERE player_id IN ('
+        + player_placeholders
+        + ') ORDER BY player_id,room_id',
+        player_ids,
+    ).fetchall():
+        players[int(room['player_id'])]['roomIds'].append(int(room['room_id']))
+    for alias in connection.execute(
+        'SELECT player_id,alias FROM player_aliases WHERE player_id IN ('
+        + player_placeholders
+        + ') ORDER BY player_id,alias',
+        player_ids,
+    ).fetchall():
+        players[int(alias['player_id'])]['aliases'].append(str(alias['alias']))
+
+    teams: Dict[Tuple[int, str], Dict[str, Any]] = {}
+    for team in connection.execute(
+        'SELECT match_id,role,side,color,kills,economy FROM match_teams '
+        'WHERE match_id IN (' + match_placeholders + ')',
+        match_ids,
+    ).fetchall():
+        teams[(int(team['match_id']), str(team['role']))] = {
+            'side': str(team['side']),
+            'color': str(team['color']),
+            'kills': team['kills'],
+            'economy': team['economy'],
+            'players': [],
+        }
+    for participant in connection.execute(
+        'SELECT match_id,team_role,slot,player_name,hero_name,kills,deaths,'
+        'assists,economy,last_hits,is_recorded_player FROM match_participants '
+        'WHERE match_id IN ('
+        + match_placeholders
+        + ') ORDER BY match_id,team_role,slot',
+        match_ids,
+    ).fetchall():
+        teams[(int(participant['match_id']), str(participant['team_role']))][
+            'players'
+        ].append(
+            {
+                'slot': int(participant['slot']),
+                'name': str(participant['player_name']),
+                'heroName': str(participant['hero_name']),
+                'kills': participant['kills'],
+                'deaths': participant['deaths'],
+                'assists': participant['assists'],
+                'economy': participant['economy'],
+                'lastHits': participant['last_hits'],
+                'isRecordedPlayer': bool(participant['is_recorded_player']),
+            }
+        )
+
+    rating_parameters: List[Any] = [*match_ids, rating_scope]
+    rating_conditions = 'WHERE match_id IN (' + match_placeholders + ') AND scope=?'
+    if rating_season is not None:
+        rating_conditions += ' AND season_key=?'
+        rating_parameters.append(rating_season)
+    ratings = {
+        (int(rating['match_id']), str(rating['season_key'])): rating
+        for rating in connection.execute(
+            'SELECT match_id,season_key,score_before,score_delta,score_after,'
+            'match_number,provisional,model_version FROM rating_events '
+            + rating_conditions,
+            rating_parameters,
+        ).fetchall()
     }
+
+    values: List[Dict[str, Any]] = []
+    for row in rows:
+        match_id = int(row['source_match_id'])
+        player_id = int(row['player_id'])
+        season_key = str(row['season_key']) if rating_season is None else rating_season
+        player = players.get(player_id)
+        ally = teams.get((match_id, 'ally'))
+        enemy = teams.get((match_id, 'enemy'))
+        if player is None or ally is None or enemy is None:
+            raise LookupError('match relations are incomplete')
+        rating = ratings.get((match_id, season_key))
+        replay = None
+        if row['replay_url'] is not None:
+            replay = {'kind': str(row['replay_kind']), 'url': str(row['replay_url'])}
+        result_image = None
+        if row['result_image_url'] is not None:
+            result_image = {
+                'url': str(row['result_image_url']),
+                'width': int(row['result_image_width']),
+                'height': int(row['result_image_height']),
+            }
+        values.append(
+            {
+                'id': match_id,
+                'playerId': player_id,
+                'player': player,
+                'seasonKey': str(row['season_key']),
+                'mode': str(row['mode']),
+                'playedAt': str(row['played_at']),
+                'durationSeconds': int(row['duration_seconds']),
+                'result': str(row['result']),
+                'streamTitle': str(row['stream_title']),
+                'analysisProvisional': bool(row['analysis_provisional']),
+                'ally': ally,
+                'enemy': enemy,
+                'rating': (
+                    None
+                    if rating is None
+                    else {
+                        'scope': rating_scope,
+                        'seasonKey': season_key,
+                        'matchNumber': int(rating['match_number']),
+                        'scoreBefore': int(rating['score_before']),
+                        'scoreDelta': int(rating['score_delta']),
+                        'scoreAfter': int(rating['score_after']),
+                        'provisional': bool(rating['provisional']),
+                        'modelVersion': int(rating['model_version']),
+                    }
+                ),
+                'replay': replay,
+                'resultImage': result_image,
+            }
+        )
+    return values
 
 
 def _search_clause(query: str, parameters: List[Any], *, postgres: bool = False) -> str:
@@ -857,18 +886,26 @@ def _search_clause(query: str, parameters: List[Any], *, postgres: bool = False)
             'WHERE search.match_id=matches.source_match_id '
             'AND match_search MATCH ?)'
         )
+    if postgres:
+        escaped = (
+            normalized.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        )
+        pattern = '%' + escaped + '%'
+        parameters.extend((pattern, pattern, pattern))
+        return (
+            ' AND EXISTS(SELECT 1 FROM match_search search '
+            'WHERE search.match_id=matches.source_match_id '
+            "AND (search.normalized LIKE ? ESCAPE '\\' OR "
+            "search.pinyin LIKE ? ESCAPE '\\' OR "
+            "search.initials LIKE ? ESCAPE '\\'))"
+        )
     parameters.extend((normalized, normalized, normalized))
-    contains = 'strpos' if postgres else 'instr'
     return (
         ' AND EXISTS(SELECT 1 FROM match_search search '
         'WHERE search.match_id=matches.source_match_id '
-        'AND ('
-        + contains
-        + '(search.normalized,?)>0 OR '
-        + contains
-        + '(search.pinyin,?)>0 OR '
-        + contains
-        + '(search.initials,?)>0))'
+        'AND (instr(search.normalized,?)>0 OR '
+        'instr(search.pinyin,?)>0 OR '
+        'instr(search.initials,?)>0))'
     )
 
 
@@ -919,15 +956,9 @@ def list_matches(
             (*parameters, page_size, (page - 1) * page_size),
         ).fetchall()
         return {
-            'items': [
-                _row_match(
-                    connection,
-                    row,
-                    rating_scope=rating_scope,
-                    rating_season=rating_season,
-                )
-                for row in rows
-            ],
+            'items': _rows_matches(
+                connection, rows, rating_scope=rating_scope, rating_season=rating_season
+            ),
             'page': page,
             'pageSize': page_size,
             'total': total,
@@ -950,9 +981,9 @@ def get_match(
         ).fetchone()
         if row is None:
             raise LookupError('match not found')
-        return _row_match(
-            connection, row, rating_scope=rating_scope, rating_season=rating_season
-        )
+        return _rows_matches(
+            connection, [row], rating_scope=rating_scope, rating_season=rating_season
+        )[0]
     finally:
         connection.close()
 

@@ -134,6 +134,10 @@
     white-space: nowrap;
   }
 
+  .match-time .match-provisional {
+    max-width: none;
+  }
+
   .match-score small {
     display: none;
   }

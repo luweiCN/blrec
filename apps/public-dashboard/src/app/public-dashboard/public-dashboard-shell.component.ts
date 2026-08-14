@@ -28,8 +28,11 @@ import { SiteStatsService } from './site-stats.service';
 })
 export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   siteStatsState: SiteStatsState = { kind: 'loading' };
+  realtimeRefreshState: 'idle' | 'refreshing' | 'updated' = 'idle';
 
   private destroyed = false;
+  private activeRealtimeRefreshes = 0;
+  private realtimeFeedbackTimer?: ReturnType<typeof setTimeout>;
   private realtimeSubscription?: Subscription;
   private readonly visibilityHandler = (): void => {
     if (document.visibilityState === 'visible') {
@@ -68,6 +71,9 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.destroyed = true;
+    if (this.realtimeFeedbackTimer !== undefined) {
+      clearTimeout(this.realtimeFeedbackTimer);
+    }
     this.realtimeSubscription?.unsubscribe();
     this.realtime.stop();
     document.removeEventListener('visibilitychange', this.visibilityHandler);
@@ -87,6 +93,16 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
     return snapshot === null
       ? '数据载入中'
       : seasonOption(snapshot, snapshot.currentSeasonKey).label;
+  }
+
+  get dashboardStatusLabel(): string {
+    if (this.realtimeRefreshState === 'refreshing') {
+      return '正在同步新数据';
+    }
+    if (this.realtimeRefreshState === 'updated') {
+      return '数据已更新';
+    }
+    return this.currentSeasonLabel;
   }
 
   reloadDashboard(): void {
@@ -115,14 +131,46 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   private async handleRealtimeUpdate(
     update: DashboardRealtimeUpdate,
   ): Promise<void> {
-    if (update === 'resync' || update === 'dashboard') {
-      await this.refreshDashboard();
-    }
-    if (update === 'resync' || update === 'live_rooms') {
-      await this.playerLiveStatus.refresh();
-      if (!this.destroyed) {
-        this.changeDetector.markForCheck();
+    this.beginRealtimeRefresh();
+    try {
+      if (update === 'resync' || update === 'dashboard') {
+        await this.refreshDashboard();
       }
+      if (update === 'resync' || update === 'live_rooms') {
+        await this.playerLiveStatus.refresh();
+        if (!this.destroyed) {
+          this.changeDetector.markForCheck();
+        }
+      }
+    } finally {
+      this.finishRealtimeRefresh();
     }
+  }
+
+  private beginRealtimeRefresh(): void {
+    this.activeRealtimeRefreshes += 1;
+    if (this.realtimeFeedbackTimer !== undefined) {
+      clearTimeout(this.realtimeFeedbackTimer);
+      this.realtimeFeedbackTimer = undefined;
+    }
+    this.realtimeRefreshState = 'refreshing';
+    this.changeDetector.markForCheck();
+  }
+
+  private finishRealtimeRefresh(): void {
+    this.activeRealtimeRefreshes = Math.max(0, this.activeRealtimeRefreshes - 1);
+    if (this.destroyed || this.activeRealtimeRefreshes > 0) {
+      return;
+    }
+    this.realtimeRefreshState = 'updated';
+    this.changeDetector.markForCheck();
+    this.realtimeFeedbackTimer = setTimeout(() => {
+      if (this.destroyed) {
+        return;
+      }
+      this.realtimeRefreshState = 'idle';
+      this.realtimeFeedbackTimer = undefined;
+      this.changeDetector.markForCheck();
+    }, 1800);
   }
 }

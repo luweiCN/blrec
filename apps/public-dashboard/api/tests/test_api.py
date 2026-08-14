@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
+from blrec_dashboard_api import app as app_module
 from blrec_dashboard_api import service
 from blrec_dashboard_api.app import create_app
 from blrec_dashboard_api.realtime import (
@@ -339,9 +340,7 @@ def test_dashboard_is_materialized_from_server_matches_without_embedding_archive
     response = client.get('/v1/dashboard')
 
     assert response.status_code == 200
-    assert response.headers['cache-control'] == (
-        'public, max-age=60, stale-while-revalidate=300'
-    )
+    assert response.headers['cache-control'] == 'public, no-cache'
     assert response.headers['etag'].startswith('"')
     document = response.json()
     snapshot = document['snapshot']
@@ -366,6 +365,37 @@ def test_dashboard_is_materialized_from_server_matches_without_embedding_archive
         '/v1/dashboard', headers={'If-None-Match': response.headers['etag']}
     )
     assert not_modified.status_code == 304
+
+
+def test_dashboard_response_reuses_the_current_revision_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    original_get_dashboard = app_module.get_dashboard_document
+
+    def tracked_get_dashboard(database_target: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return original_get_dashboard(database_target)
+
+    monkeypatch.setattr(app_module, 'get_dashboard_document', tracked_get_dashboard)
+    client = make_client(tmp_path)
+    assert (
+        ingest(
+            client, batch([match(1, played_at='2026-06-01T12:00:00Z', result='W')])
+        ).status_code
+        == 200
+    )
+    calls_after_ingest = calls
+
+    first = client.get('/v1/dashboard')
+    second = client.get(
+        '/v1/dashboard', headers={'If-None-Match': first.headers['etag']}
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 304
+    assert calls == calls_after_ingest
 
 
 def test_dashboard_backfill_replaces_same_day_trend_after_chronological_replay(
@@ -650,6 +680,46 @@ def test_match_response_separates_teams_replay_and_result_image(tmp_path: Path) 
     assert item['streamTitle'] == '茉莉深夜排位'
     assert item['replay']['kind'] == 'match'
     assert item['resultImage']['width'] == 1600
+
+
+def test_match_page_prefetches_relations_in_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = make_client(tmp_path)
+    matches = [
+        match(
+            match_id,
+            played_at='2026-06-{:02d}T12:00:00Z'.format(match_id),
+            result='W' if match_id % 2 else 'L',
+        )
+        for match_id in range(1, 11)
+    ]
+    assert ingest(client, batch(matches)).status_code == 200
+    statements: List[str] = []
+    original_connect = service.connect_database
+
+    class TrackingConnection:
+        def __init__(self, connection: Any) -> None:
+            self._connection = connection
+
+        def execute(self, statement: str, parameters: Any = ()) -> Any:
+            statements.append(statement)
+            return self._connection.execute(statement, parameters)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(
+        service,
+        'connect_database',
+        lambda target: TrackingConnection(original_connect(target)),
+    )
+
+    response = client.get('/v1/matches?page=1&pageSize=10')
+
+    assert response.status_code == 200
+    assert len(response.json()['items']) == 10
+    assert len([value for value in statements if value.startswith('SELECT')]) == 8
 
 
 def test_live_preanalysis_is_marked_until_final_ingest_replaces_it(

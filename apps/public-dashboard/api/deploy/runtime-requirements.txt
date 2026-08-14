@@ -3,4 +3,5 @@ pydantic==1.10.26
 pypinyin==0.55.0
 psycopg==3.2.9
 psycopg-binary==3.2.9
+psycopg-pool==3.2.6
 uvicorn==0.23.2

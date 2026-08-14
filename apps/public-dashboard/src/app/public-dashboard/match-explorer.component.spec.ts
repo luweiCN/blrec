@@ -142,6 +142,21 @@ describe('MatchExplorerComponent', () => {
     );
   });
 
+  it('keeps live preanalysis outside the compact result badge', () => {
+    fixture.componentRef.setInput('matches', [
+      { ...TEST_DASHBOARD_MATCHES[0], analysisProvisional: true },
+    ]);
+    fixture.detectChanges();
+    const page = fixture.nativeElement as HTMLElement;
+
+    expect(page.querySelector('.match-outcome')?.textContent).not.toContain(
+      '直播预识别',
+    );
+    expect(page.querySelector('.match-provisional')?.textContent).toContain(
+      '直播预识别',
+    );
+  });
+
   it('closes the whole modal after a result image opened from the list', () => {
     fixture.componentRef.setInput('matches', [
       {

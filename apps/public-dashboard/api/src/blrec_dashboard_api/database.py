@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from atexit import register
 from contextlib import contextmanager
 from importlib import resources
 from pathlib import Path
+from threading import Lock
 from typing import Any, Iterator, Mapping, Sequence, Union, overload
 
 LATEST_SCHEMA_VERSION = 5
 DatabaseTarget = Union[Path, str]
+_POSTGRES_POOLS: dict[str, Any] = {}
+_POSTGRES_POOLS_LOCK = Lock()
 
 
 class DatabaseRow(Mapping[str, Any]):
@@ -49,8 +53,10 @@ def _postgres_sql(sql: str) -> str:
 class PostgresConnection:
     dialect = 'postgresql'
 
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: Any, pool: Any) -> None:
         self._connection = connection
+        self._pool = pool
+        self._closed = False
 
     def execute(self, sql: str, parameters: Sequence[Any] = ()) -> Any:
         statement = _postgres_sql(sql)
@@ -70,7 +76,10 @@ class PostgresConnection:
         self._connection.rollback()
 
     def close(self) -> None:
-        self._connection.close()
+        if self._closed:
+            return
+        self._closed = True
+        self._pool.putconn(self._connection)
 
 
 def is_postgres(target: DatabaseTarget) -> bool:
@@ -81,18 +90,44 @@ def is_postgres(target: DatabaseTarget) -> bool:
 
 def connect_database(target: DatabaseTarget) -> Any:
     if is_postgres(target):
-        import psycopg
-
         database_url = str(target).replace('postgresql+psycopg://', 'postgresql://', 1)
-        return PostgresConnection(
-            psycopg.connect(database_url, row_factory=_postgres_row_factory)
-        )
+        pool = _postgres_pool(database_url)
+        return PostgresConnection(pool.getconn(), pool)
     path = Path(target)
     connection = sqlite3.connect(str(path), timeout=30.0)
     connection.row_factory = sqlite3.Row
     connection.execute('PRAGMA foreign_keys=ON')
     connection.execute('PRAGMA busy_timeout=30000')
     return connection
+
+
+def _postgres_pool(database_url: str) -> Any:
+    with _POSTGRES_POOLS_LOCK:
+        pool = _POSTGRES_POOLS.get(database_url)
+        if pool is None:
+            from psycopg_pool import ConnectionPool
+
+            pool = ConnectionPool(
+                database_url,
+                min_size=1,
+                max_size=8,
+                kwargs={'autocommit': True, 'row_factory': _postgres_row_factory},
+                check=ConnectionPool.check_connection,
+                open=True,
+            )
+            _POSTGRES_POOLS[database_url] = pool
+        return pool
+
+
+def close_database_pools() -> None:
+    with _POSTGRES_POOLS_LOCK:
+        pools = tuple(_POSTGRES_POOLS.values())
+        _POSTGRES_POOLS.clear()
+    for pool in pools:
+        pool.close()
+
+
+register(close_database_pools)
 
 
 def initialize_database(target: DatabaseTarget) -> None:

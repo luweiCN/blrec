@@ -5,7 +5,8 @@ import hmac
 import json
 import re
 from functools import partial
-from typing import Literal, Optional
+from threading import Lock
+from typing import Any, Literal, Mapping, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
@@ -29,6 +30,32 @@ from .service import (
 from .settings import ApiSettings
 
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,128}$')
+
+
+class _DashboardResponseCache:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._payload: Optional[bytes] = None
+        self._revision: Optional[str] = None
+
+    def replace(self, current: Optional[Tuple[Mapping[str, Any], str]]) -> None:
+        if current is None:
+            payload = None
+            revision = None
+        else:
+            document, revision = current
+            payload = json.dumps(
+                document, ensure_ascii=False, allow_nan=False, separators=(',', ':')
+            ).encode('utf-8')
+        with self._lock:
+            self._payload = payload
+            self._revision = revision
+
+    def current(self) -> Optional[Tuple[bytes, str]]:
+        with self._lock:
+            if self._payload is None or self._revision is None:
+                return None
+            return self._payload, self._revision
 
 
 def _authenticate_ingest(authorization: Optional[str], settings: ApiSettings) -> None:
@@ -62,6 +89,8 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
     initialize_database(database_target)
     reconcile_match_fingerprints(database_target)
     ensure_dashboard_state(database_target)
+    dashboard_cache = _DashboardResponseCache()
+    dashboard_cache.replace(get_dashboard_document(database_target))
     app = FastAPI(
         title='BLREC Vainglory Dashboard API',
         version='1.0.0',
@@ -114,6 +143,7 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
                 detail='idempotency key was already used for another payload',
             ) from error
         current = await run_in_threadpool(get_dashboard_document, database_target)
+        dashboard_cache.replace(current)
         revision = '' if current is None else current[1]
         await realtime_broker.publish('dashboard', {'revision': revision})
         await realtime_broker.publish('live_rooms', {'revision': revision})
@@ -127,20 +157,20 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
     def dashboard(
         if_none_match: Optional[str] = Header(default=None, alias='If-None-Match')
     ) -> Response:
-        current = get_dashboard_document(database_target)
+        current = dashboard_cache.current()
+        if current is None:
+            dashboard_cache.replace(get_dashboard_document(database_target))
+            current = dashboard_cache.current()
         if current is None:
             raise HTTPException(
                 status_code=503, detail='dashboard is waiting for its first publication'
             )
-        document, revision = current
+        payload, revision = current
         etag = '"{}"'.format(revision)
-        headers = {
-            'Cache-Control': 'public, max-age=60, stale-while-revalidate=300',
-            'ETag': etag,
-        }
+        headers = {'Cache-Control': 'public, no-cache', 'ETag': etag}
         if if_none_match == etag:
             return Response(status_code=304, headers=headers)
-        return JSONResponse(content=document, headers=headers)
+        return Response(content=payload, media_type='application/json', headers=headers)
 
     @app.get('/v1/live-rooms')
     def live_rooms(

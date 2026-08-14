@@ -1,24 +1,34 @@
 import { NO_ERRORS_SCHEMA } from '@angular/core';
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import {
+  ComponentFixture,
+  fakeAsync,
+  flushMicrotasks,
+  TestBed,
+  tick,
+} from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
+import { Subject } from 'rxjs';
 
 import { DashboardModeService } from './dashboard-mode.service';
 import { DashboardRealtimeService } from './dashboard-realtime.service';
 import { DashboardDataService } from './public-dashboard-data.service';
+import { PlayerLiveStatusService } from './player-live-status.service';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
 import { SiteAnalyticsService } from './site-analytics.service';
 import { SiteStatsService } from './site-stats.service';
 
 describe('PublicDashboardShellComponent', () => {
   let fixture: ComponentFixture<PublicDashboardShellComponent>;
+  let realtimeUpdates: Subject<'resync' | 'dashboard' | 'live_rooms'>;
   let data: {
-    state: { kind: 'loading' };
+    state: { kind: 'loading' | 'ready' };
     snapshotOrNull: null;
     load: jasmine.Spy<() => Promise<void>>;
     refresh: jasmine.Spy<() => Promise<boolean>>;
   };
 
   beforeEach(async () => {
+    realtimeUpdates = new Subject();
     data = {
       state: { kind: 'loading' },
       snapshotOrNull: null,
@@ -45,9 +55,17 @@ describe('PublicDashboardShellComponent', () => {
         {
           provide: DashboardRealtimeService,
           useValue: {
-            updates$: { subscribe: () => ({ unsubscribe: () => undefined }) },
+            updates$: realtimeUpdates,
             start: () => undefined,
             stop: () => undefined,
+          },
+        },
+        {
+          provide: PlayerLiveStatusService,
+          useValue: {
+            start: () => undefined,
+            stop: () => undefined,
+            refresh: () => Promise.resolve(),
           },
         },
       ],
@@ -65,4 +83,30 @@ describe('PublicDashboardShellComponent', () => {
     ).not.toBeNull();
     expect(fixture.nativeElement.querySelector('.site-header')).not.toBeNull();
   });
+
+  it('shows feedback while realtime data is refreshing', fakeAsync(() => {
+    let finishRefresh!: (changed: boolean) => void;
+    data.state = { kind: 'ready' };
+    data.refresh.and.returnValue(
+      new Promise<boolean>((resolve) => {
+        finishRefresh = resolve;
+      }),
+    );
+    fixture.detectChanges();
+
+    realtimeUpdates.next('dashboard');
+    fixture.detectChanges();
+    const status = fixture.nativeElement.querySelector(
+      '.data-status',
+    ) as HTMLElement;
+    expect(status.textContent).toContain('正在同步新数据');
+    expect(status.getAttribute('aria-busy')).toBe('true');
+
+    finishRefresh(true);
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(status.textContent).toContain('数据已更新');
+
+    tick(1800);
+  }));
 });

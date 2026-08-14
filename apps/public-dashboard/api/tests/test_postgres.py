@@ -74,6 +74,7 @@ def test_postgres_backend_applies_ingest_and_serves_dashboard() -> None:
     assert response.status_code == 200
     assert client.get('/v1/dashboard').status_code == 200
     assert client.get('/v1/matches').json()['total'] == 1
+    assert client.get('/v1/matches?q=茉莉').json()['total'] == 1
 
 
 @pytest.mark.skipif(

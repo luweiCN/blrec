@@ -197,6 +197,8 @@ button {
   display: flex;
   gap: 8px;
   align-items: center;
+  justify-content: center;
+  min-width: 108px;
   min-height: 28px;
   margin: 0;
   padding: 0 10px;
@@ -207,6 +209,9 @@ button {
   font-size: var(--type-label);
   letter-spacing: 0.015em;
   white-space: nowrap;
+  transition:
+    border-color 180ms var(--ease-out),
+    color 180ms var(--ease-out);
 
   & > span:first-child {
     flex: none;
@@ -218,8 +223,24 @@ button {
   }
 }
 
-.data-status.loading > span:first-child {
+.data-status.loading > span:first-child,
+.data-status.refreshing > span:first-child {
   animation: dashboard-status-pulse 1.2s ease-in-out infinite alternate;
+}
+
+.data-status.refreshing {
+  border-color: var(--cyan-strong);
+  color: var(--cyan);
+}
+
+.data-status.updated {
+  border-color: oklch(70% 0.115 77 / 0.55);
+  color: var(--gold);
+
+  & > span:first-child {
+    background: var(--gold);
+    box-shadow: 0 0 0 3px var(--gold-wash);
+  }
 }
 
 .dashboard-loading {
@@ -502,6 +523,7 @@ footer {
 
 @media (prefers-reduced-motion: reduce) {
   .data-status.loading > span:first-child,
+  .data-status.refreshing > span:first-child,
   .dashboard-loading-hero,
   .dashboard-loading-grid span,
   .dashboard-loading-table {

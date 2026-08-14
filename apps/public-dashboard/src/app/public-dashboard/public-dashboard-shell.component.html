@@ -65,9 +65,19 @@
       (valueChange)="dashboardMode.selectMode($event)"
     ></app-dashboard-mode-switcher>
 
-    <p *ngIf="data.state.kind === 'ready'" class="data-status">
+    <p
+      *ngIf="data.state.kind === 'ready'"
+      class="data-status"
+      [class.refreshing]="realtimeRefreshState === 'refreshing'"
+      [class.updated]="realtimeRefreshState === 'updated'"
+      [attr.aria-busy]="realtimeRefreshState === 'refreshing'"
+      role="status"
+      aria-live="polite"
+    >
       <span aria-hidden="true"></span>
-      <span class="status-season">{{ currentSeasonLabel }}</span>
+      <span [class.status-season]="realtimeRefreshState === 'idle'">
+        {{ dashboardStatusLabel }}
+      </span>
     </p>
     <p *ngIf="data.state.kind === 'loading'" class="data-status loading">
       <span aria-hidden="true"></span>
