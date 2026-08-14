@@ -51,9 +51,22 @@ jobs:
           import tomllib
           from pathlib import Path
 
+          import blrec
+          from packaging.version import Version
+
           project = tomllib.loads(
               Path('apps/analysis-worker/pyproject.toml').read_text(encoding='utf8')
           )['project']
+          shared_core = next(
+              requirement
+              for requirement in project['dependencies']
+              if requirement.startswith('blrec==')
+          )
+          expected_shared_core = 'blrec=={}'.format(Version(blrec.__version__))
+          if shared_core != expected_shared_core:
+              raise SystemExit(
+                  '{} does not match {}'.format(shared_core, expected_shared_core)
+              )
           requirements = [
               requirement
               for requirement in project['dependencies']
