@@ -18,7 +18,7 @@ from blrec_dashboard_publisher.snapshot import SHANGHAI, build_dashboard_runtime
 from pypinyin import Style, lazy_pinyin
 
 from .assets import get_match_assets
-from .dashboard import current_dashboard_publication
+from .dashboard import MAX_TREND_PUBLICATIONS, current_dashboard_publication
 from .database import DatabaseTarget, connect_database, is_postgres
 
 LOGGER = logging.getLogger(__name__)
@@ -320,7 +320,7 @@ def _rating_trends(
     return {
         'schemaVersion': 1,
         'updatedAt': str(snapshot['generatedAt']),
-        'publications': publications,
+        'publications': publications[-MAX_TREND_PUBLICATIONS:],
     }
 
 

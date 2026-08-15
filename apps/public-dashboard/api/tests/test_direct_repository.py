@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
@@ -16,7 +16,7 @@ from blrec_dashboard_api.database import (
     connect_database,
     initialize_database,
 )
-from blrec_dashboard_api.direct import DirectDashboardRepository
+from blrec_dashboard_api.direct import DirectDashboardRepository, _rating_trends
 from blrec_dashboard_api.settings import ApiSettings
 from blrec_dashboard_publisher.snapshot import build_dashboard_snapshot_from_records
 from fastapi.testclient import TestClient
@@ -231,6 +231,33 @@ def test_rating_trend_uses_the_match_date_instead_of_the_calculation_date(
     historical = publications[0]['standings']['2026-summer']['3v3'][0]
     latest = publications[-1]['standings']['2026-summer']['3v3'][0]
     assert historical['ratingScore'] == latest['ratingScore']
+
+
+def test_rating_trends_keep_only_the_latest_frontend_supported_publications() -> None:
+    snapshot = _runtime_source()['snapshot']
+    matches = []
+    ratings = {}
+    started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    for index in range(181):
+        match_id = index + 1
+        match = {
+            'id': match_id,
+            'playerId': 7,
+            'seasonKey': '2025-spring',
+            'mode': '3v3',
+            'playedAt': (started_at + timedelta(days=index)).isoformat(),
+            'result': 'W',
+        }
+        matches.append(match)
+        for scope in ('all', '3v3'):
+            for season_key in ('2025-spring', 'all-time'):
+                ratings[(match_id, scope, season_key)] = {'scoreAfter': 1000 + index}
+
+    trends = _rating_trends(snapshot, matches, ratings)
+
+    assert len(trends['publications']) == 180
+    assert trends['publications'][0]['publicationDate'] == '2025-01-03'
+    assert trends['publications'][-1]['snapshotId'] == snapshot['snapshotId']
 
 
 def test_schema_upgrade_converts_legacy_trend_json_to_rows(tmp_path: Path) -> None:

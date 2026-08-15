@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Mapping, Sequence, Tuple
 from .database import DatabaseTarget, connect_database
 
 _TREND_MODES = ('all', '3v3', 'brawl', '5v5')
-_MAX_TREND_PUBLICATIONS = 180
+MAX_TREND_PUBLICATIONS = 180
 
 
 def _ranked_trend_rows(
@@ -70,7 +70,7 @@ def merge_current_dashboard_publication(
     return {
         'schemaVersion': 1,
         'updatedAt': str(snapshot['generatedAt']),
-        'publications': publications[-_MAX_TREND_PUBLICATIONS:],
+        'publications': publications[-MAX_TREND_PUBLICATIONS:],
     }
 
 
@@ -131,7 +131,7 @@ def persist_dashboard_publication(
             'DELETE FROM dashboard_publications WHERE publication_date NOT IN('
             'SELECT publication_date FROM dashboard_publications '
             'ORDER BY publication_date DESC LIMIT ?)',
-            (_MAX_TREND_PUBLICATIONS,),
+            (MAX_TREND_PUBLICATIONS,),
         )
         connection.commit()
     except Exception:
