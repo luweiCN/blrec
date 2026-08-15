@@ -54,7 +54,7 @@ def test_thirteen_wins_and_two_losses_from_2160_gain_one_hundred_eighteen() -> N
 
 @pytest.mark.parametrize(
     ('visible_score', 'win_delta', 'loss_delta'),
-    ((2160, 12, -12), (2499, 9, -12), (2700, 2, -12), (2901, 1, -15)),
+    ((2160, 12, -12), (2499, 5, -12), (2700, 3, -11), (2901, 2, -9)),
 )
 def test_established_rating_uses_visible_tier_baselines(
     visible_score: int, win_delta: int, loss_delta: int
@@ -74,28 +74,35 @@ def test_established_rating_uses_visible_tier_baselines(
 
 
 @pytest.mark.parametrize(
-    ('visible_score', 'hidden_score', 'win_delta'),
+    ('visible_score', 'win_delta', 'loss_delta'),
     (
-        (2700, 2400, 1),
-        (2700, 2700, 2),
-        (2700, 3000, 3),
-        (2901, 2601, 1),
-        (2901, 3000, 3),
+        (2400, 6, -12),
+        (2500, 5, -12),
+        (2599, 4, -12),
+        (2600, 4, -12),
+        (2700, 3, -11),
+        (2799, 2, -10),
+        (2800, 3, -12),
+        (2900, 2, -9),
+        (2999, 1, -6),
     ),
 )
-def test_tier_ten_silver_and_gold_wins_gain_one_to_three_points(
-    visible_score: int, hidden_score: int, win_delta: int
+def test_tier_ten_deltas_follow_visible_progress_and_ignore_hidden_strength(
+    visible_score: int, win_delta: int, loss_delta: int
 ) -> None:
-    rating = VirtualMatchRating(
-        ability=expected_win_probability(hidden_score),
-        evidence=CARRYOVER_MATCH_CAP,
-        score=visible_score / 3,
-        provisional=False,
-    )
+    for hidden_score in (1800, visible_score, 3000):
+        rating = VirtualMatchRating(
+            ability=expected_win_probability(hidden_score),
+            evidence=CARRYOVER_MATCH_CAP,
+            score=visible_score / 3,
+            provisional=False,
+        )
 
-    win = _advance_rating(rating, 'W')
+        win = _advance_rating(rating, 'W')
+        loss = _advance_rating(rating, 'L')
 
-    assert display_score(win) - visible_score == win_delta
+        assert display_score(win) - visible_score == win_delta
+        assert display_score(loss) - visible_score == loss_delta
 
 
 @pytest.mark.parametrize(
@@ -189,7 +196,7 @@ def test_forecast_reports_promotion_targets_and_two_match_estimates() -> None:
     assert forecast.next_tier.all_win_matches == 23
     assert forecast.next_tier.current_win_rate_matches == 57
     assert forecast.ultimate.target_display_score == 2800
-    assert forecast.ultimate.all_win_matches == 153
+    assert forecast.ultimate.all_win_matches == 133
     assert forecast.ultimate.current_win_rate_matches is None
 
 
@@ -306,12 +313,12 @@ def test_established_players_receive_a_soft_season_reset(
 
 @pytest.mark.parametrize(
     ('previous_score', 'minimum_matches', 'maximum_matches'),
-    ((2400, 25, 35), (2600, 30, 40), (2800, 125, 135)),
+    ((2400, 25, 35), (2600, 75, 85), (2800, 205, 220)),
 )
-def test_high_rank_soft_reset_recovery_matches_the_calibrated_curve(
+def test_hidden_carryover_stops_accelerating_after_tier_ten(
     previous_score: int, minimum_matches: int, maximum_matches: int
 ) -> None:
-    results = ['L' if match % 10 == 5 else 'W' for match in range(1, 151)]
+    results = ['L' if match % 10 == 5 else 'W' for match in range(1, 251)]
     timeline = calculate_virtual_match_rating_timeline(
         results=results,
         previous_ability=expected_win_probability(previous_score),

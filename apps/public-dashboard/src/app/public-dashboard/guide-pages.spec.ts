@@ -30,6 +30,9 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('不会因此自动进入玩家榜');
     expect(page.textContent).toContain('根据已收录的胜负估算排位分');
     expect(page.textContent).toContain('胜利上涨、失败下降');
+    expect(page.textContent).toContain('十段铜胜一局约增加 4～6 分');
+    expect(page.textContent).toContain('十段金约增加 1～3 分');
+    expect(page.textContent).toContain('进入十段后不再生效');
     expect(page.textContent).not.toContain('下一局胜率约为 77.3%');
     expect(page.textContent).not.toContain('经验量 · 35%');
     expect(page.textContent).not.toContain('稳定胜率 · 40%');
@@ -42,7 +45,9 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('10 段金约从 9 段铜开始');
     expect(page.textContent).not.toContain('30 场 19 胜 11 负');
     expect(page.textContent).toContain('为什么同段位、相近胜率');
-    expect(page.textContent).toContain('累计场数增加后，单局涨跌也不会再无限缩小');
+    expect(page.textContent).toContain(
+      '累计场数也不会让单局涨跌继续缩小',
+    );
     expect(page.textContent).not.toContain('软重置');
     expect(page.textContent).not.toContain('具体参数不公开');
     expect(page.textContent).not.toContain('精确参数');

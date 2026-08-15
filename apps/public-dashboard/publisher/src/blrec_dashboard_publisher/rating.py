@@ -34,7 +34,7 @@ NEW_PLAYER_DISPLAY_SCORE = 1000
 SEASON_RESET_ANCHOR_DISPLAY_SCORE = 1200
 SEASON_RESET_CARRYOVER_RATE = 0.5
 PROBABILITY_SCALE = 1800
-RATING_MODEL_VERSION = 5
+RATING_MODEL_VERSION = 6
 
 _NEUTRAL_ABILITY = 0.5
 _DISPLAY_SCORE_MULTIPLIER = 3
@@ -49,6 +49,7 @@ _STANDARD_MINIMUM_WIN_DELTA = 9
 _MINIMUM_LOSS_DELTA = 3
 _MAXIMUM_LOSS_DELTA = 18
 _FORECAST_STAGNATION_MATCHES = 200
+_TIER_TEN_BRONZE_DISPLAY_SCORE = 2400
 _TIER_TEN_SILVER_DISPLAY_SCORE = 2600
 _TIER_TEN_GOLD_DISPLAY_SCORE = 2800
 _SKILL_TIER_START_POINTS = (
@@ -179,27 +180,24 @@ def _baseline_display_deltas(visible_score: int) -> tuple[int, int]:
         return 21, 9
     if visible_score < 2000:
         return 18, 12
-    if visible_score < 2400:
-        return 12, 12
+    return 12, 12
+
+
+def _tier_ten_display_deltas(visible_score: int) -> tuple[int, int]:
     if visible_score < _TIER_TEN_SILVER_DISPLAY_SCORE:
-        return 9, 12
+        progress = visible_score - _TIER_TEN_BRONZE_DISPLAY_SCORE
+        return 6 - _round_display_adjustment(progress / 100), 12
     if visible_score < _TIER_TEN_GOLD_DISPLAY_SCORE:
-        return 2, 12
-    return 1, 15
-
-
-def _minimum_win_delta(visible_score: int) -> int:
-    if visible_score >= _TIER_TEN_SILVER_DISPLAY_SCORE:
-        return 1
-    return _STANDARD_MINIMUM_WIN_DELTA
-
-
-def _maximum_win_bonus(visible_score: int) -> int:
-    if visible_score >= _TIER_TEN_GOLD_DISPLAY_SCORE:
-        return 2
-    if visible_score >= _TIER_TEN_SILVER_DISPLAY_SCORE:
-        return 1
-    return _MAXIMUM_WIN_BONUS
+        progress = visible_score - _TIER_TEN_SILVER_DISPLAY_SCORE
+        return (
+            4 - _round_display_adjustment(progress / 100),
+            12 - _round_display_adjustment(progress * 2 / 200),
+        )
+    progress = visible_score - _TIER_TEN_GOLD_DISPLAY_SCORE
+    return (
+        max(1, 3 - _round_display_adjustment(progress / 100)),
+        max(6, 12 - _round_display_adjustment(progress * 6 / 200)),
+    )
 
 
 def _round_display_adjustment(value: float) -> int:
@@ -210,12 +208,17 @@ def _internal_outcome_delta(
     *, result: str, hidden_score_before: float, visible_score: float
 ) -> float:
     visible_display_score = round(visible_score * _DISPLAY_SCORE_MULTIPLIER)
+    if visible_display_score >= _TIER_TEN_BRONZE_DISPLAY_SCORE:
+        win_delta, loss_delta = _tier_ten_display_deltas(visible_display_score)
+        display_delta = win_delta if result == 'W' else -loss_delta
+        return display_delta / _DISPLAY_SCORE_MULTIPLIER
+
     win_delta, loss_delta = _baseline_display_deltas(visible_display_score)
     rating_gap = hidden_score_before - visible_display_score
     if result == 'W':
         if rating_gap > 0.0:
             win_delta += min(
-                _maximum_win_bonus(visible_display_score),
+                _MAXIMUM_WIN_BONUS,
                 _round_display_adjustment(rating_gap * _RATING_GAP_WIN_BONUS_RATE),
             )
         else:
@@ -225,7 +228,7 @@ def _internal_outcome_delta(
                     -rating_gap * _RATING_GAP_OUTCOME_ADJUSTMENT_RATE
                 ),
             )
-        display_delta = max(_minimum_win_delta(visible_display_score), win_delta)
+        display_delta = max(_STANDARD_MINIMUM_WIN_DELTA, win_delta)
     else:
         if rating_gap > 0.0:
             loss_delta -= min(
