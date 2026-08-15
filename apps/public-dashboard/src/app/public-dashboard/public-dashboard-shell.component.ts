@@ -2,8 +2,10 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  ElementRef,
   OnDestroy,
   OnInit,
+  ViewChild,
 } from '@angular/core';
 import { Router } from '@angular/router';
 import { Subscription } from 'rxjs';
@@ -27,8 +29,12 @@ import { SiteStatsService } from './site-stats.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PublicDashboardShellComponent implements OnInit, OnDestroy {
+  @ViewChild('updateNotesDialog')
+  private updateNotesDialog?: ElementRef<HTMLDialogElement>;
+
   siteStatsState: SiteStatsState = { kind: 'loading' };
   realtimeRefreshState: 'idle' | 'refreshing' | 'updated' = 'idle';
+  updateNotesOpen = false;
 
   private destroyed = false;
   private activeRealtimeRefreshes = 0;
@@ -107,6 +113,31 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
 
   reloadDashboard(): void {
     void this.loadDashboard();
+  }
+
+  openUpdateNotes(): void {
+    const dialog = this.updateNotesDialog?.nativeElement;
+    if (dialog === undefined || dialog.open) {
+      return;
+    }
+    dialog.showModal();
+    this.updateNotesOpen = true;
+    this.changeDetector.markForCheck();
+  }
+
+  closeUpdateNotes(): void {
+    const dialog = this.updateNotesDialog?.nativeElement;
+    if (dialog?.open) {
+      dialog.close();
+    }
+    this.updateNotesOpen = false;
+    this.changeDetector.markForCheck();
+  }
+
+  onUpdateNotesBackdropClick(event: MouseEvent): void {
+    if (event.target === event.currentTarget) {
+      this.closeUpdateNotes();
+    }
   }
 
   private async loadDashboard(): Promise<void> {

@@ -64,6 +64,9 @@ describe('PlayerRankingsPageComponent', () => {
     expect(component.totalPages).toBe(2);
     expect(page.querySelectorAll('tbody tr').length).toBe(10);
     expect(page.querySelectorAll('.directory-score img').length).toBe(10);
+    expect(
+      page.querySelectorAll('app-player-room-links.compact-live').length,
+    ).toBe(10);
 
     const secondPage = Array.from(
       page.querySelectorAll<HTMLButtonElement>('.pagination button'),

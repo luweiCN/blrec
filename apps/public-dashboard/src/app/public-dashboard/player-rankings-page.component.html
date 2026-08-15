@@ -144,6 +144,7 @@
                   <strong>{{ row.player.name }}</strong>
                 </a>
                 <app-player-room-links
+                  class="compact-live"
                   [roomIds]="row.player.roomIds"
                   [fallbackLabel]="row.player.roomLabel"
                 ></app-player-room-links>

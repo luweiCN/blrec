@@ -100,7 +100,15 @@ export interface RatingModelV3 {
   readonly catchupLossMultiplier: 0.5;
 }
 
-export type RatingModel = RatingModelV1 | RatingModelV2 | RatingModelV3;
+export interface RatingModelV4 {
+  readonly version: 4;
+}
+
+export type RatingModel =
+  | RatingModelV1
+  | RatingModelV2
+  | RatingModelV3
+  | RatingModelV4;
 
 export interface HeroUsage {
   readonly name: string;

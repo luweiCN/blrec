@@ -229,7 +229,7 @@ a {
   border-collapse: collapse;
 
   &.player-directory-table {
-    min-width: 920px;
+    min-width: 1080px;
   }
 
   &.hero-directory-table {
@@ -438,6 +438,11 @@ a {
     object-fit: cover;
   }
 
+  span,
+  strong {
+    white-space: nowrap;
+  }
+
   &.hero-identity {
     img {
       width: 46px;
@@ -481,7 +486,7 @@ a {
 }
 
 .directory-score {
-  min-width: 166px;
+  min-width: 188px;
 }
 
 .empty-state {

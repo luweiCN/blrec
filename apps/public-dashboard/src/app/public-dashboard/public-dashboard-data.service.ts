@@ -273,6 +273,9 @@ function isRatingModel(value: unknown): value is RatingModel {
   if (!isObject(value)) {
     return false;
   }
+  if (value['version'] === 4) {
+    return true;
+  }
   if (value['version'] === 3) {
     return (
       value['priorMatches'] === 20 &&

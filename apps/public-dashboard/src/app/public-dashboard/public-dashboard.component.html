@@ -166,6 +166,7 @@
                     <strong>{{ player.name }}</strong>
                   </a>
                   <app-player-room-links
+                    class="compact-live"
                     [roomIds]="player.roomIds"
                     [fallbackLabel]="player.roomLabel"
                   ></app-player-room-links>
@@ -412,7 +413,10 @@
           <small>WIN RATE</small>
         </strong>
       </li>
-      <li *ngIf="overviewHeroRankings.length === 0" class="ranking-empty">
+      <li
+        *ngIf="overviewHeroRankings.length === 0"
+        class="ranking-empty hero-ranking-empty"
+      >
         当前模式还没有英雄达到 20 局门槛。
       </li>
     </ol>

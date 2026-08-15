@@ -104,6 +104,7 @@ describe('SkillTierBadgeComponent', () => {
     expect(page.textContent).toContain('1,716');
     expect(page.textContent).not.toContain('榜单分');
     expect(page.textContent).toContain('定位中');
+    expect(page.querySelector('em')?.textContent).toContain('定位中');
     expect(page.querySelector('img')?.getAttribute('src')).toBe(
       'assets/skill-tiers/tier-07-silver-hd.webp',
     );

@@ -75,6 +75,10 @@
   color: inherit;
 }
 
+:host(.compact-live) .is-live .room-number {
+  display: none;
+}
+
 @media (max-width: 520px) {
   :host(.compact-mobile) .room-number {
     display: none;

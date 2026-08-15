@@ -55,7 +55,7 @@
         [attr.aria-current]="isGameGuideActive ? 'page' : null"
       >
         <span class="nav-label-long">下载与游玩</span>
-        <span class="nav-label-short">下载游玩</span>
+        <span class="nav-label-short">指南</span>
       </a>
     </nav>
 
@@ -65,24 +65,36 @@
       (valueChange)="dashboardMode.selectMode($event)"
     ></app-dashboard-mode-switcher>
 
-    <p
-      *ngIf="data.state.kind === 'ready'"
-      class="data-status"
-      [class.refreshing]="realtimeRefreshState === 'refreshing'"
-      [class.updated]="realtimeRefreshState === 'updated'"
-      [attr.aria-busy]="realtimeRefreshState === 'refreshing'"
-      role="status"
-      aria-live="polite"
-    >
-      <span aria-hidden="true"></span>
-      <span [class.status-season]="realtimeRefreshState === 'idle'">
-        {{ dashboardStatusLabel }}
-      </span>
-    </p>
-    <p *ngIf="data.state.kind === 'loading'" class="data-status loading">
-      <span aria-hidden="true"></span>
-      <span>数据载入中</span>
-    </p>
+    <div class="header-actions">
+      <button
+        type="button"
+        class="update-notes-trigger"
+        aria-haspopup="dialog"
+        [attr.aria-expanded]="updateNotesOpen"
+        (click)="openUpdateNotes()"
+      >
+        <span class="nav-label-long">更新说明</span>
+        <span class="nav-label-short">更新</span>
+      </button>
+      <p
+        *ngIf="data.state.kind === 'ready'"
+        class="data-status"
+        [class.refreshing]="realtimeRefreshState === 'refreshing'"
+        [class.updated]="realtimeRefreshState === 'updated'"
+        [attr.aria-busy]="realtimeRefreshState === 'refreshing'"
+        role="status"
+        aria-live="polite"
+      >
+        <span aria-hidden="true"></span>
+        <span [class.status-season]="realtimeRefreshState === 'idle'">
+          {{ dashboardStatusLabel }}
+        </span>
+      </p>
+      <p *ngIf="data.state.kind === 'loading'" class="data-status loading">
+        <span aria-hidden="true"></span>
+        <span>数据载入中</span>
+      </p>
+    </div>
   </header>
 
   <section
@@ -131,4 +143,48 @@
       </p>
     </div>
   </footer>
+
+  <dialog
+    #updateNotesDialog
+    class="update-notes-dialog"
+    aria-labelledby="update-notes-title"
+    (cancel)="closeUpdateNotes()"
+    (click)="onUpdateNotesBackdropClick($event)"
+  >
+    <header class="update-notes-header">
+      <div>
+        <p>站点动态</p>
+        <h2 id="update-notes-title">更新说明</h2>
+      </div>
+      <button
+        type="button"
+        aria-label="关闭更新说明"
+        (click)="closeUpdateNotes()"
+      >
+        ×
+      </button>
+    </header>
+
+    <div class="update-notes-content">
+      <article>
+        <time datetime="2026-08-15">2026 年 8 月 15 日 · 数据规则</time>
+        <h3>赛季时间已重新校正</h3>
+        <p>
+          我们此前错误地把本应属于春季赛的 5
+          月对局计入了夏季赛，造成部分夏季分数和段位虚高。现在已将这些对局归回春季赛，战绩没有被删除。
+        </p>
+      </article>
+      <article>
+        <time datetime="2026-08-15">2026 年 8 月 15 日 · 排位分</time>
+        <h3>新赛季改为软重置</h3>
+        <p>
+          历史表现会形成站内隐藏分，帮助新赛季段位逐步回到相符水平；这种影响会随赛季推进而减弱。
+        </p>
+        <p>
+          历史对局仍在补录，近期部分玩家的分数、段位和排名可能会有较明显的变化。
+        </p>
+      </article>
+    </div>
+
+  </dialog>
 </main>

@@ -63,7 +63,7 @@ describe('PublicDashboardComponent', () => {
       '这是我们的错误',
     );
     expect(page.querySelector('.season-correction-notice')?.textContent).toContain(
-      '这部分隐藏分会作用于夏季追分',
+      '软重置和隐藏分规则',
     );
     expect(page.querySelector('.snapshot-note')?.textContent).toContain(
       '真实数据',
@@ -113,8 +113,8 @@ describe('PublicDashboardComponent', () => {
     ]);
     expect(firstRow.querySelector('.player-mobile-stats')).toBeNull();
     expect(
-      firstRow.querySelector('app-player-room-links.compact-mobile'),
-    ).toBeNull();
+      firstRow.querySelector('app-player-room-links.compact-live'),
+    ).not.toBeNull();
   });
 
   it('updates the ranking when the global game mode changes', () => {

@@ -88,6 +88,32 @@ describe('PublicDashboardShellComponent', () => {
     expect(fixture.nativeElement.querySelector('.site-header')).not.toBeNull();
   });
 
+  it('opens and closes the update notes dialog from the stable header action', () => {
+    const page = fixture.nativeElement as HTMLElement;
+    const trigger = page.querySelector<HTMLButtonElement>(
+      '.update-notes-trigger',
+    );
+
+    trigger?.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.updateNotesOpen).toBeTrue();
+    const dialog = page.querySelector<HTMLDialogElement>(
+      '.update-notes-dialog',
+    );
+    expect(dialog?.open).toBeTrue();
+    expect(dialog?.textContent).toContain(
+      '新赛季改为软重置',
+    );
+    expect(dialog?.textContent).not.toContain('50 局');
+
+    page
+      .querySelector<HTMLButtonElement>('[aria-label="关闭更新说明"]')
+      ?.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.updateNotesOpen).toBeFalse();
+    expect(dialog?.open).toBeFalse();
+  });
+
   it('shows feedback while realtime data is refreshing', fakeAsync(() => {
     let finishRefresh!: (changed: boolean) => void;
     data.state = { kind: 'ready' };

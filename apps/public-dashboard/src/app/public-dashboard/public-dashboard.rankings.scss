@@ -269,6 +269,7 @@ table {
 
   span {
     font-size: var(--type-label);
+    white-space: nowrap;
   }
 }
 
@@ -302,7 +303,7 @@ table {
 }
 
 .rating-score-cell {
-  min-width: 168px;
+  min-width: 188px;
 }
 
 .player-kda {
@@ -685,6 +686,12 @@ table {
       padding-left: 28px;
       border-left: 1px solid var(--line-soft);
     }
+  }
+
+  > li.hero-ranking-empty {
+    grid-column: 1 / -1;
+    grid-template-columns: 1fr;
+    place-items: center;
   }
 }
 
