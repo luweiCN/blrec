@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blrec-analysis-worker"
-version = "0.1.9"
+version = "0.1.10"
 description = "Mac analysis worker for BLREC Vainglory recordings"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "blrec==3.0.0b82",
+  "blrec==3.0.0b83",
   "loguru>=0.7.2,<0.8.0",
   "requests>=2.24.0,<3.0.0",
   "rapidocr==3.9.2",
