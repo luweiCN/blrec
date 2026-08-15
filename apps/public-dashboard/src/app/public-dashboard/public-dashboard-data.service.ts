@@ -189,6 +189,15 @@ function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) >= 0;
 }
 
+function isRatingScore(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 1000
+  );
+}
+
 function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
@@ -224,9 +233,7 @@ function isPerformance(value: unknown): value is Performance {
     isNonNegativeInteger(value['wins']) &&
     value['wins'] <= value['matches'] &&
     typeof value['topHero'] === 'string' &&
-    (value['ratingScore'] === null ||
-      (isNonNegativeInteger(value['ratingScore']) &&
-        value['ratingScore'] <= 1000)) &&
+    (value['ratingScore'] === null || isRatingScore(value['ratingScore'])) &&
     typeof value['provisional'] === 'boolean' &&
     (value['matches'] === 0) === (value['ratingScore'] === null) &&
     (value['ratingForecast'] === undefined ||
@@ -257,10 +264,9 @@ function isRatingForecast(
     return false;
   }
   return (
-    isNonNegativeInteger(value['nextWinScore']) &&
-    value['nextWinScore'] <= 1000 &&
+    isRatingScore(value['nextWinScore']) &&
     value['nextWinScore'] >= currentScore &&
-    isNonNegativeInteger(value['nextLossScore']) &&
+    isRatingScore(value['nextLossScore']) &&
     value['nextLossScore'] <= currentScore &&
     (value['nextDivision'] === null ||
       isRatingGoalForecast(value['nextDivision'])) &&
@@ -273,7 +279,7 @@ function isRatingModel(value: unknown): value is RatingModel {
   if (!isObject(value)) {
     return false;
   }
-  if (value['version'] === 4) {
+  if (value['version'] === 4 || value['version'] === 5) {
     return true;
   }
   if (value['version'] === 3) {
@@ -566,8 +572,7 @@ function isTrendStandingList(value: unknown): boolean {
       standing['playerId'] === 0 ||
       playerIds.has(standing['playerId']) ||
       standing['rank'] !== index + 1 ||
-      !isNonNegativeInteger(standing['ratingScore']) ||
-      standing['ratingScore'] > 1000
+      !isRatingScore(standing['ratingScore'])
     ) {
       return false;
     }

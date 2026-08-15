@@ -52,6 +52,13 @@ describe('skillTierForRatingScore', () => {
         displayScore: 2_802,
       }),
     );
+    expect(skillTierForRatingScore(2602 / 3)).toEqual(
+      jasmine.objectContaining({
+        tier: 10,
+        division: 'silver',
+        displayScore: 2_602,
+      }),
+    );
   });
 
   it('handles missing and out-of-range scores safely', () => {

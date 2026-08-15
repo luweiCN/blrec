@@ -72,7 +72,9 @@ export function skillTierForRatingScore(
     return null;
   }
 
-  const displayScore = normalizedScore * DISPLAY_SCORE_MULTIPLIER;
+  const displayScore = Math.round(
+    normalizedScore * DISPLAY_SCORE_MULTIPLIER,
+  );
   let skillTierIndex = 0;
 
   for (let index = 1; index < SKILL_TIER_START_POINTS.length; index += 1) {
@@ -165,7 +167,7 @@ export function displayScoreForRatingScore(
   const normalizedScore = normalizeRatingScore(ratingScore);
   return normalizedScore === null
     ? null
-    : normalizedScore * DISPLAY_SCORE_MULTIPLIER;
+    : Math.round(normalizedScore * DISPLAY_SCORE_MULTIPLIER);
 }
 
 export function displayScoreForRatingDelta(ratingDelta: number): number {
@@ -176,9 +178,7 @@ function normalizeRatingScore(ratingScore: number | null): number | null {
   if (ratingScore === null || !Number.isFinite(ratingScore)) {
     return null;
   }
-  return Math.round(
-    Math.min(RATING_SCORE_MAXIMUM, Math.max(0, ratingScore)),
-  );
+  return Math.min(RATING_SCORE_MAXIMUM, Math.max(0, ratingScore));
 }
 
 function scorePosition(score: number, minimum: number, maximum: number): number {

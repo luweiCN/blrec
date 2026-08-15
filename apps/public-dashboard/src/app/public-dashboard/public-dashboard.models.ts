@@ -104,11 +104,16 @@ export interface RatingModelV4 {
   readonly version: 4;
 }
 
+export interface RatingModelV5 {
+  readonly version: 5;
+}
+
 export type RatingModel =
   | RatingModelV1
   | RatingModelV2
   | RatingModelV3
-  | RatingModelV4;
+  | RatingModelV4
+  | RatingModelV5;
 
 export interface HeroUsage {
   readonly name: string;

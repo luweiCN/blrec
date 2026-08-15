@@ -161,7 +161,7 @@ export const TEST_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
   sourceLastMatchId: 12345,
   sourceMatchCount: 2468,
   ratingModel: {
-    version: 4,
+    version: 5,
   },
   currentSeasonKey: '2026-summer',
   seasons: SEASONS,
