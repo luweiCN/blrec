@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 import pytest
-from blrec_dashboard_api import direct as direct_module
 from blrec_dashboard_api.app import create_app
 from blrec_dashboard_api.dashboard import load_dashboard_trends
 from blrec_dashboard_api.database import (
@@ -216,29 +215,22 @@ def test_dashboard_and_match_queries_are_computed_from_the_runtime_source(
     assert listed['items'][0]['rating']['scoreDelta'] > 0
 
 
-def test_current_trend_history_is_stored_as_rows_instead_of_json(
+def test_rating_trend_uses_the_match_date_instead_of_the_calculation_date(
     tmp_path: Path,
 ) -> None:
     repository, _loads = _repository(tmp_path)
-    repository.dashboard_document()
-    connection = connect_database(tmp_path / 'public.sqlite3')
-    try:
-        columns = {
-            str(row[1])
-            for row in connection.execute(
-                'PRAGMA table_info(dashboard_publications)'
-            ).fetchall()
-        }
-        standing_count = int(
-            connection.execute(
-                'SELECT COUNT(*) FROM dashboard_publication_standings'
-            ).fetchone()[0]
-        )
-    finally:
-        connection.close()
+    document, _revision = repository.dashboard_document()
+    publications = document['trends']['publications']
+    current = document['snapshot']
 
-    assert 'snapshot_json' not in columns
-    assert standing_count > 0
+    assert [value['publicationDate'] for value in publications] == [
+        '2026-06-01',
+        '2026-08-11',
+    ]
+    assert publications[-1]['snapshotId'] == current['snapshotId']
+    historical = publications[0]['standings']['2026-summer']['3v3'][0]
+    latest = publications[-1]['standings']['2026-summer']['3v3'][0]
+    assert historical['ratingScore'] == latest['ratingScore']
 
 
 def test_schema_upgrade_converts_legacy_trend_json_to_rows(tmp_path: Path) -> None:
@@ -390,25 +382,3 @@ def test_repository_keeps_the_last_good_value_when_refresh_fails(
     with pytest.raises(RuntimeError, match='database unavailable'):
         repository.refresh()
     assert repository.dashboard_document() == before
-
-
-def test_trend_cache_write_failure_does_not_hide_fresh_database_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repository, _loads = _repository(tmp_path)
-    repository._revision_loader = lambda _target: 2
-    repository._runtime_loader = lambda _target: (2, _runtime_source(match_id=2))
-
-    def fail_write(*_args: Any, **_kwargs: Any) -> None:
-        raise RuntimeError('write failed')
-
-    monkeypatch.setattr(direct_module, 'persist_dashboard_publication', fail_write)
-
-    assert repository.refresh() is True
-    document, revision = repository.dashboard_document()
-
-    assert revision == '2'
-    assert document['snapshot']['sourceLastMatchId'] == 2
-    assert document['trends']['publications'][-1]['snapshotId'] == (
-        document['snapshot']['snapshotId']
-    )

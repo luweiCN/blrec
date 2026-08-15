@@ -287,9 +287,7 @@ def decode_match(payload: Mapping[str, Any]) -> AnalyzedMatch:
                 economy=_optional_int(
                     cast(Mapping[str, Any], player['stats']).get('economy')
                 ),
-                last_hits=_optional_int(
-                    cast(Mapping[str, Any], player['stats']).get('last_hits')
-                ),
+                last_hits=None,
             ),
             confidence=float(player.get('confidence', 0)),
             raw_name=str(player.get('raw_name', '')),

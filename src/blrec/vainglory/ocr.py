@@ -724,18 +724,10 @@ def parse_player_stats(text: str) -> PlayerStats:
     normalized = _normalize_numeric_ocr(text)
     kda = _KDA_PATTERN.search(normalized)
     repaired_kda = None if kda is not None else _repair_missing_kda_slash(normalized)
-    economy_matches = tuple(_ECONOMY_PATTERN.finditer(normalized))
     economies = _economies(normalized)
     economy = economies[-1] if economies else None
     if economy is not None and economy > 100_000:
         economy = None
-    last_hits: Optional[int] = None
-    if economy_matches:
-        trailing_integers = _integers(normalized[economy_matches[-1].end() :])
-        if trailing_integers:
-            candidate = trailing_integers[0]
-            if candidate <= 999:
-                last_hits = candidate
     kda_values = (
         repaired_kda
         if kda is None
@@ -746,7 +738,7 @@ def parse_player_stats(text: str) -> PlayerStats:
         deaths=None if kda_values is None else kda_values[1],
         assists=None if kda_values is None else kda_values[2],
         economy=economy,
-        last_hits=last_hits,
+        last_hits=None,
     )
 
 
@@ -774,7 +766,7 @@ def resolve_player_stats(
             deaths=kda[1],
             assists=kda[2],
             economy=_choose_economy(candidates[index]),
-            last_hits=_choose_last_hits(candidates[index]),
+            last_hits=None,
         )
         for index, kda in enumerate(best)
     )
@@ -1225,15 +1217,3 @@ def _choose_economy(candidates: Sequence[PlayerStats]) -> Optional[int]:
     common = [value for value, count in counts.items() if count == highest_count]
     center = median(values)
     return min(common, key=lambda value: (abs(value - center), value))
-
-
-def _choose_last_hits(candidates: Sequence[PlayerStats]) -> Optional[int]:
-    values = [
-        item.last_hits
-        for item in candidates
-        if item.last_hits is not None and item.last_hits <= 999
-    ]
-    if not values:
-        return None
-    counts = Counter(values)
-    return max(counts, key=lambda value: (counts[value], -values.index(value)))

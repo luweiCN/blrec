@@ -57,8 +57,7 @@ def exact_match_fingerprint(
             player = cast(Mapping[str, Any], raw_player)
             hero_name = str(player.get('hero_name') or '').strip().casefold()
             statistics = tuple(
-                player.get(field)
-                for field in ('kills', 'deaths', 'assists', 'economy', 'last_hits')
+                player.get(field) for field in ('kills', 'deaths', 'assists', 'economy')
             )
             if not hero_name or any(not isinstance(value, int) for value in statistics):
                 return None

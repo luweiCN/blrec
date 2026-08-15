@@ -47,11 +47,12 @@
         *ngFor="let team of [match.ally, match.enemy]"
         class="match-team"
         [class.match-team--enemy]="team === match.enemy"
+        [class.match-team--kda-only]="match.mode === 'brawl'"
         [attr.aria-label]="team === match.ally ? '主播方阵容' : '对手方阵容'"
       >
         <header>
           <strong>{{ teamLabel(team) }} · {{ teamResult(team) }}</strong>
-          <span>
+          <span *ngIf="match.mode !== 'brawl'">
             经济 {{ formatEconomy(team.economy) }}
           </span>
         </header>
@@ -76,13 +77,9 @@
               </strong>
               <span>K / D / A</span>
             </div>
-            <div class="match-player-economy">
+            <div *ngIf="match.mode !== 'brawl'" class="match-player-economy">
               <strong>{{ formatEconomy(player.economy) }}</strong>
               <span>经济</span>
-            </div>
-            <div class="match-player-last-hits">
-              <strong>{{ player.lastHits === null ? "—" : player.lastHits }}</strong>
-              <span>补刀</span>
             </div>
           </li>
         </ol>
@@ -110,7 +107,9 @@
     </figure>
 
     <footer class="match-modal-footer">
-      <p>阵容、KDA 与经济来自结算画面识别，空缺项显示为“—”。</p>
+      <p>
+        {{ match.mode === "brawl" ? "阵容与 KDA" : "阵容、KDA 与经济" }}来自结算画面识别，空缺项显示为“—”。
+      </p>
       <a
         *ngIf="match.replay as replay"
         [href]="replay.url"

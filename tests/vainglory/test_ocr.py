@@ -147,7 +147,7 @@ def test_parse_player_stats_accepts_compact_numeric_ocr() -> None:
     assert stats.deaths == 2
     assert stats.assists == 10
     assert stats.economy == 15_600
-    assert stats.last_hits == 123
+    assert stats.last_hits is None
 
 
 def test_parse_player_stats_recovers_slash_read_as_one() -> None:

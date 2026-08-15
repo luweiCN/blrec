@@ -3,7 +3,7 @@ export const MODE_FILTERS = ['all', '3v3', 'brawl', '5v5'] as const;
 export type ModeFilter = (typeof MODE_FILTERS)[number];
 export type CompetitiveMode = Exclude<ModeFilter, 'all'>;
 export type SeasonKey =
-  | `${number}-${'spring' | 'summer' | 'autumn'}`
+  | `${number}-${'spring' | 'summer' | 'autumn' | 'winter'}`
   | 'all-time';
 export type MatchResult = 'W' | 'L';
 export type HeroDataScope = 'streamer' | 'environment';
@@ -300,6 +300,6 @@ export function isModeFilter(value: string): value is ModeFilter {
 export function isSeasonKey(value: string): value is SeasonKey {
   return (
     value === 'all-time' ||
-    /^\d{4}-(spring|summer|autumn)$/u.test(value)
+    /^\d{4}-(spring|summer|autumn|winter)$/u.test(value)
   );
 }

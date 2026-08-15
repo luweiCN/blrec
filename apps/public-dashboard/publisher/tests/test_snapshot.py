@@ -7,6 +7,7 @@ from urllib.parse import urlencode, urlsplit
 import psycopg
 import pytest
 from blrec_dashboard_publisher.snapshot import (
+    _season_for,
     build_dashboard_api_source,
     build_dashboard_asset_source,
     build_dashboard_runtime_source,
@@ -333,6 +334,32 @@ async def test_postgres_source_matches_the_sqlite_snapshot(tmp_path: Path) -> No
     assert actual == expected
 
 
+def test_seasons_follow_the_original_game_calendar() -> None:
+    cases = (
+        ((2026, 2, 28), '2025-winter', (2025, 12, 1), (2026, 3, 1)),
+        ((2026, 3, 1), '2026-spring', (2026, 3, 1), (2026, 6, 1)),
+        ((2026, 5, 31), '2026-spring', (2026, 3, 1), (2026, 6, 1)),
+        ((2026, 6, 1), '2026-summer', (2026, 6, 1), (2026, 9, 1)),
+        ((2026, 8, 31), '2026-summer', (2026, 6, 1), (2026, 9, 1)),
+        ((2026, 9, 1), '2026-autumn', (2026, 9, 1), (2026, 12, 1)),
+        ((2026, 11, 30), '2026-autumn', (2026, 9, 1), (2026, 12, 1)),
+        ((2026, 12, 1), '2026-winter', (2026, 12, 1), (2027, 3, 1)),
+    )
+
+    for value, expected_key, expected_start, expected_end in cases:
+        season = _season_for(datetime(*value, tzinfo=SHANGHAI))
+
+        assert season.key == expected_key
+        assert (
+            season.starts_at.year,
+            season.starts_at.month,
+            season.starts_at.day,
+        ) == expected_start
+        assert (season.ends_at.year, season.ends_at.month, season.ends_at.day) == (
+            expected_end
+        )
+
+
 @pytest.mark.asyncio
 async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
@@ -351,7 +378,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             tmp_path,
             match_id=1,
             room_id=100,
-            started_at=timestamp(2026, 4, 30, 23),
+            started_at=timestamp(2026, 5, 31, 23),
             game_mode='3v3',
             won=True,
             hero_id=1,
@@ -362,7 +389,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             tmp_path,
             match_id=2,
             room_id=100,
-            started_at=timestamp(2026, 5, 1),
+            started_at=timestamp(2026, 6, 1),
             game_mode='3v3',
             won=True,
             hero_id=1,
@@ -373,7 +400,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             tmp_path,
             match_id=3,
             room_id=100,
-            started_at=timestamp(2026, 6, 1),
+            started_at=timestamp(2026, 7, 1),
             game_mode='aram',
             won=False,
             hero_id=2,
@@ -387,7 +414,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             tmp_path,
             match_id=4,
             room_id=200,
-            started_at=timestamp(2026, 7, 1),
+            started_at=timestamp(2026, 8, 1),
             game_mode='3v3',
             won=True,
             hero_id=1,
@@ -402,7 +429,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             tmp_path,
             match_id=5,
             room_id=200,
-            started_at=timestamp(2026, 7, 2),
+            started_at=timestamp(2026, 8, 2),
             game_mode='unknown',
             won=True,
             hero_id=1,
@@ -413,7 +440,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             tmp_path,
             match_id=6,
             room_id=200,
-            started_at=timestamp(2026, 7, 3),
+            started_at=timestamp(2026, 8, 3),
             game_mode='3v3',
             won=True,
             hero_id=1,
@@ -425,7 +452,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             tmp_path,
             match_id=7,
             room_id=100,
-            started_at=timestamp(2026, 7, 4),
+            started_at=timestamp(2026, 8, 4),
             game_mode='3v3',
             won=False,
             hero_id=1,
@@ -663,7 +690,7 @@ async def test_snapshot_exports_matches_by_live_time_and_hides_private_replays(
         ]
         assert matches[1]['ally']['economy'] == 40900
         assert matches[1]['enemy']['economy'] == 33000
-        assert matches[1]['ally']['players'][0]['lastHits'] == 900
+        assert matches[1]['ally']['players'][0]['lastHits'] is None
 
         await database.execute(
             "UPDATE vainglory_matches SET result_frame_path='session/result.png' "

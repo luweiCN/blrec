@@ -65,7 +65,12 @@ RAW_MODE_TO_PUBLIC = {
     'other': 'brawl',
     'brawl': 'brawl',
 }
-SEASON_NAMES = {'spring': '春季赛', 'summer': '夏季赛', 'autumn': '秋季赛'}
+SEASON_NAMES = {
+    'spring': '春季赛',
+    'summer': '夏季赛',
+    'autumn': '秋季赛',
+    'winter': '冬季赛',
+}
 HERO_SYNERGY_MIN_MATCHES = 5
 HERO_SYNERGY_PRIOR_MATCHES = 5
 HERO_SYNERGY_LIMIT = 3
@@ -283,18 +288,26 @@ def _rating_forecast_value(
 
 def _season_for(moment: datetime) -> _Season:
     local = moment.astimezone(SHANGHAI)
-    if local.month < 5:
+    if local.month < 3:
+        name = 'winter'
+        starts_at = datetime(local.year - 1, 12, 1, tzinfo=SHANGHAI)
+        ends_at = datetime(local.year, 3, 1, tzinfo=SHANGHAI)
+    elif local.month < 6:
         name = 'spring'
-        starts_at = datetime(local.year, 1, 1, tzinfo=SHANGHAI)
-        ends_at = datetime(local.year, 5, 1, tzinfo=SHANGHAI)
+        starts_at = datetime(local.year, 3, 1, tzinfo=SHANGHAI)
+        ends_at = datetime(local.year, 6, 1, tzinfo=SHANGHAI)
     elif local.month < 9:
         name = 'summer'
-        starts_at = datetime(local.year, 5, 1, tzinfo=SHANGHAI)
+        starts_at = datetime(local.year, 6, 1, tzinfo=SHANGHAI)
         ends_at = datetime(local.year, 9, 1, tzinfo=SHANGHAI)
-    else:
+    elif local.month < 12:
         name = 'autumn'
         starts_at = datetime(local.year, 9, 1, tzinfo=SHANGHAI)
-        ends_at = datetime(local.year + 1, 1, 1, tzinfo=SHANGHAI)
+        ends_at = datetime(local.year, 12, 1, tzinfo=SHANGHAI)
+    else:
+        name = 'winter'
+        starts_at = datetime(local.year, 12, 1, tzinfo=SHANGHAI)
+        ends_at = datetime(local.year + 1, 3, 1, tzinfo=SHANGHAI)
     return _Season(
         key='{}-{}'.format(starts_at.year, name),
         year=starts_at.year,
@@ -325,7 +338,12 @@ def _format_period(season: _Season) -> str:
 
 
 def _season_option(season: _Season, current_key: str) -> Mapping[str, Any]:
-    label = '{} {}'.format(season.year, SEASON_NAMES[season.name])
+    year_label = (
+        '{}–{}'.format(season.starts_at.year, season.ends_at.year)
+        if season.name == 'winter'
+        else str(season.year)
+    )
+    label = '{} {}'.format(year_label, SEASON_NAMES[season.name])
     current = season.key == current_key
     return {
         'key': season.key,
@@ -721,13 +739,13 @@ def _public_matches(
                     ('deaths', 'deaths'),
                     ('assists', 'assists'),
                     ('economy', 'economy'),
-                    ('last_hits', 'lastHits'),
                 ):
                     player_value[target] = (
                         None
                         if participant[source] is None
                         else int(participant[source])
                     )
+                player_value['lastHits'] = None
                 players.append(player_value)
             return {
                 'role': 'ally' if side == recorded_side else 'enemy',
@@ -1202,7 +1220,6 @@ def _row_exact_fingerprint(
                         'deaths': participant.get('deaths'),
                         'assists': participant.get('assists'),
                         'economy': participant.get('economy'),
-                        'last_hits': participant.get('last_hits'),
                     }
                     for participant in participants
                     if str(participant.get('side')) == side

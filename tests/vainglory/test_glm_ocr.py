@@ -34,14 +34,14 @@ def test_parse_glm_result_maps_paired_rows_and_keeps_partial_data() -> None:
     assert result.header.left_kills == 12
     assert result.header.right_kills == 21
     assert players[('left', 1)].name == '8888_Weak'
-    assert players[('left', 1)].stats.last_hits == 77
+    assert players[('left', 1)].stats.last_hits is None
     assert players[('right', 1)].name == '8888-2_33no1'
     assert players[('right', 1)].stats.kills == 6
-    assert players[('right', 1)].stats.last_hits == 119
+    assert players[('right', 1)].stats.last_hits is None
     assert players[('right', 2)].name == '8888-2_'
     assert players[('right', 2)].stats.kills is None
     assert players[('right', 3)].name == '8888-2_邱波'
-    assert players[('right', 3)].stats.last_hits == 26
+    assert players[('right', 3)].stats.last_hits is None
 
 
 class _Response:

@@ -27,7 +27,7 @@ from .vision import STANDARD_VIEWPORT, RgbFrame, ViewportTransform, png_bytes
 
 _KDA_PATTERN = re.compile(r'(?<!\d)(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(\d{1,2})(?!\d)')
 _ECONOMY_PATTERN = re.compile(r'\d{1,2}(?:[.,]\d)?\s*[kK]')
-_LEADING_LAST_HITS_PATTERN = re.compile(r'^\s*\d{1,3}(?!\d)')
+_LEADING_AUXILIARY_STAT_PATTERN = re.compile(r'^\s*\d{1,3}(?!\d)')
 _TIME_TOKEN_PATTERN = re.compile(r'^\d{1,2}:\d{2}(?::\d{2})?$')
 _NAME_EDGE_PATTERN = re.compile(r'^[\s,，:：;；|]+|[\s,，:：;；|]+$')
 _REJECTED_NAMES = {
@@ -546,7 +546,7 @@ def _trailing_name_after_stats(value: str) -> str:
     if economy is None:
         return ''
     trailing = value[economy.end() :]
-    trailing = _LEADING_LAST_HITS_PATTERN.sub('', trailing, count=1)
+    trailing = _LEADING_AUXILIARY_STAT_PATTERN.sub('', trailing, count=1)
     tokens = trailing.split()
     if not tokens:
         return ''
@@ -579,8 +579,6 @@ def _player_confidence(name: str, stats: PlayerStats) -> float:
         confidence += 0.45
     if stats.economy is not None:
         confidence += 0.2
-    if stats.last_hits is not None:
-        confidence += 0.1
     return min(1.0, confidence)
 
 
@@ -633,7 +631,7 @@ def _merge_players(
             deaths=_choose_stat(candidates, 'deaths'),
             assists=_choose_stat(candidates, 'assists'),
             economy=_choose_stat(candidates, 'economy'),
-            last_hits=_choose_stat(candidates, 'last_hits'),
+            last_hits=None,
         )
     return OcrPlayer(
         side=side,
@@ -788,13 +786,7 @@ def _result_matches_header(
 def _has_any_stats(stats: PlayerStats) -> bool:
     return any(
         value is not None
-        for value in (
-            stats.kills,
-            stats.deaths,
-            stats.assists,
-            stats.economy,
-            stats.last_hits,
-        )
+        for value in (stats.kills, stats.deaths, stats.assists, stats.economy)
     )
 
 

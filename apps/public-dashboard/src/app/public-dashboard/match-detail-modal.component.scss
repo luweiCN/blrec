@@ -218,7 +218,7 @@
 
   li {
     display: grid;
-    grid-template-columns: 48px minmax(90px, 1fr) auto auto auto;
+    grid-template-columns: 48px minmax(90px, 1fr) auto auto;
     gap: 10px;
     align-items: center;
     min-height: 72px;
@@ -238,6 +238,10 @@
     }
   }
 
+  &--kda-only li {
+    grid-template-columns: 48px minmax(90px, 1fr) auto;
+  }
+
   img {
     width: 46px;
     height: 46px;
@@ -249,8 +253,7 @@
 
 .match-player-name,
 .match-player-kda,
-.match-player-economy,
-.match-player-last-hits {
+.match-player-economy {
   display: grid;
   gap: 3px;
   min-width: 0;
@@ -282,8 +285,7 @@
 }
 
 .match-player-kda,
-.match-player-economy,
-.match-player-last-hits {
+.match-player-economy {
   text-align: right;
 }
 
@@ -468,8 +470,7 @@
     }
   }
 
-  .match-player-economy,
-  .match-player-last-hits {
+  .match-player-economy {
     display: none;
   }
 

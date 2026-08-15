@@ -4,6 +4,7 @@ import logging
 import time
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from itertools import groupby
 from threading import Lock, RLock
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -13,15 +14,11 @@ from blrec_dashboard_publisher.rating import (
     RATING_MODEL_VERSION,
     calculate_virtual_match_rating_timeline,
 )
-from blrec_dashboard_publisher.snapshot import build_dashboard_runtime_source
+from blrec_dashboard_publisher.snapshot import SHANGHAI, build_dashboard_runtime_source
 from pypinyin import Style, lazy_pinyin
 
 from .assets import get_match_assets
-from .dashboard import (
-    load_dashboard_trends,
-    merge_current_dashboard_publication,
-    persist_dashboard_publication,
-)
+from .dashboard import current_dashboard_publication
 from .database import DatabaseTarget, connect_database, is_postgres
 
 LOGGER = logging.getLogger(__name__)
@@ -41,6 +38,13 @@ class _Dataset:
     heroes: Mapping[int, frozenset[str]]
     ratings: Mapping[Tuple[int, str, str], Mapping[str, Any]]
     live_rooms: Mapping[str, Any]
+
+
+@dataclass
+class _TrendPerformance:
+    rating_score: int
+    matches: int
+    wins: int
 
 
 def read_source_revision(database_target: DatabaseTarget) -> int:
@@ -113,7 +117,6 @@ def _match_fingerprint(match: Mapping[str, Any]) -> Optional[str]:
                         'deaths': player.get('deaths'),
                         'assists': player.get('assists'),
                         'economy': player.get('economy'),
-                        'last_hits': player.get('lastHits'),
                     }
                     for player in team['players']
                 ],
@@ -213,9 +216,115 @@ def _rating_events(
     return events
 
 
-def _dataset(
-    source_revision: int, runtime: Mapping[str, Any], trends: Mapping[str, Any]
-) -> _Dataset:
+def _match_publication_date(match: Mapping[str, Any]) -> str:
+    value = str(match['playedAt'])
+    moment = datetime.fromisoformat(
+        value[:-1] + '+00:00' if value.endswith('Z') else value
+    )
+    if moment.tzinfo is None:
+        raise ValueError('dashboard match time must include a timezone')
+    return moment.astimezone(SHANGHAI).date().isoformat()
+
+
+def _rank_trend_performances(
+    performances: Mapping[int, _TrendPerformance]
+) -> List[Mapping[str, int]]:
+    candidates = sorted(
+        performances.items(),
+        key=lambda item: (
+            -item[1].rating_score,
+            -item[1].matches,
+            -(item[1].wins / item[1].matches if item[1].matches else 0.0),
+            item[0],
+        ),
+    )
+    return [
+        {'playerId': player_id, 'rank': rank, 'ratingScore': performance.rating_score}
+        for rank, (player_id, performance) in enumerate(candidates, start=1)
+    ]
+
+
+def _trend_standings_from_state(
+    state: Mapping[str, Mapping[str, Mapping[int, _TrendPerformance]]]
+) -> Mapping[str, Any]:
+    return {
+        season_key: {
+            mode: _rank_trend_performances(modes.get(mode, {}))
+            for mode in ('all', '3v3', 'brawl', '5v5')
+        }
+        for season_key, modes in state.items()
+    }
+
+
+def _rating_trends(
+    snapshot: Mapping[str, Any],
+    matches: Sequence[Mapping[str, Any]],
+    ratings: Mapping[Tuple[int, str, str], Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    state: Dict[str, Dict[str, Dict[int, _TrendPerformance]]] = {}
+    publications: List[Mapping[str, Any]] = []
+    source_last_match_id = 0
+    ordered = sorted(
+        matches, key=lambda match: (str(match['playedAt']), int(match['id']))
+    )
+    for publication_date, date_group in groupby(ordered, key=_match_publication_date):
+        changed = False
+        for match in date_group:
+            match_id = int(match['id'])
+            player_id = int(match['playerId'])
+            season_key = str(match['seasonKey'])
+            mode = str(match['mode'])
+            if (match_id, 'all', season_key) not in ratings:
+                continue
+            changed = True
+            source_last_match_id = max(source_last_match_id, match_id)
+            for scope in ('all', mode):
+                for rating_season in (season_key, 'all-time'):
+                    event = ratings.get((match_id, scope, rating_season))
+                    if event is None:
+                        continue
+                    performances = state.setdefault(rating_season, {}).setdefault(
+                        scope, {}
+                    )
+                    previous = performances.get(player_id)
+                    performances[player_id] = _TrendPerformance(
+                        rating_score=int(event['scoreAfter']) // 3,
+                        matches=1 if previous is None else previous.matches + 1,
+                        wins=(
+                            int(str(match['result']) == 'W')
+                            if previous is None
+                            else previous.wins + int(str(match['result']) == 'W')
+                        ),
+                    )
+        if changed:
+            publications.append(
+                {
+                    'snapshotId': 'match-history-{}-{}'.format(
+                        publication_date, source_last_match_id
+                    ),
+                    'publicationDate': publication_date,
+                    'sourceLastMatchId': source_last_match_id,
+                    'standings': _trend_standings_from_state(state),
+                }
+            )
+
+    current = current_dashboard_publication(snapshot)
+    current_date = str(current['publicationDate'])
+    publications = [
+        publication
+        for publication in publications
+        if str(publication['publicationDate']) != current_date
+    ]
+    publications.append(current)
+    publications.sort(key=lambda publication: str(publication['publicationDate']))
+    return {
+        'schemaVersion': 1,
+        'updatedAt': str(snapshot['generatedAt']),
+        'publications': publications,
+    }
+
+
+def _dataset(source_revision: int, runtime: Mapping[str, Any]) -> _Dataset:
     snapshot = dict(runtime['snapshot'])
     snapshot['matches'] = []
     players = {int(player['id']): dict(player) for player in runtime.get('players', ())}
@@ -263,15 +372,19 @@ def _dataset(
     live_rooms.sort(
         key=lambda room: (str(room['startedAt']), int(room['roomId'])), reverse=True
     )
+    ratings = _rating_events(matches)
     return _Dataset(
         source_revision=source_revision,
-        document={'snapshot': snapshot, 'trends': trends},
+        document={
+            'snapshot': snapshot,
+            'trends': _rating_trends(snapshot, matches, ratings),
+        },
         players=players,
         matches=matches,
         matches_by_id={int(match['id']): match for match in matches},
         search_forms=forms,
         heroes=heroes,
-        ratings=_rating_events(matches),
+        ratings=ratings,
         live_rooms={
             'schemaVersion': 1,
             'updatedAt': str(snapshot['generatedAt']),
@@ -312,28 +425,7 @@ class DirectDashboardRepository:
             source_revision, runtime = self._runtime_loader(self._source_target)
             if source_revision < expected_revision:
                 raise RuntimeError('dashboard source changed during refresh')
-            snapshot = runtime['snapshot']
-            try:
-                persist_dashboard_publication(
-                    self._auxiliary_target,
-                    source_revision=source_revision,
-                    snapshot=snapshot,
-                )
-                trends = load_dashboard_trends(self._auxiliary_target)
-            except Exception:
-                LOGGER.exception(
-                    'failed to persist dashboard trend history; serving direct data'
-                )
-                try:
-                    trends = load_dashboard_trends(self._auxiliary_target)
-                except Exception:
-                    trends = {
-                        'schemaVersion': 1,
-                        'updatedAt': str(snapshot['generatedAt']),
-                        'publications': [],
-                    }
-                trends = merge_current_dashboard_publication(trends, snapshot)
-            next_dataset = _dataset(source_revision, runtime, trends)
+            next_dataset = _dataset(source_revision, runtime)
             with self._state_lock:
                 self._dataset = next_dataset
             LOGGER.info(

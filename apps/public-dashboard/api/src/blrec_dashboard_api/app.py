@@ -233,7 +233,7 @@ def create_app(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=10, alias='pageSize', ge=1, le=50),
         season: Optional[str] = Query(
-            default=None, regex=r'^(all-time|\d{4}-(spring|summer|autumn))$'
+            default=None, regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$'
         ),
         mode: Optional[Literal['3v3', 'brawl', '5v5']] = None,
         player_id: Optional[int] = Query(default=None, alias='playerId', gt=0),
@@ -245,7 +245,7 @@ def create_app(
         rating_season: Optional[str] = Query(
             default=None,
             alias='ratingSeason',
-            regex=r'^(all-time|\d{4}-(spring|summer|autumn))$',
+            regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$',
         ),
     ) -> Dict[str, Any]:
         return active_repository.list_matches(
@@ -263,7 +263,7 @@ def create_app(
     @app.get('/v1/matches/summary')
     def match_summary(
         season: Optional[str] = Query(
-            default=None, regex=r'^(all-time|\d{4}-(spring|summer|autumn))$'
+            default=None, regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$'
         ),
         mode: Optional[Literal['3v3', 'brawl', '5v5']] = None,
         player_id: Optional[int] = Query(default=None, alias='playerId', gt=0),
@@ -283,7 +283,7 @@ def create_app(
         rating_season: Optional[str] = Query(
             default=None,
             alias='ratingSeason',
-            regex=r'^(all-time|\d{4}-(spring|summer|autumn))$',
+            regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$',
         ),
     ) -> Mapping[str, Any]:
         try:
