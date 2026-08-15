@@ -13,7 +13,7 @@ from blrec.vainglory.archive_backfill import (
     ArchiveContentReviewPage,
     ArchiveSync,
 )
-from blrec.vainglory.publication import PublicationTaskStatus
+from blrec.vainglory.publication import PublicationAuditStatus, PublicationTaskStatus
 from blrec.vainglory.repository import (
     AnchorStatsRecord,
     GameModeStatsRecord,
@@ -44,6 +44,7 @@ class FakeService:
         self.updated_session_anchors = []
         self.bulk_updates = []
         self.publication_retries = []
+        self.publication_audit_requests = []
         self.suppressed_zero_match_sessions = []
         self.restored_zero_match_sessions = []
         self.suppressed_match_reviews = []
@@ -276,6 +277,23 @@ class FakeService:
             )
         }
 
+    async def publication_audit_status(
+        self, *, stale_before: int
+    ) -> PublicationAuditStatus:
+        self.publication_audit_requests.append(('status', stale_before))
+        return PublicationAuditStatus(
+            total_count=30,
+            verified_count=24,
+            stale_count=4,
+            pending_count=5,
+            failed_count=1,
+            oldest_verified_at=1_000,
+        )
+
+    async def queue_publication_audit(self, *, stale_before: int, limit: int) -> int:
+        self.publication_audit_requests.append(('queue', stale_before, limit))
+        return min(4, limit)
+
 
 class FakeArchiveBackfill:
     def __init__(self) -> None:
@@ -455,6 +473,30 @@ def test_retries_or_resends_each_publication_step_independently(
         (9, 'pin'),
         (9, 'chapter'),
     ]
+
+
+def test_reads_and_queues_low_priority_publication_audits(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    current = client.get(
+        '/api/v1/vainglory/publication-audits', params={'maxAgeHours': 24}
+    )
+    queued = client.post(
+        '/api/v1/vainglory/publication-audits', json={'maxAgeHours': 24, 'limit': 3}
+    )
+
+    assert current.status_code == 200
+    assert current.json()['verifiedCount'] == 24
+    assert current.json()['staleCount'] == 4
+    assert queued.status_code == 202
+    assert queued.json()['queuedCount'] == 3
+    assert queued.json()['pendingCount'] == 5
+    assert fake.publication_audit_requests[0][0] == 'status'
+    assert fake.publication_audit_requests[1][0] == 'queue'
+    assert fake.publication_audit_requests[1][2] == 3
+    assert fake.publication_audit_requests[2][0] == 'status'
 
 
 def test_match_filters_use_camel_case_query_names(

@@ -35,6 +35,10 @@ const ROUTE_TOPICS: ReadonlyArray<
   ['/tasks', ['tasks']],
   ['/network', ['network']],
   ['/uploads', ['archive_migration']],
+  [
+    '/vainglory/operations',
+    ['archive_migration', 'archive_backfill', 'vainglory_index'],
+  ],
   ['/vainglory', ['archive_backfill', 'vainglory_index']],
   ['/recordings', ['upload_progress']],
   ['/upload-tasks', ['upload_progress']],

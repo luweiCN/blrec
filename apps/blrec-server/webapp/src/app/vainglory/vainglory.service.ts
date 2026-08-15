@@ -23,6 +23,8 @@ import {
   VaingloryMatchSessionSort,
   VaingloryPlayer,
   VaingloryPlayerStats,
+  VaingloryPublicationAudit,
+  VaingloryPublicationAuditQueue,
   VaingloryPublicationRetryStep,
   VaingloryScanJob,
   VaingloryZeroMatchSessionList,
@@ -244,6 +246,23 @@ export class VaingloryService {
         `/api/v1/vainglory/sessions/${sessionId}/publication/${step}/retry`,
       ),
       null,
+    );
+  }
+
+  getPublicationAudit(maxAgeHours = 168): Observable<VaingloryPublicationAudit> {
+    return this.http.get<VaingloryPublicationAudit>(
+      this.url.makeApiUrl('/api/v1/vainglory/publication-audits'),
+      { params: new HttpParams().set('maxAgeHours', maxAgeHours) },
+    );
+  }
+
+  queuePublicationAudit(
+    maxAgeHours = 168,
+    limit = 20,
+  ): Observable<VaingloryPublicationAuditQueue> {
+    return this.http.post<VaingloryPublicationAuditQueue>(
+      this.url.makeApiUrl('/api/v1/vainglory/publication-audits'),
+      { maxAgeHours, limit },
     );
   }
 

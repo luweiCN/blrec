@@ -149,6 +149,16 @@ class PublicationTaskStatus:
 
 
 @dataclass(frozen=True)
+class PublicationAuditStatus:
+    total_count: int
+    verified_count: int
+    stale_count: int
+    pending_count: int
+    failed_count: int
+    oldest_verified_at: Optional[int]
+
+
+@dataclass(frozen=True)
 class _Candidate:
     account_id: int
     session_id: int
@@ -601,6 +611,70 @@ class VaingloryPublicationService:
             if session_id not in statuses:
                 statuses[session_id] = _publication_task_status(dict(row))
         return statuses
+
+    async def publication_audit_status(
+        self, *, stale_before: int
+    ) -> PublicationAuditStatus:
+        row = await self._database.fetchone(
+            'SELECT COUNT(*) AS total_count,'
+            "SUM(CASE WHEN state='confirmed' AND remote_verified_at IS NOT NULL "
+            'THEN 1 ELSE 0 END) AS verified_count,'
+            "SUM(CASE WHEN state='confirmed' AND (remote_verified_at IS NULL "
+            'OR remote_verified_at<=?) THEN 1 ELSE 0 END) AS stale_count,'
+            "SUM(CASE WHEN state IN ('prepared','running','paused') "
+            'THEN 1 ELSE 0 END) AS pending_count,'
+            "SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_count,"
+            'MIN(CASE WHEN state=\'confirmed\' THEN remote_verified_at END) '
+            'AS oldest_verified_at FROM vainglory_publications',
+            (max(0, int(stale_before)),),
+        )
+        assert row is not None
+        oldest = row['oldest_verified_at']
+        return PublicationAuditStatus(
+            total_count=int(row['total_count'] or 0),
+            verified_count=int(row['verified_count'] or 0),
+            stale_count=int(row['stale_count'] or 0),
+            pending_count=int(row['pending_count'] or 0),
+            failed_count=int(row['failed_count'] or 0),
+            oldest_verified_at=None if oldest is None else int(oldest),
+        )
+
+    async def queue_publication_audit(self, *, stale_before: int, limit: int) -> int:
+        if not 1 <= limit <= 100:
+            raise ValueError('远端复核批次必须在 1 到 100 之间')
+        cutoff = max(0, int(stale_before))
+        now = self._now()
+
+        def queue(connection: sqlite3.Connection) -> int:
+            rows = connection.execute(
+                'SELECT id FROM vainglory_publications '
+                "WHERE state='confirmed' AND (remote_verified_at IS NULL "
+                'OR remote_verified_at<=?) '
+                'ORDER BY remote_verified_at IS NOT NULL,remote_verified_at,id LIMIT ?',
+                (cutoff, int(limit)),
+            ).fetchall()
+            ids = tuple(int(row['id']) for row in rows)
+            if not ids:
+                return 0
+            placeholders = ','.join('?' for _publication_id in ids)
+            return connection.execute(
+                "UPDATE vainglory_publications SET state='prepared',"
+                'remote_verified_at=NULL,attempt_count=0,next_attempt_at=0,'
+                "error='等待远端重新复核',priority=0,updated_at=? "
+                'WHERE id IN ({})'.format(placeholders),
+                (now, *ids),
+            ).rowcount
+
+        changed = await self._database.write(queue)
+        if changed:
+            logger.info(
+                'Queued confirmed Vainglory publications for remote audit: '
+                'count={} stale_before={}',
+                changed,
+                cutoff,
+            )
+            self._delivery_wake.set()
+        return changed
 
     async def _requeue_legacy_chapter_timing(self) -> int:
         changed = await self._database.execute(
@@ -1488,6 +1562,7 @@ class VaingloryPublicationService:
                 publication, bundle, _chapter_pages(public)
             )
             comments_ok = await self._remote_comments_match(publication, bundle)
+            pin_ok = comments_ok and await self._remote_pin_matches(publication, bundle)
         except (BiliApiError, DefinitelyNotSent, RemoteOutcomeUnknown):
             await self._retry_publication(
                 publication_id,
@@ -1504,7 +1579,7 @@ class VaingloryPublicationService:
                 minimum_delay=3600,
             )
             return False
-        if description_ok and chapter_ok and comments_ok:
+        if description_ok and chapter_ok and comments_ok and pin_ok:
             return True
         await self._reset_unverified_steps(
             publication_id,
@@ -1512,6 +1587,7 @@ class VaingloryPublicationService:
             description_ok=description_ok,
             chapter_ok=chapter_ok,
             comments_ok=comments_ok,
+            pin_ok=pin_ok,
         )
         return False
 
@@ -1591,6 +1667,28 @@ class VaingloryPublicationService:
                 return False
         return True
 
+    async def _remote_pin_matches(
+        self, publication: Mapping[str, Any], bundle: CredentialBundle
+    ) -> bool:
+        comment_count = int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM vainglory_publication_comments '
+                'WHERE publication_id=?',
+                (int(publication['id']),),
+            )
+            or 0
+        )
+        if comment_count == 0:
+            return True
+        root_rpid = _positive_int(publication.get('root_rpid'))
+        if root_rpid is None:
+            return False
+        response = await self._protocol.list_replies(
+            bundle,
+            {'type': 1, 'oid': int(publication['aid']), 'mode': 2, 'next': 0, 'ps': 20},
+        )
+        return root_rpid in _top_reply_ids(response)
+
     async def _reset_unverified_steps(
         self,
         publication_id: int,
@@ -1599,6 +1697,7 @@ class VaingloryPublicationService:
         description_ok: bool,
         chapter_ok: bool,
         comments_ok: bool,
+        pin_ok: bool,
     ) -> None:
         missing = [
             label
@@ -1609,6 +1708,8 @@ class VaingloryPublicationService:
             )
             if not ok
         ]
+        if comments_ok and not pin_ok:
+            missing.append('置顶评论')
         message = '远端缺少{}，将重新发布'.format('、'.join(missing))
         now = self._now()
         retry_delay = max(60, min(6 * 3600, 2 ** min(attempt + 1, 14)))
@@ -1630,7 +1731,7 @@ class VaingloryPublicationService:
                     'confirmed' if chapter_ok else 'prepared',
                     'confirmed' if description_ok else 'prepared',
                     'prepared' if not comments_ok else 'confirmed',
-                    'prepared' if not comments_ok else 'confirmed',
+                    'confirmed' if comments_ok and pin_ok else 'prepared',
                     (
                         None
                         if not comments_ok
@@ -3355,6 +3456,28 @@ def _reply_entries(response: Mapping[str, Any]) -> Tuple[Mapping[str, Any], ...]
     if isinstance(upper, Mapping):
         entries.extend(entry for entry in upper.values() if isinstance(entry, Mapping))
     return tuple(entries)
+
+
+def _top_reply_ids(response: Mapping[str, Any]) -> Tuple[int, ...]:
+    data = response.get('data')
+    if not isinstance(data, Mapping):
+        raise ProtocolContractError('comment list response is incomplete')
+    entries: List[Mapping[str, Any]] = []
+    top_replies = data.get('top_replies')
+    if isinstance(top_replies, list):
+        entries.extend(entry for entry in top_replies if isinstance(entry, Mapping))
+    upper = data.get('upper')
+    if isinstance(upper, Mapping):
+        upper_top = upper.get('top')
+        if isinstance(upper_top, Mapping):
+            entries.append(upper_top)
+        elif _positive_int(upper.get('rpid')) is not None:
+            entries.append(upper)
+    return tuple(
+        rpid
+        for rpid in (_positive_int(entry.get('rpid')) for entry in entries)
+        if rpid is not None
+    )
 
 
 def _owned_root_reply(reply: Mapping[str, Any], *, account_uid: int, aid: int) -> bool:

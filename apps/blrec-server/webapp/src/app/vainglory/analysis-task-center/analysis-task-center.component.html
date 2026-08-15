@@ -1,6 +1,7 @@
 <section
   *ngIf="queue as taskQueue"
   class="analysis-task-center"
+  [class.is-page]="embedded"
   aria-label="对局分析任务中心"
 >
   <section

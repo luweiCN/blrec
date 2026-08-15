@@ -63,7 +63,7 @@ _T = TypeVar('_T')
 
 
 class BiliUploadDatabase:
-    LATEST_SCHEMA_VERSION = 73
+    LATEST_SCHEMA_VERSION = 74
     LEASE_TTL_SECONDS = 120
     RENEW_WINDOW_SECONDS = 60
     READ_WORKERS = 4

@@ -31,6 +31,7 @@ from blrec.vainglory.archive_backfill import (
 )
 from blrec.vainglory.catalog import hero_chinese_name
 from blrec.vainglory.publication import (
+    PublicationAuditStatus,
     PublicationTaskStatus,
     VaingloryPublicationService,
 )
@@ -115,6 +116,25 @@ class AnalysisWorkerCreateRequest(ApiModel):
 class AnalysisWorkerUpdateRequest(ApiModel):
     display_name: Optional[str] = Field(None, max_length=100)
     enabled: Optional[bool] = None
+
+
+class PublicationAuditRequest(ApiModel):
+    max_age_hours: int = Field(168, ge=0, le=8_760)
+    limit: int = Field(20, ge=1, le=100)
+
+
+class PublicationAuditResponse(ApiModel):
+    total_count: int
+    verified_count: int
+    stale_count: int
+    pending_count: int
+    failed_count: int
+    oldest_verified_at: Optional[int]
+    stale_before: int
+
+
+class PublicationAuditQueueResponse(PublicationAuditResponse):
+    queued_count: int
 
 
 class AnalysisTimelineSegmentRequest(ApiModel):
@@ -619,6 +639,12 @@ def get_publication() -> VaingloryPublicationService:
 
 def _scan_job(value: ScanJob) -> ScanJobResponse:
     return ScanJobResponse(**value.__dict__)
+
+
+def _publication_audit(
+    value: PublicationAuditStatus, *, stale_before: int
+) -> PublicationAuditResponse:
+    return PublicationAuditResponse(**value.__dict__, stale_before=stale_before)
 
 
 def _player(value: MatchPlayerRecord) -> MatchPlayerResponse:
@@ -1416,6 +1442,47 @@ async def retry_publication_step(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from None
     return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.get('/publication-audits', response_model=PublicationAuditResponse)
+async def get_publication_audit(
+    max_age_hours: int = Query(168, alias='maxAgeHours', ge=0, le=8_760),
+    _subject: str = Depends(authenticated_manager_subject),
+    publication_service: VaingloryPublicationService = Depends(get_publication),
+) -> PublicationAuditResponse:
+    stale_before = int(time.time()) - max_age_hours * 3_600
+    return _publication_audit(
+        await publication_service.publication_audit_status(stale_before=stale_before),
+        stale_before=stale_before,
+    )
+
+
+@router.post(
+    '/publication-audits',
+    response_model=PublicationAuditQueueResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def queue_publication_audit(
+    payload: PublicationAuditRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    publication_service: VaingloryPublicationService = Depends(get_publication),
+) -> PublicationAuditQueueResponse:
+    stale_before = int(time.time()) - payload.max_age_hours * 3_600
+    queued_count = await publication_service.queue_publication_audit(
+        stale_before=stale_before, limit=payload.limit
+    )
+    audit(
+        'vainglory_publication_audit_queued',
+        max_age_hours=payload.max_age_hours,
+        limit=payload.limit,
+        queued_count=queued_count,
+    )
+    current = await publication_service.publication_audit_status(
+        stale_before=stale_before
+    )
+    return PublicationAuditQueueResponse(
+        **current.__dict__, stale_before=stale_before, queued_count=queued_count
+    )
 
 
 @router.post(

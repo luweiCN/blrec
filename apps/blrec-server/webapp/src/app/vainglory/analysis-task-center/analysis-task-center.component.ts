@@ -54,6 +54,7 @@ const TRAINING_TASK_LABELS: Readonly<Record<string, string>> = {
 export class AnalysisTaskCenterComponent {
   @Input() queue: VaingloryAnalysisQueue | null = null;
   @Input() view: AnalysisTaskCenterView = 'tasks';
+  @Input() embedded = false;
   @Input() sampledAt: number | null = null;
   @Input() updatingWorkerIds: ReadonlySet<string> = new Set<string>();
   @Output() addWorker = new EventEmitter<void>();

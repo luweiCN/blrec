@@ -24,6 +24,12 @@
   padding-right: 4px;
   overflow-x: hidden;
   overflow-y: auto;
+
+  &.is-page {
+    max-height: none;
+    padding-right: 0;
+    overflow: visible;
+  }
 }
 
 .analysis-worker-section,

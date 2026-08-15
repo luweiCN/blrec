@@ -24,38 +24,13 @@
         （{{ zeroMatchSessionTotal }}）
       </ng-container>
     </button>
-    <button
-      nz-button
-      type="button"
-      class="worker-status-trigger"
-      (click)="openAnalysisTaskCenter('workers')"
-    >
-      <span
-        class="worker-status-marker"
-        [class.running]="
-          analysisQueue?.workerState === 'running' &&
-          !workerStatusPaused(analysisQueue)
-        "
-        [class.paused]="workerStatusPaused(analysisQueue)"
-        [class.failed]="analysisQueue?.workerState === 'failed'"
-        aria-hidden="true"
-      ></span>
-      <ng-container *ngIf="analysisQueue as queue; else workerStatusLoading">
-        {{ workerStatusTriggerLabel(queue) }}
-      </ng-container>
-      <ng-template #workerStatusLoading>Worker 状态</ng-template>
-    </button>
-    <button nz-button type="button" (click)="openAnalysisTaskCenter('tasks')">
-      <i nz-icon nzType="unordered-list"></i>
-      对局分析任务
+    <a nz-button routerLink="/vainglory/operations">
+      <i nz-icon nzType="dashboard"></i>
+      运行中心
       <ng-container *ngIf="analysisQueue as queue">
-        （{{ queue.active.length }} 场执行中 / {{ queue.pendingCount }} 场等待）
+        （{{ queue.active.length }} 项执行中 / {{ queue.pendingCount }} 项等待）
       </ng-container>
-    </button>
-    <button nz-button type="button" (click)="openArchiveManager()">
-      <i nz-icon nzType="cloud-download"></i>
-      历史数据接入
-    </button>
+    </a>
     <button nz-button type="button" (click)="refreshPage()">
       <i nz-icon nzType="reload"></i>
       刷新

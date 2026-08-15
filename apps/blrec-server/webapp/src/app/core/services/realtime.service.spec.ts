@@ -61,6 +61,11 @@ describe('realtimeTopicsForUrl', () => {
       'upload_progress',
       'highlight_progress',
     ]);
+    expect(realtimeTopicsForUrl('/vainglory/operations')).toEqual([
+      'archive_migration',
+      'archive_backfill',
+      'vainglory_index',
+    ]);
   });
 
   it('maps every mounted highlight editor route to both progress topics', () => {

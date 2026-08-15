@@ -189,6 +189,21 @@ describe('VaingloryService', () => {
     request.flush(null);
   });
 
+  it('reads and queues publication evidence audits', () => {
+    service.getPublicationAudit(168).subscribe();
+    const current = http.expectOne(
+      '/api/v1/vainglory/publication-audits?maxAgeHours=168',
+    );
+    expect(current.request.method).toBe('GET');
+    current.flush({ totalCount: 12, staleCount: 2 });
+
+    service.queuePublicationAudit(24, 10).subscribe();
+    const queued = http.expectOne('/api/v1/vainglory/publication-audits');
+    expect(queued.request.method).toBe('POST');
+    expect(queued.request.body).toEqual({ maxAgeHours: 24, limit: 10 });
+    queued.flush({ totalCount: 12, staleCount: 0, queuedCount: 2 });
+  });
+
   it('registers and safely pauses an analysis worker', () => {
     service.addAnalysisWorker('mac-studio', 'Mac Studio').subscribe();
     const created = http.expectOne('/api/v1/vainglory/workers');

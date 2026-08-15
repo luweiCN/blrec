@@ -366,6 +366,21 @@ export interface VaingloryArchiveBackfillRealtimeSnapshot {
   >;
 }
 
+export interface VaingloryPublicationAudit {
+  readonly totalCount: number;
+  readonly verifiedCount: number;
+  readonly staleCount: number;
+  readonly pendingCount: number;
+  readonly failedCount: number;
+  readonly oldestVerifiedAt: number | null;
+  readonly staleBefore: number;
+}
+
+export interface VaingloryPublicationAuditQueue
+  extends VaingloryPublicationAudit {
+  readonly queuedCount: number;
+}
+
 export interface VaingloryIndexRealtimeSnapshot {
   readonly sampledAt: number;
   readonly analysisQueue: VaingloryAnalysisQueue;

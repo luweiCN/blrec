@@ -31,6 +31,13 @@
             [nzInlineCollapsed]="collapsed"
           >
             <li
+              class="menu-section-label"
+              [class.is-hidden]="collapsed"
+              role="presentation"
+            >
+              采集与内容
+            </li>
+            <li
               nz-menu-item
               nzMatchRouter="true"
               nz-tooltip
@@ -55,6 +62,23 @@
               nzMatchRouter="true"
               nz-tooltip
               nzTooltipPlacement="right"
+              [nzTooltipTitle]="collapsed ? '媒体库' : ''"
+            >
+              <i nz-icon nzType="star" nzTheme="outline"></i>
+              <span><a routerLink="/media-library">媒体库</a></span>
+            </li>
+            <li
+              class="menu-section-label"
+              [class.is-hidden]="collapsed"
+              role="presentation"
+            >
+              处理与发布
+            </li>
+            <li
+              nz-menu-item
+              nzMatchRouter="true"
+              nz-tooltip
+              nzTooltipPlacement="right"
               [nzTooltipTitle]="collapsed ? '上传任务' : ''"
             >
               <i nz-icon nzType="cloud-upload" nzTheme="outline"></i>
@@ -63,16 +87,7 @@
             <li
               nz-menu-item
               nzMatchRouter="true"
-              nz-tooltip
-              nzTooltipPlacement="right"
-              [nzTooltipTitle]="collapsed ? '媒体库' : ''"
-            >
-              <i nz-icon nzType="star" nzTheme="outline"></i>
-              <span><a routerLink="/media-library">媒体库</a></span>
-            </li>
-            <li
-              nz-menu-item
-              nzMatchRouter="true"
+              nzMatchRouterExact="true"
               nz-tooltip
               nzTooltipPlacement="right"
               [nzTooltipTitle]="collapsed ? '对局索引' : ''"
@@ -85,10 +100,29 @@
               nzMatchRouter="true"
               nz-tooltip
               nzTooltipPlacement="right"
+              [nzTooltipTitle]="collapsed ? '运行中心' : ''"
+            >
+              <i nz-icon nzType="dashboard" nzTheme="outline"></i>
+              <span>
+                <a routerLink="/vainglory/operations">运行中心</a>
+              </span>
+            </li>
+            <li
+              nz-menu-item
+              nzMatchRouter="true"
+              nz-tooltip
+              nzTooltipPlacement="right"
               [nzTooltipTitle]="collapsed ? '投稿账号' : ''"
             >
               <i nz-icon nzType="user" nzTheme="outline"></i>
               <span><a routerLink="/uploads">投稿账号</a></span>
+            </li>
+            <li
+              class="menu-section-label"
+              [class.is-hidden]="collapsed"
+              role="presentation"
+            >
+              系统
             </li>
             <li
               nz-menu-item

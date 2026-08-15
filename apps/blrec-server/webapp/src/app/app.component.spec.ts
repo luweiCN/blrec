@@ -6,6 +6,7 @@ import {
   BarChartOutline,
   BellOutline,
   CloudUploadOutline,
+  DashboardOutline,
   GithubOutline,
   InfoCircleOutline,
   MenuFoldOutline,
@@ -36,6 +37,7 @@ describe('AppComponent', () => {
             BarChartOutline,
             BellOutline,
             CloudUploadOutline,
+            DashboardOutline,
             GithubOutline,
             InfoCircleOutline,
             MenuFoldOutline,
@@ -98,6 +100,9 @@ describe('AppComponent', () => {
     const network = fixture.nativeElement.querySelector(
       'a[href="/network"]',
     ) as HTMLAnchorElement;
+    const operations = fixture.nativeElement.querySelector(
+      'a[href="/vainglory/operations"]',
+    ) as HTMLAnchorElement;
 
     expect(recordingTasks?.textContent?.trim()).toBe('房间管理');
     expect(recordings?.textContent?.trim()).toBe('录制任务');
@@ -106,6 +111,7 @@ describe('AppComponent', () => {
     expect(policies).toBeNull();
     expect(accounts.textContent?.trim()).toBe('投稿账号');
     expect(network.textContent?.trim()).toBe('网络管理');
+    expect(operations.textContent?.trim()).toBe('运行中心');
   });
 
   it('uses distinct icons for room management and recording tasks', () => {
@@ -137,9 +143,10 @@ describe('AppComponent', () => {
     expect(labels).toEqual([
       '房间管理',
       '录制任务',
-      '上传任务',
       '媒体库',
+      '上传任务',
       '对局索引',
+      '运行中心',
       '投稿账号',
       '网络管理',
       '访问分析',
@@ -148,6 +155,20 @@ describe('AppComponent', () => {
       '通知设置',
       '关于',
     ]);
+  });
+
+  it('groups navigation by business responsibility', () => {
+    const fixture = TestBed.createComponent(AppComponent);
+    fixture.detectChanges();
+
+    const sectionLabels = fixture.nativeElement.querySelectorAll(
+      '.menu-section-label',
+    ) as NodeListOf<HTMLElement>;
+    const labels = Array.from(sectionLabels).map((element) =>
+      element.textContent?.trim(),
+    );
+
+    expect(labels).toEqual(['采集与内容', '处理与发布', '系统']);
   });
 
   it('lazy loads recording and upload lists as separate scopes', () => {

@@ -329,6 +329,8 @@ class FakePublicationProtocol:
         self.public_chapter_cards: Optional[Tuple[Mapping[str, Any], ...]] = None
         self.public_reply_result: Any = None
         self.add_reply_result: Any = {'code': 0, 'data': {'rpid': 501}}
+        self.pin_write_becomes_visible = True
+        self.pinned_rpid: Optional[int] = None
         self.list_replies_result: Mapping[str, Any] = {
             'code': 0,
             'data': {'replies': []},
@@ -444,6 +446,8 @@ class FakePublicationProtocol:
         self, _bundle: object, params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
         self.top_reply_calls.append(dict(params))
+        if self.pin_write_becomes_visible:
+            self.pinned_rpid = int(params['rpid'])
         return {'code': 0}
 
     async def delete_reply(
@@ -456,7 +460,11 @@ class FakePublicationProtocol:
         self, _bundle: object, params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
         self.list_replies_calls.append(dict(params))
-        return self.list_replies_result
+        result = dict(self.list_replies_result)
+        data = result.get('data')
+        if isinstance(data, Mapping) and self.pinned_rpid is not None:
+            result['data'] = {**data, 'top_replies': [{'rpid': self.pinned_rpid}]}
+        return result
 
     async def reply_detail(
         self, _bundle: object, _params: Mapping[str, Any]
@@ -684,6 +692,124 @@ async def test_publication_is_not_confirmed_until_remote_content_is_visible(
         assert dict(confirmed) == {'state': 'confirmed', 'remote_verified_at': 1000}
         assert len(protocol.chapter_batches) == 2
         assert len(protocol.add_reply_calls) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publication_is_not_confirmed_until_pin_is_visible_remotely(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        protocol.pin_write_becomes_visible = False
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        for _ in range(6):
+            assert await service.run_once() is True
+
+        row = await database.fetchone(
+            'SELECT state,chapter_state,description_state,pin_state,'
+            'root_rpid,remote_verified_at,error FROM vainglory_publications'
+        )
+        assert dict(row) == {
+            'state': 'prepared',
+            'chapter_state': 'confirmed',
+            'description_state': 'confirmed',
+            'pin_state': 'prepared',
+            'root_rpid': 501,
+            'remote_verified_at': None,
+            'error': '远端缺少置顶评论，将重新发布',
+        }
+        assert (
+            await database.scalar('SELECT state FROM vainglory_publication_comments')
+            == 'confirmed'
+        )
+        assert len(protocol.add_reply_calls) == 1
+
+        await database.execute('UPDATE vainglory_publications SET next_attempt_at=0')
+        protocol.pin_write_becomes_visible = True
+        for _ in range(2):
+            assert await service.run_once() is True
+
+        confirmed = await database.fetchone(
+            'SELECT state,remote_verified_at FROM vainglory_publications'
+        )
+        assert dict(confirmed) == {'state': 'confirmed', 'remote_verified_at': 1000}
+        assert len(protocol.add_reply_calls) == 1
+        assert len(protocol.top_reply_calls) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_publications_can_be_queued_for_low_priority_reaudit(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        now = [1000]
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: now[0],
+        )
+        for _ in range(6):
+            assert await service.run_once() is True
+
+        now[0] = 2000
+        before = await service.publication_audit_status(stale_before=1500)
+        assert before.total_count == 1
+        assert before.verified_count == 1
+        assert before.stale_count == 1
+        assert before.pending_count == 0
+        assert before.failed_count == 0
+        assert before.oldest_verified_at == 1000
+
+        assert await service.queue_publication_audit(stale_before=1500, limit=10) == 1
+        queued = await database.fetchone(
+            'SELECT state,chapter_state,description_state,pin_state,'
+            'remote_verified_at,priority,error FROM vainglory_publications'
+        )
+        assert dict(queued) == {
+            'state': 'prepared',
+            'chapter_state': 'confirmed',
+            'description_state': 'confirmed',
+            'pin_state': 'confirmed',
+            'remote_verified_at': None,
+            'priority': 0,
+            'error': '等待远端重新复核',
+        }
+
+        after = await service.publication_audit_status(stale_before=1500)
+        assert after.verified_count == 0
+        assert after.stale_count == 0
+        assert after.pending_count == 1
+
+        await database.execute(
+            "UPDATE vainglory_publications SET state='confirmed',"
+            'remote_verified_at=NULL'
+        )
+        unverified = await service.publication_audit_status(stale_before=1500)
+        assert unverified.verified_count == 0
+        assert unverified.stale_count == 1
+        assert unverified.pending_count == 0
+        assert await service.queue_publication_audit(stale_before=1500, limit=10) == 1
     finally:
         await database.close()
 
