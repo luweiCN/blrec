@@ -20,6 +20,7 @@ import { PublicDashboardRoutingModule } from './public-dashboard-routing.module'
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
 import { RankingGuidePageComponent } from './ranking-guide-page.component';
+import { SeasonCorrectionNoticeComponent } from './season-correction-notice.component';
 import { SiteStatsComponent } from './site-stats.component';
 import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 
@@ -43,6 +44,7 @@ import { SkillTierBadgeComponent } from './skill-tier-badge.component';
     RankingGuidePageComponent,
     PlayGuidePageComponent,
     DownloadGuidePageComponent,
+    SeasonCorrectionNoticeComponent,
     SiteStatsComponent,
     SkillTierBadgeComponent,
   ],

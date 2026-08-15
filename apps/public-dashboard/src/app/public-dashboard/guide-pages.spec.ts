@@ -34,8 +34,10 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('经验量 · 35%');
     expect(page.textContent).toContain('稳定胜率 · 40%');
     expect(page.textContent).toContain('75 分起为“大师”');
-    expect(page.textContent).toContain('RANKING / 05');
-    expect(page.textContent).toContain('更新于 2026-08-11');
+    expect(page.textContent).toContain('RANKING / 06');
+    expect(page.textContent).toContain('更新于 2026-08-15');
+    expect(page.textContent).toContain('冬季赛');
+    expect(page.textContent).toContain('不是从《虚荣》服务器读取的官方 MMR');
     expect(page.textContent).toContain('新玩家不是被判定为低胜率');
     expect(page.textContent).toContain('30 场 19 胜 11 负');
     expect(page.textContent).toContain('为什么同段位、相近胜率');
