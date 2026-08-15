@@ -630,6 +630,49 @@ async def test_disconnect_closes_file_and_audits_only_safe_stream_fields(
 
 
 @pytest.mark.asyncio
+async def test_reentrant_disconnect_does_not_deadlock_media_stream_finish(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'GET',
+            'path': '/media/7',
+            'query_string': b'',
+            'headers': [],
+            'route': SimpleNamespace(path='/media/{media_id}'),
+        }
+    )
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(media_file),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+    response = build_media_response(request, resource, None, None, None, None)
+    events: List[str] = []
+
+    def reentrant_audit(event: str, **_fields: Any) -> None:
+        events.append(event)
+        response._media_stream.finish('disconnect')
+
+    monkeypatch.setattr(media_response, 'audit', reentrant_audit)
+    thread = threading.Thread(
+        target=response._media_stream.finish, args=('disconnect',), daemon=True
+    )
+
+    thread.start()
+    thread.join(timeout=0.5)
+
+    assert thread.is_alive() is False
+    assert events == ['media_stream']
+    assert resource.file.closed is True
+
+
+@pytest.mark.asyncio
 async def test_opened_resource_can_be_closed_after_conditional_short_circuit(
     media_file: Path,
 ) -> None:

@@ -767,18 +767,18 @@ class _MediaStream:
             if self._finished:
                 return
             self._finished = True
-            try:
-                self._resource.close()
-            finally:
-                audit(
-                    'media_stream',
-                    route=self._route,
-                    status=self._status,
-                    first_byte_ms=self._first_byte_ms,
-                    bytes=self._bytes,
-                    range=self._range_kind,
-                    reason=reason,
-                )
+        try:
+            self._resource.close()
+        finally:
+            audit(
+                'media_stream',
+                route=self._route,
+                status=self._status,
+                first_byte_ms=self._first_byte_ms,
+                bytes=self._bytes,
+                range=self._range_kind,
+                reason=reason,
+            )
 
     def finish_if_incomplete(self) -> None:
         with self._finish_lock:
