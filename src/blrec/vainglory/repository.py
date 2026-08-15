@@ -5594,16 +5594,23 @@ class VaingloryRepository:
                     is not None
                 ):
                     continue
-                cursor = connection.execute(
-                    'INSERT INTO vainglory_players('
-                    'name,origin,created_at,updated_at) '
-                    "VALUES(?,'automatic',?,?)",
-                    (name, now, now),
-                )
+                candidates = self._player_ids_for_anchor_name(connection, name)
+                if len(candidates) > 1:
+                    continue
+                if candidates:
+                    player_id = candidates[0]
+                else:
+                    cursor = connection.execute(
+                        'INSERT INTO vainglory_players('
+                        'name,origin,created_at,updated_at) '
+                        "VALUES(?,'automatic',?,?)",
+                        (name, now, now),
+                    )
+                    player_id = int(cursor.lastrowid)
                 connection.execute(
                     'INSERT INTO vainglory_player_rooms('
                     'room_id,player_id,created_at,updated_at) VALUES(?,?,?,?)',
-                    (room_id, int(cursor.lastrowid), now, now),
+                    (room_id, player_id, now, now),
                 )
 
         await self._database.write(ensure)
@@ -6312,6 +6319,38 @@ class VaingloryRepository:
         )
 
     @staticmethod
+    def _is_reliable_anchor_name(anchor_name: str) -> bool:
+        normalized = anchor_name.strip().casefold()
+        if normalized in ('', '未知主播', '账号已注销', 'unknown'):
+            return False
+        if normalized.startswith('玩家 ') and normalized[3:].isdigit():
+            return False
+        return True
+
+    @staticmethod
+    def _player_ids_for_anchor_name(
+        connection: sqlite3.Connection, anchor_name: str
+    ) -> Tuple[int, ...]:
+        if not VaingloryRepository._is_reliable_anchor_name(anchor_name):
+            return ()
+        rows = connection.execute(
+            'SELECT player_id FROM ('
+            'SELECT player.id AS player_id FROM vainglory_players player '
+            'WHERE lower(player.name)=lower(?) '
+            'UNION '
+            'SELECT room.player_id FROM recording_sessions known '
+            'JOIN vainglory_player_rooms room ON room.room_id=known.room_id '
+            'WHERE known.room_id>0 AND lower(trim(known.anchor_name))=lower(?) '
+            'UNION '
+            'SELECT direct.player_id FROM recording_sessions known '
+            'JOIN vainglory_player_sessions direct ON direct.session_id=known.id '
+            'WHERE lower(trim(known.anchor_name))=lower(?)'
+            ') candidate ORDER BY player_id',
+            (anchor_name[:80], anchor_name, anchor_name),
+        ).fetchall()
+        return tuple(int(row['player_id']) for row in rows)
+
+    @staticmethod
     def _ensure_session_player(
         connection: sqlite3.Connection, session_id: int, now: int
     ) -> None:
@@ -6344,13 +6383,14 @@ class VaingloryRepository:
             ).fetchone()
             if existing is not None:
                 return
-        if room_id <= 0 and anchor_uid is None and not anchor_name:
+        reliable_anchor_name = VaingloryRepository._is_reliable_anchor_name(anchor_name)
+        if anchor_uid is None and not reliable_anchor_name:
             return
 
         player_id: Optional[int] = None
         if anchor_uid is not None:
             known = connection.execute(
-                'SELECT candidate.player_id FROM ('
+                'SELECT DISTINCT candidate.player_id FROM ('
                 'SELECT room.player_id,known.started_at,known.id '
                 'FROM vainglory_player_rooms room '
                 'JOIN recording_sessions known ON known.room_id=room.room_id '
@@ -6360,28 +6400,29 @@ class VaingloryRepository:
                 'FROM vainglory_player_sessions direct '
                 'JOIN recording_sessions known ON known.id=direct.session_id '
                 'WHERE known.anchor_uid=?'
-                ') candidate ORDER BY candidate.started_at DESC,candidate.id DESC '
-                'LIMIT 1',
+                ') candidate ORDER BY candidate.player_id',
                 (anchor_uid, anchor_uid),
-            ).fetchone()
-            if known is not None:
-                player_id = int(known['player_id'])
-        if player_id is None and room_id <= 0 and anchor_name:
-            known = connection.execute(
-                "SELECT id FROM vainglory_players WHERE origin='automatic' "
-                'AND name=? COLLATE NOCASE ORDER BY id LIMIT 1',
-                (anchor_name[:80],),
-            ).fetchone()
-            if known is not None:
-                player_id = int(known['id'])
+            ).fetchall()
+            if len(known) > 1:
+                return
+            if known:
+                player_id = int(known[0]['player_id'])
+        if player_id is None and reliable_anchor_name:
+            known_player_ids = VaingloryRepository._player_ids_for_anchor_name(
+                connection, anchor_name
+            )
+            if len(known_player_ids) > 1:
+                return
+            if known_player_ids:
+                player_id = known_player_ids[0]
         if player_id is None:
-            fallback = '玩家 {}'.format(room_id or session_id)
-            display_name = (anchor_name or fallback)[:80]
+            if not reliable_anchor_name:
+                return
             cursor = connection.execute(
                 'INSERT INTO vainglory_players('
                 'name,origin,created_at,updated_at) '
                 "VALUES(?,'automatic',?,?)",
-                (display_name, now, now),
+                (anchor_name[:80], now, now),
             )
             player_id = int(cursor.lastrowid)
         if room_id > 0:

@@ -1592,18 +1592,31 @@ class UploadTaskActionManager:
         elif submit_state in ('prepared', 'failed_permanent'):
             failed = [part for part in parts if str(part['upload_state']) == 'failed']
             if any(str(part['artifact_state']) != 'ready' for part in failed):
-                raise UploadTaskActionRejected('失败分 P 的本地视频不可用')
+                identity_change_review = review_reason == 'file identity changed'
+                if not identity_change_review or any(
+                    str(part['artifact_state']) != 'manual_review' for part in failed
+                ):
+                    raise UploadTaskActionRejected('失败分 P 的本地视频不可用')
             for part in failed:
                 part_id = int(part['id'])
                 connection.execute(
                     'DELETE FROM upload_chunks WHERE part_id=?', (part_id,)
                 )
-                connection.execute(
-                    "UPDATE upload_parts SET upload_state='prepared',"
-                    'remote_filename=NULL,upload_session_json=NULL '
-                    'WHERE id=? AND job_id=?',
-                    (part_id, job_id),
-                )
+                if str(part['artifact_state']) == 'manual_review':
+                    connection.execute(
+                        "UPDATE upload_parts SET upload_state='prepared',"
+                        "artifact_state='ready',remote_filename=NULL,"
+                        'upload_session_json=NULL,file_identity=NULL '
+                        'WHERE id=? AND job_id=?',
+                        (part_id, job_id),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE upload_parts SET upload_state='prepared',"
+                        'remote_filename=NULL,upload_session_json=NULL '
+                        'WHERE id=? AND job_id=?',
+                        (part_id, job_id),
+                    )
             remaining = connection.execute(
                 'SELECT upload_state FROM upload_parts WHERE job_id=?', (job_id,)
             ).fetchall()

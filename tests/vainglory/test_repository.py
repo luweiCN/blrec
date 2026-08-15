@@ -2143,6 +2143,98 @@ async def test_analyzed_session_without_anchor_stays_unassigned(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_room_binding_reuses_a_unique_player_with_the_same_anchor_alias(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'historical.mp4'
+        second = tmp_path / 'room.mp4'
+        first.write_bytes(b'first')
+        second.write_bytes(b'second')
+        await seed_session(database, first, session_id=1)
+        await seed_session(database, second, session_id=2)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=0,anchor_uid=NULL,"
+            "anchor_name='-Akitsuki-' WHERE id=1"
+        )
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=930376,anchor_uid=NULL,"
+            "anchor_name='-Akitsuki-' WHERE id=2"
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        assert await repository.claim_next() is not None
+        await repository.complete_part(2, (replace(analyzed_match(), part_id=2),))
+
+        players = await repository.list_players()
+        assert len(players) == 1
+        assert players[0].name == '-Akitsuki-'
+        assert [room.room_id for room in players[0].rooms] == [930376]
+        identities = await database.fetchall(
+            'SELECT player_id FROM vainglory_player_sessions '
+            'UNION SELECT player_id FROM vainglory_player_rooms'
+        )
+        assert [int(row['player_id']) for row in identities] == [players[0].id]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_analysis_reuses_a_manual_player_name_instead_of_creating_a_duplicate(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'manual.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=200,anchor_uid=NULL,"
+            "anchor_name='人工主播' WHERE id=1"
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        manual = await repository.create_player('人工主播')
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+
+        players = await repository.list_players()
+        assert [player.id for player in players] == [manual.id]
+        assert [room.room_id for room in players[0].rooms] == [200]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_generic_unknown_anchor_does_not_create_a_leaderboard_player(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'unknown.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=200,anchor_uid=NULL,"
+            "anchor_name='未知主播' WHERE id=1"
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+
+        assert await repository.list_players() == ()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_external_import_without_room_stays_unassigned(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()

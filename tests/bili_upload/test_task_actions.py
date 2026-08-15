@@ -557,6 +557,12 @@ async def test_retry_failed_resets_only_safe_failed_parts(tmp_path: Path) -> Non
             'INSERT INTO upload_chunks('
             "part_id,chunk_no,offset,size,state,attempt) VALUES(12,0,0,8,'failed',3)"
         )
+        await database.execute(
+            "UPDATE upload_jobs SET review_reason='file identity changed' WHERE id=9"
+        )
+        await database.execute(
+            "UPDATE upload_parts SET artifact_state='manual_review' WHERE id=12"
+        )
         manager, _, _ = make_manager(
             database, FakeProtocol(archive_response()), tmp_path
         )
@@ -574,11 +580,32 @@ async def test_retry_failed_resets_only_safe_failed_parts(tmp_path: Path) -> Non
             'review_reason': '管理员已重新排队失败任务',
         }
         parts = await database.fetchall(
-            'SELECT id,upload_state,remote_filename FROM upload_parts ORDER BY id'
+            'SELECT id,artifact_state,upload_state,remote_filename,file_identity '
+            'FROM upload_parts ORDER BY id'
         )
-        assert [dict(row) for row in parts] == [
-            {'id': 11, 'upload_state': 'confirmed', 'remote_filename': 'remote-11'},
-            {'id': 12, 'upload_state': 'prepared', 'remote_filename': None},
+        assert parts[0]['file_identity'] is not None
+        assert parts[1]['file_identity'] is None
+        assert [
+            {
+                'id': int(row['id']),
+                'artifact_state': str(row['artifact_state']),
+                'upload_state': str(row['upload_state']),
+                'remote_filename': row['remote_filename'],
+            }
+            for row in parts
+        ] == [
+            {
+                'id': 11,
+                'artifact_state': 'ready',
+                'upload_state': 'confirmed',
+                'remote_filename': 'remote-11',
+            },
+            {
+                'id': 12,
+                'artifact_state': 'ready',
+                'upload_state': 'prepared',
+                'remote_filename': None,
+            },
         ]
         assert await database.scalar('SELECT COUNT(*) FROM upload_chunks') == 0
         audit = await database.fetchone(
@@ -592,6 +619,33 @@ async def test_retry_failed_resets_only_safe_failed_parts(tmp_path: Path) -> Non
             'old_state': 'paused/prepared',
             'new_state': 'ready/prepared',
         }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_does_not_accept_an_unrelated_manual_review(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state='paused',
+            submit_state='prepared',
+            second_upload_state='failed',
+        )
+        await database.execute(
+            "UPDATE upload_parts SET artifact_state='manual_review' WHERE id=12"
+        )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        with pytest.raises(UploadTaskActionRejected, match='本地视频不可用'):
+            await manager.retry_failed(9, manager_subject='manager')
     finally:
         await database.close()
 
