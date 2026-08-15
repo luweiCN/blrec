@@ -102,9 +102,11 @@ describe('PublicDashboardShellComponent', () => {
     );
     expect(dialog?.open).toBeTrue();
     expect(dialog?.textContent).toContain(
-      '新赛季改为软重置',
+      '新赛季会从较低段位重新开始',
     );
-    expect(dialog?.textContent).not.toContain('50 局');
+    expect(dialog?.textContent).toContain('10 段铜约从 8 段铜开始');
+    expect(dialog?.textContent).not.toContain('软重置');
+    expect(dialog?.textContent).not.toContain('具体参数不公开');
 
     page
       .querySelector<HTMLButtonElement>('[aria-label="关闭更新说明"]')

@@ -63,7 +63,10 @@ describe('PublicDashboardComponent', () => {
       '这是我们的错误',
     );
     expect(page.querySelector('.season-correction-notice')?.textContent).toContain(
-      '软重置和隐藏分规则',
+      '上赛季成绩还会用于计算新赛季起点',
+    );
+    expect(page.querySelector('.season-correction-notice')?.textContent).not.toContain(
+      '软重置',
     );
     expect(page.querySelector('.snapshot-note')?.textContent).toContain(
       '真实数据',
@@ -80,7 +83,7 @@ describe('PublicDashboardComponent', () => {
     expect(page.querySelector('.hero-chip')?.textContent).toContain('凯恩');
     expect(page.textContent).not.toContain('综合积分');
     expect(page.querySelector('.hero-intro')?.textContent).toContain(
-      '历史数据正在持续同步中',
+      '历史数据仍在补录',
     );
     expect(page.querySelector('.hero-intro')?.textContent).not.toContain(
       '重复建档',
