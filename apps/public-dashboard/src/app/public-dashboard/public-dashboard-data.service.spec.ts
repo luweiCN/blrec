@@ -59,6 +59,22 @@ describe('DashboardDataService', () => {
     ]);
   });
 
+  it('accepts the next rating model before the API switches to it', async () => {
+    environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
+    const snapshotWithV6 = {
+      ...TEST_DASHBOARD_SNAPSHOT,
+      ratingModel: { version: 6 },
+    } as unknown as typeof TEST_DASHBOARD_SNAPSHOT;
+    spyOn(window, 'fetch').and.returnValue(
+      Promise.resolve(jsonResponse(apiDocument(snapshotWithV6))),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('ready');
+  });
+
   it('does not fall back to a stale static JSON file', async () => {
     environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
     spyOn(console, 'error');

@@ -279,7 +279,11 @@ function isRatingModel(value: unknown): value is RatingModel {
   if (!isObject(value)) {
     return false;
   }
-  if (value['version'] === 4 || value['version'] === 5) {
+  if (
+    value['version'] === 4 ||
+    value['version'] === 5 ||
+    value['version'] === 6
+  ) {
     return true;
   }
   if (value['version'] === 3) {
