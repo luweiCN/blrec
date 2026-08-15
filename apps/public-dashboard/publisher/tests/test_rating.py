@@ -4,6 +4,7 @@ import pytest
 from blrec_dashboard_publisher.rating import (
     CARRYOVER_MATCH_CAP,
     VirtualMatchRating,
+    _advance_rating,
     calculate_rating_forecast,
     calculate_virtual_match_rating,
     calculate_virtual_match_rating_timeline,
@@ -223,6 +224,66 @@ def test_previous_hidden_strength_accelerates_the_visible_season_reset() -> None
     assert neutral is not None
     assert display_score(strong) > display_score(neutral)
     assert display_score(strong) >= 1047
+
+
+@pytest.mark.parametrize(
+    ('previous_score', 'expected_reset_score'),
+    ((2400, 1800), (2600, 1899), (2800, 2001)),
+)
+def test_established_players_receive_a_soft_season_reset(
+    previous_score: int, expected_reset_score: int
+) -> None:
+    timeline = calculate_virtual_match_rating_timeline(
+        results=['W'],
+        previous_ability=expected_win_probability(previous_score),
+        previous_evidence=CARRYOVER_MATCH_CAP,
+    )
+
+    assert timeline[0].score_before == expected_reset_score
+
+
+@pytest.mark.parametrize(
+    ('previous_score', 'minimum_matches', 'maximum_matches'),
+    ((2400, 30, 40), (2600, 50, 60), (2800, 70, 80)),
+)
+def test_high_rank_soft_reset_recovery_matches_the_calibrated_curve(
+    previous_score: int, minimum_matches: int, maximum_matches: int
+) -> None:
+    results = ['L' if match % 10 == 5 else 'W' for match in range(1, 121)]
+    timeline = calculate_virtual_match_rating_timeline(
+        results=results,
+        previous_ability=expected_win_probability(previous_score),
+        previous_evidence=CARRYOVER_MATCH_CAP,
+    )
+    recovery_match = next(
+        match
+        for match, transition in enumerate(timeline, start=1)
+        if transition.score_after >= previous_score
+    )
+
+    assert minimum_matches <= recovery_match <= maximum_matches
+
+
+def test_season_loss_protection_expires_after_fifty_matches() -> None:
+    protected = VirtualMatchRating(
+        ability=expected_win_probability(2400),
+        evidence=CARRYOVER_MATCH_CAP,
+        score=600,
+        provisional=False,
+        season_matches=49,
+    )
+    unprotected = VirtualMatchRating(
+        ability=protected.ability,
+        evidence=protected.evidence,
+        score=protected.score,
+        provisional=False,
+        season_matches=50,
+    )
+
+    protected_loss = _advance_rating(protected, 'L', reset_visible_score=True).score
+    unprotected_loss = _advance_rating(unprotected, 'L', reset_visible_score=True).score
+
+    assert protected.score - protected_loss < unprotected.score - unprotected_loss
 
 
 @pytest.mark.parametrize(

@@ -839,20 +839,7 @@ async def test_historical_backfill_recalculates_every_later_season(
             with_autumn, '2026-summer', 20
         )
         assert rating(with_autumn, '2026-summer', 10) != spring_strong
-        assert with_autumn['ratingModel'] == {
-            'carryoverMatchCap': 200,
-            'catchupLimit': 45,
-            'catchupLossMultiplier': 0.5,
-            'catchupProtectionGap': 150,
-            'catchupRate': 0.08,
-            'minimumOutcomeDelta': 1,
-            'neutralDisplayScore': 1200,
-            'priorMatches': 20,
-            'probabilityScale': 1800,
-            'provisionalMatches': 5,
-            'seasonResetDisplayScore': 1000,
-            'version': 3,
-        }
+        assert with_autumn['ratingModel'] == {'version': 4}
     finally:
         await database.close()
 

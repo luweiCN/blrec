@@ -25,18 +25,7 @@ from typing import (
 
 from .deduplication import exact_match_fingerprint
 from .rating import (
-    CARRYOVER_MATCH_CAP,
-    CATCHUP_LIMIT,
-    CATCHUP_LOSS_MULTIPLIER,
-    CATCHUP_PROTECTION_GAP,
-    CATCHUP_RATE,
-    MINIMUM_OUTCOME_DELTA,
-    NEUTRAL_DISPLAY_SCORE,
-    PRIOR_MATCHES,
-    PROBABILITY_SCALE,
-    PROVISIONAL_MATCHES,
     RATING_MODEL_VERSION,
-    SEASON_RESET_DISPLAY_SCORE,
     RatingForecast,
     RatingGoalForecast,
     VirtualMatchRating,
@@ -1481,20 +1470,7 @@ def build_dashboard_snapshot_from_records(
         'generatedAt': _utc_iso(generated_at),
         'sourceLastMatchId': source_last_match_id,
         'sourceMatchCount': len(source_rows),
-        'ratingModel': {
-            'version': RATING_MODEL_VERSION,
-            'priorMatches': PRIOR_MATCHES,
-            'carryoverMatchCap': CARRYOVER_MATCH_CAP,
-            'provisionalMatches': PROVISIONAL_MATCHES,
-            'neutralDisplayScore': NEUTRAL_DISPLAY_SCORE,
-            'seasonResetDisplayScore': SEASON_RESET_DISPLAY_SCORE,
-            'probabilityScale': PROBABILITY_SCALE,
-            'minimumOutcomeDelta': MINIMUM_OUTCOME_DELTA,
-            'catchupRate': CATCHUP_RATE,
-            'catchupLimit': CATCHUP_LIMIT,
-            'catchupProtectionGap': CATCHUP_PROTECTION_GAP,
-            'catchupLossMultiplier': CATCHUP_LOSS_MULTIPLIER,
-        },
+        'ratingModel': {'version': RATING_MODEL_VERSION},
         'currentSeasonKey': current_season.key,
         'seasons': [_season_option(season, current_season.key) for season in seasons]
         + [

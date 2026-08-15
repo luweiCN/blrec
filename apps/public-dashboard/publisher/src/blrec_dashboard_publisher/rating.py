@@ -7,8 +7,13 @@ from typing import Optional, Sequence
 
 __all__ = (
     'CARRYOVER_MATCH_CAP',
+    'CATCHUP_ELITE_DISPLAY_SCORE',
+    'CATCHUP_ELITE_LIMIT',
+    'CATCHUP_HIGH_DISPLAY_SCORE',
+    'CATCHUP_HIGH_LIMIT',
     'CATCHUP_LIMIT',
     'CATCHUP_LOSS_MULTIPLIER',
+    'CATCHUP_PROTECTION_MATCHES',
     'CATCHUP_PROTECTION_GAP',
     'CATCHUP_RATE',
     'MINIMUM_OUTCOME_DELTA',
@@ -20,7 +25,9 @@ __all__ = (
     'RatingForecast',
     'RatingGoalForecast',
     'RatingTransition',
-    'SEASON_RESET_DISPLAY_SCORE',
+    'NEW_PLAYER_DISPLAY_SCORE',
+    'SEASON_RESET_ANCHOR_DISPLAY_SCORE',
+    'SEASON_RESET_CARRYOVER_RATE',
     'VirtualMatchRating',
     'calculate_rating_forecast',
     'calculate_virtual_match_rating',
@@ -33,14 +40,21 @@ PRIOR_MATCHES = 20
 CARRYOVER_MATCH_CAP = 200
 PROVISIONAL_MATCHES = 5
 NEUTRAL_DISPLAY_SCORE = 1200
-SEASON_RESET_DISPLAY_SCORE = 1000
+NEW_PLAYER_DISPLAY_SCORE = 1000
+SEASON_RESET_ANCHOR_DISPLAY_SCORE = 1200
+SEASON_RESET_CARRYOVER_RATE = 0.5
 PROBABILITY_SCALE = 1800
 MINIMUM_OUTCOME_DELTA = 1
 CATCHUP_RATE = 0.08
-CATCHUP_LIMIT = 45
+CATCHUP_LIMIT = 18
+CATCHUP_HIGH_DISPLAY_SCORE = 2500
+CATCHUP_HIGH_LIMIT = 12
+CATCHUP_ELITE_DISPLAY_SCORE = 2700
+CATCHUP_ELITE_LIMIT = 10
 CATCHUP_PROTECTION_GAP = 150
+CATCHUP_PROTECTION_MATCHES = 50
 CATCHUP_LOSS_MULTIPLIER = 0.5
-RATING_MODEL_VERSION = 3
+RATING_MODEL_VERSION = 4
 
 _NEUTRAL_ABILITY = 0.5
 _DISPLAY_SCORE_MULTIPLIER = 3
@@ -86,6 +100,7 @@ class VirtualMatchRating:
     evidence: float
     score: int
     provisional: bool
+    season_matches: int = 0
 
 
 @dataclass(frozen=True)
@@ -155,18 +170,45 @@ def _initial_evidence(
     return previous_ability, min(previous_evidence, float(CARRYOVER_MATCH_CAP))
 
 
+def _initial_display_score(previous_ability: Optional[float]) -> float:
+    if previous_ability is None:
+        return float(NEW_PLAYER_DISPLAY_SCORE)
+    inherited_score = _display_score_for_ability(previous_ability)
+    compressed_score = (
+        SEASON_RESET_ANCHOR_DISPLAY_SCORE
+        + (inherited_score - SEASON_RESET_ANCHOR_DISPLAY_SCORE)
+        * SEASON_RESET_CARRYOVER_RATE
+    )
+    return min(inherited_score, compressed_score)
+
+
+def _catchup_limit(hidden_score: float) -> int:
+    if hidden_score >= CATCHUP_ELITE_DISPLAY_SCORE:
+        return CATCHUP_ELITE_LIMIT
+    if hidden_score >= CATCHUP_HIGH_DISPLAY_SCORE:
+        return CATCHUP_HIGH_LIMIT
+    return CATCHUP_LIMIT
+
+
 def _internal_outcome_delta(
     *,
     result: str,
     hidden_score_before: float,
     hidden_score_after: float,
     visible_score: float,
+    season_match_number: int,
 ) -> int:
     display_delta = hidden_score_after - hidden_score_before
     placement_gap = hidden_score_after - (visible_score * _DISPLAY_SCORE_MULTIPLIER)
     if result == 'W' and placement_gap > 0.0:
-        display_delta += min(CATCHUP_LIMIT, placement_gap * CATCHUP_RATE)
-    elif result == 'L' and placement_gap >= CATCHUP_PROTECTION_GAP:
+        display_delta += min(
+            _catchup_limit(hidden_score_after), placement_gap * CATCHUP_RATE
+        )
+    elif (
+        result == 'L'
+        and season_match_number <= CATCHUP_PROTECTION_MATCHES
+        and placement_gap >= CATCHUP_PROTECTION_GAP
+    ):
         display_delta *= CATCHUP_LOSS_MULTIPLIER
 
     internal_delta = round(display_delta / _DISPLAY_SCORE_MULTIPLIER)
@@ -200,18 +242,24 @@ def _advance_rating(
     evidence = alpha + beta
     ability = alpha / evidence
     hidden_score_after = _display_score_for_ability(ability)
+    season_match_number = rating.season_matches + 1
     if reset_visible_score:
         score = rating.score + _internal_outcome_delta(
             result=result,
             hidden_score_before=hidden_score_before,
             hidden_score_after=hidden_score_after,
             visible_score=rating.score,
+            season_match_number=season_match_number,
         )
         score = max(0, min(_INTERNAL_SCORE_MAXIMUM, score))
     else:
         score = round(hidden_score_after / _DISPLAY_SCORE_MULTIPLIER)
     return VirtualMatchRating(
-        ability=ability, evidence=evidence, score=score, provisional=rating.provisional
+        ability=ability,
+        evidence=evidence,
+        score=score,
+        provisional=rating.provisional,
+        season_matches=season_match_number,
     )
 
 
@@ -371,7 +419,7 @@ def calculate_virtual_match_rating_timeline(
         evidence=prior_evidence,
         score=round(
             (
-                SEASON_RESET_DISPLAY_SCORE
+                _initial_display_score(previous_ability)
                 if reset_visible_score
                 else _display_score_for_ability(prior_ability)
             )
@@ -387,6 +435,7 @@ def calculate_virtual_match_rating_timeline(
             evidence=after.evidence,
             score=after.score,
             provisional=match_number < PROVISIONAL_MATCHES,
+            season_matches=after.season_matches,
         )
         transitions.append(
             RatingTransition(result=result, rating_before=rating, rating_after=after)
