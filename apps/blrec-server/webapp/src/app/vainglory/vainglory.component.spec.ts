@@ -535,10 +535,10 @@ describe('VaingloryComponent remote media', () => {
       '已处理 1832 / 已发现 2148',
     );
     expect(component.archiveDiscoveryLabel(running)).toBe(
-      '正在扫描第 202 页',
+      '正在扫描第 202 页，已收录 2148 个稿件',
     );
     expect(component.archiveDiscoveryLabel(completed)).toBe(
-      '稿件列表已扫描完成，共 201 页',
+      '稿件列表扫描完成：201 页，已收录 2148 个稿件',
     );
   });
 

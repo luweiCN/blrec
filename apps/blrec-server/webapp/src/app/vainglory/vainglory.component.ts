@@ -2624,8 +2624,8 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   archiveDiscoveryLabel(sync: VaingloryArchiveSync): string {
     const scannedPages = Math.max(0, sync.nextPage - 1);
     return sync.discoveryComplete
-      ? `稿件列表已扫描完成，共 ${scannedPages} 页`
-      : `正在扫描第 ${Math.max(1, sync.nextPage)} 页`;
+      ? `稿件列表扫描完成：${scannedPages} 页，已收录 ${sync.discoveredCount} 个稿件`
+      : `正在扫描第 ${Math.max(1, sync.nextPage)} 页，已收录 ${sync.discoveredCount} 个稿件`;
   }
 
   archiveItems(accountId: number): readonly VaingloryArchiveBackfillItem[] {
