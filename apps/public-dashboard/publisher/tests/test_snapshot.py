@@ -488,7 +488,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
         assert first['modes']['all']['topHero'] == 'Caine'
         assert first['modes']['all']['form'] == ['W', 'L']
         assert first['modes']['3v3']['matches'] == 1
-        assert isinstance(first['modes']['3v3']['ratingScore'], int)
+        assert isinstance(first['modes']['3v3']['ratingScore'], (int, float))
         assert first['modes']['3v3']['provisional'] is True
         forecast = first['modes']['3v3']['ratingForecast']
         assert forecast['nextWinScore'] > first['modes']['3v3']['ratingScore']
@@ -839,7 +839,7 @@ async def test_historical_backfill_recalculates_every_later_season(
             with_autumn, '2026-summer', 20
         )
         assert rating(with_autumn, '2026-summer', 10) != spring_strong
-        assert with_autumn['ratingModel'] == {'version': 4}
+        assert with_autumn['ratingModel'] == {'version': 5}
     finally:
         await database.close()
 

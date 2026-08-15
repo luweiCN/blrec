@@ -42,7 +42,7 @@ class _Dataset:
 
 @dataclass
 class _TrendPerformance:
-    rating_score: int
+    rating_score: float
     matches: int
     wins: int
 
@@ -228,7 +228,7 @@ def _match_publication_date(match: Mapping[str, Any]) -> str:
 
 def _rank_trend_performances(
     performances: Mapping[int, _TrendPerformance]
-) -> List[Mapping[str, int]]:
+) -> List[Mapping[str, Any]]:
     candidates = sorted(
         performances.items(),
         key=lambda item: (
@@ -288,7 +288,7 @@ def _rating_trends(
                     )
                     previous = performances.get(player_id)
                     performances[player_id] = _TrendPerformance(
-                        rating_score=int(event['scoreAfter']) // 3,
+                        rating_score=int(event['scoreAfter']) / 3,
                         matches=1 if previous is None else previous.matches + 1,
                         wins=(
                             int(str(match['result']) == 'W')

@@ -33,8 +33,8 @@ describe('public guide pages', () => {
     expect(page.textContent).not.toContain('下一局胜率约为 77.3%');
     expect(page.textContent).not.toContain('经验量 · 35%');
     expect(page.textContent).not.toContain('稳定胜率 · 40%');
-    expect(page.textContent).toContain('RANKING / 08');
-    expect(page.textContent).toContain('更新于 2026-08-15');
+    expect(page.textContent).toContain('RANKING / 09');
+    expect(page.textContent).toContain('更新于 2026-08-16');
     expect(page.textContent).toContain('冬季赛');
     expect(page.textContent).toContain('第一次进入榜单时从 4 段铜附近开始');
     expect(page.textContent).toContain('10 段铜约从 8 段铜开始');
@@ -42,7 +42,7 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('10 段金约从 9 段铜开始');
     expect(page.textContent).not.toContain('30 场 19 胜 11 负');
     expect(page.textContent).toContain('为什么同段位、相近胜率');
-    expect(page.textContent).toContain('接近上赛季水平后，单局涨跌会恢复正常');
+    expect(page.textContent).toContain('累计场数增加后，单局涨跌也不会再无限缩小');
     expect(page.textContent).not.toContain('软重置');
     expect(page.textContent).not.toContain('具体参数不公开');
     expect(page.textContent).not.toContain('精确参数');

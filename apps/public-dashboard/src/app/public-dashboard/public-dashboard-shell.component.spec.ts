@@ -101,6 +101,9 @@ describe('PublicDashboardShellComponent', () => {
       '.update-notes-dialog',
     );
     expect(dialog?.open).toBeTrue();
+    expect(dialog?.textContent).toContain('高段位单局涨跌已重新校准');
+    expect(dialog?.textContent).toContain('十段银、十段金后');
+    expect(dialog?.textContent).toContain('1～3 分');
     expect(dialog?.textContent).toContain(
       '新赛季会从较低段位重新开始',
     );

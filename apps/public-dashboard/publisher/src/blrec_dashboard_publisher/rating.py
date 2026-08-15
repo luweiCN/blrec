@@ -7,16 +7,6 @@ from typing import Optional, Sequence
 
 __all__ = (
     'CARRYOVER_MATCH_CAP',
-    'CATCHUP_ELITE_DISPLAY_SCORE',
-    'CATCHUP_ELITE_LIMIT',
-    'CATCHUP_HIGH_DISPLAY_SCORE',
-    'CATCHUP_HIGH_LIMIT',
-    'CATCHUP_LIMIT',
-    'CATCHUP_LOSS_MULTIPLIER',
-    'CATCHUP_PROTECTION_MATCHES',
-    'CATCHUP_PROTECTION_GAP',
-    'CATCHUP_RATE',
-    'MINIMUM_OUTCOME_DELTA',
     'NEUTRAL_DISPLAY_SCORE',
     'PRIOR_MATCHES',
     'PROBABILITY_SCALE',
@@ -44,22 +34,23 @@ NEW_PLAYER_DISPLAY_SCORE = 1000
 SEASON_RESET_ANCHOR_DISPLAY_SCORE = 1200
 SEASON_RESET_CARRYOVER_RATE = 0.5
 PROBABILITY_SCALE = 1800
-MINIMUM_OUTCOME_DELTA = 1
-CATCHUP_RATE = 0.08
-CATCHUP_LIMIT = 18
-CATCHUP_HIGH_DISPLAY_SCORE = 2500
-CATCHUP_HIGH_LIMIT = 12
-CATCHUP_ELITE_DISPLAY_SCORE = 2700
-CATCHUP_ELITE_LIMIT = 10
-CATCHUP_PROTECTION_GAP = 150
-CATCHUP_PROTECTION_MATCHES = 50
-CATCHUP_LOSS_MULTIPLIER = 0.5
-RATING_MODEL_VERSION = 4
+RATING_MODEL_VERSION = 5
 
 _NEUTRAL_ABILITY = 0.5
 _DISPLAY_SCORE_MULTIPLIER = 3
 _DISPLAY_SCORE_MAXIMUM = 3000
 _INTERNAL_SCORE_MAXIMUM = _DISPLAY_SCORE_MAXIMUM // _DISPLAY_SCORE_MULTIPLIER
+_RATING_GAP_WIN_BONUS_RATE = 0.04
+_RATING_GAP_OUTCOME_ADJUSTMENT_RATE = 0.02
+_MAXIMUM_WIN_BONUS = 18
+_MAXIMUM_WIN_PENALTY = 6
+_MAXIMUM_LOSS_PENALTY = 6
+_STANDARD_MINIMUM_WIN_DELTA = 9
+_MINIMUM_LOSS_DELTA = 3
+_MAXIMUM_LOSS_DELTA = 18
+_FORECAST_STAGNATION_MATCHES = 200
+_TIER_TEN_SILVER_DISPLAY_SCORE = 2600
+_TIER_TEN_GOLD_DISPLAY_SCORE = 2800
 _SKILL_TIER_START_POINTS = (
     0,
     109,
@@ -98,9 +89,8 @@ _SKILL_TIER_START_POINTS = (
 class VirtualMatchRating:
     ability: float
     evidence: float
-    score: int
+    score: float
     provisional: bool
-    season_matches: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,11 +101,11 @@ class RatingTransition:
 
     @property
     def score_before(self) -> int:
-        return self.rating_before.score * _DISPLAY_SCORE_MULTIPLIER
+        return round(self.rating_before.score * _DISPLAY_SCORE_MULTIPLIER)
 
     @property
     def score_after(self) -> int:
-        return self.rating_after.score * _DISPLAY_SCORE_MULTIPLIER
+        return round(self.rating_after.score * _DISPLAY_SCORE_MULTIPLIER)
 
     @property
     def score_delta(self) -> int:
@@ -131,8 +121,8 @@ class RatingGoalForecast:
 
 @dataclass(frozen=True)
 class RatingForecast:
-    next_win_score: int
-    next_loss_score: int
+    next_win_score: float
+    next_loss_score: float
     next_division: Optional[RatingGoalForecast]
     next_tier: Optional[RatingGoalForecast]
     ultimate: RatingGoalForecast
@@ -182,39 +172,77 @@ def _initial_display_score(previous_ability: Optional[float]) -> float:
     return min(inherited_score, compressed_score)
 
 
-def _catchup_limit(hidden_score: float) -> int:
-    if hidden_score >= CATCHUP_ELITE_DISPLAY_SCORE:
-        return CATCHUP_ELITE_LIMIT
-    if hidden_score >= CATCHUP_HIGH_DISPLAY_SCORE:
-        return CATCHUP_HIGH_LIMIT
-    return CATCHUP_LIMIT
+def _baseline_display_deltas(visible_score: int) -> tuple[int, int]:
+    if visible_score < 981:
+        return 24, 6
+    if visible_score < 1400:
+        return 21, 9
+    if visible_score < 2000:
+        return 18, 12
+    if visible_score < 2400:
+        return 12, 12
+    if visible_score < _TIER_TEN_SILVER_DISPLAY_SCORE:
+        return 9, 12
+    if visible_score < _TIER_TEN_GOLD_DISPLAY_SCORE:
+        return 2, 12
+    return 1, 15
+
+
+def _minimum_win_delta(visible_score: int) -> int:
+    if visible_score >= _TIER_TEN_SILVER_DISPLAY_SCORE:
+        return 1
+    return _STANDARD_MINIMUM_WIN_DELTA
+
+
+def _maximum_win_bonus(visible_score: int) -> int:
+    if visible_score >= _TIER_TEN_GOLD_DISPLAY_SCORE:
+        return 2
+    if visible_score >= _TIER_TEN_SILVER_DISPLAY_SCORE:
+        return 1
+    return _MAXIMUM_WIN_BONUS
+
+
+def _round_display_adjustment(value: float) -> int:
+    return int(value + 0.5)
 
 
 def _internal_outcome_delta(
-    *,
-    result: str,
-    hidden_score_before: float,
-    hidden_score_after: float,
-    visible_score: float,
-    season_match_number: int,
-) -> int:
-    display_delta = hidden_score_after - hidden_score_before
-    placement_gap = hidden_score_after - (visible_score * _DISPLAY_SCORE_MULTIPLIER)
-    if result == 'W' and placement_gap > 0.0:
-        display_delta += min(
-            _catchup_limit(hidden_score_after), placement_gap * CATCHUP_RATE
-        )
-    elif (
-        result == 'L'
-        and season_match_number <= CATCHUP_PROTECTION_MATCHES
-        and placement_gap >= CATCHUP_PROTECTION_GAP
-    ):
-        display_delta *= CATCHUP_LOSS_MULTIPLIER
-
-    internal_delta = round(display_delta / _DISPLAY_SCORE_MULTIPLIER)
+    *, result: str, hidden_score_before: float, visible_score: float
+) -> float:
+    visible_display_score = round(visible_score * _DISPLAY_SCORE_MULTIPLIER)
+    win_delta, loss_delta = _baseline_display_deltas(visible_display_score)
+    rating_gap = hidden_score_before - visible_display_score
     if result == 'W':
-        return max(MINIMUM_OUTCOME_DELTA, internal_delta)
-    return min(-MINIMUM_OUTCOME_DELTA, internal_delta)
+        if rating_gap > 0.0:
+            win_delta += min(
+                _maximum_win_bonus(visible_display_score),
+                _round_display_adjustment(rating_gap * _RATING_GAP_WIN_BONUS_RATE),
+            )
+        else:
+            win_delta -= min(
+                _MAXIMUM_WIN_PENALTY,
+                _round_display_adjustment(
+                    -rating_gap * _RATING_GAP_OUTCOME_ADJUSTMENT_RATE
+                ),
+            )
+        display_delta = max(_minimum_win_delta(visible_display_score), win_delta)
+    else:
+        if rating_gap > 0.0:
+            loss_delta -= min(
+                loss_delta - _MINIMUM_LOSS_DELTA,
+                _round_display_adjustment(
+                    rating_gap * _RATING_GAP_OUTCOME_ADJUSTMENT_RATE
+                ),
+            )
+        else:
+            loss_delta += min(
+                _MAXIMUM_LOSS_PENALTY,
+                _round_display_adjustment(
+                    -rating_gap * _RATING_GAP_OUTCOME_ADJUSTMENT_RATE
+                ),
+            )
+        display_delta = -min(_MAXIMUM_LOSS_DELTA, max(_MINIMUM_LOSS_DELTA, loss_delta))
+    return display_delta / _DISPLAY_SCORE_MULTIPLIER
 
 
 def _advance_evidence(
@@ -230,9 +258,7 @@ def _advance_evidence(
     return alpha, beta
 
 
-def _advance_rating(
-    rating: VirtualMatchRating, result: str, *, reset_visible_score: bool
-) -> VirtualMatchRating:
+def _advance_rating(rating: VirtualMatchRating, result: str) -> VirtualMatchRating:
     if result not in ('W', 'L'):
         raise ValueError('virtual match rating result must be W or L')
     alpha = rating.ability * rating.evidence
@@ -241,25 +267,38 @@ def _advance_rating(
     alpha, beta = _advance_evidence(alpha, beta, 1.0 if result == 'W' else 0.0)
     evidence = alpha + beta
     ability = alpha / evidence
-    hidden_score_after = _display_score_for_ability(ability)
-    season_match_number = rating.season_matches + 1
-    if reset_visible_score:
-        score = rating.score + _internal_outcome_delta(
-            result=result,
-            hidden_score_before=hidden_score_before,
-            hidden_score_after=hidden_score_after,
-            visible_score=rating.score,
-            season_match_number=season_match_number,
-        )
-        score = max(0, min(_INTERNAL_SCORE_MAXIMUM, score))
-    else:
-        score = round(hidden_score_after / _DISPLAY_SCORE_MULTIPLIER)
+    score = rating.score + _internal_outcome_delta(
+        result=result,
+        hidden_score_before=hidden_score_before,
+        visible_score=rating.score,
+    )
+    score = max(0.0, min(float(_INTERNAL_SCORE_MAXIMUM), score))
     return VirtualMatchRating(
-        ability=ability,
+        ability=ability, evidence=evidence, score=score, provisional=rating.provisional
+    )
+
+
+def _advance_expected_rating(
+    rating: VirtualMatchRating, win_rate: float
+) -> VirtualMatchRating:
+    alpha = rating.ability * rating.evidence
+    beta = (1.0 - rating.ability) * rating.evidence
+    hidden_score_before = _display_score_for_ability(rating.ability)
+    win_delta = _internal_outcome_delta(
+        result='W', hidden_score_before=hidden_score_before, visible_score=rating.score
+    )
+    loss_delta = _internal_outcome_delta(
+        result='L', hidden_score_before=hidden_score_before, visible_score=rating.score
+    )
+    alpha, beta = _advance_evidence(alpha, beta, win_rate)
+    evidence = alpha + beta
+    score = rating.score + win_rate * win_delta + (1.0 - win_rate) * loss_delta
+    score = max(0.0, min(float(_INTERNAL_SCORE_MAXIMUM), score))
+    return VirtualMatchRating(
+        ability=alpha / evidence,
         evidence=evidence,
         score=score,
         provisional=rating.provisional,
-        season_matches=season_match_number,
     )
 
 
@@ -277,18 +316,24 @@ def _goal_target_scores(display_score: int) -> tuple[Optional[int], Optional[int
 
 
 def _all_win_matches_for_targets(
-    rating: VirtualMatchRating, targets: Sequence[int], *, reset_visible_score: bool
+    rating: VirtualMatchRating, targets: Sequence[int]
 ) -> dict[int, int]:
-    matches_by_target = {target: 0 for target in targets if rating.score * 3 >= target}
+    matches_by_target = {
+        target: 0
+        for target in targets
+        if round(rating.score * _DISPLAY_SCORE_MULTIPLIER) >= target
+    }
     pending = sorted(set(targets) - matches_by_target.keys())
     projected = rating
     for matches in range(1, _DISPLAY_SCORE_MAXIMUM + 1):
         if not pending:
             break
-        projected = _advance_rating(
-            projected, 'W', reset_visible_score=reset_visible_score
-        )
-        reached = [target for target in pending if projected.score * 3 >= target]
+        projected = _advance_rating(projected, 'W')
+        reached = [
+            target
+            for target in pending
+            if round(projected.score * _DISPLAY_SCORE_MULTIPLIER) >= target
+        ]
         for target in reached:
             matches_by_target[target] = matches
             pending.remove(target)
@@ -302,60 +347,55 @@ def _current_win_rate_matches_for_targets(
     win_rate: float,
     targets: Sequence[int],
     all_win_matches: dict[int, int],
-    *,
-    reset_visible_score: bool,
 ) -> dict[int, Optional[int]]:
-    current_display_score = rating.score * _DISPLAY_SCORE_MULTIPLIER
-    matches_by_target: dict[int, Optional[int]] = {}
+    current_display_score = round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
+    matches_by_target: dict[int, Optional[int]] = {
+        target: 0 for target in targets if current_display_score >= target
+    }
     if win_rate >= 1.0:
         return {target: all_win_matches[target] for target in targets}
 
-    next_win_score = _advance_rating(
-        rating, 'W', reset_visible_score=reset_visible_score
-    ).score
-    next_loss_score = _advance_rating(
-        rating, 'L', reset_visible_score=reset_visible_score
-    ).score
-    expected_display_delta = _DISPLAY_SCORE_MULTIPLIER * (
-        win_rate * (next_win_score - rating.score)
-        + (1.0 - win_rate) * (next_loss_score - rating.score)
-    )
-    for target in targets:
-        remaining_score = max(0, target - current_display_score)
-        matches_by_target[target] = (
-            0
-            if remaining_score == 0
-            else (
-                math.ceil(remaining_score / expected_display_delta)
-                if expected_display_delta > 0.0
-                else None
-            )
-        )
+    pending = sorted(set(targets) - matches_by_target.keys())
+    projected = rating
+    highest_display_score = current_display_score
+    stagnant_matches = 0
+    for matches in range(1, _DISPLAY_SCORE_MAXIMUM + 1):
+        if not pending:
+            break
+        projected = _advance_expected_rating(projected, win_rate)
+        projected_display_score = round(projected.score * _DISPLAY_SCORE_MULTIPLIER)
+        if projected_display_score > highest_display_score:
+            highest_display_score = projected_display_score
+            stagnant_matches = 0
+        else:
+            stagnant_matches += 1
+        reached = [target for target in pending if projected_display_score >= target]
+        for target in reached:
+            matches_by_target[target] = matches
+            pending.remove(target)
+        if stagnant_matches >= _FORECAST_STAGNATION_MATCHES:
+            break
+    for target in pending:
+        matches_by_target[target] = None
     return matches_by_target
 
 
 def calculate_rating_forecast(
-    *, rating: VirtualMatchRating, win_rate: float, reset_visible_score: bool
+    *, rating: VirtualMatchRating, win_rate: float
 ) -> RatingForecast:
     if not math.isfinite(win_rate) or not 0.0 <= win_rate <= 1.0:
         raise ValueError('virtual match forecast win rate must be between zero and one')
     next_division_target, next_tier_target, ultimate_target = _goal_target_scores(
-        rating.score * _DISPLAY_SCORE_MULTIPLIER
+        round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
     )
     targets = tuple(
         target
         for target in (next_division_target, next_tier_target, ultimate_target)
         if target is not None
     )
-    all_win_matches = _all_win_matches_for_targets(
-        rating, targets, reset_visible_score=reset_visible_score
-    )
+    all_win_matches = _all_win_matches_for_targets(rating, targets)
     current_win_rate_matches = _current_win_rate_matches_for_targets(
-        rating,
-        win_rate,
-        targets,
-        all_win_matches,
-        reset_visible_score=reset_visible_score,
+        rating, win_rate, targets, all_win_matches
     )
 
     def goal(target: Optional[int]) -> Optional[RatingGoalForecast]:
@@ -371,12 +411,8 @@ def calculate_rating_forecast(
     if ultimate is None:
         raise AssertionError('virtual match forecast ultimate goal is required')
     return RatingForecast(
-        next_win_score=_advance_rating(
-            rating, 'W', reset_visible_score=reset_visible_score
-        ).score,
-        next_loss_score=_advance_rating(
-            rating, 'L', reset_visible_score=reset_visible_score
-        ).score,
+        next_win_score=_advance_rating(rating, 'W').score,
+        next_loss_score=_advance_rating(rating, 'L').score,
         next_division=goal(next_division_target),
         next_tier=goal(next_tier_target),
         ultimate=ultimate,
@@ -417,25 +453,26 @@ def calculate_virtual_match_rating_timeline(
     rating = VirtualMatchRating(
         ability=prior_ability,
         evidence=prior_evidence,
-        score=round(
-            (
-                _initial_display_score(previous_ability)
-                if reset_visible_score
-                else _display_score_for_ability(prior_ability)
+        score=float(
+            round(
+                (
+                    _initial_display_score(previous_ability)
+                    if reset_visible_score
+                    else _display_score_for_ability(prior_ability)
+                )
+                / _DISPLAY_SCORE_MULTIPLIER
             )
-            / _DISPLAY_SCORE_MULTIPLIER
         ),
         provisional=True,
     )
     transitions = []
     for match_number, result in enumerate(results, start=1):
-        after = _advance_rating(rating, result, reset_visible_score=reset_visible_score)
+        after = _advance_rating(rating, result)
         after = VirtualMatchRating(
             ability=after.ability,
             evidence=after.evidence,
             score=after.score,
             provisional=match_number < PROVISIONAL_MATCHES,
-            season_matches=after.season_matches,
         )
         transitions.append(
             RatingTransition(result=result, rating_before=rating, rating_after=after)

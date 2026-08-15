@@ -202,17 +202,10 @@ class _Performance:
         )
 
     def public_value(
-        self,
-        rating: Optional[VirtualMatchRating] = None,
-        *,
-        reset_visible_score: bool = True,
+        self, rating: Optional[VirtualMatchRating] = None
     ) -> Mapping[str, Any]:
         forecast = (
-            calculate_rating_forecast(
-                rating=rating,
-                win_rate=self.wins / self.matches,
-                reset_visible_score=reset_visible_score,
-            )
+            calculate_rating_forecast(rating=rating, win_rate=self.wins / self.matches)
             if rating is not None and self.matches > 0
             else None
         )
@@ -1338,9 +1331,7 @@ def _standings_for_rows(
                 'trend': 0,
                 'form': list((modes['all'].results or [])[-5:]),
                 'modes': {
-                    mode: modes[mode].public_value(
-                        ratings[mode], reset_visible_score=reset_visible_score
-                    )
+                    mode: modes[mode].public_value(ratings[mode])
                     for mode in PUBLIC_MODES
                 },
                 'heroPool': _hero_pool(modes['all']),
