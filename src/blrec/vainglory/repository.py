@@ -469,6 +469,32 @@ class AnalysisQueueItem:
 
 
 @dataclass(frozen=True)
+class LiveAnalysisStatusItem:
+    part_id: int
+    session_id: int
+    part_index: int
+    title: str
+    anchor_name: str
+    room_id: int
+    live_started_at: int
+    recording_duration_seconds: int
+    last_observed_at_ms: Optional[int]
+    sample_count: int
+    fine_scan_count: int
+    last_sample_at: Optional[int]
+    next_sample_at: int
+    match_flow_label: str
+    match_flow_confidence: float
+    worker_id: str
+    pending_window_count: int
+    running_window_count: int
+    completed_window_count: int
+    failed_window_count: int
+    provisional_match_count: int
+    last_error: str
+
+
+@dataclass(frozen=True)
 class AnalysisQueueStatus:
     active: Tuple[AnalysisQueueItem, ...]
     queued: Tuple[AnalysisQueueItem, ...]
@@ -485,6 +511,7 @@ class AnalysisQueueStatus:
     live_sample_count: int = 0
     live_provisional_match_count: int = 0
     live_last_observed_at: Optional[int] = None
+    live_items: Tuple[LiveAnalysisStatusItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3397,6 +3424,46 @@ class VaingloryRepository:
                 'AS last_observed_at'
             ).fetchone()
             assert live_status is not None
+            live_rows = connection.execute(
+                'SELECT live.part_id,live.session_id,part.part_index,'
+                'session.title,session.anchor_name,session.room_id,'
+                'CASE WHEN COALESCE(session.live_start_time,0)>0 '
+                'THEN session.live_start_time ELSE session.started_at END '
+                'AS live_started_at,'
+                'COALESCE(part.record_duration_seconds,0) '
+                'AS recording_duration_seconds,'
+                'live.last_observed_at_ms,live.sample_count,live.fine_scan_count,'
+                'live.last_sample_at,live.next_sample_at,'
+                'live.last_match_flow_label,live.last_match_flow_confidence,'
+                'COALESCE(live.lease_owner,\'\') AS worker_id,'
+                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows live_window '
+                'WHERE live_window.part_id=live.part_id '
+                "AND live_window.state='pending') "
+                'AS pending_window_count,'
+                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows live_window '
+                'WHERE live_window.part_id=live.part_id '
+                "AND live_window.state='running') "
+                'AS running_window_count,'
+                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows live_window '
+                'WHERE live_window.part_id=live.part_id '
+                "AND live_window.state='ready') "
+                'AS completed_window_count,'
+                '(SELECT COUNT(*) FROM vainglory_live_analysis_windows live_window '
+                'WHERE live_window.part_id=live.part_id '
+                "AND live_window.state='failed') "
+                'AS failed_window_count,'
+                '(SELECT COUNT(*) FROM vainglory_matches match '
+                "WHERE match.result_part_id=live.part_id "
+                "AND match.analysis_state='provisional') "
+                'AS provisional_match_count,'
+                'COALESCE(live.last_error,\'\') AS last_error '
+                'FROM vainglory_live_analysis_state live '
+                'JOIN recording_parts part ON part.id=live.part_id '
+                'JOIN recording_sessions session ON session.id=live.session_id '
+                "WHERE live.state='active' "
+                'ORDER BY COALESCE(live.last_sample_at,live.created_at) DESC,'
+                'live.part_id'
+            ).fetchall()
             completion_rows = connection.execute(
                 'SELECT job.completed_at,job.started_at,job.session_id,job.part_id,'
                 'part.part_index,session.title,part.record_duration_seconds,'
@@ -3646,6 +3713,45 @@ class VaingloryRepository:
                     None
                     if live_status['last_observed_at'] is None
                     else int(live_status['last_observed_at'])
+                ),
+                live_items=tuple(
+                    LiveAnalysisStatusItem(
+                        part_id=int(row['part_id']),
+                        session_id=int(row['session_id']),
+                        part_index=int(row['part_index']),
+                        title=str(row['title'] or ''),
+                        anchor_name=str(row['anchor_name'] or ''),
+                        room_id=int(row['room_id'] or 0),
+                        live_started_at=int(row['live_started_at']),
+                        recording_duration_seconds=int(
+                            row['recording_duration_seconds']
+                        ),
+                        last_observed_at_ms=(
+                            None
+                            if row['last_observed_at_ms'] is None
+                            else int(row['last_observed_at_ms'])
+                        ),
+                        sample_count=int(row['sample_count']),
+                        fine_scan_count=int(row['fine_scan_count']),
+                        last_sample_at=(
+                            None
+                            if row['last_sample_at'] is None
+                            else int(row['last_sample_at'])
+                        ),
+                        next_sample_at=int(row['next_sample_at']),
+                        match_flow_label=str(row['last_match_flow_label'] or ''),
+                        match_flow_confidence=float(
+                            row['last_match_flow_confidence'] or 0
+                        ),
+                        worker_id=str(row['worker_id'] or ''),
+                        pending_window_count=int(row['pending_window_count']),
+                        running_window_count=int(row['running_window_count']),
+                        completed_window_count=int(row['completed_window_count']),
+                        failed_window_count=int(row['failed_window_count']),
+                        provisional_match_count=int(row['provisional_match_count']),
+                        last_error=str(row['last_error'] or ''),
+                    )
+                    for row in live_rows
                 ),
             )
 

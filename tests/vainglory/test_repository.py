@@ -274,6 +274,20 @@ async def test_final_part_analysis_replaces_live_provisional_result(
         assert live_status.live_sample_count == 2
         assert live_status.live_provisional_match_count == 1
         assert live_status.live_last_observed_at == 1_030
+        assert len(live_status.live_items) == 1
+        live_item = live_status.live_items[0]
+        assert live_item.part_id == 1
+        assert live_item.title == '样本录播'
+        assert live_item.anchor_name == '样本主播'
+        assert live_item.recording_duration_seconds == 60
+        assert live_item.last_observed_at_ms == 90_000
+        assert live_item.sample_count == 2
+        assert live_item.fine_scan_count == 1
+        assert live_item.match_flow_label == 'not_match_flow'
+        assert live_item.completed_window_count == 1
+        assert live_item.pending_window_count == 0
+        assert live_item.running_window_count == 0
+        assert live_item.provisional_match_count == 1
         await database.execute(
             "UPDATE recording_sessions SET state='closed' WHERE id=1"
         )

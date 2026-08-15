@@ -15,6 +15,7 @@ import {
   VaingloryAnalysisWorkerNodeStatus,
   VaingloryAnalysisSummary,
   VaingloryAnalysisMatchPreview,
+  VaingloryLiveAnalysisItem,
 } from '../vainglory.model';
 
 type TimelineCountGroup = 'matchFlow' | 'heroSelect' | 'matchMode';
@@ -281,6 +282,79 @@ export class AnalysisTaskCenterComponent {
 
   currentLabel(item: VaingloryAnalysisQueueItem): string {
     return item.runtimeDetail || this.stageLabel(item);
+  }
+
+  liveStatusLabel(item: VaingloryLiveAnalysisItem): string {
+    if (item.lastError) {
+      return '取帧重试中';
+    }
+    if (item.runningWindowCount > 0) {
+      return '正在精扫结算';
+    }
+    if (item.workerId) {
+      return '正在取帧';
+    }
+    if (item.pendingWindowCount > 0) {
+      return '等待精扫结算';
+    }
+    return item.sampleCount > 0 ? '持续扫描' : '等待首帧';
+  }
+
+  liveStatusColor(item: VaingloryLiveAnalysisItem): string {
+    if (item.lastError) {
+      return 'red';
+    }
+    if (item.runningWindowCount > 0 || item.workerId) {
+      return 'blue';
+    }
+    return item.sampleCount > 0 ? 'green' : 'default';
+  }
+
+  liveTimelinePercent(item: VaingloryLiveAnalysisItem): number {
+    if (
+      item.lastObservedAtMs === null ||
+      item.recordingDurationSeconds <= 0
+    ) {
+      return 0;
+    }
+    return Math.max(
+      0,
+      Math.min(
+        100,
+        Math.round(
+          (item.lastObservedAtMs / 1_000 / item.recordingDurationSeconds) * 100,
+        ),
+      ),
+    );
+  }
+
+  liveObservedSeconds(item: VaingloryLiveAnalysisItem): number | null {
+    return item.lastObservedAtMs === null ? null : item.lastObservedAtMs / 1_000;
+  }
+
+  liveLagSeconds(item: VaingloryLiveAnalysisItem): number | null {
+    const observed = this.liveObservedSeconds(item);
+    if (observed === null || item.recordingDurationSeconds <= 0) {
+      return null;
+    }
+    return Math.max(0, item.recordingDurationSeconds - observed);
+  }
+
+  liveFlowLabel(item: VaingloryLiveAnalysisItem): string {
+    if (!item.matchFlowLabel) {
+      return '等待判断';
+    }
+    const label = ANALYSIS_OUTPUT_LABELS[item.matchFlowLabel];
+    const confidence = Math.round(item.matchFlowConfidence * 100);
+    return `${label ?? item.matchFlowLabel} · ${confidence}%`;
+  }
+
+  liveNextSampleLabel(item: VaingloryLiveAnalysisItem): string {
+    if (this.sampledAt === null) {
+      return '等待刷新';
+    }
+    const remaining = Math.max(0, item.nextSampleAt - this.sampledAt);
+    return remaining === 0 ? '等待 Worker 领取' : `${remaining} 秒后`;
   }
 
   timelineCountText(

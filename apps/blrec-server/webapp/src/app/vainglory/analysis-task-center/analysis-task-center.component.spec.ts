@@ -3,6 +3,7 @@ import {
   VaingloryAnalysisQueue,
   VaingloryAnalysisQueueItem,
   VaingloryAnalysisSummary,
+  VaingloryLiveAnalysisItem,
 } from '../vainglory.model';
 
 describe('AnalysisTaskCenterComponent', () => {
@@ -107,6 +108,41 @@ describe('AnalysisTaskCenterComponent', () => {
     expect(component.trainingCandidateCount(summary)).toBe(5);
   });
 
+  it('describes per-stream live analysis progress without a completion claim', () => {
+    const component = new AnalysisTaskCenterComponent();
+    const live: VaingloryLiveAnalysisItem = {
+      partId: 7,
+      sessionId: 9,
+      partIndex: 1,
+      title: '正在直播',
+      anchorName: '主播',
+      roomId: 100,
+      liveStartedAt: 1_000,
+      recordingDurationSeconds: 3_600,
+      lastObservedAtMs: 3_570_000,
+      sampleCount: 120,
+      fineScanCount: 2,
+      lastSampleAt: 1_090,
+      nextSampleAt: 1_120,
+      matchFlowLabel: 'match_flow',
+      matchFlowConfidence: 0.96,
+      workerId: '',
+      pendingWindowCount: 1,
+      runningWindowCount: 0,
+      completedWindowCount: 2,
+      failedWindowCount: 0,
+      provisionalMatchCount: 2,
+      lastError: '',
+    };
+    component.sampledAt = 1_100;
+
+    expect(component.liveStatusLabel(live)).toBe('等待精扫结算');
+    expect(component.liveTimelinePercent(live)).toBe(99);
+    expect(component.liveLagSeconds(live)).toBe(30);
+    expect(component.liveFlowLabel(live)).toBe('对局中 · 96%');
+    expect(component.liveNextSampleLabel(live)).toBe('20 秒后');
+  });
+
   it('shows the loaded worker model and detects an active task version mismatch', () => {
     const component = new AnalysisTaskCenterComponent();
     const active = {
@@ -159,6 +195,7 @@ describe('AnalysisTaskCenterComponent', () => {
       liveSampleCount: 0,
       liveProvisionalMatchCount: 0,
       liveLastObservedAt: null,
+      liveItems: [],
     } satisfies VaingloryAnalysisQueue;
 
     expect(component.workerModelMismatch(queue, queue.workers[0])).toBeFalse();

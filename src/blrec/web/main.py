@@ -355,6 +355,7 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
         'liveSampleCount': 0,
         'liveProvisionalMatchCount': 0,
         'liveLastObservedAt': None,
+        'liveItems': [],
     }
     index_summary: Dict[str, int] = {
         'matchCount': 0,
@@ -531,6 +532,33 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
             'liveSampleCount': queue_status.live_sample_count,
             'liveProvisionalMatchCount': queue_status.live_provisional_match_count,
             'liveLastObservedAt': queue_status.live_last_observed_at,
+            'liveItems': [
+                {
+                    'partId': value.part_id,
+                    'sessionId': value.session_id,
+                    'partIndex': value.part_index,
+                    'title': value.title,
+                    'anchorName': value.anchor_name,
+                    'roomId': value.room_id,
+                    'liveStartedAt': value.live_started_at,
+                    'recordingDurationSeconds': value.recording_duration_seconds,
+                    'lastObservedAtMs': value.last_observed_at_ms,
+                    'sampleCount': value.sample_count,
+                    'fineScanCount': value.fine_scan_count,
+                    'lastSampleAt': value.last_sample_at,
+                    'nextSampleAt': value.next_sample_at,
+                    'matchFlowLabel': value.match_flow_label,
+                    'matchFlowConfidence': value.match_flow_confidence,
+                    'workerId': value.worker_id,
+                    'pendingWindowCount': value.pending_window_count,
+                    'runningWindowCount': value.running_window_count,
+                    'completedWindowCount': value.completed_window_count,
+                    'failedWindowCount': value.failed_window_count,
+                    'provisionalMatchCount': value.provisional_match_count,
+                    'lastError': value.last_error,
+                }
+                for value in queue_status.live_items
+            ],
         }
         index_summary = {
             'matchCount': summary.match_count,

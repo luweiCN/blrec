@@ -300,6 +300,31 @@ export interface VaingloryAnalysisWorkerNodeStatus {
   readonly lastTaskFinishedAt: number | null;
 }
 
+export interface VaingloryLiveAnalysisItem {
+  readonly partId: number;
+  readonly sessionId: number;
+  readonly partIndex: number;
+  readonly title: string;
+  readonly anchorName: string;
+  readonly roomId: number;
+  readonly liveStartedAt: number;
+  readonly recordingDurationSeconds: number;
+  readonly lastObservedAtMs: number | null;
+  readonly sampleCount: number;
+  readonly fineScanCount: number;
+  readonly lastSampleAt: number | null;
+  readonly nextSampleAt: number;
+  readonly matchFlowLabel: string;
+  readonly matchFlowConfidence: number;
+  readonly workerId: string;
+  readonly pendingWindowCount: number;
+  readonly runningWindowCount: number;
+  readonly completedWindowCount: number;
+  readonly failedWindowCount: number;
+  readonly provisionalMatchCount: number;
+  readonly lastError: string;
+}
+
 export interface VaingloryAnalysisQueue {
   readonly workerState: 'running' | 'stopped' | 'failed';
   readonly worker: VaingloryAnalysisWorkerStatus;
@@ -319,6 +344,7 @@ export interface VaingloryAnalysisQueue {
   readonly liveSampleCount: number;
   readonly liveProvisionalMatchCount: number;
   readonly liveLastObservedAt: number | null;
+  readonly liveItems: readonly VaingloryLiveAnalysisItem[];
 }
 
 export interface VaingloryIndexSummary {

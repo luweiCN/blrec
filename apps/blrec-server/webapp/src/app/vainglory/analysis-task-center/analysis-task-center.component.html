@@ -609,6 +609,102 @@
         </dd>
       </div>
     </dl>
+
+    <div
+      *ngIf="taskQueue.liveItems.length > 0"
+      class="analysis-live-list"
+      aria-label="正在直播的实时扫描进度"
+    >
+      <article *ngFor="let live of taskQueue.liveItems">
+        <header>
+          <div>
+            <strong>{{ live.title || "未命名直播" }}</strong>
+            <span>
+              {{ live.anchorName || "未绑定主播" }} · P{{ live.partIndex }}
+              <ng-container *ngIf="live.roomId > 0">
+                · 直播间 {{ live.roomId }}
+              </ng-container>
+            </span>
+          </div>
+          <nz-tag [nzColor]="liveStatusColor(live)">
+            {{ liveStatusLabel(live) }}
+          </nz-tag>
+        </header>
+
+        <section class="analysis-live-timeline" aria-label="直播扫描位置">
+          <header>
+            <strong>
+              扫描到 {{ formatDuration(liveObservedSeconds(live)) }} / 当前已录制
+              {{ formatDuration(live.recordingDurationSeconds) }}
+            </strong>
+            <span *ngIf="liveLagSeconds(live) as lag">
+              落后约 {{ formatDuration(lag) }}
+            </span>
+          </header>
+          <nz-progress
+            nzSize="small"
+            [nzStatus]="live.lastError ? 'exception' : 'active'"
+            [nzPercent]="liveTimelinePercent(live)"
+            [nzShowInfo]="false"
+          ></nz-progress>
+        </section>
+
+        <dl class="analysis-live-facts">
+          <div>
+            <dt>上次取帧</dt>
+            <dd>
+              {{
+                live.lastSampleAt === null
+                  ? "尚未取帧"
+                  : (live.lastSampleAt * 1000 | date: "HH:mm:ss")
+              }}
+            </dd>
+          </div>
+          <div>
+            <dt>下次取帧</dt>
+            <dd>{{ liveNextSampleLabel(live) }}</dd>
+          </div>
+          <div>
+            <dt>累计取帧</dt>
+            <dd>{{ live.sampleCount }} 张</dd>
+          </div>
+          <div>
+            <dt>当前画面</dt>
+            <dd>{{ liveFlowLabel(live) }}</dd>
+          </div>
+          <div>
+            <dt>待精扫区间</dt>
+            <dd>{{ live.pendingWindowCount + live.runningWindowCount }} 个</dd>
+          </div>
+          <div>
+            <dt>已找到对局</dt>
+            <dd>{{ live.provisionalMatchCount }} 局</dd>
+          </div>
+        </dl>
+
+        <footer>
+          <span>
+            已完成 {{ live.completedWindowCount }} 次结算精扫
+            <ng-container *ngIf="live.failedWindowCount > 0">
+              · {{ live.failedWindowCount }} 次失败
+            </ng-container>
+          </span>
+          <button
+            nz-button
+            nzType="link"
+            nzSize="small"
+            type="button"
+            (click)="requestDetails(live.sessionId)"
+          >
+            查看直播详情
+          </button>
+        </footer>
+
+        <p *ngIf="live.lastError" class="analysis-live-error">
+          最近一次失败：{{ live.lastError }}
+        </p>
+      </article>
+    </div>
   </section>
 
   <section class="analysis-task-section" aria-labelledby="queue-summary-title">
