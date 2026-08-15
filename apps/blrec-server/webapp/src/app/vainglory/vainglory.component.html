@@ -1421,8 +1421,8 @@
 >
   <ng-container *nzModalContent>
     <p class="archive-manager-help">
-      选择需要扫描的投稿账号。这里仅关注历史稿件发现与下载，显示已扫描范围、每日下载额度，
-      以及当前下载到哪一场直播；后续识别进度请在“对局分析任务”中查看。
+      这里负责查找历史稿件，并把稿件依次加入下载队列。每日上限只控制一天最多加入多少个稿件，不会增加同时下载的数量；下载器仍按 3
+      路并发处理。下载完成后，稿件会自动转到“对局分析任务”。
     </p>
     <nz-alert
       *ngIf="archiveAccountsError"
@@ -1460,8 +1460,8 @@
                 {{ sync.seasonEndedAt * 1000 | date: "yyyy-MM-dd" }}
               </span>
               <span>
-                今日已开始下载 {{ sync.dailyUsed }}/{{ sync.dailyLimit }} 个稿件
-                · 已扫描至第 {{ sync.nextPage - 1 }} 页
+                今日已加入下载队列 {{ sync.dailyUsed }}/{{ sync.dailyLimit }}
+                个稿件 · {{ archiveDiscoveryLabel(sync) }}
               </span>
               <nz-progress
                 *ngIf="archiveSyncActive(sync)"
@@ -1485,7 +1485,7 @@
             class="archive-account-controls"
           >
             <label [for]="'archive-daily-limit-' + account.id">
-              每日上限
+              每日入队上限
             </label>
             <input
               nz-input
@@ -1538,12 +1538,25 @@
             }}
           </button>
           <section
-            *ngIf="archiveActiveItems(account.id).length > 0"
+            *ngIf="archiveDownloadQueueItems(account.id).length > 0"
             class="archive-processing-panel"
           >
+            <header class="archive-processing-header">
+              <div>
+                <strong>下载队列</strong>
+                <span>下载完成后会从这里移走，后续进度到“对局分析任务”查看</span>
+              </div>
+              <span>
+                {{ archiveDownloadingItems(account.id).length }} / 3
+                路正在下载
+              </span>
+            </header>
             <div
-              *ngFor="let current of archiveActiveItems(account.id)"
+              *ngFor="let current of archiveDownloadQueueItems(account.id)"
               class="archive-current-item"
+              [class.archive-current-item-waiting]="
+                current.stage !== 'downloading'
+              "
             >
               <header>
                 <div>
@@ -1573,11 +1586,15 @@
                 </span>
               </div>
               <nz-progress
+                *ngIf="current.stage === 'downloading'"
                 nzSize="small"
                 [nzPercent]="archiveIntakePercent(current)"
                 nzStatus="active"
               ></nz-progress>
-              <span class="archive-download-status">
+              <span
+                *ngIf="current.stage === 'downloading'"
+                class="archive-download-status"
+              >
                 下载：{{ archiveDownloadLabel(current) }}
               </span>
               <span *ngIf="current.error" class="error-text">

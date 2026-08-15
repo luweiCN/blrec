@@ -568,8 +568,12 @@ class ArchiveBackfillService:
             'FROM vainglory_archive_imports imported '
             'LEFT JOIN vainglory_archive_parts current ON current.id=('
             'SELECT candidate.id FROM vainglory_archive_parts candidate '
+            'LEFT JOIN vainglory_video_sources candidate_source '
+            'ON candidate_source.part_id=candidate.recording_part_id '
             'WHERE candidate.import_id=imported.id '
-            "ORDER BY CASE candidate.state WHEN 'downloading' THEN 0 "
+            "ORDER BY CASE candidate_source.state WHEN 'downloading' THEN 0 "
+            "WHEN 'pending' THEN 1 WHEN 'ready' THEN 2 ELSE 3 END,"
+            "CASE candidate.state WHEN 'downloading' THEN 0 "
             "WHEN 'analyzing' THEN 1 WHEN 'queued' THEN 2 "
             "WHEN 'failed' THEN 3 ELSE 4 END,candidate.page LIMIT 1) "
             'LEFT JOIN vainglory_video_sources source '
@@ -580,8 +584,10 @@ class ArchiveBackfillService:
             'ON publication.account_id=imported.account_id '
             'AND publication.bvid=imported.bvid '
             'WHERE imported.account_id=? '
-            "ORDER BY CASE imported.state WHEN 'downloading' THEN 0 "
-            "WHEN 'analyzing' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,"
+            "ORDER BY CASE source.state WHEN 'downloading' THEN 0 "
+            "WHEN 'pending' THEN 1 ELSE 2 END,"
+            "CASE imported.state WHEN 'downloading' THEN 0 "
+            "WHEN 'queued' THEN 1 WHEN 'analyzing' THEN 2 ELSE 3 END,"
             'imported.updated_at DESC,imported.id DESC LIMIT ?',
             (int(account_id), int(limit)),
         )
@@ -1972,9 +1978,12 @@ class ArchiveBackfillService:
         analysis_state = row['analysis_state']
         if source_state == 'failed' or analysis_state == 'failed':
             return 'failed'
-        if source_state in ('pending', 'downloading'):
+        if source_state == 'downloading':
             return 'downloading'
-        if source_state in (None, 'missing') or row['current_part_state'] == 'queued':
+        if (
+            source_state in (None, 'missing', 'pending')
+            or row['current_part_state'] == 'queued'
+        ):
             return 'download_pending'
         if analysis_state in (None, 'pending'):
             return 'analysis_pending'

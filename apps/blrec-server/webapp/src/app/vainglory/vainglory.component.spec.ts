@@ -15,6 +15,9 @@ import { BiliAccount } from '../uploads/shared/bili-account.model';
 import { BiliAccountService } from '../uploads/shared/bili-account.service';
 import { VaingloryComponent } from './vainglory.component';
 import {
+  ArchiveBackfillStage,
+  VaingloryArchiveBackfillItem,
+  VaingloryArchiveSync,
   VaingloryMatch,
   VaingloryMatchSession,
   VaingloryPlayer,
@@ -82,6 +85,67 @@ function scanJob(sessionId: number): VaingloryScanJob {
     originalPartCount: 1,
     ignoredPartCount: 0,
     ignoredPartReasons: [],
+  };
+}
+
+function archiveItem(
+  id: number,
+  stage: ArchiveBackfillStage,
+): VaingloryArchiveBackfillItem {
+  return {
+    id,
+    accountId: 7,
+    aid: 100 + id,
+    bvid: `BV${id}`,
+    title: `历史稿件 ${id}`,
+    publishedAt: 1_000,
+    state: 'running',
+    stage,
+    progress: 0.5,
+    pageCount: 1,
+    completedPageCount: 0,
+    currentPage: 1,
+    currentPartTitle: 'P1',
+    downloadProgress: stage === 'downloading' ? 0.5 : 0,
+    downloadedBytes: 100,
+    totalBytes: 200,
+    analysisState: null,
+    analysisProgress: 0,
+    matchCount: 0,
+    publicationState: null,
+    descriptionState: null,
+    commentCount: 0,
+    confirmedCommentCount: 0,
+    pinState: null,
+    publicationProgress: 0,
+    error: null,
+    updatedAt: 1_000,
+  };
+}
+
+function archiveSync(
+  overrides: Partial<VaingloryArchiveSync> = {},
+): VaingloryArchiveSync {
+  return {
+    accountId: 7,
+    state: 'running',
+    progress: 0.85,
+    discoveredCount: 2_148,
+    completedCount: 1_832,
+    error: null,
+    requestedAt: 1_000,
+    startedAt: 1_001,
+    completedAt: null,
+    updatedAt: 1_002,
+    operatorPaused: false,
+    dailyLimit: 500,
+    dailyUsed: 405,
+    quotaDay: '2026-08-15',
+    nextPage: 202,
+    discoveryComplete: false,
+    seasonStartedAt: null,
+    seasonEndedAt: null,
+    ...overrides,
   };
 }
 
@@ -436,6 +500,46 @@ describe('VaingloryComponent remote media', () => {
     expect(component.archiveAccounts).toEqual([account]);
     expect(vainglory.requestArchiveSync).toHaveBeenCalledOnceWith(7);
     expect(component.archiveSyncs.get(7)?.state).toBe('discovering');
+  });
+
+  it('separates current downloads from the next waiting archives', () => {
+    component.archiveItemsByAccountId = new Map([
+      [
+        7,
+        [
+          archiveItem(1, 'analysis_pending'),
+          archiveItem(2, 'download_pending'),
+          archiveItem(3, 'downloading'),
+          archiveItem(4, 'queued'),
+          archiveItem(5, 'completed'),
+        ],
+      ],
+    ]);
+
+    expect(component.archiveDownloadingItems(7).map((item) => item.id)).toEqual([
+      3,
+    ]);
+    expect(
+      component.archiveWaitingDownloadItems(7).map((item) => item.id),
+    ).toEqual([2, 4]);
+  });
+
+  it('describes archive discovery and quota in user-facing terms', () => {
+    const running = archiveSync();
+    const completed = archiveSync({
+      state: 'ready',
+      discoveryComplete: true,
+    });
+
+    expect(component.archiveSyncLabel(running)).toBe(
+      '已处理 1832 / 已发现 2148',
+    );
+    expect(component.archiveDiscoveryLabel(running)).toBe(
+      '正在扫描第 202 页',
+    );
+    expect(component.archiveDiscoveryLabel(completed)).toBe(
+      '稿件列表已扫描完成，共 201 页',
+    );
   });
 
   it('loads matches only after a recording session drawer is opened', () => {

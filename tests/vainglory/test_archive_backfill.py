@@ -104,6 +104,27 @@ def test_missing_remote_source_requeues_pending_analysis() -> None:
     assert state == ('queued', 0, None)
 
 
+@pytest.mark.parametrize(
+    ('source_state', 'expected_stage'),
+    (('pending', 'download_pending'), ('downloading', 'downloading')),
+)
+def test_archive_item_distinguishes_waiting_from_active_download(
+    source_state: str, expected_stage: str
+) -> None:
+    stage = ArchiveBackfillService._item_stage(
+        {
+            'state': 'analyzing',
+            'publication_state': None,
+            'page_count': 1,
+            'source_state': source_state,
+            'analysis_state': None,
+            'current_part_state': 'downloading',
+        }  # type: ignore[arg-type]
+    )
+
+    assert stage == expected_stage
+
+
 async def seed_account(database: BiliUploadDatabase) -> None:
     await database.execute(
         "INSERT INTO bili_accounts("
@@ -407,6 +428,16 @@ async def test_discovers_materializes_and_queues_each_archive_page(
             int(parts[0]['recording_part_id']),
             int(parts[1]['recording_part_id']),
         ]
+        waiting = (await service.list_items(1))[0]
+        assert waiting.stage == 'download_pending'
+
+        await database.execute(
+            "UPDATE vainglory_video_sources SET state='downloading' WHERE part_id=?",
+            (int(parts[1]['recording_part_id']),),
+        )
+        downloading = (await service.list_items(1))[0]
+        assert downloading.stage == 'downloading'
+        assert downloading.current_page == 2
     finally:
         await database.close()
 

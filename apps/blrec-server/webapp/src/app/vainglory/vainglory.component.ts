@@ -2614,41 +2614,67 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   archiveSyncLabel(sync: VaingloryArchiveSync): string {
     return {
       idle: '尚未开始',
-      discovering: '正在发现稿件',
-      running: `稿件分析 ${sync.completedCount}/${sync.discoveredCount}`,
-      ready: `已分析 ${sync.completedCount} 个稿件`,
-      failed: '回填失败',
+      discovering: '正在查找历史稿件',
+      running: `已处理 ${sync.completedCount} / 已发现 ${sync.discoveredCount}`,
+      ready: `全部处理完成，共 ${sync.completedCount} 个稿件`,
+      failed: '历史稿件接入失败',
     }[sync.state];
+  }
+
+  archiveDiscoveryLabel(sync: VaingloryArchiveSync): string {
+    const scannedPages = Math.max(0, sync.nextPage - 1);
+    return sync.discoveryComplete
+      ? `稿件列表已扫描完成，共 ${scannedPages} 页`
+      : `正在扫描第 ${Math.max(1, sync.nextPage)} 页`;
   }
 
   archiveItems(accountId: number): readonly VaingloryArchiveBackfillItem[] {
     return this.archiveItemsByAccountId.get(accountId) ?? [];
   }
 
-  archiveActiveItems(
+  archiveDownloadingItems(
     accountId: number,
   ): readonly VaingloryArchiveBackfillItem[] {
     return this.archiveItems(accountId)
-      .filter((item) => this.archiveItemActive(item))
+      .filter((item) => item.stage === 'downloading')
       .slice(0, 3);
+  }
+
+  archiveWaitingDownloadItems(
+    accountId: number,
+  ): readonly VaingloryArchiveBackfillItem[] {
+    return this.archiveItems(accountId)
+      .filter((item) =>
+        ['queued', 'reading_metadata', 'download_pending'].includes(item.stage),
+      )
+      .slice(0, 3);
+  }
+
+  archiveDownloadQueueItems(
+    accountId: number,
+  ): readonly VaingloryArchiveBackfillItem[] {
+    return [
+      ...this.archiveDownloadingItems(accountId),
+      ...this.archiveWaitingDownloadItems(accountId),
+    ];
   }
 
   archiveIntakeLabel(item: VaingloryArchiveBackfillItem): string {
     return {
-      queued: '等待领取',
-      reading_metadata: '读取稿件信息',
+      queued: '等待读取稿件',
+      reading_metadata: '正在读取稿件',
       download_pending: '等待下载',
       downloading: '正在下载',
-      analysis_pending: '下载完成',
-      scanning_video: '下载完成',
-      locating_results: '下载完成',
-      ocr_recognition: '下载完成',
-      publication_pending: '下载完成',
-      publishing_description: '下载完成',
-      publishing_comments: '下载完成',
-      pinning_comment: '下载完成',
-      completed: '下载完成',
-      managed_elsewhere: '已由录制或迁移流程接管',
+      analysis_pending: '等待分析',
+      scanning_video: '正在扫描视频',
+      locating_results: '正在查找结算画面',
+      ocr_recognition: '正在识别战绩',
+      publication_pending: '分析完成',
+      publishing_description: '正在更新稿件说明',
+      publishing_comments: '正在更新评论',
+      pinning_comment: '正在置顶评论',
+      completed: '处理完成',
+      managed_elsewhere: '无需重复处理',
       failed: '处理失败',
     }[item.stage];
   }
@@ -2937,10 +2963,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       analysisQueue: analysisQueue as VaingloryAnalysisQueue,
       indexSummary: indexSummary as VaingloryIndexSummary,
     };
-  }
-
-  private archiveItemActive(item: VaingloryArchiveBackfillItem): boolean {
-    return !['completed', 'managed_elsewhere', 'failed'].includes(item.stage);
   }
 
   private archiveStageAfterDownload(

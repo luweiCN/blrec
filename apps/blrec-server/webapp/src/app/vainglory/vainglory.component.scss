@@ -135,6 +135,7 @@
 }
 
 .archive-manager-help {
+  margin: 0 0 16px;
   color: #595959;
 }
 
@@ -183,10 +184,14 @@
 .archive-account-list {
   display: grid;
   gap: 8px;
+  max-height: 68vh;
+  padding-right: 4px;
+  overflow-y: auto;
 }
 
 .archive-account-row {
   display: grid;
+  min-width: 0;
   grid-template-columns: 48px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
@@ -216,6 +221,7 @@
 
 .archive-account-summary {
   display: grid;
+  min-width: 0;
   gap: 2px;
 
   > span {
@@ -229,14 +235,40 @@
 
 .archive-processing-panel {
   display: grid;
+  min-width: 0;
   grid-column: 1 / -1;
   gap: 10px;
   padding-top: 10px;
+  overflow: hidden;
   border-top: 1px solid #f0f0f0;
+}
+
+.archive-processing-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+
+  > div {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  span {
+    color: #8c8c8c;
+    font-size: 12px;
+  }
+
+  > span {
+    flex: none;
+  }
 }
 
 .archive-current-item {
   display: grid;
+  min-width: 0;
   gap: 7px;
   padding: 12px;
   border: 1px solid #d6e4ff;
@@ -267,6 +299,11 @@
   .error-text {
     color: #cf1322;
   }
+}
+
+.archive-current-item-waiting {
+  border-color: #e8e8e8;
+  background: #fafafa;
 }
 
 .archive-target-label {
