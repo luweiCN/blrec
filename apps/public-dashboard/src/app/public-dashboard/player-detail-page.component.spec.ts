@@ -92,7 +92,7 @@ describe('PlayerDetailPageComponent', () => {
     expect(component.seasonHistory.length).toBeGreaterThan(1);
     expect(page.querySelector('h1')?.textContent).toContain('星河');
     expect(page.querySelector('.season-correction-notice')?.textContent).toContain(
-      '近期分数、段位和排名可能会调整',
+      '近期分数与段位可能出现明显变化',
     );
     expect(page.querySelector('.profile-kda-value')?.textContent).toContain(
       '145 局有效',
