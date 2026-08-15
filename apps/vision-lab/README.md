@@ -55,8 +55,8 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 export SYNO_ADMIN_USERNAME=你的群晖用户名
 export SYNO_ADMIN_PASSWORD=你的群晖密码
-# 默认是 luwei@192.168.50.143；地址或账号变化时再覆盖
-export VISION_LAB_WORKER_SSH_HOST=192.168.50.143
+# 默认通过 mDNS 主机名连接 MacBook Pro，不依赖 DHCP 分配的 IP
+export VISION_LAB_WORKER_SSH_HOST=MacBook-Pro-14.local
 export VISION_LAB_WORKER_SSH_USER=luwei
 ./start.sh
 # 打开 http://127.0.0.1:8800

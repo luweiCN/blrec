@@ -37,7 +37,7 @@ class TestWorkerDeploymentClient(unittest.TestCase):
         self.archive = self.root / 'package.zip'
         self.archive.write_bytes(b'zip-content')
         self.target = WorkerDeploymentTarget(
-            host='192.168.50.143',
+            host='worker.example.test',
             user='luwei',
             model_root=(
                 '~/Library/Application Support/BLRECAnalysisWorker/model-packages'
@@ -151,7 +151,7 @@ class TestWorkerDeploymentApi(unittest.TestCase):
         )
         conn.close()
         self.target = WorkerDeploymentTarget(
-            host='192.168.50.143',
+            host='worker.example.test',
             user='luwei',
             model_root='/tmp/models',
             launchd_label='com.luwei.blrec-analysis-worker',
@@ -170,7 +170,7 @@ class TestWorkerDeploymentApi(unittest.TestCase):
             result = server.api_deploy_model_package_to_worker('vg-ready')
 
         self.assertEqual(result['deployment']['status'], 'queued')
-        self.assertEqual(result['target'], 'luwei@192.168.50.143:22')
+        self.assertEqual(result['target'], 'luwei@worker.example.test:22')
         thread.return_value.start.assert_called_once_with()
         conn = db.connect(config.DB_PATH)
         try:

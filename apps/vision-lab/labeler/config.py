@@ -41,7 +41,9 @@ NAS_RESULT_FRAME_DIR = os.environ.get(
 
 # MacBook Pro Analysis Worker 模型包发布。SSH 只使用系统密钥/SSH agent，
 # Vision Lab 不保存 Worker 密码。
-WORKER_SSH_HOST = os.environ.get('VISION_LAB_WORKER_SSH_HOST', '192.168.50.143').strip()
+WORKER_SSH_HOST = os.environ.get(
+    'VISION_LAB_WORKER_SSH_HOST', 'MacBook-Pro-14.local'
+).strip()
 WORKER_SSH_USER = os.environ.get(
     'VISION_LAB_WORKER_SSH_USER', os.environ.get('USER', '')
 ).strip()
