@@ -713,15 +713,17 @@ class ArchiveBackfillService:
             self._next_discovery_at = now + self.DISCOVERY_INTERVAL_SECONDS
             await self._discover(int(sync['account_id']))
             return True
+        identity_reconciled = False
         if (
             self._identity_reconciliation_enabled
             and now >= self._next_identity_reconcile_at
         ):
-            self._next_identity_reconcile_at = (
-                now + self.IDENTITY_RECONCILE_INTERVAL_SECONDS
-            )
-            if await self.reconcile_archive_identity_once():
-                return True
+            try:
+                identity_reconciled = await self.reconcile_archive_identity_once()
+            finally:
+                self._next_identity_reconcile_at = (
+                    self._now() + self.IDENTITY_RECONCILE_INTERVAL_SECONDS
+                )
         part = await self._claim_download_part()
         if part is not None:
             await self._queue_download(int(part['recording_part_id']))
@@ -733,7 +735,7 @@ class ArchiveBackfillService:
             else:
                 await self._materialize(import_row)
             return True
-        return reconciled
+        return reconciled or identity_reconciled
 
     async def reconcile_archive_identity_once(self) -> bool:
         """Refresh one historical archive's room/player identity from Bilibili."""

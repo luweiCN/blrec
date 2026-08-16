@@ -1022,6 +1022,58 @@ async def test_reconciles_existing_historical_identity_from_private_archive_deta
 
 
 @pytest.mark.asyncio
+async def test_identity_reconciliation_does_not_starve_archive_intake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1_000]
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: now[0],
+        )
+        service._identity_reconciliation_enabled = True
+        calls = []
+
+        async def reconcile() -> bool:
+            return False
+
+        async def reconcile_identity() -> bool:
+            calls.append('identity')
+            now[0] += 10
+            return True
+
+        async def claim_download_part() -> None:
+            calls.append('download')
+            return None
+
+        async def claim_import() -> Mapping[str, int]:
+            calls.append('import')
+            return {'id': 1, 'page_count': 0}
+
+        async def materialize(_imported: Mapping[str, int]) -> None:
+            calls.append('materialize')
+
+        monkeypatch.setattr(service, '_reconcile', reconcile)
+        monkeypatch.setattr(
+            service, 'reconcile_archive_identity_once', reconcile_identity
+        )
+        monkeypatch.setattr(service, '_claim_download_part', claim_download_part)
+        monkeypatch.setattr(service, '_claim_import', claim_import)
+        monkeypatch.setattr(service, '_materialize', materialize)
+
+        assert await service.run_once() is True
+        assert calls == ['identity', 'download', 'import', 'materialize']
+        assert service._next_identity_reconcile_at == 1_015
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_keeps_short_archive_pages_for_result_scanning(tmp_path: Path) -> None:
     class Reader(FakeArchiveReader):
         async def detail(
