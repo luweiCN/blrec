@@ -127,7 +127,7 @@ async def test_postgres_backend_migrates_schema_and_preserves_writes(
         expected_schema='core',
         backup_directory=tmp_path / 'backups',
     )
-    assert len(copied) == 68
+    assert len(copied) == 69
     with psycopg.connect(core_database_url, autocommit=True) as connection:
         connection.execute(POSTGRES_COMPATIBILITY_SQL)
 
