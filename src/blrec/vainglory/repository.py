@@ -34,6 +34,7 @@ from .analyzer import (
     TrainingCandidate,
     VideoPart,
 )
+from .anchor_identity import infer_recorded_anchor
 from .catalog import identify_builtin_hero
 from .exclusions import EXCLUDED_TITLE_MARKER, is_excluded_title
 from .hero_recognition import HeroReference
@@ -5663,7 +5664,11 @@ class VaingloryRepository:
                 'name,origin,created_at,updated_at) VALUES(?,\'manual\',?,?)',
                 (normalized, now, now),
             )
-            return int(cursor.lastrowid)
+            player_id = int(cursor.lastrowid)
+            self._insert_player_alias(
+                connection, player_id=player_id, alias=normalized, now=now
+            )
+            return player_id
 
         return await self.get_player(await self._database.write(create))
 
@@ -5713,6 +5718,9 @@ class VaingloryRepository:
                         (name, now, now),
                     )
                     player_id = int(cursor.lastrowid)
+                self._insert_player_alias(
+                    connection, player_id=player_id, alias=name, now=now
+                )
                 connection.execute(
                     'INSERT INTO vainglory_player_rooms('
                     'room_id,player_id,created_at,updated_at) VALUES(?,?,?,?)',
@@ -5724,13 +5732,233 @@ class VaingloryRepository:
 
     async def rename_player(self, player_id: int, name: str) -> PlayerRecord:
         normalized = self._normalize_player_display_name(name)
-        count = await self._database.execute(
-            'UPDATE vainglory_players SET name=?,updated_at=? WHERE id=?',
-            (normalized, self._now(), int(player_id)),
-        )
+        selected_player_id = int(player_id)
+        now = self._now()
+
+        def rename(connection: sqlite3.Connection) -> int:
+            current = connection.execute(
+                'SELECT name FROM vainglory_players WHERE id=?', (selected_player_id,)
+            ).fetchone()
+            if current is None:
+                return 0
+            self._insert_player_alias(
+                connection,
+                player_id=selected_player_id,
+                alias=str(current['name']),
+                now=now,
+            )
+            self._insert_player_alias(
+                connection, player_id=selected_player_id, alias=normalized, now=now
+            )
+            return connection.execute(
+                'UPDATE vainglory_players SET name=?,updated_at=? WHERE id=?',
+                (normalized, now, selected_player_id),
+            ).rowcount
+
+        count = await self._database.write(rename)
         if count != 1:
             raise VaingloryNotFound('玩家不存在')
-        return await self.get_player(int(player_id))
+        return await self.get_player(selected_player_id)
+
+    async def bind_player_alias(self, player_id: int, alias: str) -> PlayerRecord:
+        selected_player_id = int(player_id)
+        normalized = self._normalize_player_display_name(alias)
+        now = self._now()
+
+        def bind(connection: sqlite3.Connection) -> None:
+            if (
+                connection.execute(
+                    'SELECT 1 FROM vainglory_players WHERE id=?', (selected_player_id,)
+                ).fetchone()
+                is None
+            ):
+                raise VaingloryNotFound('玩家不存在')
+            previous_player_ids = {
+                int(row['player_id'])
+                for row in connection.execute(
+                    'SELECT DISTINCT direct.player_id '
+                    'FROM recording_sessions session '
+                    'JOIN vainglory_player_sessions direct '
+                    'ON direct.session_id=session.id '
+                    'WHERE lower(trim(session.anchor_name))=lower(?) '
+                    'AND direct.player_id<>?',
+                    (normalized, selected_player_id),
+                ).fetchall()
+            }
+            connection.execute(
+                'INSERT INTO vainglory_player_aliases('
+                'alias,player_id,created_at,updated_at) VALUES(?,?,?,?) '
+                'ON CONFLICT(alias) DO UPDATE SET '
+                'player_id=excluded.player_id,updated_at=excluded.updated_at',
+                (normalized, selected_player_id, now, now),
+            )
+            connection.execute(
+                'UPDATE vainglory_player_sessions SET player_id=?,updated_at=? '
+                'WHERE session_id IN ('
+                'SELECT id FROM recording_sessions '
+                'WHERE lower(trim(anchor_name))=lower(?))',
+                (selected_player_id, now, normalized),
+            )
+            connection.execute(
+                'UPDATE vainglory_players SET updated_at=? WHERE id=?',
+                (now, selected_player_id),
+            )
+            for previous_player_id in previous_player_ids:
+                connection.execute(
+                    "DELETE FROM vainglory_players WHERE id=? AND origin='automatic' "
+                    'AND NOT EXISTS(SELECT 1 FROM vainglory_player_rooms room '
+                    'WHERE room.player_id=vainglory_players.id) '
+                    'AND NOT EXISTS(SELECT 1 FROM vainglory_player_sessions direct '
+                    'WHERE direct.player_id=vainglory_players.id)',
+                    (previous_player_id,),
+                )
+
+        await self._database.write(bind)
+        return await self.get_player(selected_player_id)
+
+    async def reconcile_recorded_session_identity(
+        self,
+        session_id: int,
+        *,
+        title: str,
+        description: str,
+        excluded_anchor_uid: Optional[int] = None,
+        excluded_anchor_name: str = '',
+    ) -> Tuple[int, Optional[int], str]:
+        """Apply a historical archive's best known room and player identity."""
+        selected_session_id = int(session_id)
+        now = self._now()
+
+        def reconcile(connection: sqlite3.Connection) -> Tuple[int, Optional[int], str]:
+            session = connection.execute(
+                'SELECT room_id,anchor_uid,anchor_name FROM recording_sessions '
+                'WHERE id=?',
+                (selected_session_id,),
+            ).fetchone()
+            if session is None:
+                raise VaingloryNotFound('历史稿件对应的录播不存在')
+            room_id, anchor_uid, anchor_name = infer_recorded_anchor(
+                connection,
+                title,
+                description,
+                excluded_anchor_uids=(
+                    () if excluded_anchor_uid is None else (excluded_anchor_uid,)
+                ),
+                excluded_anchor_names=(excluded_anchor_name,),
+            )
+            if room_id <= 0 and anchor_uid is None and not anchor_name:
+                return room_id, anchor_uid, anchor_name
+
+            current_room_id = int(session['room_id'])
+            current_room_is_bound = (
+                current_room_id > 0
+                and connection.execute(
+                    'SELECT 1 FROM vainglory_player_rooms WHERE room_id=?',
+                    (current_room_id,),
+                ).fetchone()
+                is not None
+            )
+            target_room_id = (
+                room_id
+                if room_id > 0
+                else (current_room_id if current_room_is_bound else 0)
+            )
+            target_anchor_uid = (
+                anchor_uid
+                if anchor_uid is not None
+                else (
+                    None
+                    if session['anchor_uid'] is None
+                    else int(session['anchor_uid'])
+                )
+            )
+            target_anchor_name = anchor_name or str(session['anchor_name'] or '')
+            connection.execute(
+                'UPDATE recording_sessions SET room_id=?,anchor_uid=?,'
+                'anchor_name=? WHERE id=?',
+                (
+                    target_room_id,
+                    target_anchor_uid,
+                    target_anchor_name[:80],
+                    selected_session_id,
+                ),
+            )
+
+            previous_player_ids = {
+                int(row['player_id'])
+                for row in connection.execute(
+                    'SELECT player_id FROM vainglory_player_sessions '
+                    'WHERE session_id=?',
+                    (selected_session_id,),
+                ).fetchall()
+            }
+            player_id: Optional[int] = None
+            if target_room_id > 0:
+                bound = connection.execute(
+                    'SELECT player_id FROM vainglory_player_rooms WHERE room_id=?',
+                    (target_room_id,),
+                ).fetchone()
+                if bound is not None:
+                    player_id = int(bound['player_id'])
+            if player_id is None and anchor_name:
+                candidates = self._player_ids_for_anchor_name(connection, anchor_name)
+                if len(candidates) == 1:
+                    player_id = candidates[0]
+            if player_id is None and anchor_uid is not None:
+                candidates = connection.execute(
+                    'SELECT DISTINCT player_id FROM ('
+                    'SELECT room.player_id FROM recording_sessions known '
+                    'JOIN vainglory_player_rooms room ON room.room_id=known.room_id '
+                    'WHERE known.anchor_uid=? AND known.id<>? '
+                    'UNION '
+                    'SELECT direct.player_id FROM recording_sessions known '
+                    'JOIN vainglory_player_sessions direct '
+                    'ON direct.session_id=known.id '
+                    'WHERE known.anchor_uid=? AND known.id<>?) candidate '
+                    'ORDER BY player_id',
+                    (anchor_uid, selected_session_id, anchor_uid, selected_session_id),
+                ).fetchall()
+                if len(candidates) == 1:
+                    player_id = int(candidates[0]['player_id'])
+            if player_id is None:
+                return room_id, anchor_uid, anchor_name
+
+            if target_room_id > 0:
+                connection.execute(
+                    'INSERT INTO vainglory_player_rooms('
+                    'room_id,player_id,created_at,updated_at) VALUES(?,?,?,?) '
+                    'ON CONFLICT(room_id) DO UPDATE SET '
+                    'player_id=excluded.player_id,updated_at=excluded.updated_at',
+                    (target_room_id, player_id, now, now),
+                )
+                connection.execute(
+                    'DELETE FROM vainglory_player_sessions WHERE session_id=?',
+                    (selected_session_id,),
+                )
+            else:
+                connection.execute(
+                    'INSERT INTO vainglory_player_sessions('
+                    'session_id,player_id,created_at,updated_at) VALUES(?,?,?,?) '
+                    'ON CONFLICT(session_id) DO UPDATE SET '
+                    'player_id=excluded.player_id,updated_at=excluded.updated_at',
+                    (selected_session_id, player_id, now, now),
+                )
+            if anchor_name:
+                self._insert_player_alias(
+                    connection, player_id=player_id, alias=anchor_name, now=now
+                )
+            for previous_player_id in previous_player_ids - {player_id}:
+                connection.execute(
+                    "DELETE FROM vainglory_players WHERE id=? AND origin='automatic' "
+                    'AND NOT EXISTS(SELECT 1 FROM vainglory_player_rooms room '
+                    'WHERE room.player_id=vainglory_players.id) '
+                    'AND NOT EXISTS(SELECT 1 FROM vainglory_player_sessions direct '
+                    'WHERE direct.player_id=vainglory_players.id)',
+                    (previous_player_id,),
+                )
+            return room_id, anchor_uid, anchor_name
+
+        return await self._database.write(reconcile)
 
     async def bind_player_room(self, player_id: int, room_id: int) -> PlayerRecord:
         selected_player_id = int(player_id)
@@ -5767,6 +5995,23 @@ class VaingloryRepository:
                 'UPDATE vainglory_players SET updated_at=? WHERE id=?',
                 (now, selected_player_id),
             )
+            known_names = connection.execute(
+                'SELECT DISTINCT trim(anchor_name) AS anchor_name '
+                'FROM recording_sessions WHERE room_id=? '
+                "AND trim(anchor_name)<>''",
+                (selected_room_id,),
+            ).fetchall()
+            for known_name in known_names:
+                alias = str(known_name['anchor_name'])
+                if (
+                    connection.execute(
+                        'SELECT 1 FROM vainglory_player_aliases WHERE alias=?', (alias,)
+                    ).fetchone()
+                    is None
+                ):
+                    self._insert_player_alias(
+                        connection, player_id=selected_player_id, alias=alias, now=now
+                    )
             if previous_player_id not in (None, selected_player_id):
                 connection.execute(
                     'UPDATE vainglory_players SET updated_at=? WHERE id=?',
@@ -6439,6 +6684,13 @@ class VaingloryRepository:
     ) -> Tuple[int, ...]:
         if not VaingloryRepository._is_reliable_anchor_name(anchor_name):
             return ()
+        explicit = connection.execute(
+            'SELECT player_id FROM vainglory_player_aliases '
+            'WHERE lower(alias)=lower(?)',
+            (anchor_name[:80],),
+        ).fetchall()
+        if explicit:
+            return tuple(int(row['player_id']) for row in explicit)
         rows = connection.execute(
             'SELECT player_id FROM ('
             'SELECT player.id AS player_id FROM vainglory_players player '
@@ -6458,7 +6710,11 @@ class VaingloryRepository:
 
     @staticmethod
     def _ensure_session_player(
-        connection: sqlite3.Connection, session_id: int, now: int
+        connection: sqlite3.Connection,
+        session_id: int,
+        now: int,
+        *,
+        allow_roomless_create: bool = False,
     ) -> None:
         session = connection.execute(
             'SELECT id,room_id,anchor_uid,anchor_name '
@@ -6524,6 +6780,8 @@ class VaingloryRepository:
         if player_id is None:
             if not reliable_anchor_name:
                 return
+            if room_id <= 0 and not allow_roomless_create:
+                return
             cursor = connection.execute(
                 'INSERT INTO vainglory_players('
                 'name,origin,created_at,updated_at) '
@@ -6531,6 +6789,9 @@ class VaingloryRepository:
                 (anchor_name[:80], now, now),
             )
             player_id = int(cursor.lastrowid)
+            VaingloryRepository._insert_player_alias(
+                connection, player_id=player_id, alias=anchor_name[:80], now=now
+            )
         if room_id > 0:
             connection.execute(
                 'INSERT OR IGNORE INTO vainglory_player_rooms('
@@ -6552,6 +6813,19 @@ class VaingloryRepository:
         if len(normalized) > 80:
             raise ValueError('player name is too long')
         return normalized
+
+    @staticmethod
+    def _insert_player_alias(
+        connection: sqlite3.Connection, *, player_id: int, alias: str, now: int
+    ) -> None:
+        normalized = alias.strip()[:80]
+        if not VaingloryRepository._is_reliable_anchor_name(normalized):
+            return
+        connection.execute(
+            'INSERT OR IGNORE INTO vainglory_player_aliases('
+            'alias,player_id,created_at,updated_at) VALUES(?,?,?,?)',
+            (normalized, int(player_id), int(now), int(now)),
+        )
 
     @staticmethod
     def _override_payload(value: object) -> Dict[str, Any]:
@@ -6926,7 +7200,9 @@ class VaingloryRepository:
                 (previous_player_id,),
             )
         if not preserved:
-            VaingloryRepository._ensure_session_player(connection, session_id, now)
+            VaingloryRepository._ensure_session_player(
+                connection, session_id, now, allow_roomless_create=True
+            )
 
     @staticmethod
     def _match_session_record(row: sqlite3.Row) -> MatchSessionRecord:

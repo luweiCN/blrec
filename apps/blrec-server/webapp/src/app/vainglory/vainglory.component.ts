@@ -2770,8 +2770,8 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       return;
     }
     const dailyLimit = this.archiveDailyLimit(account.id, sync);
-    if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 500) {
-      this.messages.error('每日处理上限必须是 1 到 500 的整数');
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
+      this.messages.error('每日处理上限必须是 1 到 1000 的整数');
       return;
     }
     this.requestingArchiveAccountIds.add(account.id);

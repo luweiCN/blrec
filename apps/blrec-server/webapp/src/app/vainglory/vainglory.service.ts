@@ -25,6 +25,8 @@ import {
   VaingloryPlayerStats,
   VaingloryPublicationAudit,
   VaingloryPublicationAuditQueue,
+  VaingloryPublicationRecordFilter,
+  VaingloryPublicationRecordList,
   VaingloryPublicationRetryStep,
   VaingloryScanJob,
   VaingloryZeroMatchSessionList,
@@ -263,6 +265,31 @@ export class VaingloryService {
     return this.http.post<VaingloryPublicationAuditQueue>(
       this.url.makeApiUrl('/api/v1/vainglory/publication-audits'),
       { maxAgeHours, limit },
+    );
+  }
+
+  listPublicationRecords(
+    status: VaingloryPublicationRecordFilter,
+    limit = 20,
+    offset = 0,
+  ): Observable<VaingloryPublicationRecordList> {
+    return this.http.get<VaingloryPublicationRecordList>(
+      this.url.makeApiUrl('/api/v1/vainglory/publication-records'),
+      {
+        params: new HttpParams()
+          .set('status', status)
+          .set('limit', limit)
+          .set('offset', offset),
+      },
+    );
+  }
+
+  retryPublication(publicationId: number): Observable<void> {
+    return this.http.post<void>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/publication-records/${publicationId}/retry`,
+      ),
+      null,
     );
   }
 

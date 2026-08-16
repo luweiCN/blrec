@@ -14,7 +14,7 @@ from blrec.compat import ZoneInfo
 
 from .anchor_identity import infer_recorded_anchor
 from .exclusions import is_excluded_title
-from .repository import refresh_session_scan_job
+from .repository import VaingloryRepository, refresh_session_scan_job
 from .title_time import current_season_window, resolve_recording_started_at
 
 
@@ -104,6 +104,7 @@ class _Archive:
     title: str
     published_at: Optional[int]
     page_count: Optional[int]
+    is_only_self: Optional[bool]
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,8 @@ class ArchiveBackfillService:
     RETRY_BASE_SECONDS = 5 * 60
     RETRY_MAX_SECONDS = 6 * 60 * 60
     METADATA_COOLDOWN_SECONDS = 15 * 60
+    IDENTITY_RECONCILE_INTERVAL_SECONDS = 5
+    IDENTITY_RETRY_SECONDS = 6 * 60 * 60
 
     def __init__(
         self,
@@ -141,6 +144,9 @@ class ArchiveBackfillService:
         self._clock = clock
         self._idle_poll_seconds = idle_poll_seconds
         self._next_discovery_at = 0
+        self._next_identity_reconcile_at = 0
+        self._identity_reconciliation_enabled = False
+        self._repository = VaingloryRepository(database, clock=clock)
         self._wake = asyncio.Event()
         self._task: Optional[asyncio.Task[None]] = None
 
@@ -148,6 +154,7 @@ class ArchiveBackfillService:
         if self._task is not None:
             return
         await self.recover_interrupted()
+        self._identity_reconciliation_enabled = True
         self._wake.set()
         self._task = asyncio.create_task(self._run(), name='vainglory-archive-backfill')
 
@@ -663,8 +670,8 @@ class ArchiveBackfillService:
         paused: Optional[bool] = None,
         daily_limit: Optional[int] = None,
     ) -> ArchiveSync:
-        if daily_limit is not None and not 1 <= int(daily_limit) <= 500:
-            raise ValueError('每日处理上限必须在 1 到 500 之间')
+        if daily_limit is not None and not 1 <= int(daily_limit) <= 1000:
+            raise ValueError('每日处理上限必须在 1 到 1000 之间')
         values: List[str] = []
         parameters: List[Any] = []
         if paused is not None:
@@ -672,6 +679,8 @@ class ArchiveBackfillService:
             parameters.append(1 if paused else 0)
         if daily_limit is not None:
             values.append('daily_limit=?')
+            values.append('daily_limit_override=?')
+            parameters.append(min(int(daily_limit), 500))
             parameters.append(int(daily_limit))
         if not values:
             return await self.status(account_id)
@@ -704,6 +713,15 @@ class ArchiveBackfillService:
             self._next_discovery_at = now + self.DISCOVERY_INTERVAL_SECONDS
             await self._discover(int(sync['account_id']))
             return True
+        if (
+            self._identity_reconciliation_enabled
+            and now >= self._next_identity_reconcile_at
+        ):
+            self._next_identity_reconcile_at = (
+                now + self.IDENTITY_RECONCILE_INTERVAL_SECONDS
+            )
+            if await self.reconcile_archive_identity_once():
+                return True
         part = await self._claim_download_part()
         if part is not None:
             await self._queue_download(int(part['recording_part_id']))
@@ -716,6 +734,91 @@ class ArchiveBackfillService:
                 await self._materialize(import_row)
             return True
         return reconciled
+
+    async def reconcile_archive_identity_once(self) -> bool:
+        """Refresh one historical archive's room/player identity from Bilibili."""
+        now = self._now()
+
+        def claim(connection: sqlite3.Connection) -> Optional[sqlite3.Row]:
+            row = connection.execute(
+                'SELECT imported.id,imported.account_id,imported.bvid,'
+                'imported.title,imported.session_id,account.uid,'
+                'account.display_name,account.credential_version '
+                'FROM vainglory_archive_imports imported '
+                'JOIN bili_accounts account ON account.id=imported.account_id '
+                'WHERE imported.session_id IS NOT NULL '
+                "AND account.state='active' AND ("
+                'imported.anchor_identity_checked_at IS NULL OR ('
+                'imported.anchor_identity_error IS NOT NULL AND '
+                'imported.anchor_identity_checked_at<=?)) '
+                'ORDER BY CASE WHEN imported.anchor_identity_checked_at IS NULL '
+                'THEN 0 ELSE 1 END,'
+                'COALESCE(imported.recording_started_at,imported.published_at,'
+                'imported.created_at) DESC,imported.id DESC LIMIT 1',
+                (now - self.IDENTITY_RETRY_SECONDS,),
+            ).fetchone()
+            if row is None:
+                return None
+            changed = connection.execute(
+                'UPDATE vainglory_archive_imports SET '
+                'anchor_identity_checked_at=?,anchor_identity_error=? '
+                'WHERE id=? AND (anchor_identity_checked_at IS NULL OR ('
+                'anchor_identity_error IS NOT NULL AND '
+                'anchor_identity_checked_at<=?))',
+                (
+                    now,
+                    '正在重新核对历史稿件归属',
+                    int(row['id']),
+                    now - self.IDENTITY_RETRY_SECONDS,
+                ),
+            )
+            return row if changed.rowcount == 1 else None
+
+        imported = await self._database.write(claim)
+        if imported is None:
+            return False
+        try:
+            bundle = await self._bundle_loader(int(imported['account_id']))
+            detail = await self._archive_reader.viewer_detail(
+                bundle,
+                account_id=int(imported['account_id']),
+                credential_version=int(imported['credential_version']),
+                bvid=str(imported['bvid']),
+            )
+            detail_title, description = self._detail_metadata(
+                detail, fallback_title=str(imported['title'])
+            )
+            await self._repository.reconcile_recorded_session_identity(
+                int(imported['session_id']),
+                title=detail_title,
+                description=description,
+                excluded_anchor_uid=int(imported['uid']),
+                excluded_anchor_name=str(imported['display_name']),
+            )
+            is_only_self = self._detail_is_only_self(detail)
+            await self._database.execute(
+                'UPDATE vainglory_archive_imports SET title=?,'
+                'is_only_self=COALESCE(?,is_only_self),'
+                'anchor_identity_checked_at=?,anchor_identity_error=NULL,'
+                'updated_at=? WHERE id=?',
+                (
+                    detail_title,
+                    None if is_only_self is None else int(is_only_self),
+                    now,
+                    now,
+                    int(imported['id']),
+                ),
+            )
+        except BaseException as error:
+            if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt)):
+                raise
+            await self._database.execute(
+                'UPDATE vainglory_archive_imports SET '
+                'anchor_identity_checked_at=?,anchor_identity_error=?,'
+                'updated_at=? WHERE id=?',
+                (now, self._error_text(error), now, int(imported['id'])),
+            )
+        return True
 
     async def _discover(self, account_id: int) -> None:
         now = self._now()
@@ -810,12 +913,18 @@ class ArchiveBackfillService:
                             'completed_page_count=0,error=NULL,retryable=0,'
                             "next_retry_at=NULL,content_classification='unknown',"
                             "classification_reason='B 站分 P 数已增加，等待补充分析',"
+                            'is_only_self=COALESCE(?,is_only_self),'
                             'updated_at=? WHERE id=?',
                             (
                                 archive.aid,
                                 archive.title,
                                 archive.published_at,
                                 recording_started_at,
+                                (
+                                    None
+                                    if archive.is_only_self is None
+                                    else int(archive.is_only_self)
+                                ),
                                 now,
                                 int(existing['id']),
                             ),
@@ -824,12 +933,18 @@ class ArchiveBackfillService:
                         connection.execute(
                             'UPDATE vainglory_archive_imports '
                             'SET aid=?,title=?,published_at=?,recording_started_at=?,'
+                            'is_only_self=COALESCE(?,is_only_self),'
                             'updated_at=? WHERE id=?',
                             (
                                 archive.aid,
                                 archive.title,
                                 archive.published_at,
                                 recording_started_at,
+                                (
+                                    None
+                                    if archive.is_only_self is None
+                                    else int(archive.is_only_self)
+                                ),
                                 now,
                                 int(existing['id']),
                             ),
@@ -846,9 +961,9 @@ class ArchiveBackfillService:
                 connection.execute(
                     'INSERT INTO vainglory_archive_imports('
                     'account_id,aid,bvid,title,published_at,recording_started_at,'
-                    'session_id,state,'
+                    'is_only_self,session_id,state,'
                     'progress,page_count,completed_page_count,error,created_at,'
-                    'updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    'updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (
                         account_id,
                         archive.aid,
@@ -856,6 +971,11 @@ class ArchiveBackfillService:
                         archive.title,
                         archive.published_at,
                         recording_started_at,
+                        (
+                            None
+                            if archive.is_only_self is None
+                            else int(archive.is_only_self)
+                        ),
                         (None if uploaded is None else int(uploaded['session_id'])),
                         'queued',
                         0,
@@ -916,7 +1036,8 @@ class ArchiveBackfillService:
                 'archive.recording_part_id,imported.id AS import_id,'
                 'imported.account_id,imported.quota_day AS import_quota_day,'
                 'sync.quota_day AS sync_quota_day,sync.daily_used,'
-                'sync.daily_limit '
+                'COALESCE(sync.daily_limit_override,sync.daily_limit) '
+                'AS daily_limit '
                 'FROM vainglory_archive_parts archive '
                 'JOIN vainglory_archive_imports imported '
                 'ON imported.id=archive.import_id '
@@ -927,7 +1048,8 @@ class ArchiveBackfillService:
                 "AND imported.state IN ('downloading','analyzing') "
                 'AND sync.operator_paused=0 AND ('
                 'imported.quota_day=? OR sync.quota_day IS NULL '
-                'OR sync.quota_day<>? OR sync.daily_used<sync.daily_limit) '
+                'OR sync.quota_day<>? OR sync.daily_used<'
+                'COALESCE(sync.daily_limit_override,sync.daily_limit)) '
                 'ORDER BY CASE WHEN '
                 'COALESCE(imported.recording_started_at,imported.published_at,'
                 'imported.created_at)>=sync.season_started_at AND '
@@ -996,7 +1118,8 @@ class ArchiveBackfillService:
                 'AND sync.operator_paused=0 '
                 'AND (sync.retry_after_at IS NULL OR sync.retry_after_at<=?) AND ('
                 'imported.quota_day=? OR sync.quota_day IS NULL '
-                'OR sync.quota_day<>? OR sync.daily_used<sync.daily_limit) '
+                'OR sync.quota_day<>? OR sync.daily_used<'
+                'COALESCE(sync.daily_limit_override,sync.daily_limit)) '
                 'ORDER BY CASE WHEN '
                 'COALESCE(imported.recording_started_at,imported.published_at,'
                 'imported.created_at)>=sync.season_started_at AND '
@@ -1044,6 +1167,13 @@ class ArchiveBackfillService:
             detail_title, description = self._detail_metadata(
                 detail, fallback_title=str(imported['title'])
             )
+            is_only_self = self._detail_is_only_self(detail)
+            if is_only_self is not None:
+                await self._database.execute(
+                    'UPDATE vainglory_archive_imports SET is_only_self=?,updated_at=? '
+                    'WHERE id=?',
+                    (int(is_only_self), self._now(), import_id),
+                )
             if is_excluded_title(str(imported['title']), detail_title):
                 await self._delete_import(import_id)
                 return
@@ -1138,8 +1268,10 @@ class ArchiveBackfillService:
                 )
                 session_id = int(cursor.lastrowid)
                 connection.execute(
-                    'UPDATE vainglory_archive_imports SET session_id=? WHERE id=?',
-                    (session_id, import_id),
+                    'UPDATE vainglory_archive_imports SET session_id=?,'
+                    'anchor_identity_checked_at=?,anchor_identity_error=NULL '
+                    'WHERE id=?',
+                    (session_id, now, import_id),
                 )
                 connection.execute(
                     'INSERT INTO recording_runs('
@@ -1823,7 +1955,17 @@ class ArchiveBackfillService:
         )
         cid_list = entry.get('cid_list')
         page_count = len(cid_list) if isinstance(cid_list, list) and cid_list else None
-        return _Archive(aid, bvid, title[:200], published_at, page_count)
+        raw_is_only_self = value.get('is_only_self')
+        if raw_is_only_self is None:
+            raw_is_only_self = entry.get('is_only_self')
+        return _Archive(
+            aid,
+            bvid,
+            title[:200],
+            published_at,
+            page_count,
+            cls._optional_bool(raw_is_only_self),
+        )
 
     @classmethod
     def _parse_detail(cls, detail: Mapping[str, Any]) -> Tuple[_ArchivePage, ...]:
@@ -1897,6 +2039,32 @@ class ArchiveBackfillService:
             '',
         )
         return title[:200], description
+
+    @classmethod
+    def _detail_is_only_self(cls, detail: Mapping[str, Any]) -> Optional[bool]:
+        data = detail.get('data')
+        if not isinstance(data, Mapping):
+            return None
+        archive = data.get('archive')
+        if not isinstance(archive, Mapping):
+            archive = data
+        return cls._optional_bool(archive.get('is_only_self'))
+
+    @staticmethod
+    def _optional_bool(value: Any) -> Optional[bool]:
+        if value is None or value == '':
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized in ('true', 'yes'):
+                return True
+            if normalized in ('false', 'no'):
+                return False
+            try:
+                return bool(int(normalized))
+            except ValueError:
+                return None
+        return bool(value)
 
     async def _run(self) -> None:
         while True:
@@ -2090,7 +2258,7 @@ class ArchiveBackfillService:
             ),
             updated_at=int(row['updated_at']),
             operator_paused=bool(row['operator_paused']),
-            daily_limit=int(row['daily_limit']),
+            daily_limit=int(row['daily_limit_override'] or row['daily_limit']),
             daily_used=int(row['daily_used']),
             quota_day=(None if row['quota_day'] is None else str(row['quota_day'])),
             next_page=int(row['next_page']),

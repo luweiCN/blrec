@@ -3,7 +3,7 @@
     <div>
       <span class="eyebrow">SYSTEM OPERATIONS</span>
       <h1>运行中心</h1>
-      <p>集中查看执行节点、处理队列、历史流水线和稿件完成证据。</p>
+      <p>集中查看实时直播、执行节点、历史流水线和稿件完成证据。</p>
     </div>
     <span *ngIf="sampledAt !== null" class="freshness">
       实时状态 · {{ sampledAt * 1000 | date: "HH:mm:ss" }}
@@ -73,7 +73,7 @@
         >
           {{
             audit.staleCount + audit.failedCount > 0
-              ? audit.staleCount + audit.failedCount + " 项待复核或处理"
+              ? audit.staleCount + audit.failedCount + " 项待验证或处理"
               : "远端状态已核实"
           }}
         </small>
@@ -91,6 +91,23 @@
     >
       <nz-tab *ngFor="let tab of tabs" [nzTitle]="tab.label"></nz-tab>
     </nz-tabset>
+
+    <section *ngIf="activeTab === 'live'" class="tab-panel">
+      <header class="section-heading">
+        <div>
+          <h2>实时直播</h2>
+          <p>每个正在开播的直播间单独显示取帧、精扫与临时对局进度。</p>
+        </div>
+      </header>
+      <app-vainglory-analysis-task-center
+        *ngIf="queue; else queueLoading"
+        [queue]="queue"
+        [sampledAt]="sampledAt"
+        [embedded]="true"
+        view="live"
+        (viewSession)="openSession($event)"
+      ></app-vainglory-analysis-task-center>
+    </section>
 
     <section *ngIf="activeTab === 'tasks'" class="tab-panel">
       <header class="section-heading">
@@ -383,7 +400,7 @@
           [disabled]="(publicationAudit?.staleCount || 0) === 0"
           (click)="queuePublicationAudit()"
         >
-          复核下一批 20 条
+          验证下一批 20 条
         </button>
       </header>
 
@@ -395,15 +412,15 @@
           <div>
             <dt>已验证完成</dt>
             <dd>{{ audit.verifiedCount }}</dd>
-            <span>最近一次完整远端复核有证据</span>
+            <span>已从 B 站重新读取并确认完整</span>
           </div>
           <div>
             <dt>处理中</dt>
             <dd>{{ audit.pendingCount }}</dd>
-            <span>等待分析、发布、重试或远端复核</span>
+            <span>等待分析、发布、重试或远端验证</span>
           </div>
           <div [class.has-issue]="audit.staleCount > 0">
-            <dt>超过 7 天待复核</dt>
+            <dt>超过 7 天待验证</dt>
             <dd>{{ audit.staleCount }}</dd>
             <span>每批低优先级读取 20 条，不影响新稿件</span>
           </div>
@@ -418,17 +435,102 @@
           <div>
             <strong>完成不等于请求成功</strong>
             <p>
-              系统会读取 B 站公开稿件与评论列表，确认简介、分段、评论图片和置顶位置。
+              系统会用公开访问或稿件所属账号重新读取 B 站内容，确认简介、分段、评论图片和置顶位置。
               如果只缺少置顶，就只重新置顶原评论；不会重复发布评论或上传图片。
             </p>
           </div>
         </section>
         <p *ngIf="audit.oldestVerifiedAt" class="oldest-evidence">
-          最早一次完整复核：{{
+          最早远端验证记录：{{
             audit.oldestVerifiedAt * 1000 | date: "yyyy-MM-dd HH:mm"
           }}
         </p>
       </ng-container>
+
+      <section class="publication-records" aria-labelledby="publication-record-title">
+        <header>
+          <div>
+            <h3 id="publication-record-title">回填记录</h3>
+            <p>可以直接打开 B 站稿件核对；无论成功或失败都可以重新执行。</p>
+          </div>
+          <div class="publication-filters" aria-label="回填记录筛选">
+            <button
+              *ngFor="let filter of publicationFilters"
+              nz-button
+              nzSize="small"
+              type="button"
+              [nzType]="publicationFilter === filter.key ? 'primary' : 'default'"
+              (click)="selectPublicationFilter(filter.key)"
+            >
+              {{ filter.label }}
+            </button>
+          </div>
+        </header>
+
+        <div *ngIf="publicationRecordsLoading" class="loading-block">
+          <nz-spin nzSimple></nz-spin><span>正在读取回填记录…</span>
+        </div>
+        <ol *ngIf="!publicationRecordsLoading" class="publication-record-list">
+          <li *ngFor="let record of publicationRecords">
+            <nz-tag [nzColor]="publicationStatusColor(record)">
+              {{ record.statusLabel }}
+            </nz-tag>
+            <div class="publication-record-main">
+              <a
+                [href]="biliArchiveUrl(record)"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {{ record.title }}
+              </a>
+              <span>
+                {{ record.bvid }} · {{ publicationVisibilityLabel(record) }} ·
+                {{ record.matchCount }} 局
+              </span>
+              <small *ngIf="record.detail">{{ record.detail }}</small>
+            </div>
+            <time [attr.datetime]="record.updatedAt * 1000 | date: 'yyyy-MM-ddTHH:mm:ss'">
+              {{ record.updatedAt * 1000 | date: "MM-dd HH:mm" }}
+            </time>
+            <div class="publication-record-actions">
+              <a
+                nz-button
+                nzType="link"
+                nzSize="small"
+                [href]="biliArchiveUrl(record)"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                查看稿件
+              </a>
+              <button
+                nz-button
+                nzSize="small"
+                type="button"
+                nz-popconfirm
+                nzPopconfirmTitle="重新执行简介、评论、置顶和视频分段，并再次验证？"
+                [disabled]="record.state === 'running'"
+                [nzLoading]="retryingPublicationIds.has(record.id)"
+                (nzOnConfirm)="retryPublication(record)"
+              >
+                重试
+              </button>
+            </div>
+          </li>
+          <li *ngIf="publicationRecords.length === 0" class="empty-row">
+            当前筛选下没有回填记录
+          </li>
+        </ol>
+        <footer *ngIf="publicationRecordTotal > publicationRecordPageSize">
+          <nz-pagination
+            [nzPageIndex]="publicationRecordPage"
+            [nzPageSize]="publicationRecordPageSize"
+            [nzTotal]="publicationRecordTotal"
+            [nzShowSizeChanger]="false"
+            (nzPageIndexChange)="changePublicationPage($event)"
+          ></nz-pagination>
+        </footer>
+      </section>
     </section>
   </section>
 

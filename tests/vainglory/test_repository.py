@@ -2198,6 +2198,143 @@ async def test_room_binding_reuses_a_unique_player_with_the_same_anchor_alias(
 
 
 @pytest.mark.asyncio
+async def test_roomless_history_uses_explicit_player_alias_without_creating_duplicate(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        historical = tmp_path / 'historical.mp4'
+        historical.write_bytes(b'historical')
+        await seed_session(database, historical)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=0,anchor_uid=NULL,"
+            "anchor_name='-Akitsuki-' WHERE id=1"
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        player = await repository.create_player('茉莉')
+        await repository.bind_player_room(player.id, 930376)
+        await repository.bind_player_alias(player.id, '-Akitsuki-')
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+
+        players = await repository.list_players()
+        assert [item.name for item in players] == ['茉莉']
+        assert (
+            await database.scalar(
+                'SELECT player_id FROM vainglory_player_sessions WHERE session_id=1'
+            )
+            == player.id
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_historical_description_reassigns_a_duplicate_to_the_bound_room(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title,'
+            'anchor_uid,anchor_name) VALUES('
+            "1,0,'bili-archive:1:BV1history','closed',1,'旧稿件',NULL,"
+            "'-Akitsuki-')"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title,'
+            'anchor_uid,anchor_name) VALUES('
+            "2,930376,'930376:known','closed',2,'茉莉直播',99,'茉莉')"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title,'
+            'anchor_uid,anchor_name) VALUES('
+            "3,111,'111:uploader','closed',3,'旧账号直播',42,'旧账号')"
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        canonical = await repository.create_player('茉莉')
+        await repository.bind_player_room(canonical.id, 930376)
+        duplicate = await repository.create_player('-Akitsuki-')
+        await database.execute(
+            'UPDATE vainglory_players SET origin=\'automatic\' WHERE id=?',
+            (duplicate.id,),
+        )
+        await database.execute(
+            'INSERT INTO vainglory_player_sessions('
+            'session_id,player_id,created_at,updated_at) VALUES(1,?,1,1)',
+            (duplicate.id,),
+        )
+
+        inferred = await repository.reconcile_recorded_session_identity(
+            1,
+            title='茉莉的直播回放',
+            description=(
+                '上传账号 https://live.bilibili.com/111\n' '原直播间号：930376'
+            ),
+            excluded_anchor_uid=42,
+            excluded_anchor_name='旧账号',
+        )
+
+        assert inferred == (930376, 99, '茉莉')
+        session = await database.fetchone(
+            'SELECT room_id,anchor_uid,anchor_name FROM recording_sessions WHERE id=1'
+        )
+        assert session is not None
+        assert (
+            int(session['room_id']),
+            int(session['anchor_uid']),
+            str(session['anchor_name']),
+        ) == (930376, 99, '茉莉')
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM vainglory_player_sessions WHERE session_id=1'
+            )
+            == 0
+        )
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM vainglory_players WHERE id=?', (duplicate.id,)
+            )
+            == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_roomless_history_name_does_not_create_an_automatic_player(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        historical = tmp_path / 'unmatched-history.mp4'
+        historical.write_bytes(b'historical')
+        await seed_session(database, historical)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=0,anchor_uid=NULL,"
+            "anchor_name='无法确认的旧昵称' WHERE id=1"
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+
+        assert await repository.list_players() == ()
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM vainglory_player_sessions') == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_analysis_reuses_a_manual_player_name_instead_of_creating_a_duplicate(
     tmp_path: Path,
 ) -> None:

@@ -28,10 +28,12 @@ import {
   VaingloryArchiveSync,
   VaingloryIndexRealtimeSnapshot,
   VaingloryPublicationAudit,
+  VaingloryPublicationRecord,
+  VaingloryPublicationRecordFilter,
 } from '../vainglory.model';
 import { VaingloryService } from '../vainglory.service';
 
-type OperationsTab = 'tasks' | 'workers' | 'history' | 'publication';
+type OperationsTab = 'live' | 'tasks' | 'workers' | 'history' | 'publication';
 
 @Component({
   selector: 'app-vainglory-operations',
@@ -41,12 +43,13 @@ type OperationsTab = 'tasks' | 'workers' | 'history' | 'publication';
 })
 export class OperationsComponent implements OnInit, OnDestroy {
   readonly tabs: readonly { key: OperationsTab; label: string }[] = [
+    { key: 'live', label: '实时直播' },
     { key: 'tasks', label: '处理队列' },
     { key: 'workers', label: 'Worker 节点' },
     { key: 'history', label: '历史流水线' },
     { key: 'publication', label: '稿件回填' },
   ];
-  activeTab: OperationsTab = 'tasks';
+  activeTab: OperationsTab = 'live';
   queue: VaingloryAnalysisQueue | null = null;
   sampledAt: number | null = null;
   archiveSyncs: readonly VaingloryArchiveSync[] = [];
@@ -61,6 +64,21 @@ export class OperationsComponent implements OnInit, OnDestroy {
     readonly ArchiveMigrationItem[]
   > = new Map();
   publicationAudit: VaingloryPublicationAudit | null = null;
+  readonly publicationFilters: readonly {
+    key: VaingloryPublicationRecordFilter;
+    label: string;
+  }[] = [
+    { key: 'all', label: '全部' },
+    { key: 'processing', label: '处理中' },
+    { key: 'verified', label: '已验证' },
+    { key: 'needs_action', label: '需要处理' },
+  ];
+  publicationFilter: VaingloryPublicationRecordFilter = 'all';
+  publicationRecords: readonly VaingloryPublicationRecord[] = [];
+  publicationRecordTotal = 0;
+  publicationRecordPage = 1;
+  readonly publicationRecordPageSize = 20;
+  publicationRecordsLoading = true;
   accountsLoading = true;
   migrationLoading = true;
   auditLoading = true;
@@ -76,6 +94,7 @@ export class OperationsComponent implements OnInit, OnDestroy {
   readonly updatingWorkerIds = new Set<string>();
   readonly archiveControlIds = new Set<number>();
   readonly migrationControlIds = new Set<number>();
+  readonly retryingPublicationIds = new Set<number>();
   readonly archiveDailyLimitDrafts = new Map<number, number>();
   readonly migrationDailyLimitDrafts = new Map<number, number>();
 
@@ -93,6 +112,7 @@ export class OperationsComponent implements OnInit, OnDestroy {
     this.loadAccounts();
     this.loadMigrations();
     this.loadPublicationAudit();
+    this.loadPublicationRecords();
     this.realtime.events$
       .pipe(takeUntil(this.destroy$))
       .subscribe((event) => {
@@ -100,6 +120,7 @@ export class OperationsComponent implements OnInit, OnDestroy {
           this.loadAccounts();
           this.loadMigrations();
           this.loadPublicationAudit();
+          this.loadPublicationRecords();
           return;
         }
         if (event.type === 'vainglory_index') {
@@ -374,15 +395,84 @@ export class OperationsComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (result) => {
           this.publicationAudit = result;
+          this.loadPublicationRecords();
           this.actionMessage =
             result.queuedCount > 0
-              ? `已将 ${result.queuedCount} 条稿件加入低优先级远端复核`
-              : '当前没有超过 7 天未复核的稿件';
+              ? `已将 ${result.queuedCount} 条稿件加入低优先级远端验证`
+              : '当前没有超过 7 天未验证的稿件';
         },
         error: (error: unknown) => {
-          this.pageError = this.errorMessage(error, '稿件远端复核排队失败');
+          this.pageError = this.errorMessage(error, '稿件远端验证排队失败');
         },
       });
+  }
+
+  selectPublicationFilter(filter: VaingloryPublicationRecordFilter): void {
+    if (this.publicationFilter === filter) {
+      return;
+    }
+    this.publicationFilter = filter;
+    this.publicationRecordPage = 1;
+    this.loadPublicationRecords();
+  }
+
+  changePublicationPage(page: number): void {
+    this.publicationRecordPage = page;
+    this.loadPublicationRecords();
+  }
+
+  retryPublication(record: VaingloryPublicationRecord): void {
+    if (this.retryingPublicationIds.has(record.id) || record.state === 'running') {
+      return;
+    }
+    this.retryingPublicationIds.add(record.id);
+    this.vainglory
+      .retryPublication(record.id)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.retryingPublicationIds.delete(record.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.actionMessage = `${record.title} 已加入重新回填与验证队列`;
+          this.loadPublicationAudit();
+          this.loadPublicationRecords();
+        },
+        error: (error: unknown) => {
+          this.pageError = this.errorMessage(error, '稿件重新回填失败');
+        },
+      });
+  }
+
+  publicationStatusColor(record: VaingloryPublicationRecord): string {
+    if (record.state === 'failed') {
+      return 'red';
+    }
+    if (record.state === 'confirmed') {
+      return 'green';
+    }
+    if (record.state === 'running') {
+      return 'blue';
+    }
+    if (record.state === 'paused') {
+      return 'orange';
+    }
+    return 'default';
+  }
+
+  publicationVisibilityLabel(record: VaingloryPublicationRecord): string {
+    return record.visibilityScope === 'owner'
+      ? '仅自己可见'
+      : record.visibilityScope === 'public'
+        ? '公开稿件'
+        : '待确认可见性';
+  }
+
+  biliArchiveUrl(record: VaingloryPublicationRecord): string {
+    return `https://www.bilibili.com/video/${record.bvid}`;
   }
 
   openAddWorker(): void {
@@ -538,6 +628,32 @@ export class OperationsComponent implements OnInit, OnDestroy {
         error: (error: unknown) => {
           this.auditLoading = false;
           this.pageError = this.errorMessage(error, '稿件完成证据读取失败');
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  private loadPublicationRecords(): void {
+    this.publicationRecordsLoading = true;
+    const offset =
+      (this.publicationRecordPage - 1) * this.publicationRecordPageSize;
+    this.vainglory
+      .listPublicationRecords(
+        this.publicationFilter,
+        this.publicationRecordPageSize,
+        offset,
+      )
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (result) => {
+          this.publicationRecords = result.items;
+          this.publicationRecordTotal = result.total;
+          this.publicationRecordsLoading = false;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.publicationRecordsLoading = false;
+          this.pageError = this.errorMessage(error, '稿件回填记录读取失败');
           this.changeDetector.markForCheck();
         },
       });

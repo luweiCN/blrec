@@ -307,6 +307,7 @@ def test_description_never_truncates_existing_user_text() -> None:
 class FakePublicationProtocol:
     def __init__(self) -> None:
         self.description = '  原简介\n第二行  '
+        self.archive_is_only_self = False
         self.public_archive_calls: List[str] = []
         self.public_archive_result: Any = {
             'code': 0,
@@ -368,6 +369,7 @@ class FakePublicationProtocol:
                 'archive': {
                     'aid': 303,
                     'bvid': 'BV1abcdefgh',
+                    'is_only_self': 1 if self.archive_is_only_self else 0,
                     'title': '原标题',
                     'desc': self.description,
                     'tag': '虚荣,直播回放',
@@ -793,7 +795,7 @@ async def test_confirmed_publications_can_be_queued_for_low_priority_reaudit(
             'pin_state': 'confirmed',
             'remote_verified_at': None,
             'priority': 0,
-            'error': '等待远端重新复核',
+            'error': '等待重新验证远端内容',
         }
 
         after = await service.publication_audit_status(stale_before=1500)
@@ -810,6 +812,57 @@ async def test_confirmed_publications_can_be_queued_for_low_priority_reaudit(
         assert unverified.stale_count == 1
         assert unverified.pending_count == 0
         assert await service.queue_publication_audit(stale_before=1500, limit=10) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publication_records_are_paginated_and_a_confirmed_record_can_retry(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1_000,
+        )
+        for _ in range(6):
+            assert await service.run_once() is True
+
+        page = await service.list_publication_records(
+            status='verified', limit=20, offset=0
+        )
+
+        assert page.total == 1
+        assert len(page.items) == 1
+        record = page.items[0]
+        assert record.bvid == 'BV1abcdefgh'
+        assert record.title == '直播回放'
+        assert record.status.code == 'confirmed'
+
+        await service.retry_publication(record.id)
+
+        retried = await database.fetchone(
+            'SELECT state,chapter_state,description_state,pin_state,'
+            'remote_verified_at,priority,error FROM vainglory_publications '
+            'WHERE id=?',
+            (record.id,),
+        )
+        assert dict(retried) == {
+            'state': 'prepared',
+            'chapter_state': 'prepared',
+            'description_state': 'prepared',
+            'pin_state': 'prepared',
+            'remote_verified_at': None,
+            'priority': 1,
+            'error': '管理员要求重新回填并验证',
+        }
     finally:
         await database.close()
 
@@ -977,6 +1030,47 @@ async def test_upload_publication_waits_until_archive_is_publicly_visible(
 
         assert await service.run_once() is True
         assert len(protocol.public_archive_calls) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_private_archive_uses_authenticated_remote_verification(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        protocol.archive_is_only_self = True
+        protocol.public_archive_result = BiliApiError(
+            62012, operation='public_archive_view'
+        )
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1_000,
+        )
+
+        for _ in range(6):
+            assert await service.run_once() is True
+
+        publication = await database.fetchone(
+            'SELECT state,visibility_scope,visibility_verified_at,'
+            'remote_verified_at,error FROM vainglory_publications'
+        )
+        assert dict(publication) == {
+            'state': 'confirmed',
+            'visibility_scope': 'owner',
+            'visibility_verified_at': 1_000,
+            'remote_verified_at': 1_000,
+            'error': None,
+        }
+        assert protocol.public_archive_calls == ['BV1abcdefgh']
     finally:
         await database.close()
 

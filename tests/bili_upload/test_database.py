@@ -65,6 +65,7 @@ REQUIRED_TABLES = {
     'vainglory_analysis_revisions',
     'vainglory_match_players',
     'vainglory_players',
+    'vainglory_player_aliases',
     'vainglory_player_rooms',
     'vainglory_player_room_suppressions',
     'vainglory_scan_suppressions',

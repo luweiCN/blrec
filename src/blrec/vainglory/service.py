@@ -1110,6 +1110,9 @@ class VaingloryIndexService:
     async def rename_player(self, player_id: int, name: str) -> PlayerRecord:
         return await self._repository.rename_player(player_id, name)
 
+    async def bind_player_alias(self, player_id: int, alias: str) -> PlayerRecord:
+        return await self._repository.bind_player_alias(player_id, alias)
+
     async def bind_player_room(self, player_id: int, room_id: int) -> PlayerRecord:
         return await self._repository.bind_player_room(player_id, room_id)
 

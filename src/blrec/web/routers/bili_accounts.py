@@ -139,7 +139,7 @@ class ArchiveMigrationResponse(ApiModel):
 
 class ArchiveMigrationControlRequest(ApiModel):
     paused: Optional[bool] = None
-    daily_limit: Optional[int] = Field(None, ge=1, le=500)
+    daily_limit: Optional[int] = Field(None, ge=1, le=1000)
 
 
 class ArchiveMigrationItemResponse(ApiModel):

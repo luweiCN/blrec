@@ -571,7 +571,13 @@
     </ol>
   </section>
 
-  <section class="analysis-task-section" aria-labelledby="live-analysis-title">
+  </ng-container>
+
+  <section
+    *ngIf="view === 'live'"
+    class="analysis-task-section"
+    aria-labelledby="live-analysis-title"
+  >
     <header class="analysis-section-heading">
       <div>
         <h3 id="live-analysis-title">直播预分析</h3>
@@ -708,6 +714,7 @@
     </div>
   </section>
 
+  <ng-container *ngIf="view === 'tasks'">
   <section class="analysis-task-section" aria-labelledby="queue-summary-title">
     <header class="analysis-section-heading">
       <div>

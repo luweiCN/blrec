@@ -908,6 +908,120 @@ async def test_does_not_treat_the_archive_owner_as_the_recorded_anchor(
 
 
 @pytest.mark.asyncio
+async def test_infers_a_known_player_name_from_the_archive_description(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            "INSERT INTO vainglory_players(id,name,origin,created_at,updated_at) "
+            "VALUES(1,'茉莉','manual',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_player_aliases('
+            'alias,player_id,created_at,updated_at) VALUES(\'茉莉\',1,1,1)'
+        )
+
+        inferred = await database.write(
+            lambda connection: ArchiveBackfillService._infer_anchor(
+                connection,
+                '早期虚荣录播',
+                '本期主播：茉莉',
+                excluded_anchor_uid=42,
+                excluded_anchor_name='旧账号',
+            )
+        )
+
+        assert inferred == (0, None, '茉莉')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_reconciles_existing_historical_identity_from_private_archive_detail(
+    tmp_path: Path,
+) -> None:
+    class Reader(FakeArchiveReader):
+        async def viewer_detail(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            bvid: str,
+        ) -> Mapping[str, Any]:
+            assert (account_id, credential_version, bvid) == (1, 1, 'BV1abcdefgh')
+            return {
+                'data': {
+                    'archive': {
+                        'aid': 101,
+                        'bvid': bvid,
+                        'title': '茉莉的直播回放',
+                        'desc': '原直播间：https://live.bilibili.com/930376',
+                        'is_only_self': 1,
+                    },
+                    'videos': [{'cid': 201, 'title': 'P1', 'duration': 600}],
+                }
+            }
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            "INSERT INTO vainglory_players(id,name,origin,created_at,updated_at) "
+            "VALUES(1,'茉莉','manual',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_player_rooms('
+            'room_id,player_id,created_at,updated_at) VALUES(930376,1,1,1)'
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title,'
+            'anchor_name) '
+            "VALUES(1,0,'bili-archive:1:BV1abcdefgh','closed',1,"
+            "'未归属旧稿件','-Akitsuki-')"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,session_id,state,progress,page_count,'
+            'completed_page_count,created_at,updated_at) '
+            "VALUES(1,1,101,'BV1abcdefgh','未归属旧稿件',1,'ready',1,1,1,1,1)"
+        )
+        service = ArchiveBackfillService(
+            database,
+            Reader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+
+        assert await service.reconcile_archive_identity_once() is True
+
+        session = await database.fetchone(
+            'SELECT room_id,anchor_name FROM recording_sessions WHERE id=1'
+        )
+        imported = await database.fetchone(
+            'SELECT is_only_self,anchor_identity_checked_at,'
+            'anchor_identity_error FROM vainglory_archive_imports WHERE id=1'
+        )
+        assert session is not None
+        assert (int(session['room_id']), str(session['anchor_name'])) == (
+            930376,
+            '茉莉',
+        )
+        assert imported is not None
+        assert int(imported['is_only_self']) == 1
+        assert int(imported['anchor_identity_checked_at']) == 1_000
+        assert imported['anchor_identity_error'] is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_keeps_short_archive_pages_for_result_scanning(tmp_path: Path) -> None:
     class Reader(FakeArchiveReader):
         async def detail(
@@ -1173,6 +1287,99 @@ async def test_infers_historical_anchor_from_live_room_link_and_known_sessions(
             int(imported['anchor_uid']),
             str(imported['anchor_name']),
         ) == (777, 123, '主播甲')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_historical_anchor_prefers_a_bound_room_from_multiple_description_links(
+    tmp_path: Path,
+) -> None:
+    class Reader(FakeArchiveReader):
+        async def detail(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            bvid: str,
+        ) -> Mapping[str, Any]:
+            detail = await super().detail(
+                _bundle,
+                account_id=account_id,
+                credential_version=credential_version,
+                bvid=bvid,
+            )
+            return {
+                **detail,
+                'data': {
+                    **detail['data'],
+                    'archive': {
+                        **detail['data']['archive'],
+                        'title': '旧直播录像',
+                        'desc': (
+                            '投稿账号：https://live.bilibili.com/111\n'
+                            '原直播间号：930376'
+                        ),
+                    },
+                },
+            }
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            'INSERT INTO vainglory_players('
+            "id,name,origin,created_at,updated_at) VALUES(9,'茉莉','manual',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_player_rooms('
+            'room_id,player_id,created_at,updated_at) VALUES(930376,9,1,1)'
+        )
+        service = ArchiveBackfillService(
+            database,
+            Reader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+        await service.request(1)
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        imported = await database.fetchone(
+            'SELECT session.room_id,session.anchor_name '
+            'FROM vainglory_archive_imports imported '
+            'JOIN recording_sessions session ON session.id=imported.session_id'
+        )
+        assert imported is not None
+        assert int(imported['room_id']) == 930376
+        assert str(imported['anchor_name']) == '茉莉'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_history_control_accepts_one_thousand_archives_per_day(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+        await service.request(1)
+
+        updated = await service.update_control(1, daily_limit=1_000)
+
+        assert updated.daily_limit == 1_000
     finally:
         await database.close()
 

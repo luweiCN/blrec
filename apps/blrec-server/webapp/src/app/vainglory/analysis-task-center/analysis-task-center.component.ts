@@ -19,7 +19,7 @@ import {
 } from '../vainglory.model';
 
 type TimelineCountGroup = 'matchFlow' | 'heroSelect' | 'matchMode';
-export type AnalysisTaskCenterView = 'workers' | 'tasks';
+export type AnalysisTaskCenterView = 'workers' | 'tasks' | 'live';
 
 const ANALYSIS_OUTPUT_LABELS: Readonly<Record<string, string>> = {
   match_flow: '对局中',

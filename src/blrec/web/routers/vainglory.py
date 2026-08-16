@@ -32,6 +32,8 @@ from blrec.vainglory.archive_backfill import (
 from blrec.vainglory.catalog import hero_chinese_name
 from blrec.vainglory.publication import (
     PublicationAuditStatus,
+    PublicationRecord,
+    PublicationRecordPage,
     PublicationTaskStatus,
     VaingloryPublicationService,
 )
@@ -135,6 +137,29 @@ class PublicationAuditResponse(ApiModel):
 
 class PublicationAuditQueueResponse(PublicationAuditResponse):
     queued_count: int
+
+
+class PublicationRecordResponse(ApiModel):
+    id: int
+    session_id: int
+    bvid: str
+    title: str
+    source_kind: str
+    state: str
+    visibility_scope: str
+    match_count: int
+    updated_at: int
+    remote_verified_at: Optional[int]
+    status_code: str
+    status_label: str
+    detail: Optional[str]
+    recommended_action: str
+    next_attempt_at: Optional[int]
+
+
+class PublicationRecordPageResponse(ApiModel):
+    total: int
+    items: List[PublicationRecordResponse]
 
 
 class AnalysisTimelineSegmentRequest(ApiModel):
@@ -561,7 +586,7 @@ class ArchiveSyncResponse(ApiModel):
 
 class ArchiveSyncControlRequest(ApiModel):
     paused: Optional[bool] = None
-    daily_limit: Optional[int] = Field(None, ge=1, le=500)
+    daily_limit: Optional[int] = Field(None, ge=1, le=1000)
 
 
 class ArchiveBackfillItemResponse(ApiModel):
@@ -645,6 +670,34 @@ def _publication_audit(
     value: PublicationAuditStatus, *, stale_before: int
 ) -> PublicationAuditResponse:
     return PublicationAuditResponse(**value.__dict__, stale_before=stale_before)
+
+
+def _publication_record(value: PublicationRecord) -> PublicationRecordResponse:
+    return PublicationRecordResponse(
+        id=value.id,
+        session_id=value.session_id,
+        bvid=value.bvid,
+        title=value.title,
+        source_kind=value.source_kind,
+        state=value.state,
+        visibility_scope=value.visibility_scope,
+        match_count=value.match_count,
+        updated_at=value.updated_at,
+        remote_verified_at=value.remote_verified_at,
+        status_code=value.status.code,
+        status_label=value.status.label,
+        detail=value.status.detail,
+        recommended_action=value.status.recommended_action,
+        next_attempt_at=value.status.next_attempt_at,
+    )
+
+
+def _publication_record_page(
+    value: PublicationRecordPage,
+) -> PublicationRecordPageResponse:
+    return PublicationRecordPageResponse(
+        total=value.total, items=[_publication_record(item) for item in value.items]
+    )
 
 
 def _player(value: MatchPlayerRecord) -> MatchPlayerResponse:
@@ -1485,6 +1538,41 @@ async def queue_publication_audit(
     )
 
 
+@router.get('/publication-records', response_model=PublicationRecordPageResponse)
+async def list_publication_records(
+    record_status: Literal['all', 'verified', 'processing', 'needs_action'] = Query(
+        'all', alias='status'
+    ),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    publication_service: VaingloryPublicationService = Depends(get_publication),
+) -> PublicationRecordPageResponse:
+    return _publication_record_page(
+        await publication_service.list_publication_records(
+            status=record_status, limit=limit, offset=offset
+        )
+    )
+
+
+@router.post(
+    '/publication-records/{publication_id}/retry', status_code=status.HTTP_202_ACCEPTED
+)
+async def retry_publication_record(
+    publication_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    publication_service: VaingloryPublicationService = Depends(get_publication),
+) -> Response:
+    try:
+        await publication_service.retry_publication(publication_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
+    audit('vainglory_publication_retried', publication_id=publication_id)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
 @router.post(
     '/sessions/{session_id}/match-markers',
     response_model=ManualMatchMarkerResponse,
@@ -1707,6 +1795,24 @@ async def rename_player(
 ) -> PlayerResponse:
     try:
         return _stored_player(await index.rename_player(player_id, payload.name))
+    except VaingloryNotFound as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
+
+
+@router.put('/players/{player_id}/aliases', response_model=PlayerResponse)
+async def bind_player_alias(
+    player_id: int,
+    payload: PlayerNameRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> PlayerResponse:
+    try:
+        return _stored_player(await index.bind_player_alias(player_id, payload.name))
     except VaingloryNotFound as error:
         _raise_repository_error(error)
         raise AssertionError('unreachable')

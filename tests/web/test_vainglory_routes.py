@@ -13,7 +13,12 @@ from blrec.vainglory.archive_backfill import (
     ArchiveContentReviewPage,
     ArchiveSync,
 )
-from blrec.vainglory.publication import PublicationAuditStatus, PublicationTaskStatus
+from blrec.vainglory.publication import (
+    PublicationAuditStatus,
+    PublicationRecord,
+    PublicationRecordPage,
+    PublicationTaskStatus,
+)
 from blrec.vainglory.repository import (
     AnchorStatsRecord,
     GameModeStatsRecord,
@@ -45,6 +50,7 @@ class FakeService:
         self.bulk_updates = []
         self.publication_retries = []
         self.publication_audit_requests = []
+        self.publication_record_requests = []
         self.suppressed_zero_match_sessions = []
         self.restored_zero_match_sessions = []
         self.suppressed_match_reviews = []
@@ -52,6 +58,7 @@ class FakeService:
         self.requested_scans = []
         self.created_players = []
         self.renamed_players = []
+        self.bound_aliases = []
         self.bound_rooms = []
         self.unbound_rooms = []
         self.result_frame_value = b'\x89PNG-result-frame'
@@ -139,6 +146,10 @@ class FakeService:
     async def rename_player(self, player_id: int, name: str) -> PlayerRecord:
         self.renamed_players.append((player_id, name))
         return stored_player(name=name.strip())
+
+    async def bind_player_alias(self, player_id: int, alias: str) -> PlayerRecord:
+        self.bound_aliases.append((player_id, alias))
+        return stored_player()
 
     async def bind_player_room(self, player_id: int, room_id: int) -> PlayerRecord:
         self.bound_rooms.append((player_id, room_id))
@@ -293,6 +304,44 @@ class FakeService:
     async def queue_publication_audit(self, *, stale_before: int, limit: int) -> int:
         self.publication_audit_requests.append(('queue', stale_before, limit))
         return min(4, limit)
+
+    async def list_publication_records(
+        self, *, status: str, limit: int, offset: int
+    ) -> PublicationRecordPage:
+        self.publication_record_requests.append(('list', status, limit, offset))
+        task_status = PublicationTaskStatus(
+            session_id=9,
+            code='failed',
+            label='发布任务失败',
+            detail='需要人工处理',
+            recommended_action='retry',
+            next_attempt_at=None,
+            plan_state='ready',
+            upload_state='approved',
+            scan_state='ready',
+            operator_paused=False,
+        )
+        return PublicationRecordPage(
+            total=1,
+            items=(
+                PublicationRecord(
+                    id=7,
+                    session_id=9,
+                    bvid='BV1abcdefgh',
+                    title='直播回放',
+                    source_kind='archive',
+                    state='failed',
+                    visibility_scope='owner',
+                    match_count=3,
+                    updated_at=1_000,
+                    remote_verified_at=None,
+                    status=task_status,
+                ),
+            ),
+        )
+
+    async def retry_publication(self, publication_id: int) -> None:
+        self.publication_record_requests.append(('retry', publication_id))
 
 
 class FakeArchiveBackfill:
@@ -499,6 +548,28 @@ def test_reads_and_queues_low_priority_publication_audits(
     assert fake.publication_audit_requests[2][0] == 'status'
 
 
+def test_lists_and_retries_publication_records(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    listed = client.get(
+        '/api/v1/vainglory/publication-records',
+        params={'status': 'needs_action', 'limit': 20, 'offset': 0},
+    )
+    retried = client.post('/api/v1/vainglory/publication-records/7/retry')
+
+    assert listed.status_code == 200
+    assert listed.json()['total'] == 1
+    assert listed.json()['items'][0]['bvid'] == 'BV1abcdefgh'
+    assert listed.json()['items'][0]['statusCode'] == 'failed'
+    assert retried.status_code == 202
+    assert fake.publication_record_requests == [
+        ('list', 'needs_action', 20, 0),
+        ('retry', 7),
+    ]
+
+
 def test_match_filters_use_camel_case_query_names(
     api_client: Tuple[TestClient, FakeService]
 ) -> None:
@@ -660,6 +731,9 @@ def test_manages_player_library_and_lists_player_rankings(
     listed = client.get('/api/v1/vainglory/players')
     created = client.post('/api/v1/vainglory/players', json={'name': ' 新玩家 '})
     renamed = client.patch('/api/v1/vainglory/players/5', json={'name': ' 新名字 '})
+    aliased = client.put(
+        '/api/v1/vainglory/players/5/aliases', json={'name': ' 旧名字 '}
+    )
     bound = client.put('/api/v1/vainglory/players/5/rooms/200')
     unbound = client.delete('/api/v1/vainglory/players/5/rooms/200')
     player_stats = client.get('/api/v1/vainglory/stats/players')
@@ -678,12 +752,14 @@ def test_manages_player_library_and_lists_player_rankings(
     assert created.json()['name'] == '新玩家'
     assert renamed.status_code == 200
     assert renamed.json()['name'] == '新名字'
+    assert aliased.status_code == 200
     assert bound.status_code == 200
     assert bound.json()['rooms'][0]['roomId'] == 200
     assert unbound.status_code == 200
     assert unbound.json()['rooms'] == []
     assert fake.created_players == [' 新玩家 ']
     assert fake.renamed_players == [(5, ' 新名字 ')]
+    assert fake.bound_aliases == [(5, ' 旧名字 ')]
     assert fake.bound_rooms == [(5, 200)]
     assert fake.unbound_rooms == [(5, 200)]
     assert player_stats.status_code == 200

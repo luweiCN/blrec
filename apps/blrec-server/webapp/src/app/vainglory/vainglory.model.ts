@@ -381,6 +381,35 @@ export interface VaingloryPublicationAuditQueue
   readonly queuedCount: number;
 }
 
+export type VaingloryPublicationRecordFilter =
+  | 'all'
+  | 'verified'
+  | 'processing'
+  | 'needs_action';
+
+export interface VaingloryPublicationRecord {
+  readonly id: number;
+  readonly sessionId: number;
+  readonly bvid: string;
+  readonly title: string;
+  readonly sourceKind: 'upload' | 'archive';
+  readonly state: 'prepared' | 'running' | 'confirmed' | 'paused' | 'failed';
+  readonly visibilityScope: 'unknown' | 'public' | 'owner';
+  readonly matchCount: number;
+  readonly updatedAt: number;
+  readonly remoteVerifiedAt: number | null;
+  readonly statusCode: string;
+  readonly statusLabel: string;
+  readonly detail: string | null;
+  readonly recommendedAction: string;
+  readonly nextAttemptAt: number | null;
+}
+
+export interface VaingloryPublicationRecordList {
+  readonly total: number;
+  readonly items: readonly VaingloryPublicationRecord[];
+}
+
 export interface VaingloryIndexRealtimeSnapshot {
   readonly sampledAt: number;
   readonly analysisQueue: VaingloryAnalysisQueue;

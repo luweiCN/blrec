@@ -80,7 +80,7 @@ function audit(staleCount = 2): VaingloryPublicationAudit {
 }
 
 describe('OperationsComponent', () => {
-  it('separates worker, queue, history, and publication evidence summaries', () => {
+  it('separates live, worker, queue, history, and publication evidence views', () => {
     const events = new Subject<RealtimeEvent>();
     const changeDetector = jasmine.createSpyObj<ChangeDetectorRef>(
       'ChangeDetectorRef',
@@ -88,12 +88,21 @@ describe('OperationsComponent', () => {
     );
     const vainglory = jasmine.createSpyObj<VaingloryService>(
       'VaingloryService',
-      ['getPublicationAudit', 'queuePublicationAudit'],
+      [
+        'getPublicationAudit',
+        'queuePublicationAudit',
+        'listPublicationRecords',
+        'retryPublication',
+      ],
     );
     vainglory.getPublicationAudit.and.returnValue(of(audit()));
     vainglory.queuePublicationAudit.and.returnValue(
       of({ ...audit(0), queuedCount: 2 }),
     );
+    vainglory.listPublicationRecords.and.returnValue(
+      of({ total: 0, items: [] }),
+    );
+    vainglory.retryPublication.and.returnValue(of(void 0));
     const accounts = jasmine.createSpyObj<BiliAccountService>(
       'BiliAccountService',
       ['listAccounts', 'listArchiveMigrations'],
