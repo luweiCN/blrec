@@ -127,10 +127,10 @@ def infer_recorded_anchor(
         return room_id, None, str(alias_matches[0]['alias']).strip()
 
     for pattern in _EXPLICIT_NAME_PATTERNS:
-        matched = pattern.search(combined)
-        if matched is None:
+        explicit_match = pattern.search(combined)
+        if explicit_match is None:
             continue
-        inferred_name = matched.group(1).strip()
+        inferred_name = explicit_match.group(1).strip()
         if inferred_name.casefold() not in excluded_names:
             return room_id, None, inferred_name
     return room_id, None, ''

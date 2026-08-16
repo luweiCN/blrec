@@ -5905,7 +5905,7 @@ class VaingloryRepository:
                 if len(candidates) == 1:
                     player_id = candidates[0]
             if player_id is None and anchor_uid is not None:
-                candidates = connection.execute(
+                uid_candidates = connection.execute(
                     'SELECT DISTINCT player_id FROM ('
                     'SELECT room.player_id FROM recording_sessions known '
                     'JOIN vainglory_player_rooms room ON room.room_id=known.room_id '
@@ -5918,8 +5918,8 @@ class VaingloryRepository:
                     'ORDER BY player_id',
                     (anchor_uid, selected_session_id, anchor_uid, selected_session_id),
                 ).fetchall()
-                if len(candidates) == 1:
-                    player_id = int(candidates[0]['player_id'])
+                if len(uid_candidates) == 1:
+                    player_id = int(uid_candidates[0]['player_id'])
             if player_id is None:
                 return room_id, anchor_uid, anchor_name
 
