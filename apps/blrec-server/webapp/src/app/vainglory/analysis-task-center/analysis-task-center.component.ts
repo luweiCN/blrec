@@ -63,6 +63,10 @@ export class AnalysisTaskCenterComponent {
     readonly workerId: string;
     readonly enabled: boolean;
   }>();
+  @Output() workerConcurrencyChange = new EventEmitter<{
+    readonly workerId: string;
+    readonly concurrency: number;
+  }>();
   @Output() playPart = new EventEmitter<{
     readonly sessionId: number;
     readonly partId: number;
@@ -73,12 +77,42 @@ export class AnalysisTaskCenterComponent {
     readonly partId?: number;
     readonly title: string;
   }>();
+  readonly workerConcurrencyDrafts = new Map<string, number>();
 
   toggleWorker(worker: VaingloryAnalysisWorkerNodeStatus): void {
     this.workerEnabledChange.emit({
       workerId: worker.workerId,
       enabled: !worker.enabled,
     });
+  }
+
+  workerConcurrency(worker: VaingloryAnalysisWorkerNodeStatus): number {
+    return Math.max(
+      1,
+      this.workerConcurrencyDrafts.get(worker.workerId) ??
+        worker.desiredConcurrency ??
+        worker.concurrency,
+    );
+  }
+
+  setWorkerConcurrency(workerId: string, value: number | null): void {
+    if (value !== null) {
+      this.workerConcurrencyDrafts.set(workerId, value);
+    }
+  }
+
+  saveWorkerConcurrency(worker: VaingloryAnalysisWorkerNodeStatus): void {
+    this.workerConcurrencyChange.emit({
+      workerId: worker.workerId,
+      concurrency: this.workerConcurrency(worker),
+    });
+  }
+
+  workerConcurrencyChanged(worker: VaingloryAnalysisWorkerNodeStatus): boolean {
+    return (
+      this.workerConcurrency(worker) !==
+      Math.max(1, worker.desiredConcurrency ?? worker.concurrency)
+    );
   }
 
   workerLabel(worker: VaingloryAnalysisWorkerNodeStatus): string {

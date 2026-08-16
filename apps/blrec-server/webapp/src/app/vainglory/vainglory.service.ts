@@ -229,7 +229,11 @@ export class VaingloryService {
 
   updateAnalysisWorker(
     workerId: string,
-    update: { readonly displayName?: string; readonly enabled?: boolean },
+    update: {
+      readonly displayName?: string;
+      readonly enabled?: boolean;
+      readonly desiredConcurrency?: number;
+    },
   ): Observable<VaingloryAnalysisWorkerNodeStatus> {
     return this.http.patch<VaingloryAnalysisWorkerNodeStatus>(
       this.url.makeApiUrl(

@@ -9,6 +9,7 @@ import pytest
 from blrec_analysis_worker.remote import (
     AnalysisWorkerClient,
     RemoteAnalysisWorker,
+    WorkerConcurrency,
     _Heartbeat,
 )
 
@@ -94,6 +95,9 @@ class Client:
     def claim_live(self) -> Optional[Dict[str, Any]]:
         return None
 
+    def desired_concurrency(self) -> int:
+        raise ValueError('测试未启用动态并发配置')
+
     def download(self, media_path: str, destination: Path) -> None:
         destination.write_bytes(b'x')
 
@@ -177,6 +181,38 @@ def test_client_reports_loaded_model_while_polling_for_work() -> None:
             'modelPackageId': 'vg-vision-v2',
             'pipelineVersion': 'timeline-v2',
             'concurrency': 0,
+        },
+        timeout=(10, 30),
+    )
+
+
+def test_client_reads_desired_concurrency() -> None:
+    response = mock.Mock()
+    response.json.return_value = {'desiredConcurrency': 4}
+    session = mock.Mock()
+    session.post.return_value = response
+    current = WorkerConcurrency(2)
+    with mock.patch(
+        'blrec_analysis_worker.remote.requests.Session', return_value=session
+    ):
+        client = AnalysisWorkerClient(
+            'http://nas:2234',
+            'token',
+            worker_id='mac-studio',
+            model_package_id='vg-vision-v2',
+            pipeline_version='timeline-v2',
+            concurrency_provider=current.get,
+        )
+
+    assert client.desired_concurrency() == 4
+    session.post.assert_called_once_with(
+        'http://nas:2234/api/v1/vainglory/worker/configuration',
+        headers={'X-BLREC-Analysis-Worker-Token': 'token'},
+        json={
+            'workerId': 'mac-studio',
+            'modelPackageId': 'vg-vision-v2',
+            'pipelineVersion': 'timeline-v2',
+            'concurrency': 2,
         },
         timeout=(10, 30),
     )
@@ -290,11 +326,49 @@ def test_parallel_workers_process_claims_concurrently(tmp_path: Path) -> None:
     thread.start()
     assert _wait_until(lambda: analyzer.completed >= 2)
     assert analyzer.max_active >= 2, '两个任务没有真正并行处理'
-    assert len(clients) == 3, '两个录播线程和一个实时线程应各有独立 client'
+    assert len(clients) == 4, '控制、两个录播线程和实时线程应各有独立 client'
     worker.stop()
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert all(client.closed for client in clients)
+
+
+def test_worker_applies_increased_concurrency_without_restart(tmp_path: Path) -> None:
+    class ConfigurableClient(Client):
+        def __init__(
+            self,
+            queue: List[Mapping[str, Any]],
+            lock: threading.Lock,
+            desired: List[int],
+        ) -> None:
+            super().__init__(queue, lock)
+            self._desired = desired
+
+        def desired_concurrency(self) -> int:
+            return self._desired[0]
+
+    queue, lock = _shared_queue([_claim(value) for value in range(1, 9)])
+    analyzer = Analyzer(block=0.15)
+    desired = [1]
+    clients: List[Client] = []
+
+    def client_factory() -> Client:
+        client = ConfigurableClient(queue, lock, desired)
+        clients.append(client)
+        return client
+
+    worker = RemoteAnalysisWorker(
+        client_factory, analyzer, cache_dir=tmp_path, poll_seconds=0.01, concurrency=1
+    )
+    thread = threading.Thread(target=worker.run, daemon=True)
+    thread.start()
+    assert _wait_until(lambda: analyzer.max_active == 1)
+    desired[0] = 2
+    assert _wait_until(lambda: analyzer.max_active >= 2)
+
+    worker.stop()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
 
 
 def test_once_forces_single_worker(tmp_path: Path) -> None:

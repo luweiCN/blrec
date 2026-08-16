@@ -19,7 +19,12 @@ from blrec.vainglory.glm_ocr import GlmOcrClient, GlmOcrResultReader
 from blrec.vainglory.sampling import FfmpegSampler
 
 from .model_package import ModelPackage, build_package_runtime, load_model_package
-from .remote import AnalysisWorkerClient, RemoteAnalysisWorker, load_worker_token
+from .remote import (
+    AnalysisWorkerClient,
+    RemoteAnalysisWorker,
+    WorkerConcurrency,
+    load_worker_token,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -287,6 +292,7 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
         model_package_path=arguments.model_package,
         trusted_remote_origin=trusted_remote_origin,
     )
+    concurrency = WorkerConcurrency(arguments.concurrency)
     RemoteAnalysisWorker(
         lambda: AnalysisWorkerClient(
             server_url,
@@ -295,11 +301,13 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
             model_package_id=package.package_id,
             pipeline_version=package.pipeline_version,
             concurrency=arguments.concurrency,
+            concurrency_provider=concurrency.get,
         ),
         analyzer,
         cache_dir=arguments.cache_dir,
         poll_seconds=arguments.poll_seconds,
         concurrency=arguments.concurrency,
+        concurrency_state=concurrency,
         worker_id=worker_id,
         debug_dir=arguments.debug_dir,
     ).run(once=arguments.once)

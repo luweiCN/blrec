@@ -145,6 +145,7 @@
         (addWorker)="openAddWorker()"
         (editWorker)="openEditWorker($event)"
         (workerEnabledChange)="setWorkerEnabled($event)"
+        (workerConcurrencyChange)="setWorkerConcurrency($event)"
       ></app-vainglory-analysis-task-center>
     </section>
 
@@ -249,7 +250,9 @@
                   </ng-container>
                 </span>
               </div>
-              <span>{{ item.progress * 100 | number: "1.0-0" }}%</span>
+              <span class="work-progress">
+                {{ item.progress * 100 | number: "1.0-0" }}%
+              </span>
             </li>
             <li *ngIf="items.length === 0" class="empty-row">
               当前没有待处理稿件
@@ -367,7 +370,21 @@
                 <strong>{{ item.title || item.bvid }}</strong>
                 <span>{{ item.error || "等待下一个步骤" }}</span>
               </div>
-              <span>{{ item.progress * 100 | number: "1.0-0" }}%</span>
+              <span class="work-progress">
+                {{ item.progress * 100 | number: "1.0-0" }}%
+              </span>
+              <button
+                *ngIf="item.state === 'failed'"
+                nz-button
+                nzSize="small"
+                type="button"
+                class="work-retry"
+                [disabled]="migrationControlIds.has(migration.id)"
+                [nzLoading]="migrationControlIds.has(migration.id)"
+                (click)="retryMigrationItem(migration, item)"
+              >
+                重试
+              </button>
             </li>
             <li
               *ngIf="currentMigrationItems(migration.id).length === 0"
@@ -504,6 +521,36 @@
                 查看稿件
               </a>
               <button
+                *ngIf="record.recommendedAction === 'reanalyze'"
+                nz-button
+                nzType="primary"
+                nzSize="small"
+                type="button"
+                nz-popconfirm
+                nzPopconfirmTitle="重新下载可用媒体并从头识别这场直播？"
+                [disabled]="record.state === 'running'"
+                [nzLoading]="retryingPublicationIds.has(record.id)"
+                (nzOnConfirm)="reanalyzePublication(record)"
+              >
+                重新识别
+              </button>
+              <button
+                *ngIf="record.recommendedAction === 'retry_chapter'"
+                nz-button
+                nzType="primary"
+                nzSize="small"
+                type="button"
+                [disabled]="record.state === 'running'"
+                [nzLoading]="retryingPublicationIds.has(record.id)"
+                (click)="retryPublicationChapter(record)"
+              >
+                重算分段
+              </button>
+              <button
+                *ngIf="
+                  record.recommendedAction !== 'reanalyze' &&
+                  record.recommendedAction !== 'retry_chapter'
+                "
                 nz-button
                 nzSize="small"
                 type="button"

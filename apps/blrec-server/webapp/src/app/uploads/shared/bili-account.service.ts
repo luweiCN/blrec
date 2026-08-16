@@ -101,6 +101,16 @@ export class BiliAccountService {
     return this.http.get<ArchiveMigrationItem[]>(url);
   }
 
+  retryArchiveMigrationItem(
+    migrationId: number,
+    itemId: number
+  ): Observable<ArchiveMigrationStatus> {
+    const url = this.url.makeApiUrl(
+      `/api/v1/bili-accounts/archive-migrations/${migrationId}/items/${itemId}/retry`
+    );
+    return this.http.post<ArchiveMigrationStatus>(url, null);
+  }
+
   updateArchiveMigration(
     migrationId: number,
     control: ArchiveMigrationControl

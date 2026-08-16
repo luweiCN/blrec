@@ -228,5 +228,17 @@ describe('AnalysisTaskCenterComponent', () => {
     expect(component.workerTaskLabel(idleQueue, pausedWorker)).toBe(
       '已停止领取新任务',
     );
+
+    let concurrencyChange: unknown;
+    component.workerConcurrencyChange.subscribe(
+      (value) => (concurrencyChange = value),
+    );
+    component.setWorkerConcurrency(queue.workers[0].workerId, 4);
+    component.saveWorkerConcurrency(queue.workers[0]);
+    expect(component.workerConcurrencyChanged(queue.workers[0])).toBeTrue();
+    expect(concurrencyChange).toEqual({
+      workerId: 'macbook-pro',
+      concurrency: 4,
+    });
   });
 });

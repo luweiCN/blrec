@@ -744,6 +744,37 @@ class ArchiveMigrationService:
             self._wake.set()
         return await self.status(migration_id)
 
+    async def retry_item(
+        self, migration_id: int, item_id: int
+    ) -> ArchiveMigrationStatus:
+        now = self._now()
+
+        def retry(connection: sqlite3.Connection) -> None:
+            item = connection.execute(
+                'SELECT state FROM archive_migration_items '
+                'WHERE id=? AND migration_id=?',
+                (int(item_id), int(migration_id)),
+            ).fetchone()
+            if item is None:
+                raise ArchiveMigrationNotFound('稿件迁移明细不存在')
+            if str(item['state']) != 'failed':
+                raise ArchiveMigrationUnavailable('只能重试处理失败的稿件')
+            connection.execute(
+                "UPDATE archive_migration_items SET state='queued',progress=0,"
+                'downloaded_page_count=0,error=NULL,updated_at=? WHERE id=?',
+                (now, int(item_id)),
+            )
+            connection.execute(
+                "UPDATE archive_migration_jobs SET state='running',error=NULL,"
+                'completed_at=NULL,updated_at=? WHERE id=?',
+                (now, int(migration_id)),
+            )
+
+        await self._database.write(retry)
+        await self._refresh_job(int(migration_id))
+        self._wake.set()
+        return await self.status(int(migration_id))
+
     async def run_once(self) -> bool:
         discovering = await self._database.fetchone(
             'SELECT id FROM archive_migration_jobs '

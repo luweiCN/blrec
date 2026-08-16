@@ -822,6 +822,45 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       });
   }
 
+  setAnalysisWorkerConcurrency(change: {
+    readonly workerId: string;
+    readonly concurrency: number;
+  }): void {
+    if (this.updatingAnalysisWorkerIds.has(change.workerId)) {
+      return;
+    }
+    this.updatingAnalysisWorkerIds = new Set([
+      ...this.updatingAnalysisWorkerIds,
+      change.workerId,
+    ]);
+    this.vainglory
+      .updateAnalysisWorker(change.workerId, {
+        desiredConcurrency: change.concurrency,
+      })
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (worker) => {
+          this.updatingAnalysisWorkerIds = new Set(
+            [...this.updatingAnalysisWorkerIds].filter(
+              (workerId) => workerId !== change.workerId,
+            ),
+          );
+          this.replaceAnalysisWorker(worker);
+          this.messages.success(`Worker 并发数已设为 ${change.concurrency}`);
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.updatingAnalysisWorkerIds = new Set(
+            [...this.updatingAnalysisWorkerIds].filter(
+              (workerId) => workerId !== change.workerId,
+            ),
+          );
+          this.messages.error(this.errorMessage(error, 'Worker 并发数更新失败'));
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
   openAnalysisImageBrowser(request: AnalysisImageRequest): void {
     const generation = ++this.analysisImageRequestGeneration;
     this.analysisImageBrowserVisible = true;

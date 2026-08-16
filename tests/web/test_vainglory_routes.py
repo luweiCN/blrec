@@ -995,6 +995,7 @@ def test_manages_analysis_workers() -> None:
         active_task_count=1,
         active_part_ids=(7,),
         concurrency=3,
+        desired_concurrency=4,
         completed_task_count=12,
         failed_task_count=1,
         total_processing_seconds=240.0,
@@ -1023,7 +1024,8 @@ def test_manages_analysis_workers() -> None:
             json={'workerId': 'mac-studio', 'displayName': ' Mac Studio '},
         )
         updated = client.patch(
-            '/api/v1/vainglory/workers/mac-studio', json={'enabled': False}
+            '/api/v1/vainglory/workers/mac-studio',
+            json={'enabled': False, 'desiredConcurrency': 4},
         )
         invalid = client.post(
             '/api/v1/vainglory/workers', json={'workerId': '../not-allowed'}
@@ -1032,6 +1034,7 @@ def test_manages_analysis_workers() -> None:
     assert listed.status_code == 200
     assert listed.json()['workers'][0]['activePartIds'] == [7]
     assert listed.json()['workers'][0]['profiledTaskCount'] == 10
+    assert listed.json()['workers'][0]['desiredConcurrency'] == 4
     assert listed.json()['workers'][0]['profiledVideoSeconds'] == 18_000.0
     assert listed.json()['workers'][0]['totalDecodeAnalysisSeconds'] == 600.0
     assert listed.json()['workers'][0]['totalProfiledTaskSeconds'] == 900.0
@@ -1041,7 +1044,38 @@ def test_manages_analysis_workers() -> None:
     assert invalid.status_code == 422
     service.add_analysis_worker.assert_awaited_once_with('mac-studio', 'Mac Studio')
     service.update_analysis_worker.assert_awaited_once_with(
-        'mac-studio', display_name=None, enabled=False
+        'mac-studio', display_name=None, enabled=False, desired_concurrency=4
+    )
+
+
+def test_worker_reads_desired_concurrency() -> None:
+    service = SimpleNamespace()
+    service.analysis_worker_configuration = AsyncMock(return_value=4)
+    application = FastAPI()
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[
+        vainglory.security.authenticated_analysis_worker
+    ] = lambda: 'analysis-worker'
+    application.dependency_overrides[vainglory.get_service] = lambda: service
+
+    with TestClient(application) as client:
+        response = client.post(
+            '/api/v1/vainglory/worker/configuration',
+            json={
+                'workerId': 'mac-studio',
+                'modelPackageId': 'vg-vision-v2',
+                'pipelineVersion': 'timeline-v2',
+                'concurrency': 2,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {'desiredConcurrency': 4}
+    service.analysis_worker_configuration.assert_awaited_once_with(
+        worker_id='mac-studio',
+        model_package_id='vg-vision-v2',
+        pipeline_version='timeline-v2',
+        concurrency=2,
     )
 
 

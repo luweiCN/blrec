@@ -281,6 +281,29 @@ async def list_archive_migration_items(
         ) from None
 
 
+@router.post(
+    '/archive-migrations/{migration_id}/items/{item_id}/retry',
+    response_model=ArchiveMigrationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_archive_migration_item(
+    migration_id: int,
+    item_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    service: ArchiveMigrationService = Depends(get_archive_migration),
+) -> ArchiveMigrationStatus:
+    try:
+        return await service.retry_item(migration_id, item_id)
+    except ArchiveMigrationNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+    except ArchiveMigrationUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
+
+
 @router.put('/{account_id}/primary', response_model=AccountResponse)
 async def select_primary_account(
     account_id: int,

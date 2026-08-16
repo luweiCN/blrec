@@ -118,6 +118,7 @@ class AnalysisWorkerCreateRequest(ApiModel):
 class AnalysisWorkerUpdateRequest(ApiModel):
     display_name: Optional[str] = Field(None, max_length=100)
     enabled: Optional[bool] = None
+    desired_concurrency: Optional[int] = Field(None, ge=1, le=8)
 
 
 class PublicationAuditRequest(ApiModel):
@@ -939,6 +940,7 @@ def _analysis_worker_payload(worker: Any) -> Dict[str, Any]:
         'activeTaskCount': worker.active_task_count,
         'activePartIds': list(worker.active_part_ids),
         'concurrency': worker.concurrency,
+        'desiredConcurrency': worker.desired_concurrency,
         'completedTaskCount': worker.completed_task_count,
         'failedTaskCount': worker.failed_task_count,
         'totalProcessingSeconds': worker.total_processing_seconds,
@@ -1038,6 +1040,7 @@ async def update_analysis_worker(
                 None if payload.display_name is None else payload.display_name.strip()
             ),
             enabled=payload.enabled,
+            desired_concurrency=payload.desired_concurrency,
         )
     except ValueError as error:
         _raise_repository_error(error)
@@ -1047,8 +1050,28 @@ async def update_analysis_worker(
         worker_id=worker.worker_id,
         display_name_updated=payload.display_name is not None,
         enabled=worker.enabled,
+        desired_concurrency=worker.desired_concurrency,
     )
     return _analysis_worker_payload(worker)
+
+
+@router.post('/worker/configuration')
+async def analysis_worker_configuration(
+    payload: AnalysisWorkerClaimRequest,
+    _worker: str = Depends(security.authenticated_analysis_worker),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Dict[str, int]:
+    try:
+        concurrency = await index.analysis_worker_configuration(
+            worker_id=payload.worker_id,
+            model_package_id=payload.model_package_id,
+            pipeline_version=payload.pipeline_version,
+            concurrency=payload.concurrency,
+        )
+    except ValueError as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    return {'desiredConcurrency': concurrency}
 
 
 @router.post('/worker/claim', response_model=None)

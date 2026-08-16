@@ -290,6 +290,7 @@ export interface VaingloryAnalysisWorkerNodeStatus {
   readonly activeTaskCount: number;
   readonly activePartIds: readonly number[];
   readonly concurrency: number;
+  readonly desiredConcurrency?: number | null;
   readonly completedTaskCount: number;
   readonly failedTaskCount: number;
   readonly totalProcessingSeconds: number;
@@ -401,7 +402,7 @@ export interface VaingloryPublicationRecord {
   readonly statusCode: string;
   readonly statusLabel: string;
   readonly detail: string | null;
-  readonly recommendedAction: string;
+  readonly recommendedAction: VaingloryPublicationRecommendedAction;
   readonly nextAttemptAt: number | null;
 }
 

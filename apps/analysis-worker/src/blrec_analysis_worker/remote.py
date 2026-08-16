@@ -8,7 +8,18 @@ import time
 from collections import Counter
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Mapping, Optional, Sequence, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 from urllib.parse import urljoin
 
 import requests
@@ -100,6 +111,32 @@ def _live_claim_identity(claim: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+class WorkerConcurrency:
+    MINIMUM = 1
+    MAXIMUM = 8
+
+    def __init__(self, value: int) -> None:
+        self._lock = threading.Lock()
+        self._value = self._validated(value)
+
+    def get(self) -> int:
+        with self._lock:
+            return self._value
+
+    def set(self, value: int) -> int:
+        selected = self._validated(value)
+        with self._lock:
+            self._value = selected
+        return selected
+
+    @classmethod
+    def _validated(cls, value: int) -> int:
+        selected = int(value)
+        if not cls.MINIMUM <= selected <= cls.MAXIMUM:
+            raise ValueError('并发任务数必须在 1 到 8 之间')
+        return selected
+
+
 class AnalysisWorkerClient:
     def __init__(
         self,
@@ -110,6 +147,7 @@ class AnalysisWorkerClient:
         model_package_id: str = '',
         pipeline_version: str = '',
         concurrency: int = 0,
+        concurrency_provider: Optional[Callable[[], int]] = None,
     ) -> None:
         self._server_url = server_url.rstrip('/') + '/'
         self._headers = {'X-BLREC-Analysis-Worker-Token': token}
@@ -118,17 +156,31 @@ class AnalysisWorkerClient:
             'workerId': worker_id,
             'modelPackageId': model_package_id,
             'pipelineVersion': pipeline_version,
-            'concurrency': concurrency,
         }
+        self._concurrency = int(concurrency)
+        self._concurrency_provider = concurrency_provider
 
     def close(self) -> None:
         self._session.close()
+
+    def desired_concurrency(self) -> int:
+        response = self._session.post(
+            self._url('api/v1/vainglory/worker/configuration'),
+            headers=self._headers,
+            json=self._registration_payload(),
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, Mapping):
+            raise ValueError('NAS 返回的 Worker 配置无效')
+        return WorkerConcurrency._validated(int(payload['desiredConcurrency']))
 
     def claim(self) -> Optional[Dict[str, Any]]:
         response = self._session.post(
             self._url('api/v1/vainglory/worker/claim'),
             headers=self._headers,
-            json=self._registration,
+            json=self._registration_payload(),
             timeout=(10, 30),
         )
         if response.status_code == 204:
@@ -140,7 +192,7 @@ class AnalysisWorkerClient:
         response = self._session.post(
             self._url('api/v1/vainglory/worker/live/claim'),
             headers=self._headers,
-            json=self._registration,
+            json=self._registration_payload(),
             timeout=(10, 30),
         )
         if response.status_code == 204:
@@ -180,7 +232,7 @@ class AnalysisWorkerClient:
             self._url('api/v1/vainglory/worker/heartbeat'),
             headers=self._headers,
             json={
-                **self._registration,
+                **self._registration_payload(),
                 'kind': kind,
                 'itemId': item_id,
                 'progress': progress,
@@ -194,7 +246,7 @@ class AnalysisWorkerClient:
 
     def complete(self, payload: Mapping[str, Any]) -> None:
         body = dict(payload)
-        body.update(self._registration)
+        body.update(self._registration_payload())
         response = self._session.post(
             self._url('api/v1/vainglory/worker/complete'),
             headers=self._headers,
@@ -205,7 +257,7 @@ class AnalysisWorkerClient:
 
     def complete_live(self, payload: Mapping[str, Any]) -> None:
         body = dict(payload)
-        body.update(self._registration)
+        body.update(self._registration_payload())
         response = self._session.post(
             self._url('api/v1/vainglory/worker/live/complete'),
             headers=self._headers,
@@ -219,7 +271,7 @@ class AnalysisWorkerClient:
             self._url('api/v1/vainglory/worker/live/fail'),
             headers=self._headers,
             json={
-                **self._registration,
+                **self._registration_payload(),
                 **_live_claim_identity(claim),
                 'error': error[:500],
                 'retry': True,
@@ -240,7 +292,7 @@ class AnalysisWorkerClient:
             self._url('api/v1/vainglory/worker/fail'),
             headers=self._headers,
             json={
-                **self._registration,
+                **self._registration_payload(),
                 'kind': kind,
                 'itemId': item_id,
                 'error': error[:500],
@@ -249,6 +301,14 @@ class AnalysisWorkerClient:
             timeout=(10, 30),
         )
         response.raise_for_status()
+
+    def _registration_payload(self) -> Dict[str, Any]:
+        concurrency = (
+            self._concurrency
+            if self._concurrency_provider is None
+            else int(self._concurrency_provider())
+        )
+        return {**self._registration, 'concurrency': concurrency}
 
     def _url(self, path: str) -> str:
         return urljoin(self._server_url, path)
@@ -350,6 +410,7 @@ class RemoteAnalysisWorker:
         cache_dir: Path,
         poll_seconds: float = 5,
         concurrency: int = 1,
+        concurrency_state: Optional[WorkerConcurrency] = None,
         worker_id: str = '',
         debug_dir: Optional[Path] = None,
     ) -> None:
@@ -361,7 +422,7 @@ class RemoteAnalysisWorker:
         self._analyzer = analyzer
         self._cache_dir = cache_dir.expanduser().resolve()
         self._poll_seconds = poll_seconds
-        self._concurrency = concurrency
+        self._concurrency = concurrency_state or WorkerConcurrency(concurrency)
         self._worker_id = worker_id.strip() or socket.gethostname()
         self._debug_dir = (
             None if debug_dir is None else Path(debug_dir).expanduser().resolve()
@@ -377,40 +438,91 @@ class RemoteAnalysisWorker:
             'Mac 分析 Worker 已启动：worker_id={} cache={} concurrency={}',
             self._worker_id,
             self._cache_dir,
-            self._concurrency,
+            self._concurrency.get(),
         )
         if once:
             client = self._client_factory()
             try:
-                self._run_loop(client, worker_id=0, once=once)
+                self._run_loop(
+                    client, worker_id=0, once=once, worker_stop=threading.Event()
+                )
             finally:
                 client.close()
             return
-        threads = [
-            threading.Thread(
-                target=self._worker_thread,
-                args=(index,),
-                name='analysis-worker-{}'.format(index),
-                daemon=True,
-            )
-            for index in range(self._concurrency)
-        ]
-        threads.append(
-            threading.Thread(
-                target=self._live_worker_thread,
-                name='analysis-worker-live',
-                daemon=True,
-            )
+        control_client = self._client_factory()
+        workers: Dict[int, Tuple[threading.Thread, threading.Event]] = {}
+        retired: List[threading.Thread] = []
+        live_thread = threading.Thread(
+            target=self._live_worker_thread, name='analysis-worker-live', daemon=True
         )
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        live_thread.start()
+        self._resize_workers(workers, retired, self._concurrency.get())
+        try:
+            while not self._stop.is_set():
+                try:
+                    desired = control_client.desired_concurrency()
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    requests.RequestException,
+                ) as error:
+                    logger.warning('读取 Worker 并发配置失败：{!r}', error)
+                else:
+                    previous = self._concurrency.get()
+                    if desired != previous:
+                        self._concurrency.set(desired)
+                        logger.info(
+                            'Worker 并发配置已更新：worker_id={} {} -> {}',
+                            self._worker_id,
+                            previous,
+                            desired,
+                        )
+                        self._resize_workers(workers, retired, desired)
+                retired[:] = [thread for thread in retired if thread.is_alive()]
+                if self._stop.wait(self._poll_seconds):
+                    break
+        finally:
+            self._stop.set()
+            for thread, worker_stop in workers.values():
+                worker_stop.set()
+                retired.append(thread)
+            live_thread.join()
+            for thread in retired:
+                thread.join()
+            control_client.close()
 
-    def _worker_thread(self, worker_id: int) -> None:
+    def _resize_workers(
+        self,
+        workers: Dict[int, Tuple[threading.Thread, threading.Event]],
+        retired: List[threading.Thread],
+        desired: int,
+    ) -> None:
+        for worker_id in sorted(workers, reverse=True):
+            if worker_id < desired:
+                continue
+            thread, worker_stop = workers.pop(worker_id)
+            worker_stop.set()
+            retired.append(thread)
+        for worker_id in range(desired):
+            if worker_id in workers:
+                continue
+            worker_stop = threading.Event()
+            thread = threading.Thread(
+                target=self._worker_thread,
+                args=(worker_id, worker_stop),
+                name='analysis-worker-{}'.format(worker_id),
+                daemon=True,
+            )
+            workers[worker_id] = (thread, worker_stop)
+            thread.start()
+
+    def _worker_thread(self, worker_id: int, worker_stop: threading.Event) -> None:
         client = self._client_factory()
         try:
-            self._run_loop(client, worker_id=worker_id, once=False)
+            self._run_loop(
+                client, worker_id=worker_id, once=False, worker_stop=worker_stop
+            )
         finally:
             client.close()
 
@@ -422,12 +534,17 @@ class RemoteAnalysisWorker:
             client.close()
 
     def _run_loop(
-        self, client: AnalysisWorkerClient, *, worker_id: int, once: bool
+        self,
+        client: AnalysisWorkerClient,
+        *,
+        worker_id: int,
+        once: bool,
+        worker_stop: threading.Event,
     ) -> None:
         logger.info(
             '分析 Worker 线程已启动：worker_id={} worker={}', self._worker_id, worker_id
         )
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not worker_stop.is_set():
             try:
                 claim = client.claim()
             except requests.RequestException as error:
@@ -436,12 +553,13 @@ class RemoteAnalysisWorker:
                 )
                 if once:
                     raise
-                time.sleep(self._poll_seconds)
+                if worker_stop.wait(self._poll_seconds):
+                    return
                 continue
             if claim is None:
                 if once:
                     return
-                if self._stop.wait(self._poll_seconds):
+                if worker_stop.wait(self._poll_seconds):
                     return
                 continue
             self._process_claim(client, claim, worker_id=worker_id)

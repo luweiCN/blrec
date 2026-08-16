@@ -289,7 +289,7 @@
 
   li {
     display: grid;
-    grid-template-columns: 86px minmax(0, 1fr) 48px;
+    grid-template-columns: 86px minmax(0, 1fr) 48px auto;
     align-items: center;
     min-width: 0;
     padding: 10px 0;
@@ -323,7 +323,7 @@
       font-size: 12px;
     }
 
-    > span:last-child {
+    .work-progress {
       text-align: right;
       font-variant-numeric: tabular-nums;
     }
@@ -690,8 +690,13 @@
     grid-template-columns: 72px minmax(0, 1fr);
     gap: 8px;
 
-    > span:last-child {
+    .work-progress {
       display: none;
+    }
+
+    .work-retry {
+      grid-column: 2;
+      justify-self: start;
     }
   }
 

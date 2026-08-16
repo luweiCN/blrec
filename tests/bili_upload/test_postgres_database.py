@@ -237,6 +237,10 @@ async def test_postgres_backend_migrates_schema_and_preserves_writes(
         assert registered_worker.model_package_id == 'package-v1'
         assert registered_worker.pipeline_version == 'pipeline-v1'
         assert registered_worker.concurrency == 3
+        configured_worker = await vainglory.update_analysis_worker(
+            'postgres-probe-worker', desired_concurrency=4
+        )
+        assert configured_worker.desired_concurrency == 4
         await target.execute(
             'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
             'VALUES(?,?,?,?,?)',

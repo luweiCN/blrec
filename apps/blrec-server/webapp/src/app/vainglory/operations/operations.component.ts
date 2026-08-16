@@ -313,9 +313,13 @@ export class OperationsComponent implements OnInit, OnDestroy {
   currentMigrationItems(
     migrationId: number,
   ): readonly ArchiveMigrationItem[] {
-    return this.migrationItems(migrationId)
-      .filter((item) => item.state !== 'task_created')
-      .slice(0, 6);
+    const visible = this.migrationItems(migrationId).filter(
+      (item) => item.state !== 'task_created',
+    );
+    return [
+      ...visible.filter((item) => item.state === 'failed'),
+      ...visible.filter((item) => item.state !== 'failed'),
+    ].slice(0, 6);
   }
 
   migrationStateLabel(migration: ArchiveMigrationStatus): string {
@@ -447,6 +451,58 @@ export class OperationsComponent implements OnInit, OnDestroy {
       });
   }
 
+  reanalyzePublication(record: VaingloryPublicationRecord): void {
+    if (this.retryingPublicationIds.has(record.id) || record.state === 'running') {
+      return;
+    }
+    this.retryingPublicationIds.add(record.id);
+    this.vainglory
+      .requestScan(record.sessionId)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.retryingPublicationIds.delete(record.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.actionMessage = `${record.title} 已加入重新识别队列`;
+          this.loadPublicationAudit();
+          this.loadPublicationRecords();
+        },
+        error: (error: unknown) => {
+          this.pageError = this.errorMessage(error, '稿件重新识别失败');
+        },
+      });
+  }
+
+  retryPublicationChapter(record: VaingloryPublicationRecord): void {
+    if (this.retryingPublicationIds.has(record.id) || record.state === 'running') {
+      return;
+    }
+    this.retryingPublicationIds.add(record.id);
+    this.vainglory
+      .retryPublicationStep(record.sessionId, 'chapter')
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.retryingPublicationIds.delete(record.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.actionMessage = `${record.title} 已加入视频分段重算队列`;
+          this.loadPublicationAudit();
+          this.loadPublicationRecords();
+        },
+        error: (error: unknown) => {
+          this.pageError = this.errorMessage(error, '视频分段重算失败');
+        },
+      });
+  }
+
   publicationStatusColor(record: VaingloryPublicationRecord): string {
     if (record.state === 'failed') {
       return 'red';
@@ -556,6 +612,78 @@ export class OperationsComponent implements OnInit, OnDestroy {
         next: (worker) => this.upsertWorker(worker),
         error: (error: unknown) => {
           this.pageError = this.errorMessage(error, 'Worker 状态更新失败');
+        },
+      });
+  }
+
+  setWorkerConcurrency(change: {
+    readonly workerId: string;
+    readonly concurrency: number;
+  }): void {
+    if (this.updatingWorkerIds.has(change.workerId)) {
+      return;
+    }
+    this.updatingWorkerIds.add(change.workerId);
+    this.vainglory
+      .updateAnalysisWorker(change.workerId, {
+        desiredConcurrency: change.concurrency,
+      })
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.updatingWorkerIds.delete(change.workerId);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (worker) => {
+          this.upsertWorker(worker);
+          this.actionMessage = `Worker 并发数已设为 ${change.concurrency}`;
+        },
+        error: (error: unknown) => {
+          this.pageError = this.errorMessage(error, 'Worker 并发数更新失败');
+        },
+      });
+  }
+
+  retryMigrationItem(
+    migration: ArchiveMigrationStatus,
+    item: ArchiveMigrationItem,
+  ): void {
+    if (item.state !== 'failed' || this.migrationControlIds.has(migration.id)) {
+      return;
+    }
+    this.migrationControlIds.add(migration.id);
+    this.accountsService
+      .retryArchiveMigrationItem(migration.id, item.id)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.migrationControlIds.delete(migration.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (updated) => {
+          this.migrations = [
+            updated,
+            ...this.migrations.filter((value) => value.id !== updated.id),
+          ];
+          this.migrationItemsById = new Map([
+            ...this.migrationItemsById,
+            [
+              migration.id,
+              this.migrationItems(migration.id).map((value) =>
+                value.id === item.id
+                  ? { ...value, state: 'queued', progress: 0, error: null }
+                  : value,
+              ),
+            ],
+          ]);
+          this.actionMessage = `${item.title || item.bvid} 已重新加入搬运队列`;
+        },
+        error: (error: unknown) => {
+          this.pageError = this.errorMessage(error, '历史搬运任务重试失败');
         },
       });
   }

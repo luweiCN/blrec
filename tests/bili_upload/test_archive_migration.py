@@ -12,6 +12,7 @@ from blrec.bili_upload.archive_migration import (
     ArchiveDetail,
     ArchiveListing,
     ArchiveMigrationService,
+    ArchiveMigrationUnavailable,
     ArchivePage,
     BiliPublicArchiveReader,
     YtDlpSpaceArchiveCatalog,
@@ -431,6 +432,66 @@ async def test_requeues_migration_item_interrupted_during_a_side_effect(
             )
             == 'queued'
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retries_one_failed_migration_item(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        service = ArchiveMigrationService(
+            database,
+            recording_root=tmp_path / 'rec',
+            catalog=FakeCatalog(
+                (ArchiveListing('BV1abcdefgh', '旧稿件', published_at=900),)
+            ),
+            detail_reader=FakeDetailReader(archive_detail()),
+            downloader=FakeDownloader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            task_creator=FakeTaskCreator(database),
+            clock=lambda: 1000,
+        )
+        requested = await service.request(
+            source_uid=300, download_account_id=1, target_account_id=2
+        )
+        assert await service.run_once() is True
+        item_id = await database.scalar(
+            'SELECT id FROM archive_migration_items WHERE migration_id=?',
+            (requested.id,),
+        )
+        assert item_id is not None
+        await database.execute(
+            "UPDATE archive_migration_items SET state='failed',progress=1,"
+            "error='下载失败' WHERE id=?",
+            (int(item_id),),
+        )
+        await database.execute(
+            "UPDATE archive_migration_jobs SET state='completed',failed_count=1 "
+            'WHERE id=?',
+            (requested.id,),
+        )
+
+        retried = await service.retry_item(requested.id, int(item_id))
+
+        assert retried.state == 'running'
+        assert retried.failed_count == 0
+        item = await database.fetchone(
+            'SELECT state,progress,downloaded_page_count,error '
+            'FROM archive_migration_items WHERE id=?',
+            (int(item_id),),
+        )
+        assert item is not None
+        assert dict(item) == {
+            'state': 'queued',
+            'progress': 0.0,
+            'downloaded_page_count': 0,
+            'error': None,
+        }
+        with pytest.raises(ArchiveMigrationUnavailable, match='只能重试'):
+            await service.retry_item(requested.id, int(item_id))
     finally:
         await database.close()
 

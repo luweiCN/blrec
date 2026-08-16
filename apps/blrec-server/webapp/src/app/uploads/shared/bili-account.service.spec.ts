@@ -134,5 +134,13 @@ describe('BiliAccountService', () => {
     );
     expect(request.request.method).toBe('GET');
     request.flush([]);
+
+    service.retryArchiveMigrationItem(9, 12).subscribe();
+    request = http.expectOne(
+      '/api/v1/bili-accounts/archive-migrations/9/items/12/retry'
+    );
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toBeNull();
+    request.flush({ id: 9 });
   });
 });

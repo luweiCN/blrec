@@ -98,6 +98,7 @@ class AnalysisWorkerNodeStatus:
     total_decode_analysis_seconds: float = 0
     total_profiled_task_seconds: float = 0
     last_task_finished_at: Optional[int] = None
+    desired_concurrency: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +317,7 @@ class VaingloryIndexService:
             total_decode_analysis_seconds=record.total_decode_analysis_seconds,
             total_profiled_task_seconds=record.total_profiled_task_seconds,
             last_task_finished_at=record.last_task_finished_at,
+            desired_concurrency=record.desired_concurrency,
         )
 
     async def add_analysis_worker(
@@ -334,18 +336,26 @@ class VaingloryIndexService:
         *,
         display_name: Optional[str] = None,
         enabled: Optional[bool] = None,
+        desired_concurrency: Optional[int] = None,
     ) -> AnalysisWorkerNodeStatus:
         worker_id = worker_id.strip()
         if not worker_id:
             raise ValueError('Worker ID 不能为空')
+        if desired_concurrency is not None and not 1 <= desired_concurrency <= 8:
+            raise ValueError('并发任务数必须在 1 到 8 之间')
         if enabled is None:
             await self._repository.update_analysis_worker(
-                worker_id, display_name=display_name
+                worker_id,
+                display_name=display_name,
+                desired_concurrency=desired_concurrency,
             )
         else:
             async with self._remote_claim_lock:
                 await self._repository.update_analysis_worker(
-                    worker_id, display_name=display_name, enabled=enabled
+                    worker_id,
+                    display_name=display_name,
+                    enabled=enabled,
+                    desired_concurrency=desired_concurrency,
                 )
         workers = await self.list_analysis_workers()
         return next(worker for worker in workers if worker.worker_id == worker_id)
@@ -458,6 +468,31 @@ class VaingloryIndexService:
             pipeline_version=pipeline_version,
             concurrency=concurrency,
         )
+
+    async def analysis_worker_configuration(
+        self,
+        *,
+        worker_id: str,
+        model_package_id: str = '',
+        pipeline_version: str = '',
+        concurrency: int = 0,
+    ) -> int:
+        worker_id = worker_id.strip()
+        if not worker_id:
+            raise ValueError('Worker ID 不能为空')
+        worker = await self._repository.register_analysis_worker(
+            worker_id,
+            model_package_id=model_package_id,
+            pipeline_version=pipeline_version,
+            concurrency=concurrency,
+        )
+        self._require_remote_worker(
+            worker_id=worker_id,
+            model_package_id=model_package_id,
+            pipeline_version=pipeline_version,
+            concurrency=concurrency,
+        )
+        return worker.desired_concurrency or max(1, worker.concurrency or concurrency)
 
     def _assign_remote_work(
         self, claim: RemoteAnalysisClaim, worker_id: str

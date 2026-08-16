@@ -64,11 +64,23 @@
 .analysis-worker-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 
   span {
     color: #8c8c8c;
     font-size: 12px;
+  }
+}
+
+.analysis-worker-concurrency {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+
+  nz-input-number {
+    width: 72px;
   }
 }
 

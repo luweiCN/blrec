@@ -112,6 +112,30 @@
           </div>
         </dl>
         <footer class="analysis-worker-actions">
+          <label class="analysis-worker-concurrency">
+            <span>任务并发</span>
+            <nz-input-number
+              nzSize="small"
+              [nzMin]="1"
+              [nzMax]="8"
+              [ngModel]="workerConcurrency(worker)"
+              (ngModelChange)="setWorkerConcurrency(worker.workerId, $event)"
+            ></nz-input-number>
+            <button
+              nz-button
+              nzType="primary"
+              nzSize="small"
+              type="button"
+              [disabled]="
+                !workerConcurrencyChanged(worker) ||
+                updatingWorkerIds.has(worker.workerId)
+              "
+              [nzLoading]="updatingWorkerIds.has(worker.workerId)"
+              (click)="saveWorkerConcurrency(worker)"
+            >
+              应用
+            </button>
+          </label>
           <button nz-button nzSize="small" (click)="editWorker.emit(worker)">
             编辑名称
           </button>

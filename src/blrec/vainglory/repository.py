@@ -546,6 +546,7 @@ class AnalysisWorkerRecord:
     total_decode_analysis_seconds: float
     total_profiled_task_seconds: float
     last_task_finished_at: Optional[int]
+    desired_concurrency: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -994,6 +995,11 @@ def _analysis_worker_record(row: sqlite3.Row) -> AnalysisWorkerRecord:
             if row['last_task_finished_at'] is None
             else int(row['last_task_finished_at'])
         ),
+        desired_concurrency=(
+            None
+            if row['desired_concurrency'] is None
+            else int(row['desired_concurrency'])
+        ),
     )
 
 
@@ -1318,6 +1324,7 @@ class VaingloryRepository:
         *,
         display_name: Optional[str] = None,
         enabled: Optional[bool] = None,
+        desired_concurrency: Optional[int] = None,
     ) -> AnalysisWorkerRecord:
         now = self._now()
 
@@ -1325,10 +1332,13 @@ class VaingloryRepository:
             cursor = connection.execute(
                 'UPDATE vainglory_analysis_workers SET '
                 'display_name=COALESCE(?,display_name),'
-                'enabled=COALESCE(?,enabled),updated_at=? WHERE worker_id=?',
+                'enabled=COALESCE(?,enabled),'
+                'desired_concurrency=COALESCE(?,desired_concurrency),'
+                'updated_at=? WHERE worker_id=?',
                 (
                     display_name,
                     None if enabled is None else int(enabled),
+                    desired_concurrency,
                     now,
                     worker_id,
                 ),

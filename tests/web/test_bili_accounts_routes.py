@@ -41,6 +41,7 @@ class FakeRenewalCheckResult:
 class FakeArchiveMigration:
     request_error: Optional[Exception] = None
     requested: Optional[tuple] = None
+    retried: Optional[tuple] = None
 
     async def request(
         self, *, source_uid: int, download_account_id: int, target_account_id: int
@@ -81,6 +82,12 @@ class FakeArchiveMigration:
                 updated_at=1_700_000_100,
             ),
         )
+
+    async def retry_item(
+        self, migration_id: int, item_id: int
+    ) -> ArchiveMigrationStatus:
+        self.retried = (migration_id, item_id)
+        return self.status()
 
     @staticmethod
     def status() -> ArchiveMigrationStatus:
@@ -356,6 +363,10 @@ def test_archive_migration_can_be_requested_and_polled(
     items = client.get(
         '/api/v1/bili-accounts/archive-migrations/9/items', headers=auth_headers()
     )
+    retried = client.post(
+        '/api/v1/bili-accounts/archive-migrations/9/items/12/retry',
+        headers=auth_headers(),
+    )
 
     assert created.status_code == 202
     assert created.json()['id'] == 9
@@ -387,6 +398,9 @@ def test_archive_migration_can_be_requested_and_polled(
         'error': None,
         'updatedAt': 1_700_000_100,
     }
+    assert retried.status_code == 202
+    assert retried.json()['id'] == 9
+    assert migration.retried == (9, 12)
 
 
 @pytest.mark.parametrize(

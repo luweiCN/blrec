@@ -93,6 +93,9 @@ describe('OperationsComponent', () => {
         'queuePublicationAudit',
         'listPublicationRecords',
         'retryPublication',
+        'retryPublicationStep',
+        'requestScan',
+        'updateAnalysisWorker',
       ],
     );
     vainglory.getPublicationAudit.and.returnValue(of(audit()));
@@ -103,9 +106,17 @@ describe('OperationsComponent', () => {
       of({ total: 0, items: [] }),
     );
     vainglory.retryPublication.and.returnValue(of(void 0));
+    vainglory.retryPublicationStep.and.returnValue(of(void 0));
+    vainglory.updateAnalysisWorker.and.returnValue(
+      of({ ...analysisQueue().workers[0], desiredConcurrency: 4 }),
+    );
     const accounts = jasmine.createSpyObj<BiliAccountService>(
       'BiliAccountService',
-      ['listAccounts', 'listArchiveMigrations'],
+      [
+        'listAccounts',
+        'listArchiveMigrations',
+        'retryArchiveMigrationItem',
+      ],
     );
     accounts.listAccounts.and.returnValue(of([]));
     accounts.listArchiveMigrations.and.returnValue(of([]));
@@ -176,6 +187,13 @@ describe('OperationsComponent', () => {
 
     expect(vainglory.queuePublicationAudit).toHaveBeenCalledOnceWith(168, 20);
     expect(component.actionMessage).toContain('2 条稿件');
+
+    component.setWorkerConcurrency({ workerId: 'worker-1', concurrency: 4 });
+    expect(vainglory.updateAnalysisWorker).toHaveBeenCalledOnceWith(
+      'worker-1',
+      { desiredConcurrency: 4 },
+    );
+    expect(component.queue?.workers[0].desiredConcurrency).toBe(4);
     component.ngOnDestroy();
   });
 });

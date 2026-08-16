@@ -214,10 +214,18 @@ describe('VaingloryService', () => {
     });
     created.flush({ workerId: 'mac-studio' });
 
-    service.updateAnalysisWorker('mac-studio', { enabled: false }).subscribe();
+    service
+      .updateAnalysisWorker('mac-studio', {
+        enabled: false,
+        desiredConcurrency: 4,
+      })
+      .subscribe();
     const paused = http.expectOne('/api/v1/vainglory/workers/mac-studio');
     expect(paused.request.method).toBe('PATCH');
-    expect(paused.request.body).toEqual({ enabled: false });
+    expect(paused.request.body).toEqual({
+      enabled: false,
+      desiredConcurrency: 4,
+    });
     paused.flush({ workerId: 'mac-studio', enabled: false });
   });
 

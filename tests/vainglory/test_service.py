@@ -265,8 +265,21 @@ async def test_remote_worker_registry_preserves_pause_and_records_work(
         assert registered.enabled is False
         assert registered.display_name == 'Mac Studio 夜间节点'
         assert registered.concurrency == 3
+        configured = await repository.update_analysis_worker(
+            created.worker_id, desired_concurrency=4
+        )
+        assert configured.desired_concurrency == 4
 
         service = VaingloryIndexService(repository, remote_worker_enabled=True)
+        assert (
+            await service.analysis_worker_configuration(
+                worker_id=created.worker_id,
+                model_package_id='vg-vision-v2',
+                pipeline_version='timeline-v2',
+                concurrency=3,
+            )
+            == 4
+        )
         assert (
             await service.claim_remote_work(
                 worker_id=created.worker_id,
@@ -285,6 +298,7 @@ async def test_remote_worker_registry_preserves_pause_and_records_work(
             decode_analysis_seconds=120.0,
         )
         worker = (await repository.list_analysis_workers())[0]
+        assert worker.desired_concurrency == 4
         assert worker.completed_task_count == 1
         assert worker.failed_task_count == 0
         assert worker.total_processing_seconds == 180.0
