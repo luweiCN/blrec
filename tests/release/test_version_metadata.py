@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_release_version_matches_preview_beta() -> None:
-    assert blrec.__version__ == '3.0.0-beta.92'
+    assert blrec.__version__ == '3.0.0-beta.93'
 
 
 def test_server_and_worker_runtime_pins_cover_supported_python_wheels() -> None:
