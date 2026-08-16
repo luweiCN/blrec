@@ -153,7 +153,7 @@ async def test_event_retention_deletes_only_video_and_preserves_danmaku(
 
 
 @pytest.mark.asyncio
-async def test_migration_video_is_kept_until_match_analysis_is_ready(
+async def test_migration_video_is_kept_until_approval_and_match_analysis_are_ready(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / 'records'
@@ -190,6 +190,13 @@ async def test_migration_video_is_kept_until_match_analysis_is_ready(
         await database.execute(
             "UPDATE vainglory_part_jobs SET state='ready',progress=1,"
             'completed_at=1,updated_at=1 WHERE part_id=1'
+        )
+
+        assert await manager.run_once() == 0
+        assert video.exists()
+
+        await database.execute(
+            "UPDATE upload_jobs SET state='approved',approved_at=1000 WHERE id=1"
         )
 
         assert await manager.run_once() == 1

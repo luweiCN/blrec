@@ -1126,7 +1126,7 @@ class ArchiveMigrationService:
             collection_section_id=None,
             cover_mode='live',
             cover_asset_id=None,
-            retention_mode='submitted',
+            retention_mode='approved',
             retention_days=0,
         )
         override_json = encode_submission_settings(command)

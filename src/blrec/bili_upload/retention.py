@@ -123,7 +123,8 @@ class RetentionManager:
     async def _event_candidates(self, now: int) -> List[_Candidate]:
         rows = await self._database.fetchall(
             'SELECT part.id,part.source_path,part.final_path,session.id AS session_id,'
-            'session.started_at,session.upload_override_json,'
+            'session.started_at,session.broadcast_session_key,'
+            'session.upload_override_json,'
             "COALESCE(policy.retention_mode,'submitted') AS retention_mode,"
             'COALESCE(policy.retention_days,5) AS retention_days,'
             'job.upload_completed_at,job.submitted_at,job.approved_at '
@@ -169,7 +170,8 @@ class RetentionManager:
         now = int(self._clock())
         rows = await self._database.fetchall(
             'SELECT part.id,part.source_path,part.final_path,session.id AS session_id,'
-            'session.started_at,session.upload_override_json,'
+            'session.started_at,session.broadcast_session_key,'
+            'session.upload_override_json,'
             "COALESCE(policy.retention_mode,'submitted') AS retention_mode,"
             'COALESCE(policy.retention_days,5) AS retention_days,'
             'CASE WHEN job.id IS NULL THEN '
@@ -210,6 +212,8 @@ class RetentionManager:
 
     @staticmethod
     def _retention_policy(row: Any) -> Tuple[str, int]:
+        if str(row['broadcast_session_key'] or '').startswith('bili-migration:'):
+            return 'approved', 0
         override = row['upload_override_json']
         if override is None:
             return str(row['retention_mode']), int(row['retention_days'])

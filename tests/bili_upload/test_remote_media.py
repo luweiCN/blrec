@@ -66,6 +66,47 @@ async def seed_remote_part(database: BiliUploadDatabase, source_path: Path) -> N
     )
 
 
+async def seed_migration_target_archive(database: BiliUploadDatabase) -> None:
+    await database.execute(
+        "INSERT INTO bili_accounts("
+        "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+        "state,created_at,updated_at) "
+        "VALUES(2,84,'下载账号',X'00',1,'key','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO archive_migration_jobs('
+        'id,source_uid,download_account_id,target_account_id,state,progress,'
+        'discovered_count,completed_count,failed_count,error,requested_at,'
+        'started_at,completed_at,updated_at) '
+        "VALUES(1,42,2,1,'completed',1,1,1,0,NULL,1,1,1,1)"
+    )
+    await database.execute(
+        'INSERT INTO archive_migration_items('
+        'id,migration_id,aid,bvid,title,published_at,state,progress,page_count,'
+        'downloaded_page_count,session_id,upload_job_id,error,created_at,updated_at) '
+        "VALUES(1,1,101,'BV1source001','源稿件',1,'task_created',1,1,1,"
+        '1,1,NULL,1,1)'
+    )
+    await database.execute(
+        'INSERT INTO vainglory_archive_syncs('
+        'account_id,state,progress,discovered_count,completed_count,error,'
+        'requested_at,started_at,completed_at,updated_at) '
+        "VALUES(1,'running',0,1,0,NULL,1,1,NULL,1)"
+    )
+    await database.execute(
+        'INSERT INTO vainglory_archive_imports('
+        'id,account_id,aid,bvid,title,published_at,session_id,state,progress,'
+        'page_count,completed_page_count,created_at,updated_at) '
+        "VALUES(1,1,201,'BV1abcdefgh','目标稿件',1,1,'queued',0,1,0,1,1)"
+    )
+    await database.execute(
+        'INSERT INTO vainglory_archive_parts('
+        'id,import_id,page,cid,title,duration_seconds,recording_part_id,state,'
+        'progress,created_at,updated_at) '
+        "VALUES(1,1,1,123,'P1',60,1,'queued',0,1,1)"
+    )
+
+
 @pytest.mark.asyncio
 async def test_downloads_missing_submitted_part_and_expires_after_ten_days(
     tmp_path: Path,
@@ -217,6 +258,45 @@ async def test_explicit_user_download_promotes_analysis_cache_to_ten_days(
                 'SELECT retention_kind FROM vainglory_video_sources WHERE part_id=1'
             )
             == 'ten_day'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_does_not_download_migration_target_discovered_by_history_intake(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    downloader = FakeDownloader()
+    try:
+        missing = tmp_path / 'deleted.mp4'
+        await seed_remote_part(database, missing)
+        await seed_migration_target_archive(database)
+        await database.execute(
+            'INSERT INTO vainglory_video_sources('
+            'part_id,account_id,bvid,cid,page,origin,state,retention_kind,'
+            'progress,downloaded_bytes,original_artifact_state,created_at,'
+            'updated_at) '
+            "VALUES(1,1,'BV1abcdefgh',123,1,'archive','pending','analysis',"
+            "0,0,'missing',1,1)"
+        )
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=downloader,
+            clock=lambda: 1_000,
+        )
+
+        assert await cache.run_once() is False
+        assert downloader.calls == []
+        assert (
+            await database.scalar(
+                'SELECT state FROM vainglory_video_sources WHERE part_id=1'
+            )
+            == 'pending'
         )
     finally:
         await database.close()

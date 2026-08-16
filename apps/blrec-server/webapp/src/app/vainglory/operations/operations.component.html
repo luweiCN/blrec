@@ -157,10 +157,16 @@
             <div>
               <strong>{{ accountLabel(sync.accountId) }}</strong>
               <span>
-                已完成 {{ sync.completedCount }}/{{ sync.discoveredCount }} 个稿件
-                <ng-container *ngIf="!sync.discoveryComplete">
-                  · 正在扫描第 {{ sync.nextPage }} 页
+                已处理 {{ sync.completedCount }}/{{ sync.discoveredCount }}
+                个稿件（按 BV 号去重）
+                <ng-container
+                  *ngIf="sync.discoveryComplete; else scanningPages"
+                >
+                  · 共扫描 {{ sync.nextPage - 1 }} 页
                 </ng-container>
+                <ng-template #scanningPages>
+                  · 已扫描 {{ sync.nextPage - 1 }} 页 · 总页数待确认
+                </ng-template>
               </span>
             </div>
             <nz-tag [nzColor]="archiveStateColor(sync)">

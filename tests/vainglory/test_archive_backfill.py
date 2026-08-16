@@ -739,6 +739,84 @@ async def test_existing_uploaded_archive_reuses_its_recording_parts(
 
 
 @pytest.mark.asyncio
+async def test_migration_target_is_not_added_to_history_intake(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            "INSERT INTO bili_accounts("
+            "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+            "state,created_at,updated_at) "
+            "VALUES(2,84,'下载账号',X'00',1,'key','active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(99,100,'bili-migration:42:1:BV1source001','closed',900,"
+            "'早期虚荣录播')"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'aid,bvid,created_at,updated_at) '
+            "VALUES(50,99,1,'{}','approved','confirmed',101,"
+            "'BV1abcdefgh',900,900)"
+        )
+        await database.execute(
+            'INSERT INTO archive_migration_jobs('
+            'id,source_uid,download_account_id,target_account_id,state,progress,'
+            'discovered_count,completed_count,failed_count,error,requested_at,'
+            'started_at,completed_at,updated_at) '
+            "VALUES(1,42,2,1,'completed',1,1,1,0,NULL,900,900,900,900)"
+        )
+        await database.execute(
+            'INSERT INTO archive_migration_items('
+            'id,migration_id,aid,bvid,title,published_at,state,progress,page_count,'
+            'downloaded_page_count,session_id,upload_job_id,error,created_at,'
+            'updated_at) '
+            "VALUES(1,1,201,'BV1source001','源稿件',800,'task_created',1,1,1,"
+            '99,50,NULL,900,900)'
+        )
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+
+        await service.request(1)
+        assert await service.run_once() is True
+
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM vainglory_archive_imports') == 0
+        )
+        status = await service.status(1)
+        assert status.discovered_count == 0
+        assert status.completed_count == 0
+        assert status.daily_used == 0
+
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'account_id,aid,bvid,title,published_at,session_id,state,progress,'
+            'page_count,completed_page_count,created_at,updated_at) '
+            "VALUES(1,101,'BV1abcdefgh','目标稿件',900,99,'queued',0,0,0,900,900)"
+        )
+        assert await service.recover_interrupted() == 1
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM vainglory_archive_imports "
+                "WHERE state='skipped' AND retryable=0"
+            )
+            == 1
+        )
+        assert await service.list_items(1) == ()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_marks_finished_archive_and_sync_without_duplicating_on_rescan(
     tmp_path: Path,
 ) -> None:

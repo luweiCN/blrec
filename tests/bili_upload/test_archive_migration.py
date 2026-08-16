@@ -18,7 +18,10 @@ from blrec.bili_upload.archive_migration import (
 )
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.policies import default_room_upload_policy
-from blrec.bili_upload.session_submission import encode_submission_settings
+from blrec.bili_upload.session_submission import (
+    decode_submission_settings,
+    encode_submission_settings,
+)
 from blrec.bili_upload.upload import UploadCoordinator
 
 
@@ -244,7 +247,8 @@ async def test_migration_downloads_each_page_and_creates_one_upload_task(
         assert all(Path(str(row['final_path'])).is_file() for row in parts)
         assert all(Path(str(row['xml_path'])).is_file() for row in parts)
         session = await database.fetchone(
-            'SELECT room_id,anchor_uid,anchor_name FROM recording_sessions'
+            'SELECT room_id,anchor_uid,anchor_name,upload_override_json '
+            'FROM recording_sessions'
         )
         assert session is not None
         assert (
@@ -252,6 +256,11 @@ async def test_migration_downloads_each_page_and_creates_one_upload_task(
             session['anchor_uid'],
             str(session['anchor_name']),
         ) == (0, None, '')
+        migration_policy = decode_submission_settings(
+            str(session['upload_override_json'])
+        )
+        assert migration_policy.retention_mode == 'approved'
+        assert migration_policy.retention_days == 0
         await database.execute(
             "UPDATE recording_sessions SET room_id=300,anchor_uid=300,"
             "anchor_name='源账号'"

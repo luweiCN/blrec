@@ -409,6 +409,14 @@ class RemoteMediaCache:
                     'LEFT JOIN vainglory_archive_imports imported '
                     'ON imported.id=archive.import_id '
                     "WHERE source.state='pending' "
+                    "AND (imported.id IS NULL OR imported.state!='skipped') "
+                    'AND NOT EXISTS(SELECT 1 '
+                    'FROM archive_migration_items migration '
+                    'JOIN upload_jobs migrated_upload '
+                    'ON migrated_upload.id=migration.upload_job_id '
+                    'WHERE migrated_upload.account_id=imported.account_id '
+                    'AND migrated_upload.bvid=imported.bvid '
+                    'AND migrated_upload.session_id=migration.session_id) '
                     + exclusion
                     + "ORDER BY CASE WHEN source.retention_kind='ten_day' "
                     'THEN 0 ELSE 1 END,'

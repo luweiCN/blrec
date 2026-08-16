@@ -162,6 +162,7 @@ class ArchiveBackfillService:
                 "WHERE state='downloading' AND page_count=0",
                 (now,),
             ).rowcount
+            changed += self._skip_migration_target_imports(connection, now)
             syncs = connection.execute(
                 'SELECT account_id,season_started_at,season_ended_at '
                 'FROM vainglory_archive_syncs'
@@ -232,6 +233,13 @@ class ArchiveBackfillService:
         def request(connection: sqlite3.Connection) -> Optional[int]:
             imported = connection.execute(
                 'SELECT imported.account_id,imported.session_id,imported.state,'
+                'EXISTS(SELECT 1 FROM archive_migration_items migration '
+                'JOIN upload_jobs migrated_upload '
+                'ON migrated_upload.id=migration.upload_job_id '
+                'WHERE migrated_upload.account_id=imported.account_id '
+                'AND migrated_upload.bvid=imported.bvid '
+                'AND migrated_upload.session_id=migration.session_id) '
+                'AS migration_target,'
                 'account.state '
                 'AS account_state FROM vainglory_archive_imports imported '
                 'JOIN bili_accounts account ON account.id=imported.account_id '
@@ -242,6 +250,10 @@ class ArchiveBackfillService:
                 raise ArchiveBackfillNotFound('历史稿件不存在')
             if str(imported['account_state']) != 'active':
                 raise ArchiveBackfillUnavailable('稿件所属 B 站账号当前不可用')
+            if bool(imported['migration_target']):
+                raise ArchiveBackfillUnavailable(
+                    '该稿件由历史搬运管理，将沿用源录像的分析结果'
+                )
             if imported['session_id'] is not None:
                 return int(imported['session_id'])
             if str(imported['state']) not in ('ready', 'skipped', 'failed'):
@@ -584,6 +596,12 @@ class ArchiveBackfillService:
             'ON publication.account_id=imported.account_id '
             'AND publication.bvid=imported.bvid '
             'WHERE imported.account_id=? '
+            'AND NOT EXISTS(SELECT 1 FROM archive_migration_items migration '
+            'JOIN upload_jobs migrated_upload '
+            'ON migrated_upload.id=migration.upload_job_id '
+            'WHERE migrated_upload.account_id=imported.account_id '
+            'AND migrated_upload.bvid=imported.bvid '
+            'AND migrated_upload.session_id=migration.session_id) '
             "ORDER BY CASE source.state WHEN 'downloading' THEN 0 "
             "WHEN 'pending' THEN 1 ELSE 2 END,"
             "CASE imported.state WHEN 'downloading' THEN 0 "
@@ -766,6 +784,21 @@ class ArchiveBackfillService:
                     'WHERE account_id=? AND bvid=?',
                     (account_id, archive.bvid),
                 ).fetchone()
+                migration_target = connection.execute(
+                    'SELECT 1 FROM archive_migration_items migration '
+                    'JOIN upload_jobs migrated_upload '
+                    'ON migrated_upload.id=migration.upload_job_id '
+                    'WHERE migrated_upload.account_id=? '
+                    'AND migrated_upload.bvid=? '
+                    'AND migrated_upload.session_id=migration.session_id LIMIT 1',
+                    (account_id, archive.bvid),
+                ).fetchone()
+                if migration_target is not None:
+                    if existing is not None:
+                        self._skip_migration_target_import(
+                            connection, int(existing['id']), now
+                        )
+                    continue
                 if existing is not None:
                     if archive.page_count is not None and archive.page_count > int(
                         existing['page_count']
@@ -838,7 +871,13 @@ class ArchiveBackfillService:
                 "SUM(CASE WHEN state IN ('ready','skipped') "
                 "OR (state='failed' AND retryable=0) "
                 'THEN 1 ELSE 0 END) AS completed '
-                'FROM vainglory_archive_imports WHERE account_id=?',
+                'FROM vainglory_archive_imports imported WHERE account_id=? '
+                'AND NOT EXISTS(SELECT 1 FROM archive_migration_items migration '
+                'JOIN upload_jobs migrated_upload '
+                'ON migrated_upload.id=migration.upload_job_id '
+                'WHERE migrated_upload.account_id=imported.account_id '
+                'AND migrated_upload.bvid=imported.bvid '
+                'AND migrated_upload.session_id=migration.session_id)',
                 (account_id,),
             ).fetchone()
             assert counts is not None
@@ -1535,8 +1574,15 @@ class ArchiveBackfillService:
             for sync in syncs:
                 values = connection.execute(
                     'SELECT state,progress,retryable '
-                    'FROM vainglory_archive_imports '
-                    'WHERE account_id=?',
+                    'FROM vainglory_archive_imports imported '
+                    'WHERE account_id=? '
+                    'AND NOT EXISTS(SELECT 1 '
+                    'FROM archive_migration_items migration '
+                    'JOIN upload_jobs migrated_upload '
+                    'ON migrated_upload.id=migration.upload_job_id '
+                    'WHERE migrated_upload.account_id=imported.account_id '
+                    'AND migrated_upload.bvid=imported.bvid '
+                    'AND migrated_upload.session_id=migration.session_id)',
                     (int(sync['account_id']),),
                 ).fetchall()
                 total = len(values)
@@ -1597,6 +1643,38 @@ class ArchiveBackfillService:
             return changed
 
         return await self._database.write(reconcile)
+
+    @staticmethod
+    def _skip_migration_target_import(
+        connection: sqlite3.Connection, import_id: int, now: int
+    ) -> int:
+        return connection.execute(
+            "UPDATE vainglory_archive_imports SET state='skipped',progress=1,"
+            'error=NULL,retryable=0,next_retry_at=NULL,'
+            "content_classification='unknown',"
+            "classification_reason='历史搬运目标稿件，沿用源录像分析结果',"
+            'updated_at=? WHERE id=?',
+            (now, int(import_id)),
+        ).rowcount
+
+    @classmethod
+    def _skip_migration_target_imports(
+        cls, connection: sqlite3.Connection, now: int
+    ) -> int:
+        rows = connection.execute(
+            'SELECT imported.id FROM vainglory_archive_imports imported '
+            'WHERE imported.state!=\'skipped\' AND EXISTS('
+            'SELECT 1 FROM archive_migration_items migration '
+            'JOIN upload_jobs migrated_upload '
+            'ON migrated_upload.id=migration.upload_job_id '
+            'WHERE migrated_upload.account_id=imported.account_id '
+            'AND migrated_upload.bvid=imported.bvid '
+            'AND migrated_upload.session_id=migration.session_id)'
+        ).fetchall()
+        return sum(
+            cls._skip_migration_target_import(connection, int(row['id']), now)
+            for row in rows
+        )
 
     @staticmethod
     def _derived_part_state(row: sqlite3.Row) -> Tuple[str, float, Optional[str]]:
