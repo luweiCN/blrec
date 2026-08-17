@@ -13,7 +13,7 @@
 
 ```dotenv
 VISION_LAB_WORKER_TOKEN=独立随机令牌
-VISION_LAB_IMAGE_TAG=vision-lab-v0.3.3
+VISION_LAB_IMAGE_TAG=vision-lab-v0.3.4
 VISION_LAB_DATABASE_URL=postgresql://...
 VISION_LAB_DATABASE_SCHEMA=vision_lab
 ```

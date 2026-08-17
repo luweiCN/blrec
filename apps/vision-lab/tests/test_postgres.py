@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, List, Sequence, Tuple
 
 from labeler import db, postgres
 
@@ -61,6 +62,25 @@ class PostgresCompatibilityTests(unittest.TestCase):
                 self.assertEqual(int(row[0]), len(db.DEFAULT_TASKS))
             finally:
                 connection.close()
+
+    def test_existing_schema_does_not_require_database_create_privilege(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.calls: List[Tuple[Any, Sequence[Any]]] = []
+
+            def execute(
+                self, statement: Any, parameters: Sequence[Any] = ()
+            ) -> 'Cursor':
+                self.calls.append((statement, parameters))
+                return self
+
+            def fetchone(self) -> Tuple[bool]:
+                return (True,)
+
+        cursor = Cursor()
+        self.assertTrue(postgres._schema_exists(cursor, 'vision_lab'))
+
+        self.assertEqual(len(cursor.calls), 1)
 
 
 if __name__ == '__main__':

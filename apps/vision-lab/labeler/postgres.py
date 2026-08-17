@@ -359,9 +359,10 @@ def _initialize_schema(
     connection = psycopg.connect(database_url, autocommit=False)
     try:
         cursor = connection.cursor()
-        cursor.execute(
-            sql.SQL('CREATE SCHEMA IF NOT EXISTS {}').format(sql.Identifier(schema))
-        )
+        if not _schema_exists(cursor, schema):
+            cursor.execute(
+                sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema))
+            )
         cursor.execute(
             sql.SQL('SET LOCAL search_path TO {}').format(sql.Identifier(schema))
         )
@@ -396,6 +397,15 @@ def _initialize_schema(
         raise
     finally:
         connection.close()
+
+
+def _schema_exists(cursor: Any, schema: str) -> bool:
+    row = cursor.execute(
+        'SELECT EXISTS ('
+        'SELECT 1 FROM pg_namespace WHERE nspname = %s)',
+        (schema,),
+    ).fetchone()
+    return row is not None and bool(row[0])
 
 
 def connect(
