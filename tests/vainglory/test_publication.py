@@ -1079,6 +1079,50 @@ async def test_private_archive_uses_authenticated_remote_verification(
 
 
 @pytest.mark.asyncio
+async def test_private_upload_policy_skips_public_visibility_probe(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        await database.execute(
+            'UPDATE upload_jobs SET policy_snapshot_json=? WHERE id=1',
+            (json.dumps({'is_only_self': True}),),
+        )
+        protocol = FakePublicationProtocol()
+        protocol.archive_is_only_self = True
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1_000,
+        )
+
+        for _ in range(6):
+            assert await service.run_once() is True
+
+        publication = await database.fetchone(
+            'SELECT state,visibility_scope,visibility_verified_at,'
+            'public_visible_at,remote_verified_at,error '
+            'FROM vainglory_publications'
+        )
+        assert publication is not None and dict(publication) == {
+            'state': 'confirmed',
+            'visibility_scope': 'owner',
+            'visibility_verified_at': 1_000,
+            'public_visible_at': None,
+            'remote_verified_at': 1_000,
+            'error': None,
+        }
+        assert protocol.public_archive_calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_upload_publication_waits_for_scheduled_publication_time(
     tmp_path: Path,
 ) -> None:

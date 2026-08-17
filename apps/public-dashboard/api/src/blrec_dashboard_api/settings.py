@@ -14,6 +14,7 @@ class ApiSettings:
     database_path: Path
     ingest_token_sha256: str
     cors_origins: tuple[str, ...]
+    owner_token_sha256: str = ''
     database_url: str = ''
     source_database_path: Path | None = None
     source_database_url: str = ''
@@ -22,6 +23,10 @@ class ApiSettings:
     def __post_init__(self) -> None:
         if not _SHA256_PATTERN.fullmatch(self.ingest_token_sha256):
             raise ValueError('dashboard API ingest token SHA-256 is invalid')
+        if self.owner_token_sha256 and not _SHA256_PATTERN.fullmatch(
+            self.owner_token_sha256
+        ):
+            raise ValueError('dashboard API owner token SHA-256 is invalid')
         if not self.cors_origins:
             raise ValueError('dashboard API requires at least one CORS origin')
         if self.database_url and not self.database_url.startswith(
@@ -61,6 +66,9 @@ class ApiSettings:
             'DASHBOARD_API_SOURCE_DATABASE_URL', ''
         ).strip()
         token_sha256 = os.environ.get('DASHBOARD_API_INGEST_TOKEN_SHA256', '')
+        owner_token_sha256 = os.environ.get(
+            'DASHBOARD_API_OWNER_TOKEN_SHA256', ''
+        ).strip()
         cors_origins = tuple(
             value.strip()
             for value in os.environ.get(
@@ -72,6 +80,7 @@ class ApiSettings:
             database_path=Path(database_path),
             ingest_token_sha256=token_sha256,
             cors_origins=cors_origins,
+            owner_token_sha256=owner_token_sha256,
             database_url=database_url,
             source_database_path=(
                 Path(source_database_path) if source_database_path else None

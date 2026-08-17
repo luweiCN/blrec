@@ -454,6 +454,7 @@ class PlayerResponse(ApiModel):
     id: int
     name: str
     origin: Literal['automatic', 'manual']
+    public_visible: bool
     rooms: List[PlayerRoomResponse]
     created_at: int
     updated_at: int
@@ -541,6 +542,10 @@ class PlayerNameRequest(ApiModel):
     name: str = Field(..., max_length=80)
 
 
+class PlayerVisibilityRequest(ApiModel):
+    public_visible: bool
+
+
 class PlayerRoomSeedRequest(ApiModel):
     room_id: int = Field(..., gt=0)
     name: str = Field(..., min_length=1, max_length=80)
@@ -610,7 +615,7 @@ class ArchiveSyncResponse(ApiModel):
 
 class ArchiveSyncControlRequest(ApiModel):
     paused: Optional[bool] = None
-    daily_limit: Optional[int] = Field(None, ge=1, le=1000)
+    daily_limit: Optional[int] = Field(None, ge=1)
 
 
 class ArchiveBackfillItemResponse(ApiModel):
@@ -894,6 +899,7 @@ def _stored_player(value: PlayerRecord) -> PlayerResponse:
         id=value.id,
         name=value.name,
         origin=value.origin,
+        public_visible=value.public_visible,
         rooms=[_player_room(room) for room in value.rooms],
         created_at=value.created_at,
         updated_at=value.updated_at,
@@ -1908,6 +1914,22 @@ async def rename_player(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
         ) from error
+
+
+@router.patch('/players/{player_id}/visibility', response_model=PlayerResponse)
+async def set_player_public_visibility(
+    player_id: int,
+    payload: PlayerVisibilityRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> PlayerResponse:
+    try:
+        return _stored_player(
+            await index.set_player_public_visibility(player_id, payload.public_visible)
+        )
+    except VaingloryNotFound as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
 
 
 @router.put('/players/{player_id}/aliases', response_model=PlayerResponse)

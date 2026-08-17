@@ -1750,6 +1750,48 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       });
   }
 
+  setPlayerPublicVisibility(
+    player: VaingloryPlayer,
+    publicVisible: boolean,
+  ): void {
+    if (publicVisible === player.publicVisible || this.playerSaving(player.id)) {
+      return;
+    }
+    this.savingPlayerIds.add(player.id);
+    this.vainglory
+      .setPlayerPublicVisibility(player.id, publicVisible)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.savingPlayerIds.delete(player.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (updated) => {
+          if (this.playersView.state === 'ready') {
+            this.playersView = {
+              state: 'ready',
+              items: this.playersView.items.map((item) =>
+                item.id === updated.id ? updated : item,
+              ),
+            };
+          }
+          this.messages.success(
+            updated.publicVisible
+              ? '该玩家已恢复公开展示'
+              : '该玩家已从公开榜单隐藏',
+          );
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.messages.error(
+            this.errorMessage(error, '玩家公开状态保存失败'),
+          );
+        },
+      });
+  }
+
   deletePlayer(player: VaingloryPlayer): void {
     if (this.playerSaving(player.id)) {
       return;
@@ -2809,8 +2851,8 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       return;
     }
     const dailyLimit = this.archiveDailyLimit(account.id, sync);
-    if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
-      this.messages.error('每日处理上限必须是 1 到 1000 的整数');
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 1) {
+      this.messages.error('每日处理上限必须是正整数');
       return;
     }
     this.requestingArchiveAccountIds.add(account.id);

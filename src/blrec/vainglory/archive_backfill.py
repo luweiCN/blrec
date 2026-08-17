@@ -713,8 +713,8 @@ class ArchiveBackfillService:
         paused: Optional[bool] = None,
         daily_limit: Optional[int] = None,
     ) -> ArchiveSync:
-        if daily_limit is not None and not 1 <= int(daily_limit) <= 1000:
-            raise ValueError('每日处理上限必须在 1 到 1000 之间')
+        if daily_limit is not None and int(daily_limit) < 1:
+            raise ValueError('每日处理上限必须是正整数')
         values: List[str] = []
         parameters: List[Any] = []
         if paused is not None:
@@ -723,7 +723,9 @@ class ArchiveBackfillService:
         if daily_limit is not None:
             values.append('daily_limit=?')
             values.append('daily_limit_override=?')
+            values.append('daily_limit_override_v2=?')
             parameters.append(min(int(daily_limit), 500))
+            parameters.append(min(int(daily_limit), 1000))
             parameters.append(int(daily_limit))
         if not values:
             return await self.status(account_id)
@@ -1081,7 +1083,8 @@ class ArchiveBackfillService:
                 'archive.recording_part_id,imported.id AS import_id,'
                 'imported.account_id,imported.quota_day AS import_quota_day,'
                 'sync.quota_day AS sync_quota_day,sync.daily_used,'
-                'COALESCE(sync.daily_limit_override,sync.daily_limit) '
+                'COALESCE(sync.daily_limit_override_v2,'
+                'sync.daily_limit_override,sync.daily_limit) '
                 'AS daily_limit '
                 'FROM vainglory_archive_parts archive '
                 'JOIN vainglory_archive_imports imported '
@@ -1094,7 +1097,8 @@ class ArchiveBackfillService:
                 'AND sync.operator_paused=0 AND ('
                 'imported.quota_day=? OR sync.quota_day IS NULL '
                 'OR sync.quota_day<>? OR sync.daily_used<'
-                'COALESCE(sync.daily_limit_override,sync.daily_limit)) '
+                'COALESCE(sync.daily_limit_override_v2,'
+                'sync.daily_limit_override,sync.daily_limit)) '
                 'ORDER BY CASE WHEN '
                 'COALESCE(imported.recording_started_at,imported.published_at,'
                 'imported.created_at)>=sync.season_started_at AND '
@@ -1164,7 +1168,8 @@ class ArchiveBackfillService:
                 'AND (sync.retry_after_at IS NULL OR sync.retry_after_at<=?) AND ('
                 'imported.quota_day=? OR sync.quota_day IS NULL '
                 'OR sync.quota_day<>? OR sync.daily_used<'
-                'COALESCE(sync.daily_limit_override,sync.daily_limit)) '
+                'COALESCE(sync.daily_limit_override_v2,'
+                'sync.daily_limit_override,sync.daily_limit)) '
                 'ORDER BY CASE WHEN '
                 'COALESCE(imported.recording_started_at,imported.published_at,'
                 'imported.created_at)>=sync.season_started_at AND '
@@ -2311,7 +2316,11 @@ class ArchiveBackfillService:
             ),
             updated_at=int(row['updated_at']),
             operator_paused=bool(row['operator_paused']),
-            daily_limit=int(row['daily_limit_override'] or row['daily_limit']),
+            daily_limit=int(
+                row['daily_limit_override_v2']
+                or row['daily_limit_override']
+                or row['daily_limit']
+            ),
             daily_used=int(row['daily_used']),
             quota_day=(None if row['quota_day'] is None else str(row['quota_day'])),
             next_page=int(row['next_page']),

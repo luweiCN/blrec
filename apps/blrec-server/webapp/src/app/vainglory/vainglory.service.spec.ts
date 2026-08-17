@@ -247,6 +247,14 @@ describe('VaingloryService', () => {
     expect(renamed.request.body).toEqual({ name: '新游戏名' });
     renamed.flush({});
 
+    service.setPlayerPublicVisibility(5, false).subscribe();
+    const hidden = http.expectOne(
+      '/api/v1/vainglory/players/5/visibility',
+    );
+    expect(hidden.request.method).toBe('PATCH');
+    expect(hidden.request.body).toEqual({ publicVisible: false });
+    hidden.flush({});
+
     service.bindPlayerRoom(5, 100).subscribe();
     const bound = http.expectOne('/api/v1/vainglory/players/5/rooms/100');
     expect(bound.request.method).toBe('PUT');

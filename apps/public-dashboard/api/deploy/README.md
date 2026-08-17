@@ -26,6 +26,16 @@ PostgreSQL URL 分别固定 `search_path=public` 和 `search_path=core`；也可
 `DASHBOARD_API_SOURCE_DATABASE_URL` 使用独立的只读账号。NAS 只持有图片资产 API
 的 Bearer 密钥，不持有 API 数据库密码。
 
+站长视图使用单独的高熵 Bearer 令牌。服务端只在 `api.env` 保存令牌的 SHA-256：
+
+```text
+DASHBOARD_API_OWNER_TOKEN_SHA256=<64 位小写十六进制摘要>
+```
+
+令牌明文不能进入仓库、静态构建或 URL。Dashboard 只在当前浏览器会话的
+`sessionStorage` 中保存明文；站长响应使用 `private, no-store`，不能进入 CDN
+共享缓存。
+
 SSH 隧道需要以下文件：
 
 - `/etc/blrec-dashboard-api/db-tunnel.key`

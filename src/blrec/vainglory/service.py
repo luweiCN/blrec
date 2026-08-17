@@ -1147,6 +1147,13 @@ class VaingloryIndexService:
     async def rename_player(self, player_id: int, name: str) -> PlayerRecord:
         return await self._repository.rename_player(player_id, name)
 
+    async def set_player_public_visibility(
+        self, player_id: int, public_visible: bool
+    ) -> PlayerRecord:
+        return await self._repository.set_player_public_visibility(
+            player_id, public_visible
+        )
+
     async def bind_player_alias(self, player_id: int, alias: str) -> PlayerRecord:
         return await self._repository.bind_player_alias(player_id, alias)
 

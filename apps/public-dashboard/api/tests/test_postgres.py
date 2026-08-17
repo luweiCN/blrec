@@ -24,6 +24,7 @@ def test_deployment_backup_is_limited_to_public_schema() -> None:
     ).read_text(encoding='utf-8')
 
     assert 'pg_dump --schema=public --format=custom' in script
+    assert 'for _attempt in {1..120}; do' in script
 
 
 def _empty_postgres(database_url: str) -> None:

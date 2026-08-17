@@ -1925,11 +1925,19 @@ class VaingloryPublicationService:
     async def _confirm_public_visibility(
         self, publication: Mapping[str, Any], bundle: CredentialBundle
     ) -> bool:
+        expected_scope = await self._configured_visibility_scope(publication)
+        current_scope = str(publication.get('visibility_scope') or '')
         if (
-            publication.get('visibility_verified_at') is not None
-            or publication['public_visible_at'] is not None
+            (
+                publication.get('visibility_verified_at') is not None
+                or publication['public_visible_at'] is not None
+            )
+            and current_scope in ('public', 'owner')
+            and (expected_scope is None or expected_scope == current_scope)
         ):
             return True
+        if expected_scope == 'owner':
+            return await self._confirm_owner_visibility(publication, bundle)
         publication_id = int(publication['id'])
         try:
             response = await self._protocol.public_archive_view(
@@ -2013,6 +2021,38 @@ class VaingloryPublicationService:
         )
         return True
 
+    async def _configured_visibility_scope(
+        self, publication: Mapping[str, Any]
+    ) -> Optional[str]:
+        source_kind = str(publication.get('source_kind') or '')
+        if source_kind == 'upload':
+            upload_job_id = publication.get('upload_job_id')
+            if upload_job_id is None:
+                return None
+            row = await self._database.fetchone(
+                'SELECT policy_snapshot_json FROM upload_jobs WHERE id=?',
+                (int(upload_job_id),),
+            )
+            if row is None:
+                return None
+            try:
+                policy = json.loads(str(row['policy_snapshot_json']))
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(policy, Mapping) or 'is_only_self' not in policy:
+                return None
+            return 'owner' if _flag(policy.get('is_only_self')) == 1 else 'public'
+        if source_kind != 'archive':
+            return None
+        row = await self._database.fetchone(
+            'SELECT is_only_self FROM vainglory_archive_imports '
+            'WHERE account_id=? AND bvid=? ORDER BY id DESC LIMIT 1',
+            (int(publication['account_id']), str(publication['bvid'])),
+        )
+        if row is None or row['is_only_self'] is None:
+            return None
+        return 'owner' if _flag(row['is_only_self']) == 1 else 'public'
+
     async def _confirm_owner_visibility(
         self, publication: Mapping[str, Any], bundle: CredentialBundle
     ) -> bool:
@@ -2063,7 +2103,8 @@ class VaingloryPublicationService:
         await self._database.execute(
             "UPDATE vainglory_publications SET state='prepared',"
             "visibility_scope='owner',visibility_verified_at=?,"
-            'next_attempt_at=0,error=NULL,updated_at=? WHERE id=?',
+            'public_visible_at=NULL,next_attempt_at=0,error=NULL,updated_at=? '
+            'WHERE id=?',
             (now, now, publication_id),
         )
         logger.info(

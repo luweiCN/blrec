@@ -736,6 +736,7 @@ class PlayerRecord:
     id: int
     name: str
     origin: Literal['automatic', 'manual']
+    public_visible: bool
     rooms: Tuple[PlayerRoomRecord, ...]
     created_at: int
     updated_at: int
@@ -5625,7 +5626,7 @@ class VaingloryRepository:
 
     async def list_players(self) -> Tuple[PlayerRecord, ...]:
         player_rows = await self._database.fetchall(
-            'SELECT id,name,origin,created_at,updated_at '
+            'SELECT id,name,origin,public_visible,created_at,updated_at '
             'FROM vainglory_players ORDER BY name COLLATE NOCASE,id'
         )
         room_rows = await self._database.fetchall(
@@ -5659,6 +5660,7 @@ class VaingloryRepository:
                 id=int(row['id']),
                 name=str(row['name']),
                 origin=cast(Literal['automatic', 'manual'], str(row['origin'])),
+                public_visible=bool(row['public_visible']),
                 rooms=tuple(rooms_by_player.get(int(row['id']), ())),
                 created_at=int(row['created_at']),
                 updated_at=int(row['updated_at']),
@@ -5777,6 +5779,19 @@ class VaingloryRepository:
             ).rowcount
 
         count = await self._database.write(rename)
+        if count != 1:
+            raise VaingloryNotFound('玩家不存在')
+        return await self.get_player(selected_player_id)
+
+    async def set_player_public_visibility(
+        self, player_id: int, public_visible: bool
+    ) -> PlayerRecord:
+        selected_player_id = int(player_id)
+        now = self._now()
+        count = await self._database.execute(
+            'UPDATE vainglory_players SET public_visible=?,updated_at=? WHERE id=?',
+            (int(bool(public_visible)), now, selected_player_id),
+        )
         if count != 1:
             raise VaingloryNotFound('玩家不存在')
         return await self.get_player(selected_player_id)

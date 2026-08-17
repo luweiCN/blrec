@@ -418,8 +418,12 @@ class RemoteMediaCache:
                     'AND migrated_upload.bvid=imported.bvid '
                     'AND migrated_upload.session_id=migration.session_id) '
                     + exclusion
-                    + "ORDER BY CASE WHEN source.retention_kind='ten_day' "
-                    'THEN 0 ELSE 1 END,'
+                    + 'ORDER BY CASE WHEN EXISTS('
+                    'SELECT 1 FROM vainglory_part_jobs manual_job '
+                    'WHERE manual_job.part_id=source.part_id '
+                    "AND manual_job.state='pending' "
+                    "AND manual_job.request_kind='manual') THEN 0 "
+                    "WHEN source.retention_kind='ten_day' THEN 1 ELSE 2 END,"
                     'CASE WHEN archive.import_id IS NOT NULL AND EXISTS('
                     'SELECT 1 FROM vainglory_archive_parts active_archive '
                     'JOIN vainglory_video_sources active_source '

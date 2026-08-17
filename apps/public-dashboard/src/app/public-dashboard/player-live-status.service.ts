@@ -2,6 +2,7 @@ import { Injectable, OnDestroy } from '@angular/core';
 import { BehaviorSubject, Observable } from 'rxjs';
 
 import { environment } from '../../environments/environment';
+import { dashboardRequestInit } from './dashboard-owner-access.service';
 
 export interface PlayerLiveRoomStatus {
   readonly roomId: number;
@@ -53,7 +54,7 @@ export class PlayerLiveStatusService implements OnDestroy {
     const apiBaseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
     try {
       const response = await fetch(`${apiBaseUrl}/live-rooms`, {
-        cache: 'no-cache',
+        ...dashboardRequestInit('no-cache'),
       });
       if (!response.ok) {
         throw new Error(`fetch live rooms failed with ${response.status}`);

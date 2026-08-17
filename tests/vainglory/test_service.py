@@ -138,6 +138,27 @@ def test_runtime_log_deduplicates_repeated_stage_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_player_visibility_update_delegates_to_repository() -> None:
+    player = object()
+
+    class VisibilityRepository:
+        def __init__(self) -> None:
+            self.updates = []
+
+        async def set_player_public_visibility(
+            self, player_id: int, public_visible: bool
+        ) -> object:
+            self.updates.append((player_id, public_visible))
+            return player
+
+    repository = VisibilityRepository()
+    service = VaingloryIndexService(repository)  # type: ignore[arg-type]
+
+    assert await service.set_player_public_visibility(7, False) is player
+    assert repository.updates == [(7, False)]
+
+
+@pytest.mark.asyncio
 async def test_remote_worker_status_tracks_multiple_nodes_and_task_owner() -> None:
     class IdleRemoteRepository:
         def __init__(self) -> None:

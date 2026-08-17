@@ -2559,10 +2559,15 @@ async def test_repository_manages_players_and_aggregates_player_rankings(
         assert len(automatic) == 1
         assert automatic[0].name == '直播名称'
         assert automatic[0].origin == 'automatic'
+        assert automatic[0].public_visible is True
         assert [room.room_id for room in automatic[0].rooms] == [100]
 
         renamed = await repository.rename_player(automatic[0].id, '  游戏名称  ')
         assert renamed.name == '游戏名称'
+        hidden = await repository.set_player_public_visibility(renamed.id, False)
+        assert hidden.public_visible is False
+        restored = await repository.set_player_public_visibility(renamed.id, True)
+        assert restored.public_visible is True
         injected = await repository.create_player("'; DROP TABLE players; --")
         assert injected.name == "'; DROP TABLE players; --"
         assert await database.scalar('SELECT COUNT(*) FROM vainglory_players') == 2
@@ -2602,5 +2607,7 @@ async def test_repository_manages_players_and_aggregates_player_rankings(
 
         with pytest.raises(VaingloryNotFound):
             await repository.rename_player(999, '不存在')
+        with pytest.raises(VaingloryNotFound):
+            await repository.set_player_public_visibility(999, False)
     finally:
         await database.close()

@@ -67,6 +67,15 @@
 
     <div class="header-actions">
       <button
+        *ngIf="ownerAccess.active"
+        type="button"
+        class="owner-view-badge"
+        aria-haspopup="dialog"
+        (click)="openOwnerAccess()"
+      >
+        站长视图
+      </button>
+      <button
         type="button"
         class="update-notes-trigger"
         aria-haspopup="dialog"
@@ -136,6 +145,9 @@
           <a routerLink="/guide/rankings">榜单说明</a>
           <a routerLink="/guide/play">如何游玩</a>
           <a routerLink="/guide/download">下载指南</a>
+          <button type="button" (click)="openOwnerAccess()">
+            {{ ownerAccess.active ? "站长视图" : "站长入口" }}
+          </button>
         </nav>
       </div>
       <p *ngIf="data.snapshotOrNull as snapshot">
@@ -201,5 +213,55 @@
       </article>
     </div>
 
+  </dialog>
+
+  <dialog
+    #ownerAccessDialog
+    class="owner-access-dialog"
+    aria-labelledby="owner-access-title"
+    (cancel)="closeOwnerAccess()"
+    (click)="onOwnerAccessBackdropClick($event)"
+  >
+    <header>
+      <div>
+        <p>OWNER ACCESS</p>
+        <h2 id="owner-access-title">站长视图</h2>
+      </div>
+      <button type="button" aria-label="关闭站长入口" (click)="closeOwnerAccess()">
+        ×
+      </button>
+    </header>
+
+    <div *ngIf="ownerAccess.active; else ownerLogin" class="owner-access-active">
+      <strong>当前正在查看完整数据</strong>
+      <p>隐藏玩家、完整排名及仅自己可见稿件的回放入口只在此视图显示。</p>
+      <button type="button" [disabled]="ownerAccessLoading" (click)="lockOwner()">
+        退出站长视图
+      </button>
+    </div>
+
+    <ng-template #ownerLogin>
+      <form (submit)="unlockOwner($event)">
+        <label for="owner-access-token">站长访问密钥</label>
+        <input
+          id="owner-access-token"
+          type="password"
+          autocomplete="current-password"
+          [value]="ownerToken"
+          [disabled]="ownerAccessLoading"
+          (input)="setOwnerToken($event)"
+        />
+        <p>密钥只保存在当前浏览器会话中，不会写入网址或公开数据。</p>
+        <p *ngIf="ownerAccessError" class="owner-access-error" role="alert">
+          {{ ownerAccessError }}
+        </p>
+        <button
+          type="submit"
+          [disabled]="ownerAccessLoading || ownerToken.trim().length < 32"
+        >
+          {{ ownerAccessLoading ? "正在验证…" : "进入站长视图" }}
+        </button>
+      </form>
+    </ng-template>
   </dialog>
 </main>

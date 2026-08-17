@@ -226,6 +226,79 @@ async def test_force_remote_queues_download_for_logically_deleted_local_video(
 
 
 @pytest.mark.asyncio
+async def test_manual_reanalysis_downloads_before_regular_remote_media(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    downloader = FakeDownloader()
+    try:
+        first_path = tmp_path / 'manual.mp4'
+        second_path = tmp_path / 'regular.mp4'
+        await seed_remote_part(database, first_path)
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(2,200,'session:2','closed',2,'普通下载')"
+        )
+        await database.execute(
+            "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+            "VALUES('run:2',2,'finished',2,3)"
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,final_path,'
+            'record_start_time,artifact_state,video_deleted_at,file_size_bytes,'
+            'created_at,updated_at) '
+            "VALUES(2,2,'run:2',1,?,? ,2,'missing',50,99,2,2)",
+            (str(second_path), str(second_path)),
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'bvid,created_at,updated_at) '
+            "VALUES(2,2,1,'{}','approved','confirmed','BV1ijklmnop',2,2)"
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'id,job_id,part_index,source_path,artifact_state,upload_state,cid) '
+            "VALUES(2,2,1,?,'missing','confirmed',456)",
+            (str(second_path),),
+        )
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=downloader,
+            clock=lambda: 1_000,
+        )
+        assert (await cache.request(1, force_remote=True)).state == 'pending'
+        assert (await cache.request(2, force_remote=True)).state == 'pending'
+        await database.execute(
+            "UPDATE vainglory_video_sources SET retention_kind='analysis' "
+            'WHERE part_id=1'
+        )
+        await database.execute(
+            'INSERT INTO vainglory_part_jobs('
+            'part_id,session_id,state,request_kind,progress,algorithm_version,'
+            'match_count,error,requested_at,started_at,completed_at,updated_at) '
+            "VALUES(1,1,'pending','manual',0,1,0,NULL,1000,NULL,NULL,1000)"
+        )
+
+        assert await cache.run_once() is True
+
+        assert downloader.calls[0][1:4] == ('BV1abcdefgh', 123, 1)
+        assert (
+            await database.scalar(
+                'SELECT state FROM vainglory_video_sources WHERE part_id=2'
+            )
+            == 'pending'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_user_download_promotes_analysis_cache_to_ten_days(
     tmp_path: Path,
 ) -> None:

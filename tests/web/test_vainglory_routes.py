@@ -61,6 +61,7 @@ class FakeService:
         self.requested_scans = []
         self.created_players = []
         self.renamed_players = []
+        self.player_visibility_updates = []
         self.bound_aliases = []
         self.bound_rooms = []
         self.unbound_rooms = []
@@ -149,6 +150,12 @@ class FakeService:
     async def rename_player(self, player_id: int, name: str) -> PlayerRecord:
         self.renamed_players.append((player_id, name))
         return stored_player(name=name.strip())
+
+    async def set_player_public_visibility(
+        self, player_id: int, public_visible: bool
+    ) -> PlayerRecord:
+        self.player_visibility_updates.append((player_id, public_visible))
+        return stored_player(public_visible=public_visible)
 
     async def bind_player_alias(self, player_id: int, alias: str) -> PlayerRecord:
         self.bound_aliases.append((player_id, alias))
@@ -353,6 +360,7 @@ class FakeArchiveBackfill:
         self.requested_imports = []
         self.import_sessions: Dict[int, Optional[int]] = {}
         self.item_requests = []
+        self.control_updates = []
 
     async def request(self, account_id: int) -> ArchiveSync:
         self.requested_accounts.append(account_id)
@@ -381,6 +389,28 @@ class FakeArchiveBackfill:
             started_at=1_001,
             completed_at=None,
             updated_at=1_002,
+        )
+
+    async def update_control(
+        self,
+        account_id: int,
+        *,
+        paused: Optional[bool] = None,
+        daily_limit: Optional[int] = None,
+    ) -> ArchiveSync:
+        self.control_updates.append((account_id, paused, daily_limit))
+        return ArchiveSync(
+            account_id=account_id,
+            state='running',
+            progress=0.25,
+            discovered_count=20,
+            completed_count=5,
+            error=None,
+            requested_at=1_000,
+            started_at=1_001,
+            completed_at=None,
+            updated_at=1_002,
+            daily_limit=daily_limit or 20,
         )
 
     async def request_import_reanalysis(self, import_id: int) -> Optional[int]:
@@ -503,6 +533,7 @@ def stored_match(*, title: str = '投稿标题') -> MatchRecord:
 def stored_player(
     *,
     name: str = '游戏名',
+    public_visible: bool = True,
     rooms: Tuple[PlayerRoomRecord, ...] = (
         PlayerRoomRecord(room_id=100, anchor_uid=42, anchor_name='直播名'),
     ),
@@ -511,6 +542,7 @@ def stored_player(
         id=5,
         name=name,
         origin='manual',
+        public_visible=public_visible,
         rooms=rooms,
         created_at=1_000,
         updated_at=1_001,
@@ -775,6 +807,9 @@ def test_manages_player_library_and_lists_player_rankings(
     listed = client.get('/api/v1/vainglory/players')
     created = client.post('/api/v1/vainglory/players', json={'name': ' 新玩家 '})
     renamed = client.patch('/api/v1/vainglory/players/5', json={'name': ' 新名字 '})
+    hidden = client.patch(
+        '/api/v1/vainglory/players/5/visibility', json={'publicVisible': False}
+    )
     aliased = client.put(
         '/api/v1/vainglory/players/5/aliases', json={'name': ' 旧名字 '}
     )
@@ -796,6 +831,8 @@ def test_manages_player_library_and_lists_player_rankings(
     assert created.json()['name'] == '新玩家'
     assert renamed.status_code == 200
     assert renamed.json()['name'] == '新名字'
+    assert hidden.status_code == 200
+    assert hidden.json()['publicVisible'] is False
     assert aliased.status_code == 200
     assert bound.status_code == 200
     assert bound.json()['rooms'][0]['roomId'] == 200
@@ -803,6 +840,7 @@ def test_manages_player_library_and_lists_player_rankings(
     assert unbound.json()['rooms'] == []
     assert fake.created_players == [' 新玩家 ']
     assert fake.renamed_players == [(5, ' 新名字 ')]
+    assert fake.player_visibility_updates == [(5, False)]
     assert fake.bound_aliases == [(5, ' 旧名字 ')]
     assert fake.bound_rooms == [(5, 200)]
     assert fake.unbound_rooms == [(5, 200)]
@@ -974,6 +1012,9 @@ def test_requests_and_reads_account_archive_backfill() -> None:
     with TestClient(application) as client:
         requested = client.post('/api/v1/vainglory/archive-syncs/7')
         status_response = client.get('/api/v1/vainglory/archive-syncs/7')
+        updated = client.patch(
+            '/api/v1/vainglory/archive-syncs/7', json={'dailyLimit': 50_000}
+        )
         item_page = client.get(
             '/api/v1/vainglory/archive-syncs/7/item-page',
             params={'limit': 20, 'offset': 20},
@@ -985,6 +1026,9 @@ def test_requests_and_reads_account_archive_backfill() -> None:
     assert status_response.status_code == 200
     assert status_response.json()['progress'] == 0.25
     assert status_response.json()['discoveredCount'] == 20
+    assert updated.status_code == 200
+    assert updated.json()['dailyLimit'] == 50_000
+    assert fake.control_updates == [(7, None, 50_000)]
     assert item_page.status_code == 200
     assert item_page.json()['total'] == 21
     assert item_page.json()['items'][0]['bvid'] == 'BV1abcdefgh'

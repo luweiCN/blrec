@@ -662,6 +662,7 @@ export interface VaingloryPlayer {
   readonly id: number;
   readonly name: string;
   readonly origin: VaingloryPlayerOrigin;
+  readonly publicVisible: boolean;
   readonly rooms: readonly VaingloryPlayerRoom[];
   readonly createdAt: number;
   readonly updatedAt: number;

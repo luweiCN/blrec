@@ -289,6 +289,7 @@ describe('VaingloryComponent remote media', () => {
       'listPlayers',
       'createPlayer',
       'renamePlayer',
+      'setPlayerPublicVisibility',
       'bindPlayerRoom',
       'unbindPlayerRoom',
       'listPlayerStats',
@@ -991,17 +992,20 @@ describe('VaingloryComponent remote media', () => {
       id: 5,
       name: '直播名',
       origin: 'automatic',
+      publicVisible: true,
       rooms: [],
       createdAt: 1_000,
       updatedAt: 1_000,
     };
     const renamed = { ...player, name: '游戏名' };
+    const hidden = { ...renamed, publicVisible: false };
     const bound = {
       ...renamed,
       rooms: [{ roomId: 100, anchorUid: 42, anchorName: '直播名' }],
     };
     vainglory.createPlayer.and.returnValue(of(player));
     vainglory.renamePlayer.and.returnValue(of(renamed));
+    vainglory.setPlayerPublicVisibility.and.returnValue(of(hidden));
     vainglory.bindPlayerRoom.and.returnValue(of(bound));
     vainglory.unbindPlayerRoom.and.returnValue(of(renamed));
 
@@ -1009,12 +1013,19 @@ describe('VaingloryComponent remote media', () => {
     component.createPlayer();
     component.setPlayerNameDraft(player.id, ' 游戏名 ');
     component.savePlayerName(player);
+    component.playersView = { state: 'ready', items: [renamed] };
+    component.setPlayerPublicVisibility(renamed, false);
+    expect(component.playerLibrary[0].publicVisible).toBeFalse();
     component.setPlayerRoomDraft(player.id, 100);
     component.bindPlayerRoom(renamed);
     component.unbindPlayerRoom(bound, 100);
 
     expect(vainglory.createPlayer).toHaveBeenCalledOnceWith('手工玩家');
     expect(vainglory.renamePlayer).toHaveBeenCalledOnceWith(5, '游戏名');
+    expect(vainglory.setPlayerPublicVisibility).toHaveBeenCalledOnceWith(
+      5,
+      false,
+    );
     expect(vainglory.bindPlayerRoom).toHaveBeenCalledOnceWith(5, 100);
     expect(vainglory.unbindPlayerRoom).toHaveBeenCalledOnceWith(5, 100);
     expect(component.newPlayerName).toBe('');

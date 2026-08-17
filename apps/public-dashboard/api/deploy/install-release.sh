@@ -257,7 +257,7 @@ fi
 
 systemctl restart blrec-dashboard-api.service
 healthy=false
-for _attempt in {1..30}; do
+for _attempt in {1..120}; do
   if curl --fail --silent --show-error --max-time 2 \
     http://127.0.0.1:8787/v1/health >/dev/null; then
     healthy=true

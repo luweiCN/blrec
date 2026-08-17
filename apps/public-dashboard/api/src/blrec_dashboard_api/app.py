@@ -66,6 +66,33 @@ def _authenticate_write(authorization: Optional[str], settings: ApiSettings) -> 
         )
 
 
+def _owner_view(authorization: Optional[str], settings: ApiSettings) -> bool:
+    if authorization is None:
+        return False
+    scheme, separator, token = authorization.partition(' ')
+    digest = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    if (
+        not settings.owner_token_sha256
+        or separator != ' '
+        or scheme.casefold() != 'bearer'
+        or not token
+        or not hmac.compare_digest(digest, settings.owner_token_sha256)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail='invalid owner credentials',
+            headers={'WWW-Authenticate': 'Bearer'},
+        )
+    return True
+
+
+def _set_view_headers(response: Response, owner_view: bool) -> None:
+    response.headers['Vary'] = 'Authorization'
+    response.headers['Cache-Control'] = (
+        'private, no-store' if owner_view else 'public, no-cache'
+    )
+
+
 def _hero_filters(value: str) -> tuple[str, ...]:
     heroes = tuple(
         dict.fromkeys(hero.strip() for hero in value.split(',') if hero.strip())
@@ -102,8 +129,10 @@ def create_app(
     )
     if repository is None:
         active_repository.refresh(force=True)
-    dashboard_cache = _DashboardResponseCache()
-    dashboard_cache.replace(active_repository.dashboard_document())
+    public_dashboard_cache = _DashboardResponseCache()
+    owner_dashboard_cache = _DashboardResponseCache()
+    public_dashboard_cache.replace(active_repository.dashboard_document())
+    owner_dashboard_cache.replace(active_repository.dashboard_document(owner_view=True))
     app = FastAPI(
         title='BLREC Vainglory Dashboard API',
         version='2.0.0',
@@ -116,7 +145,7 @@ def create_app(
         allow_origins=list(active_settings.cors_origins),
         allow_credentials=False,
         allow_methods=['GET'],
-        allow_headers=['Accept', 'Content-Type'],
+        allow_headers=['Accept', 'Authorization', 'Content-Type'],
         max_age=86400,
     )
     realtime_broker = DashboardRealtimeBroker()
@@ -133,7 +162,12 @@ def create_app(
                     changed = await run_in_threadpool(active_repository.refresh)
                     if not changed:
                         continue
-                    dashboard_cache.replace(active_repository.dashboard_document())
+                    public_dashboard_cache.replace(
+                        active_repository.dashboard_document()
+                    )
+                    owner_dashboard_cache.replace(
+                        active_repository.dashboard_document(owner_view=True)
+                    )
                     revision = active_repository.dashboard_document()[1]
                     await realtime_broker.publish('dashboard', {'revision': revision})
                     await realtime_broker.publish('live_rooms', {'revision': revision})
@@ -200,36 +234,75 @@ def create_app(
     async def events(request: Request) -> StreamingResponse:
         return event_response(request, realtime_broker)
 
+    @app.get('/v1/owner/session')
+    def owner_session(
+        response: Response, authorization: Optional[str] = Header(default=None)
+    ) -> Mapping[str, bool]:
+        if not _owner_view(authorization, active_settings):
+            raise HTTPException(
+                status_code=401,
+                detail='owner credentials are required',
+                headers={'WWW-Authenticate': 'Bearer'},
+            )
+        _set_view_headers(response, True)
+        return {'owner': True}
+
     @app.get('/v1/dashboard')
     def dashboard(
-        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match')
+        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match'),
+        authorization: Optional[str] = Header(default=None),
     ) -> Response:
-        payload, revision = dashboard_cache.current()
+        owner_view = _owner_view(authorization, active_settings)
+        payload, revision = (
+            owner_dashboard_cache.current()
+            if owner_view
+            else public_dashboard_cache.current()
+        )
+        if owner_view:
+            return Response(
+                content=payload,
+                media_type='application/json',
+                headers={'Cache-Control': 'private, no-store', 'Vary': 'Authorization'},
+            )
         etag = 'W/"{}"'.format(revision)
-        headers = {'Cache-Control': 'public, no-cache', 'ETag': etag}
+        headers = {
+            'Cache-Control': 'public, no-cache',
+            'ETag': etag,
+            'Vary': 'Authorization',
+        }
         if _etag_matches(if_none_match, revision):
             return Response(status_code=304, headers=headers)
         return Response(content=payload, media_type='application/json', headers=headers)
 
     @app.get('/v1/live-rooms')
     def live_rooms(
-        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match')
+        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match'),
+        authorization: Optional[str] = Header(default=None),
     ) -> Response:
-        document, revision = active_repository.live_rooms()
+        owner_view = _owner_view(authorization, active_settings)
+        document, revision = active_repository.live_rooms(owner_view=owner_view)
+        payload = json.dumps(
+            document, ensure_ascii=False, allow_nan=False, separators=(',', ':')
+        ).encode('utf-8')
+        if owner_view:
+            return Response(
+                content=payload,
+                media_type='application/json',
+                headers={'Cache-Control': 'private, no-store', 'Vary': 'Authorization'},
+            )
         etag = '"{}"'.format(revision)
         headers = {
             'Cache-Control': 'public, max-age=15, stale-while-revalidate=30',
             'ETag': etag,
+            'Vary': 'Authorization',
         }
         if _etag_matches(if_none_match, revision):
             return Response(status_code=304, headers=headers)
-        payload = json.dumps(
-            document, ensure_ascii=False, allow_nan=False, separators=(',', ':')
-        ).encode('utf-8')
         return Response(content=payload, media_type='application/json', headers=headers)
 
     @app.get('/v1/matches')
     def matches(
+        response: Response,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=10, alias='pageSize', ge=1, le=50),
         season: Optional[str] = Query(
@@ -247,7 +320,10 @@ def create_app(
             alias='ratingSeason',
             regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$',
         ),
+        authorization: Optional[str] = Header(default=None),
     ) -> Dict[str, Any]:
+        owner_view = _owner_view(authorization, active_settings)
+        _set_view_headers(response, owner_view)
         return active_repository.list_matches(
             page=page,
             page_size=page_size,
@@ -258,24 +334,31 @@ def create_app(
             heroes=_hero_filters(heroes),
             rating_scope=rating_scope,
             rating_season=rating_season,
+            owner_view=owner_view,
         )
 
     @app.get('/v1/matches/summary')
     def match_summary(
+        response: Response,
         season: Optional[str] = Query(
             default=None, regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$'
         ),
         mode: Optional[Literal['3v3', 'brawl', '5v5']] = None,
         player_id: Optional[int] = Query(default=None, alias='playerId', gt=0),
+        authorization: Optional[str] = Header(default=None),
     ) -> Mapping[str, int]:
+        owner_view = _owner_view(authorization, active_settings)
+        _set_view_headers(response, owner_view)
         return active_repository.match_summary(
             season=None if season == 'all-time' else season,
             mode=mode,
             player_id=player_id,
+            owner_view=owner_view,
         )
 
     @app.get('/v1/matches/{match_id}')
     def match_detail(
+        response: Response,
         match_id: int,
         rating_scope: Literal['all', '3v3', 'brawl', '5v5'] = Query(
             default='all', alias='ratingScope'
@@ -285,10 +368,16 @@ def create_app(
             alias='ratingSeason',
             regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$',
         ),
+        authorization: Optional[str] = Header(default=None),
     ) -> Mapping[str, Any]:
+        owner_view = _owner_view(authorization, active_settings)
+        _set_view_headers(response, owner_view)
         try:
             return active_repository.get_match(
-                match_id, rating_scope=rating_scope, rating_season=rating_season
+                match_id,
+                rating_scope=rating_scope,
+                rating_season=rating_season,
+                owner_view=owner_view,
             )
         except LookupError as error:
             raise HTTPException(status_code=404, detail='match not found') from error

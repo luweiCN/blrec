@@ -1029,6 +1029,13 @@
   }
 }
 
+.player-public-visibility {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  white-space: nowrap;
+}
+
 .hero-review-list {
   display: grid;
   gap: 12px;

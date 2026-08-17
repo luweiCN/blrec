@@ -1473,7 +1473,7 @@ async def test_historical_anchor_prefers_a_bound_room_from_multiple_description_
 
 
 @pytest.mark.asyncio
-async def test_history_control_accepts_one_thousand_archives_per_day(
+async def test_history_control_accepts_operator_defined_daily_limit(
     tmp_path: Path,
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
@@ -1489,9 +1489,18 @@ async def test_history_control_accepts_one_thousand_archives_per_day(
         )
         await service.request(1)
 
-        updated = await service.update_control(1, daily_limit=1_000)
+        updated = await service.update_control(1, daily_limit=50_000)
 
-        assert updated.daily_limit == 1_000
+        assert updated.daily_limit == 50_000
+        stored = await database.fetchone(
+            'SELECT daily_limit,daily_limit_override,daily_limit_override_v2 '
+            'FROM vainglory_archive_syncs WHERE account_id=1'
+        )
+        assert stored is not None and dict(stored) == {
+            'daily_limit': 500,
+            'daily_limit_override': 1_000,
+            'daily_limit_override_v2': 50_000,
+        }
     finally:
         await database.close()
 

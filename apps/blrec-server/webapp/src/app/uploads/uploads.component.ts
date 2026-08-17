@@ -330,8 +330,8 @@ export class UploadsComponent implements OnInit, OnDestroy {
       return;
     }
     const dailyLimit = this.archiveMigrationDailyLimit(migration);
-    if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
-      this.archiveMigrationError = '每日处理上限必须是 1 到 1000 的整数';
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 1) {
+      this.archiveMigrationError = '每日处理上限必须是正整数';
       this.changeDetector.markForCheck();
       return;
     }

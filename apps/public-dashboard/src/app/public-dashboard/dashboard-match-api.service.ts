@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 
 import { environment } from '../../environments/environment';
+import { dashboardRequestInit } from './dashboard-owner-access.service';
 import { isDashboardMatch } from './public-dashboard-data.service';
 import {
   DashboardMatch,
@@ -75,7 +76,7 @@ export class DashboardMatchApiService {
     const baseUrl = environment.apiBaseUrl.replace(/\/+$/u, '');
     const response = await fetch(
       `${baseUrl}/matches?${parameters.toString()}`,
-      { cache: 'no-store' },
+      dashboardRequestInit('no-store'),
     );
     if (!response.ok) {
       throw new Error(`match API returned ${response.status}`);
@@ -103,7 +104,7 @@ export class DashboardMatchApiService {
     const suffix = parameters.toString();
     const url = `${baseUrl}/matches/summary${suffix === '' ? '' : `?${suffix}`}`;
     try {
-      const response = await fetch(url, { cache: 'no-cache' });
+      const response = await fetch(url, dashboardRequestInit('no-cache'));
       if (!response.ok) {
         throw new Error(`match summary API returned ${response.status}`);
       }

@@ -2134,3 +2134,82 @@ async def test_dynamic_table_and_column_names_are_schema_whitelisted(
         assert 'upload_jobs' in await database.table_names()
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_77_adds_player_visibility_and_repairs_private_uploads(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 77):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'owner',X'00',1,'key','active',1,1)"
+        )
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(1,100,'100:1','closed',1,'私密直播')"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_players('
+            'id,name,origin,created_at,updated_at) '
+            "VALUES(1,'玩家','manual',1,1)"
+        )
+        connection.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'aid,bvid,created_at,updated_at) '
+            "VALUES(1,1,1,'{ \"is_only_self\": true }','ready','confirmed',"
+            "303,'BV1abcdefgh',1,2)"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_publications('
+            'id,account_id,session_id,upload_job_id,aid,bvid,source_kind,'
+            'payload_hash,description_block,state,description_state,pin_state,'
+            'public_visible_at,visibility_scope,visibility_verified_at,'
+            'created_at,updated_at) '
+            "VALUES(1,1,1,1,303,'BV1abcdefgh','upload',?,'内容','confirmed',"
+            "'confirmed','confirmed',2,'public',2,1,2)",
+            ('a' * 64,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        player = await database.fetchone(
+            'SELECT public_visible FROM vainglory_players WHERE id=1'
+        )
+        publication = await database.fetchone(
+            'SELECT visibility_scope,visibility_verified_at,public_visible_at '
+            'FROM vainglory_publications WHERE id=1'
+        )
+
+        assert player is not None and dict(player) == {'public_visible': 1}
+        assert publication is not None and dict(publication) == {
+            'visibility_scope': 'owner',
+            'visibility_verified_at': 2,
+            'public_visible_at': None,
+        }
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 77
+    finally:
+        await database.close()

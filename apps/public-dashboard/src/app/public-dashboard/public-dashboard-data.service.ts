@@ -2,6 +2,7 @@ import { Injectable } from '@angular/core';
 import { Subject } from 'rxjs';
 
 import { environment } from '../../environments/environment';
+import { dashboardRequestInit } from './dashboard-owner-access.service';
 import {
   DashboardMatch,
   DashboardMatchPlayer,
@@ -174,7 +175,7 @@ async function fetchJson(
   url: string,
   cache: RequestCache,
 ): Promise<unknown> {
-  const response = await fetch(url, { cache });
+  const response = await fetch(url, dashboardRequestInit(cache));
   if (!response.ok) {
     throw new Error(`fetch ${url} failed with ${response.status}`);
   }

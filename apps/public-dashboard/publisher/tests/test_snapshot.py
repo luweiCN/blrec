@@ -27,27 +27,19 @@ def timestamp(year: int, month: int, day: int, hour: int = 0) -> int:
     return int(datetime(year, month, day, hour, tzinfo=SHANGHAI).timestamp())
 
 
-def test_public_replay_rejects_private_upload_policy() -> None:
+def test_public_replay_uses_normalized_publication_visibility() -> None:
     publication = {
         'source_kind': 'upload',
         'visibility_scope': 'public',
         'archive_is_only_self': None,
-        'upload_policy_snapshot_json': '{"is_only_self":true}',
     }
 
-    assert _allows_public_replay(publication) is False
+    assert _allows_public_replay(publication) is True
+    assert _allows_public_replay({**publication, 'visibility_scope': 'owner'}) is False
     assert (
-        _allows_public_replay(
-            {**publication, 'upload_policy_snapshot_json': '{"is_only_self":false}'}
-        )
-        is True
+        _allows_public_replay({**publication, 'visibility_scope': 'unknown'}) is False
     )
-    assert (
-        _allows_public_replay(
-            {**publication, 'upload_policy_snapshot_json': 'invalid json'}
-        )
-        is False
-    )
+    assert _allows_public_replay({**publication, 'archive_is_only_self': 1}) is False
 
 
 async def seed_player(
@@ -307,9 +299,66 @@ async def test_runtime_and_asset_sources_read_the_core_tables_directly(
         )
 
         assert runtime['snapshot']['sourceMatchCount'] == 1
+        assert runtime['publicSnapshot']['sourceMatchCount'] == 1
         assert runtime['snapshot']['matches'] == []
         assert runtime['matches'][0]['id'] == 1
         assert assets['matches'] == [{'id': 1, 'resultFramePath': '1/result.png'}]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_builds_separate_public_and_owner_rankings(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_player(database, 10, '公开玩家', 100)
+        await seed_player(database, 20, '隐藏玩家', 200)
+        await database.execute(
+            'UPDATE vainglory_players SET public_visible=0 WHERE id=20'
+        )
+        await seed_match(
+            database,
+            tmp_path,
+            match_id=1,
+            room_id=100,
+            started_at=timestamp(2026, 8, 1),
+            game_mode='3v3',
+            won=True,
+            hero_id=None,
+            anchor_name='公开玩家',
+        )
+        await seed_match(
+            database,
+            tmp_path,
+            match_id=2,
+            room_id=200,
+            started_at=timestamp(2026, 8, 2),
+            game_mode='3v3',
+            won=True,
+            hero_id=None,
+            anchor_name='隐藏玩家',
+        )
+
+        runtime = await database.read(
+            lambda connection: build_dashboard_runtime_source(
+                connection, now=datetime(2026, 8, 3, tzinfo=SHANGHAI)
+            )
+        )
+
+        owner_players = runtime['snapshot']['standings']['2026-summer']['players']
+        public_players = runtime['publicSnapshot']['standings']['2026-summer'][
+            'players'
+        ]
+        assert [player['id'] for player in owner_players] == [10, 20]
+        assert [player['id'] for player in public_players] == [10]
+        assert [player['publicVisible'] for player in runtime['players']] == [
+            True,
+            False,
+        ]
+        assert [match['playerId'] for match in runtime['matches']] == [20, 10]
     finally:
         await database.close()
 
@@ -698,6 +747,11 @@ async def test_snapshot_exports_matches_by_live_time_and_hides_private_replays(
                 connection, now=datetime(2026, 8, 11, 22, tzinfo=SHANGHAI)
             )
         )
+        runtime = await database.read(
+            lambda connection: build_dashboard_runtime_source(
+                connection, now=datetime(2026, 8, 11, 22, tzinfo=SHANGHAI)
+            )
+        )
 
         matches = snapshot['matches']
         assert [match['id'] for match in matches] == [2, 1]
@@ -707,6 +761,13 @@ async def test_snapshot_exports_matches_by_live_time_and_hides_private_replays(
             'kind': 'match',
             'url': 'https://www.bilibili.com/video/BV1public001?p=2&t=120',
         }
+        private_runtime_match = next(
+            match for match in runtime['matches'] if match['id'] == 2
+        )
+        assert private_runtime_match['replayAccess'] == 'owner'
+        assert private_runtime_match['replay']['url'].startswith(
+            'https://www.bilibili.com/video/BV1private01'
+        )
         assert matches[1]['playerId'] == 10
         assert matches[1]['result'] == 'W'
         assert matches[1]['streamTitle'] == '样本录播'

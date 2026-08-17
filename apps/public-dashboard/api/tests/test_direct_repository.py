@@ -6,7 +6,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 import pytest
 from blrec_dashboard_api.app import create_app
@@ -22,9 +22,16 @@ from blrec_dashboard_publisher.snapshot import build_dashboard_snapshot_from_rec
 from fastapi.testclient import TestClient
 
 TOKEN = 'test-asset-token'
+OWNER_TOKEN = 'test-owner-token'
 
 
-def _runtime_source(*, match_id: int = 1, result: str = 'W') -> Mapping[str, Any]:
+def _runtime_source(
+    *,
+    match_id: int = 1,
+    result: str = 'W',
+    public_visible: bool = True,
+    replay_access: str = 'public',
+) -> Mapping[str, Any]:
     played_at = 1780272000
     lineups = {
         match_id: [
@@ -74,6 +81,14 @@ def _runtime_source(*, match_id: int = 1, result: str = 'W') -> Mapping[str, Any
         public_matches=(),
         generated_at=generated_at,
     )
+    public_snapshot = build_dashboard_snapshot_from_records(
+        players=({7: {'name': '主播', 'rooms': [123456]}} if public_visible else {}),
+        aliases={7: ['-Anchor-']} if public_visible else {},
+        rows=[row] if public_visible else [],
+        lineups=lineups,
+        public_matches=(),
+        generated_at=generated_at,
+    )
     teams = []
     for role, side, color in (('ally', 'left', 'teal'), ('enemy', 'right', 'orange')):
         teams.append(
@@ -102,6 +117,7 @@ def _runtime_source(*, match_id: int = 1, result: str = 'W') -> Mapping[str, Any
         )
     return {
         'snapshot': snapshot,
+        'publicSnapshot': public_snapshot,
         'players': [
             {
                 'id': 7,
@@ -118,6 +134,7 @@ def _runtime_source(*, match_id: int = 1, result: str = 'W') -> Mapping[str, Any
                         'startedAt': '2026-08-11T11:30:00Z',
                     }
                 ],
+                'publicVisible': public_visible,
             }
         ],
         'matches': [
@@ -137,12 +154,15 @@ def _runtime_source(*, match_id: int = 1, result: str = 'W') -> Mapping[str, Any
                     'kind': 'match',
                     'url': 'https://www.bilibili.com/video/BV1test?t=120',
                 },
+                'replayAccess': replay_access,
             }
         ],
     }
 
 
-def _repository(tmp_path: Path) -> tuple[DirectDashboardRepository, list[int]]:
+def _repository(
+    tmp_path: Path, *, runtime: Optional[Mapping[str, Any]] = None
+) -> tuple[DirectDashboardRepository, list[int]]:
     auxiliary = tmp_path / 'public.sqlite3'
     initialize_database(auxiliary)
     revisions = [1]
@@ -153,7 +173,7 @@ def _repository(tmp_path: Path) -> tuple[DirectDashboardRepository, list[int]]:
 
     def runtime_loader(_target: Any) -> tuple[int, Mapping[str, Any]]:
         loads.append(revisions[-1])
-        return revisions[-1], _runtime_source(match_id=revisions[-1])
+        return revisions[-1], (runtime or _runtime_source(match_id=revisions[-1]))
 
     repository = DirectDashboardRepository(
         source_target=tmp_path / 'unused.sqlite3',
@@ -171,6 +191,7 @@ def _settings(tmp_path: Path) -> ApiSettings:
         source_database_path=tmp_path / 'unused.sqlite3',
         ingest_token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
         cors_origins=('https://vg.luwei.host',),
+        owner_token_sha256=hashlib.sha256(OWNER_TOKEN.encode()).hexdigest(),
     )
 
 
@@ -213,6 +234,98 @@ def test_dashboard_and_match_queries_are_computed_from_the_runtime_source(
     assert listed['total'] == 1
     assert listed['items'][0]['player']['name'] == '主播'
     assert listed['items'][0]['rating']['scoreDelta'] > 0
+
+
+def test_public_cache_shares_safe_matches_but_copies_private_replays(
+    tmp_path: Path,
+) -> None:
+    public_repository, _loads = _repository(tmp_path)
+    public_state = public_repository._current()
+    owner_state = public_repository._current(owner_view=True)
+
+    assert public_state.matches[0] is owner_state.matches[0]
+
+    private_repository, _loads = _repository(
+        tmp_path, runtime=_runtime_source(replay_access='owner')
+    )
+    private_public = private_repository._current()
+    private_owner = private_repository._current(owner_view=True)
+
+    assert private_public.matches[0] is not private_owner.matches[0]
+    assert 'replay' not in private_public.matches[0]
+    assert 'replay' in private_owner.matches[0]
+
+
+def test_repository_keeps_hidden_players_only_in_the_owner_view(tmp_path: Path) -> None:
+    repository, _loads = _repository(
+        tmp_path, runtime=_runtime_source(public_visible=False, replay_access='owner')
+    )
+
+    public_document, _revision = repository.dashboard_document()
+    owner_document, _revision = repository.dashboard_document(owner_view=True)
+    public_matches = repository.list_matches(
+        page=1,
+        page_size=10,
+        season=None,
+        mode=None,
+        player_id=None,
+        query='',
+        heroes=(),
+        rating_scope='all',
+        rating_season=None,
+    )
+    owner_matches = repository.list_matches(
+        page=1,
+        page_size=10,
+        season=None,
+        mode=None,
+        player_id=None,
+        query='',
+        heroes=(),
+        rating_scope='all',
+        rating_season=None,
+        owner_view=True,
+    )
+
+    assert public_document['snapshot']['sourceMatchCount'] == 0
+    assert owner_document['snapshot']['sourceMatchCount'] == 1
+    assert public_matches['total'] == 0
+    assert owner_matches['total'] == 1
+    assert owner_matches['items'][0]['replay']['kind'] == 'match'
+
+
+def test_owner_auth_unlocks_private_replays_without_public_cache_leak(
+    tmp_path: Path,
+) -> None:
+    repository, _loads = _repository(
+        tmp_path, runtime=_runtime_source(replay_access='owner')
+    )
+    client = TestClient(create_app(_settings(tmp_path), repository=repository))
+
+    public = client.get('/v1/matches')
+    invalid = client.get('/v1/matches', headers={'Authorization': 'Bearer wrong-token'})
+    owner = client.get(
+        '/v1/matches', headers={'Authorization': 'Bearer {}'.format(OWNER_TOKEN)}
+    )
+    owner_dashboard = client.get(
+        '/v1/dashboard', headers={'Authorization': 'Bearer {}'.format(OWNER_TOKEN)}
+    )
+    owner_session = client.get(
+        '/v1/owner/session', headers={'Authorization': 'Bearer {}'.format(OWNER_TOKEN)}
+    )
+
+    assert public.status_code == 200
+    assert 'replay' not in public.json()['items'][0]
+    assert invalid.status_code == 401
+    assert owner.status_code == 200
+    assert owner.json()['items'][0]['replay']['url'].startswith(
+        'https://www.bilibili.com/'
+    )
+    assert owner.headers['cache-control'] == 'private, no-store'
+    assert owner_dashboard.headers['cache-control'] == 'private, no-store'
+    assert 'etag' not in owner_dashboard.headers
+    assert owner_session.json() == {'owner': True}
+    assert owner_session.headers['cache-control'] == 'private, no-store'
 
 
 def test_rating_trend_uses_the_match_date_instead_of_the_calculation_date(

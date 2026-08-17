@@ -1284,6 +1284,15 @@
                 </nz-tag>
               </div>
               <div class="player-library-item-actions">
+                <label class="player-public-visibility">
+                  <nz-switch
+                    [ngModel]="player.publicVisible"
+                    [nzLoading]="playerSaving(player.id)"
+                    [nzDisabled]="playerSaving(player.id)"
+                    (ngModelChange)="setPlayerPublicVisibility(player, $event)"
+                  ></nz-switch>
+                  <span>{{ player.publicVisible ? "公开展示" : "仅站长可见" }}</span>
+                </label>
                 <span>{{ player.rooms.length }} 个直播间</span>
                 <button
                   nz-button
@@ -1466,7 +1475,6 @@
               nz-input
               type="number"
               min="1"
-              max="500"
               step="1"
               [id]="'archive-daily-limit-' + account.id"
               [ngModel]="archiveDailyLimit(account.id, sync)"

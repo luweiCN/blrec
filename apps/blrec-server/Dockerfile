@@ -62,6 +62,8 @@ COPY scripts/migrate_biliupforjava_rooms.py /app/scripts/migrate_biliupforjava_r
 COPY scripts/backup_blrec_database.py /app/scripts/backup_blrec_database.py
 COPY scripts/migrate_blrec_sqlite_to_postgres.py \
      /app/scripts/migrate_blrec_sqlite_to_postgres.py
+COPY scripts/migrate_blrec_postgres_schema.py \
+     /app/scripts/migrate_blrec_postgres_schema.py
 COPY scripts/vainglory_reanalysis_recovery_20260812.py \
      /app/scripts/vainglory_reanalysis_recovery_20260812.py
 COPY scripts/vainglory_reanalysis_recovery_20260812.jsonl \

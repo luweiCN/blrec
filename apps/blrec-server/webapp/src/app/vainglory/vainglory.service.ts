@@ -346,6 +346,18 @@ export class VaingloryService {
     );
   }
 
+  setPlayerPublicVisibility(
+    playerId: number,
+    publicVisible: boolean,
+  ): Observable<VaingloryPlayer> {
+    return this.http.patch<VaingloryPlayer>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/players/${playerId}/visibility`,
+      ),
+      { publicVisible },
+    );
+  }
+
   deletePlayer(playerId: number): Observable<void> {
     return this.http.delete<void>(
       this.url.makeApiUrl(`/api/v1/vainglory/players/${playerId}`),

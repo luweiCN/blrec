@@ -751,8 +751,8 @@ class ArchiveMigrationService:
         paused: Optional[bool] = None,
         daily_limit: Optional[int] = None,
     ) -> ArchiveMigrationStatus:
-        if daily_limit is not None and not 1 <= int(daily_limit) <= 1000:
-            raise ValueError('每日处理上限必须在 1 到 1000 之间')
+        if daily_limit is not None and int(daily_limit) < 1:
+            raise ValueError('每日处理上限必须是正整数')
         values: List[str] = []
         parameters: List[Any] = []
         if paused is not None:
@@ -761,7 +761,9 @@ class ArchiveMigrationService:
         if daily_limit is not None:
             values.append('daily_limit=?')
             values.append('daily_limit_override=?')
+            values.append('daily_limit_override_v2=?')
             parameters.append(min(int(daily_limit), 500))
+            parameters.append(min(int(daily_limit), 1000))
             parameters.append(int(daily_limit))
         if not values:
             return await self.status(migration_id)
@@ -902,14 +904,16 @@ class ArchiveMigrationService:
                 'SELECT item.*,item.quota_day AS item_quota_day,'
                 'job.source_uid,job.download_account_id,job.target_account_id,'
                 'job.quota_day AS job_quota_day,job.daily_used,'
-                'COALESCE(job.daily_limit_override,job.daily_limit) AS daily_limit '
+                'COALESCE(job.daily_limit_override_v2,'
+                'job.daily_limit_override,job.daily_limit) AS daily_limit '
                 'FROM archive_migration_items item '
                 'JOIN archive_migration_jobs job ON job.id=item.migration_id '
                 "WHERE item.state='queued' AND job.state='running' "
                 'AND job.operator_paused=0 AND ('
                 'item.quota_day=? OR job.quota_day IS NULL OR job.quota_day<>? '
                 'OR job.daily_used<'
-                'COALESCE(job.daily_limit_override,job.daily_limit)) '
+                'COALESCE(job.daily_limit_override_v2,'
+                'job.daily_limit_override,job.daily_limit)) '
                 'ORDER BY CASE WHEN item.published_at IS NULL THEN 1 ELSE 0 END,'
                 'item.published_at DESC,item.id ASC LIMIT 1',
                 (quota_day, quota_day),
@@ -1478,7 +1482,11 @@ class ArchiveMigrationService:
             ),
             updated_at=int(row['updated_at']),
             operator_paused=bool(row['operator_paused']),
-            daily_limit=int(row['daily_limit_override'] or row['daily_limit']),
+            daily_limit=int(
+                row['daily_limit_override_v2']
+                or row['daily_limit_override']
+                or row['daily_limit']
+            ),
             daily_used=int(row['daily_used']),
             quota_day=(None if row['quota_day'] is None else str(row['quota_day'])),
             today_analyzed_count=max(0, int(today_analyzed_count)),

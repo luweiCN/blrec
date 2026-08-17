@@ -10,6 +10,7 @@ import { RouterTestingModule } from '@angular/router/testing';
 import { Subject } from 'rxjs';
 
 import { DashboardModeService } from './dashboard-mode.service';
+import { DashboardOwnerAccessService } from './dashboard-owner-access.service';
 import { DashboardRealtimeService } from './dashboard-realtime.service';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PlayerLiveStatusService } from './player-live-status.service';
@@ -47,6 +48,15 @@ describe('PublicDashboardShellComponent', () => {
         {
           provide: DashboardModeService,
           useValue: { mode: '3v3', selectMode: () => undefined },
+        },
+        {
+          provide: DashboardOwnerAccessService,
+          useValue: {
+            active: false,
+            unlock: () => Promise.resolve(false),
+            validateStored: () => Promise.resolve(false),
+            lock: () => undefined,
+          },
         },
         {
           provide: SiteAnalyticsService,

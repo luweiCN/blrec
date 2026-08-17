@@ -40,6 +40,12 @@ class _Dataset:
     live_rooms: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class _RepositoryState:
+    public: _Dataset
+    owner: _Dataset
+
+
 @dataclass
 class _TrendPerformance:
     rating_score: float
@@ -324,41 +330,103 @@ def _rating_trends(
     }
 
 
-def _dataset(source_revision: int, runtime: Mapping[str, Any]) -> _Dataset:
-    snapshot = dict(runtime['snapshot'])
-    snapshot['matches'] = []
-    players = {int(player['id']): dict(player) for player in runtime.get('players', ())}
-    matches = tuple(
-        sorted(
-            (dict(match) for match in runtime.get('matches', ())),
-            key=lambda match: (str(match['playedAt']), int(match['id'])),
-            reverse=True,
-        )
+def _dataset(
+    source_revision: int,
+    runtime: Mapping[str, Any],
+    *,
+    owner_view: bool,
+    shared_owner: Optional[_Dataset] = None,
+) -> _Dataset:
+    snapshot_source = (
+        runtime['snapshot']
+        if owner_view
+        else runtime.get('publicSnapshot', runtime['snapshot'])
     )
-    forms: Dict[int, Tuple[Tuple[str, str, str], ...]] = {}
-    heroes: Dict[int, frozenset[str]] = {}
-    for match in matches:
-        match_id = int(match['id'])
-        player = players[int(match['playerId'])]
-        segments = [
-            str(match.get('streamTitle') or ''),
-            str(player['name']),
-            str(player['roomLabel']),
-            *(str(value) for value in player.get('aliases', ())),
-            *(str(value) for value in player.get('roomIds', ())),
-            *(
-                str(participant['name'])
+    snapshot = dict(snapshot_source)
+    snapshot['matches'] = []
+    if shared_owner is None:
+        players = {
+            int(player['id']): dict(player)
+            for player in runtime.get('players', ())
+            if owner_view or bool(player.get('publicVisible', True))
+        }
+    else:
+        players = {
+            int(player['id']): shared_owner.players[int(player['id'])]
+            for player in runtime.get('players', ())
+            if bool(player.get('publicVisible', True))
+        }
+
+    def match_value(source: Mapping[str, Any]) -> Mapping[str, Any]:
+        value = dict(source)
+        access = str(value.pop('replayAccess', 'public'))
+        if not owner_view and access != 'public':
+            value.pop('replay', None)
+        return value
+
+    if shared_owner is None:
+        matches = tuple(
+            sorted(
+                (
+                    match_value(match)
+                    for match in runtime.get('matches', ())
+                    if int(match['playerId']) in players
+                ),
+                key=lambda match: (str(match['playedAt']), int(match['id'])),
+                reverse=True,
+            )
+        )
+        forms: Dict[int, Tuple[Tuple[str, str, str], ...]] = {}
+        heroes: Dict[int, frozenset[str]] = {}
+        for match in matches:
+            match_id = int(match['id'])
+            player = players[int(match['playerId'])]
+            segments = [
+                str(match.get('streamTitle') or ''),
+                str(player['name']),
+                str(player['roomLabel']),
+                *(str(value) for value in player.get('aliases', ())),
+                *(str(value) for value in player.get('roomIds', ())),
+                *(
+                    str(participant['name'])
+                    for team in (match['ally'], match['enemy'])
+                    for participant in team['players']
+                ),
+            ]
+            forms[match_id] = tuple(_search_forms(value) for value in segments if value)
+            heroes[match_id] = frozenset(
+                str(participant['heroName']).casefold()
                 for team in (match['ally'], match['enemy'])
                 for participant in team['players']
-            ),
-        ]
-        forms[match_id] = tuple(_search_forms(value) for value in segments if value)
-        heroes[match_id] = frozenset(
-            str(participant['heroName']).casefold()
-            for team in (match['ally'], match['enemy'])
-            for participant in team['players']
-            if participant.get('heroName')
-        )
+                if participant.get('heroName')
+            )
+    else:
+        replay_access = {
+            int(match['id']): str(match.get('replayAccess', 'public'))
+            for match in runtime.get('matches', ())
+        }
+        selected_matches = []
+        for match in shared_owner.matches:
+            if int(match['playerId']) not in players:
+                continue
+            if replay_access.get(int(match['id']), 'public') == 'public':
+                selected_matches.append(match)
+                continue
+            sanitized = dict(match)
+            sanitized.pop('replay', None)
+            selected_matches.append(sanitized)
+        matches = tuple(selected_matches)
+        match_ids = {int(match['id']) for match in matches}
+        forms = {
+            match_id: value
+            for match_id, value in shared_owner.search_forms.items()
+            if match_id in match_ids
+        }
+        heroes = {
+            match_id: value
+            for match_id, value in shared_owner.heroes.items()
+            if match_id in match_ids
+        }
     live_rooms: List[Dict[str, Any]] = [
         {
             'roomId': int(room['roomId']),
@@ -408,51 +476,65 @@ class DirectDashboardRepository:
         self._runtime_loader = runtime_loader
         self._state_lock = RLock()
         self._refresh_lock = Lock()
-        self._dataset: Optional[_Dataset] = None
+        self._state: Optional[_RepositoryState] = None
 
     def refresh(self, *, force: bool = False) -> bool:
         with self._refresh_lock:
             started_at = time.perf_counter()
             expected_revision = self._revision_loader(self._source_target)
             with self._state_lock:
-                current = self._dataset
+                current = self._state
             if (
                 not force
                 and current is not None
-                and current.source_revision == expected_revision
+                and current.public.source_revision == expected_revision
             ):
                 return False
             source_revision, runtime = self._runtime_loader(self._source_target)
             if source_revision < expected_revision:
                 raise RuntimeError('dashboard source changed during refresh')
-            next_dataset = _dataset(source_revision, runtime)
+            owner_dataset = _dataset(source_revision, runtime, owner_view=True)
+            next_state = _RepositoryState(
+                public=_dataset(
+                    source_revision,
+                    runtime,
+                    owner_view=False,
+                    shared_owner=owner_dataset,
+                ),
+                owner=owner_dataset,
+            )
             with self._state_lock:
-                self._dataset = next_dataset
+                self._state = next_state
             LOGGER.info(
-                'dashboard cache refreshed source_revision=%s players=%s matches=%s '
-                'seconds=%.3f',
+                'dashboard cache refreshed source_revision=%s '
+                'public_players=%s public_matches=%s owner_players=%s '
+                'owner_matches=%s seconds=%.3f',
                 source_revision,
-                len(next_dataset.players),
-                len(next_dataset.matches),
+                len(next_state.public.players),
+                len(next_state.public.matches),
+                len(next_state.owner.players),
+                len(next_state.owner.matches),
                 time.perf_counter() - started_at,
             )
-            return current is None or current.source_revision != source_revision
+            return current is None or current.public.source_revision != source_revision
 
     def source_revision(self) -> int:
         return self._revision_loader(self._source_target)
 
-    def _current(self) -> _Dataset:
+    def _current(self, *, owner_view: bool = False) -> _Dataset:
         with self._state_lock:
-            if self._dataset is None:
+            if self._state is None:
                 raise RuntimeError('dashboard source has not been loaded')
-            return self._dataset
+            return self._state.owner if owner_view else self._state.public
 
-    def dashboard_document(self) -> Tuple[Mapping[str, Any], str]:
-        current = self._current()
+    def dashboard_document(
+        self, *, owner_view: bool = False
+    ) -> Tuple[Mapping[str, Any], str]:
+        current = self._current(owner_view=owner_view)
         return current.document, str(current.source_revision)
 
-    def live_rooms(self) -> Tuple[Mapping[str, Any], str]:
-        current = self._current()
+    def live_rooms(self, *, owner_view: bool = False) -> Tuple[Mapping[str, Any], str]:
+        current = self._current(owner_view=owner_view)
         return current.live_rooms, str(current.source_revision)
 
     def _public_match(
@@ -484,8 +566,9 @@ class DirectDashboardRepository:
         heroes: Sequence[str],
         rating_scope: str,
         rating_season: Optional[str],
+        owner_view: bool = False,
     ) -> Dict[str, Any]:
-        current = self._current()
+        current = self._current(owner_view=owner_view)
         normalized_query = _normalize_search(query)
         required_heroes = {hero.casefold() for hero in heroes}
         matches = []
@@ -531,9 +614,14 @@ class DirectDashboardRepository:
         }
 
     def get_match(
-        self, match_id: int, *, rating_scope: str, rating_season: Optional[str]
+        self,
+        match_id: int,
+        *,
+        rating_scope: str,
+        rating_season: Optional[str],
+        owner_view: bool = False,
     ) -> Mapping[str, Any]:
-        current = self._current()
+        current = self._current(owner_view=owner_view)
         match = current.matches_by_id.get(match_id)
         if match is None:
             raise LookupError('match not found')
@@ -547,11 +635,16 @@ class DirectDashboardRepository:
         )
 
     def match_summary(
-        self, *, season: Optional[str], mode: Optional[str], player_id: Optional[int]
+        self,
+        *,
+        season: Optional[str],
+        mode: Optional[str],
+        player_id: Optional[int],
+        owner_view: bool = False,
     ) -> Mapping[str, int]:
         matches = [
             match
-            for match in self._current().matches
+            for match in self._current(owner_view=owner_view).matches
             if (season is None or match['seasonKey'] == season)
             and (mode is None or match['mode'] == mode)
             and (player_id is None or int(match['playerId']) == player_id)

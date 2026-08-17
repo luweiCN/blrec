@@ -369,10 +369,23 @@ def _player_metadata(
     connection: sqlite3.Connection,
 ) -> Tuple[Mapping[int, Mapping[str, Any]], Mapping[int, List[str]]]:
     players: Dict[int, Dict[str, Any]] = {}
+    version_row = connection.execute(
+        'SELECT COALESCE(MAX(version),0) FROM schema_migrations'
+    ).fetchone()
+    schema_version = 0 if version_row is None else int(version_row[0])
+    player_columns = (
+        'id,name,public_visible'
+        if schema_version >= 77
+        else 'id,name,1 AS public_visible'
+    )
     for row in connection.execute(
-        'SELECT id,name FROM vainglory_players ORDER BY id'
+        'SELECT {} FROM vainglory_players ORDER BY id'.format(player_columns)
     ).fetchall():
-        players[int(row['id'])] = {'name': str(row['name']), 'rooms': []}
+        players[int(row['id'])] = {
+            'name': str(row['name']),
+            'publicVisible': bool(row['public_visible']),
+            'rooms': [],
+        }
     for row in connection.execute(
         'SELECT player_id,room_id FROM vainglory_player_rooms '
         'ORDER BY player_id,room_id'
@@ -550,25 +563,23 @@ def _publications_by_session(
             'FROM vainglory_archive_imports imported '
             'WHERE imported.account_id=publication.account_id '
             'AND imported.bvid=publication.bvid '
-            'ORDER BY imported.id DESC LIMIT 1) AS archive_is_only_self,'
-            '(SELECT source_job.policy_snapshot_json FROM upload_jobs source_job '
-            'WHERE source_job.id=publication.upload_job_id) '
-            'AS upload_policy_snapshot_json '
+            'ORDER BY imported.id DESC LIMIT 1) AS archive_is_only_self '
             'FROM vainglory_publications publication '
             'WHERE publication.session_id IN ('
             + placeholders
-            + ') AND publication.public_visible_at IS NOT NULL '
+            + ') AND (publication.visibility_verified_at IS NOT NULL '
+            'OR publication.public_visible_at IS NOT NULL) '
             'AND publication.id=(SELECT latest.id '
             'FROM vainglory_publications latest '
             'WHERE latest.session_id=publication.session_id '
-            'AND latest.public_visible_at IS NOT NULL '
-            'ORDER BY latest.public_visible_at DESC,latest.id DESC LIMIT 1)',
+            'AND (latest.visibility_verified_at IS NOT NULL '
+            'OR latest.public_visible_at IS NOT NULL) '
+            'ORDER BY COALESCE(latest.visibility_verified_at,'
+            'latest.public_visible_at) DESC,latest.id DESC LIMIT 1)',
             batch,
         ).fetchall()
         publications.update(
-            (int(row['session_id']), dict(row))
-            for row in publication_rows
-            if _allows_public_replay(row)
+            (int(row['session_id']), dict(row)) for row in publication_rows
         )
     return publications
 
@@ -578,21 +589,11 @@ def _allows_public_replay(publication: Mapping[str, Any]) -> bool:
         return False
     if _true_flag(publication['archive_is_only_self']):
         return False
-    source_kind = str(publication['source_kind'] or '')
-    if source_kind == 'archive':
-        return True
-    if source_kind != 'upload':
-        return False
-    raw_policy = publication['upload_policy_snapshot_json']
-    if raw_policy is None:
-        return False
-    try:
-        policy = json.loads(str(raw_policy))
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(policy, Mapping):
-        return False
-    return not _true_flag(policy.get('is_only_self'))
+    return str(publication['source_kind'] or '') in ('archive', 'upload')
+
+
+def _replay_access(publication: Mapping[str, Any]) -> str:
+    return 'public' if _allows_public_replay(publication) else 'owner'
 
 
 def _true_flag(value: Any) -> bool:
@@ -731,6 +732,8 @@ def _public_matches(
     lineups: Mapping[int, List[Mapping[str, Any]]],
     publications: Mapping[int, Mapping[str, Any]],
     publication_parts: Mapping[int, List[Tuple[int, int, int]]],
+    *,
+    include_owner_replays: bool = False,
 ) -> List[Mapping[str, Any]]:
     values: List[Mapping[str, Any]] = []
     for row in rows:
@@ -807,8 +810,11 @@ def _public_matches(
             'ally': team_value(recorded_side),
             'enemy': team_value(enemy_side),
         }
-        if replay is not None:
+        replay_access = None if publication is None else _replay_access(publication)
+        if replay is not None and (replay_access == 'public' or include_owner_replays):
             value['replay'] = replay
+        if replay is not None and include_owner_replays:
+            value['replayAccess'] = replay_access
         values.append(value)
     return sorted(
         values,
@@ -832,6 +838,15 @@ def build_dashboard_api_source(
     publications = _publications_by_session(connection, rows)
     publication_parts = _publication_parts(connection, publications)
     public_matches = _public_matches(rows, lineups, publications, publication_parts)
+    public_player_ids = {
+        player_id
+        for player_id, metadata in players.items()
+        if bool(metadata.get('publicVisible', True))
+    }
+    rows = [row for row in rows if int(row['player_id']) in public_player_ids]
+    public_matches = [
+        match for match in public_matches if int(match['playerId']) in public_player_ids
+    ]
     rows_by_id = {int(row['match_id']): row for row in rows}
     matches = []
     for public_match in public_matches:
@@ -845,6 +860,8 @@ def build_dashboard_api_source(
         matches.append(value)
     public_players = []
     for player_id, metadata in sorted(players.items()):
+        if player_id not in public_player_ids:
+            continue
         name = str(metadata['name'])
         public_players.append(
             {
@@ -883,7 +900,25 @@ def build_dashboard_runtime_source(
     lineups = _lineups_by_match(connection, rows)
     publications = _publications_by_session(connection, rows)
     publication_parts = _publication_parts(connection, publications)
-    public_matches = _public_matches(rows, lineups, publications, publication_parts)
+    runtime_matches = _public_matches(
+        rows, lineups, publications, publication_parts, include_owner_replays=True
+    )
+    public_player_ids = {
+        player_id
+        for player_id, metadata in players.items()
+        if bool(metadata.get('publicVisible', True))
+    }
+    public_players = {
+        player_id: metadata
+        for player_id, metadata in players.items()
+        if player_id in public_player_ids
+    }
+    public_aliases = {
+        player_id: values
+        for player_id, values in aliases.items()
+        if player_id in public_player_ids
+    }
+    public_rows = [row for row in rows if int(row['player_id']) in public_player_ids]
     runtime_players = []
     for player_id, metadata in sorted(players.items()):
         name = str(metadata['name'])
@@ -897,6 +932,7 @@ def build_dashboard_runtime_source(
                 'liveRooms': list(live_rooms.get(player_id, ())),
                 'aliases': list(aliases.get(player_id, ())),
                 'avatarUrl': None,
+                'publicVisible': bool(metadata.get('publicVisible', True)),
             }
         )
     return {
@@ -909,8 +945,17 @@ def build_dashboard_runtime_source(
             public_matches=(),
             generated_at=generated_at,
         ),
+        'publicSnapshot': build_dashboard_snapshot_from_records(
+            players=public_players,
+            aliases=public_aliases,
+            rows=public_rows,
+            environment_rows=public_rows,
+            lineups=lineups,
+            public_matches=(),
+            generated_at=generated_at,
+        ),
         'players': runtime_players,
-        'matches': public_matches,
+        'matches': runtime_matches,
     }
 
 
@@ -1411,6 +1456,25 @@ def build_dashboard_snapshot(
     publications = _publications_by_session(connection, rows)
     publication_parts = _publication_parts(connection, publications)
     public_matches = _public_matches(rows, lineups, publications, publication_parts)
+    public_player_ids = {
+        player_id
+        for player_id, metadata in players.items()
+        if bool(metadata.get('publicVisible', True))
+    }
+    players = {
+        player_id: metadata
+        for player_id, metadata in players.items()
+        if player_id in public_player_ids
+    }
+    aliases = {
+        player_id: values
+        for player_id, values in aliases.items()
+        if player_id in public_player_ids
+    }
+    rows = [row for row in rows if int(row['player_id']) in public_player_ids]
+    public_matches = [
+        match for match in public_matches if int(match['playerId']) in public_player_ids
+    ]
 
     return build_dashboard_snapshot_from_records(
         players=players,

@@ -549,6 +549,43 @@ async def test_migration_pause_and_daily_quota_survive_worker_iterations(
 
 
 @pytest.mark.asyncio
+async def test_migration_accepts_operator_defined_daily_limit(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        service = ArchiveMigrationService(
+            database,
+            recording_root=tmp_path / 'rec',
+            catalog=FakeCatalog(()),
+            detail_reader=FakeDetailReader(archive_detail()),
+            downloader=FakeDownloader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            task_creator=FakeTaskCreator(database),
+            clock=lambda: 1_000,
+        )
+        requested = await service.request(
+            source_uid=300, download_account_id=1, target_account_id=2
+        )
+
+        updated = await service.update_control(requested.id, daily_limit=50_000)
+
+        assert updated.daily_limit == 50_000
+        stored = await database.fetchone(
+            'SELECT daily_limit,daily_limit_override,daily_limit_override_v2 '
+            'FROM archive_migration_jobs WHERE id=?',
+            (requested.id,),
+        )
+        assert stored is not None and dict(stored) == {
+            'daily_limit': 500,
+            'daily_limit_override': 1_000,
+            'daily_limit_override_v2': 50_000,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_rejects_copying_an_account_back_to_itself(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()

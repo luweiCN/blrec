@@ -107,3 +107,20 @@ PostgreSQL 模式下该脚本使用 16 版 `pg_dump` 生成自定义格式文件
 
 后续每次提升 `BiliUploadDatabase.LATEST_SCHEMA_VERSION`，都必须同时提供并测试
 PostgreSQL 迁移；应用遇到版本不一致会拒绝启动，不会猜测或静默修改生产 schema。
+
+## 后续版本升级
+
+主库切换到 PostgreSQL 后，版本升级仍需短暂停写。先在旧容器中执行并验证备份，
+再停止主服务；迁移工具会尝试取得与主服务相同的数据库独占锁，若仍有主服务持有锁会
+直接拒绝执行。使用目标版本镜像运行：
+
+```bash
+python /app/scripts/migrate_blrec_postgres_schema.py \
+  --expected-database blrec_dashboard \
+  --expected-schema core \
+  --apply
+```
+
+全部待执行版本必须出现在工具的明确支持列表中。所有 DDL、数据修复和
+`schema_migrations` 写入位于同一个事务；任一语句失败都会整体回滚。迁移成功后再启动
+目标版本主服务，并重新执行一次 PostgreSQL 备份和版本检查。

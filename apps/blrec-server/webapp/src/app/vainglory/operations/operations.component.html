@@ -214,14 +214,13 @@
           ></nz-progress>
           <div class="pipeline-controls">
             <span>
-              今日下载 {{ sync.dailyUsed }} · 已分析
+              今日入队 {{ sync.dailyUsed }} · 已分析
               {{ sync.todayAnalyzedCount }} · 上限 {{ sync.dailyLimit }}
             </span>
             <label>
               每日上限
               <nz-input-number
                 [nzMin]="1"
-                [nzMax]="1000"
                 [ngModel]="archiveDailyLimit(sync)"
                 (ngModelChange)="setArchiveDailyLimit(sync.accountId, $event)"
               ></nz-input-number>
@@ -345,7 +344,6 @@
               每日上限
               <nz-input-number
                 [nzMin]="1"
-                [nzMax]="1000"
                 [ngModel]="migrationDailyLimit(migration)"
                 (ngModelChange)="setMigrationDailyLimit(migration.id, $event)"
               ></nz-input-number>

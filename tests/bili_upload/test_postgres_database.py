@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from blrec.bili_upload.database import BiliUploadDatabase
@@ -21,6 +22,10 @@ from blrec.bili_upload.postgres_database import (
 from blrec.vainglory.repository import VaingloryRepository
 from blrec.visitor_analytics.archive import VisitorAnalyticsArchive
 from blrec.visitor_analytics.sls import VisitorAnalyticsConfig, VisitorAnalyticsQuery
+from scripts.migrate_blrec_postgres_schema import (
+    _migration_statements,
+    migrate_postgres_schema,
+)
 from scripts.migrate_blrec_sqlite_to_postgres import _exclusive_source_lock, migrate
 
 
@@ -101,6 +106,124 @@ def test_postgres_schema_wraps_case_expression_index() -> None:
         "(CASE WHEN source_id IS NULL THEN 'item:'||id "
         "ELSE 'source:'||source_id END),created_at DESC)"
     )
+
+
+def test_postgres_schema_migration_77_has_explicit_supported_statements() -> None:
+    statements = tuple(_migration_statements(77))
+
+    assert len(statements) == 5
+    assert 'ADD COLUMN public_visible BIGINT' in statements[0]
+    assert 'ADD COLUMN daily_limit_override_v2 BIGINT' in statements[1]
+    assert 'ADD COLUMN daily_limit_override_v2 BIGINT' in statements[2]
+
+
+def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() -> None:
+    database_url = os.environ.get('BLREC_TEST_POSTGRES_URL', '').strip()
+    if not database_url:
+        pytest.skip('BLREC_TEST_POSTGRES_URL is not configured')
+    database_name = urlsplit(database_url).path.lstrip('/')
+    assert database_name == 'blrec_core_test'
+    schema = 'core_migration_77'
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(sql.Identifier(schema))
+        )
+        connection.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
+    schema_url = make_conninfo(database_url, options='-csearch_path={}'.format(schema))
+    try:
+        with psycopg.connect(schema_url, autocommit=True) as connection:
+            connection.execute(
+                'CREATE FUNCTION instr(value text,needle text) RETURNS integer '
+                'LANGUAGE sql IMMUTABLE STRICT AS '
+                '$$ SELECT strpos(value,needle) $$'
+            )
+            connection.execute(
+                'CREATE TABLE schema_migrations('
+                'version BIGINT PRIMARY KEY,applied_at BIGINT NOT NULL)'
+            )
+            connection.execute('INSERT INTO schema_migrations VALUES(76,1)')
+            connection.execute(
+                'CREATE TABLE vainglory_players(id BIGINT PRIMARY KEY,name TEXT)'
+            )
+            connection.execute(
+                'CREATE TABLE vainglory_archive_syncs('
+                'account_id BIGINT PRIMARY KEY,daily_limit BIGINT NOT NULL,'
+                'daily_limit_override BIGINT)'
+            )
+            connection.execute(
+                'CREATE TABLE archive_migration_jobs('
+                'id BIGINT PRIMARY KEY,daily_limit BIGINT NOT NULL,'
+                'daily_limit_override BIGINT)'
+            )
+            connection.execute(
+                'CREATE TABLE upload_jobs('
+                'id BIGINT PRIMARY KEY,policy_snapshot_json TEXT)'
+            )
+            connection.execute(
+                'CREATE TABLE vainglory_archive_imports('
+                'id BIGINT PRIMARY KEY,account_id BIGINT,bvid TEXT,'
+                'is_only_self BIGINT)'
+            )
+            connection.execute(
+                'CREATE TABLE vainglory_publications('
+                'id BIGINT PRIMARY KEY,account_id BIGINT,upload_job_id BIGINT,'
+                'bvid TEXT,source_kind TEXT,visibility_scope TEXT,'
+                'visibility_verified_at BIGINT,public_visible_at BIGINT,'
+                'updated_at BIGINT)'
+            )
+            connection.execute("INSERT INTO vainglory_players VALUES(1,'玩家')")
+            connection.execute('INSERT INTO vainglory_archive_syncs VALUES(1,500,1000)')
+            connection.execute('INSERT INTO archive_migration_jobs VALUES(1,500,1000)')
+            connection.execute(
+                "INSERT INTO upload_jobs VALUES(1,'{ \"is_only_self\": true }')"
+            )
+            connection.execute(
+                "INSERT INTO vainglory_archive_imports " "VALUES(1,2,'BV1archive01',1)"
+            )
+            connection.execute(
+                'INSERT INTO vainglory_publications VALUES('
+                "1,1,1,'BV1upload001','upload','public',2,2,2),"
+                "(2,2,NULL,'BV1archive01','archive','public',3,3,3)"
+            )
+
+        assert migrate_postgres_schema(
+            schema_url, expected_database=database_name, expected_schema=schema
+        ) == (77,)
+
+        with psycopg.connect(schema_url, autocommit=True) as connection:
+            assert connection.execute(
+                'SELECT public_visible FROM vainglory_players WHERE id=1'
+            ).fetchone() == (1,)
+            connection.execute(
+                'UPDATE vainglory_archive_syncs '
+                'SET daily_limit_override_v2=50000 WHERE account_id=1'
+            )
+            assert connection.execute(
+                'SELECT daily_limit_override_v2 FROM vainglory_archive_syncs '
+                'WHERE account_id=1'
+            ).fetchone() == (50000,)
+            connection.execute(
+                'UPDATE archive_migration_jobs '
+                'SET daily_limit_override_v2=50000 WHERE id=1'
+            )
+            assert connection.execute(
+                'SELECT daily_limit_override_v2 FROM archive_migration_jobs '
+                'WHERE id=1'
+            ).fetchone() == (50000,)
+            assert connection.execute(
+                'SELECT visibility_scope,public_visible_at '
+                'FROM vainglory_publications ORDER BY id'
+            ).fetchall() == [('owner', None), ('owner', None)]
+            assert connection.execute(
+                'SELECT MAX(version) FROM schema_migrations'
+            ).fetchone() == (77,)
+    finally:
+        with psycopg.connect(database_url, autocommit=True) as connection:
+            connection.execute(
+                sql.SQL('DROP SCHEMA IF EXISTS {} CASCADE').format(
+                    sql.Identifier(schema)
+                )
+            )
 
 
 @pytest.mark.asyncio
