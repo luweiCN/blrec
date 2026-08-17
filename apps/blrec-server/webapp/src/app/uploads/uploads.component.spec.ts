@@ -710,11 +710,11 @@ describe('UploadsComponent', () => {
     ) as HTMLButtonElement;
 
     expect(pause).not.toBeNull();
-    expect(
-      fixture.nativeElement.querySelector(
-        '[data-testid="archive-migration-daily-limit-9"]'
-      )
-    ).not.toBeNull();
+    const dailyLimit = fixture.nativeElement.querySelector(
+      '[data-testid="archive-migration-daily-limit-9"]'
+    ) as HTMLInputElement;
+    expect(dailyLimit).not.toBeNull();
+    expect(dailyLimit.max).toBe('');
     expect(
       fixture.nativeElement.querySelector(
         '[data-testid="save-archive-migration-daily-limit-9"]'
