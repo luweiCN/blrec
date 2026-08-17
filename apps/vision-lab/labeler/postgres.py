@@ -28,16 +28,9 @@ _identity_tables: Set[str] = set()
 
 POSTGRES_COMPATIBILITY_SQL = """
 CREATE OR REPLACE FUNCTION json_extract(document text, path text)
-RETURNS text LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT
 AS $$
-BEGIN
-    IF document IS NULL OR path IS NULL THEN
-        RETURN NULL;
-    END IF;
-    RETURN jsonb_path_query_first(document::jsonb, path::jsonpath) #>> '{}';
-EXCEPTION WHEN others THEN
-    RETURN NULL;
-END
+    SELECT jsonb_path_query_first(document::jsonb, path::jsonpath) #>> '{}'
 $$;
 
 CREATE OR REPLACE FUNCTION json_each(document text)

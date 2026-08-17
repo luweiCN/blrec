@@ -28,6 +28,13 @@ class PostgresCompatibilityTests(unittest.TestCase):
             'INSERT INTO annotation_tasks (id) VALUES (%s) ON CONFLICT DO NOTHING',
         )
 
+    def test_json_extract_compatibility_function_is_parallel_safe_sql(self) -> None:
+        self.assertIn(
+            'RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT',
+            postgres.POSTGRES_COMPATIBILITY_SQL,
+        )
+        self.assertNotIn('EXCEPTION WHEN', postgres.POSTGRES_COMPATIBILITY_SQL)
+
     def test_schema_conversion_orders_referenced_tables_first(self) -> None:
         statements, identities = postgres.ordered_schema_statements(db._SCHEMA)
         table_names = [
