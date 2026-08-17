@@ -573,6 +573,69 @@ async def test_rejects_copying_an_account_back_to_itself(tmp_path: Path) -> None
         await database.close()
 
 
+@pytest.mark.asyncio
+async def test_migration_status_counts_only_analysis_completed_today(
+    tmp_path: Path,
+) -> None:
+    now = 1_000_000
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        await database.execute(
+            'INSERT INTO archive_migration_jobs('
+            'id,source_uid,download_account_id,target_account_id,state,progress,'
+            'discovered_count,completed_count,failed_count,error,requested_at,'
+            'updated_at) '
+            "VALUES(1,300,1,2,'running',0,2,0,0,NULL,1,1)"
+        )
+        for session_id, completed_at in ((1, now - 100), (2, now - 86_400)):
+            await database.execute(
+                'INSERT INTO recording_sessions('
+                'id,room_id,broadcast_session_key,state,started_at,title) '
+                "VALUES(?,100,?,'closed',1,'搬运直播')",
+                (session_id, 'migration:{}'.format(session_id)),
+            )
+            await database.execute(
+                'INSERT INTO archive_migration_items('
+                'id,migration_id,aid,bvid,title,state,progress,page_count,'
+                'downloaded_page_count,session_id,created_at,updated_at) '
+                "VALUES(?,1,?,?,'搬运直播','creating_task',0.8,1,1,?,1,1)",
+                (
+                    session_id,
+                    100 + session_id,
+                    'BV1bcdefg{}'.format(session_id),
+                    session_id,
+                ),
+            )
+            await database.execute(
+                'INSERT INTO vainglory_scan_jobs('
+                'session_id,state,progress,algorithm_version,match_count,error,'
+                'requested_at,started_at,completed_at,updated_at) '
+                "VALUES(?,'ready',1,1,0,NULL,1,1,?,?)",
+                (session_id, completed_at, completed_at),
+            )
+        service = ArchiveMigrationService(
+            database,
+            recording_root=tmp_path / 'rec',
+            catalog=FakeCatalog(()),
+            detail_reader=FakeDetailReader(archive_detail()),
+            downloader=FakeDownloader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            task_creator=FakeTaskCreator(database),
+            clock=lambda: now,
+        )
+
+        status = await service.status(1)
+
+        assert status.today_analyzed_count == 1
+        assert await service.count_items(1) == 2
+        page = await service.list_items(1, limit=1, offset=1)
+        assert [item.id for item in page] == [1]
+    finally:
+        await database.close()
+
+
 def test_ytdlp_catalog_uses_cookie_and_streams_flat_entries() -> None:
     command = YtDlpSpaceArchiveCatalog.build_command(
         executable='yt-dlp',

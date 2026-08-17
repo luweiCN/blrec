@@ -112,6 +112,24 @@
     small.has-issue {
       color: #cf1322;
     }
+
+    &.summary-action {
+      cursor: pointer;
+      transition:
+        background 160ms ease,
+        box-shadow 160ms ease;
+
+      &:hover {
+        background: #fafcff;
+      }
+
+      &:focus-visible {
+        position: relative;
+        z-index: 1;
+        outline: 2px solid #1677ff;
+        outline-offset: -2px;
+      }
+    }
   }
 }
 
@@ -576,6 +594,76 @@
   }
 }
 
+.history-source-select {
+  width: min(420px, 100%);
+  margin-bottom: 14px;
+}
+
+.queue-dialog-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid #edf0f4;
+  border-radius: 8px;
+
+  li {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr) 64px;
+    align-items: center;
+    min-width: 0;
+    padding: 12px 14px;
+    gap: 12px;
+    border-top: 1px solid #f0f0f0;
+
+    &:first-child {
+      border-top: 0;
+    }
+
+    > div {
+      display: grid;
+      min-width: 0;
+      gap: 2px;
+    }
+
+    strong,
+    span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    strong {
+      color: #262626;
+      font-size: 14px;
+    }
+
+    span,
+    time {
+      color: #8c8c8c;
+      font-size: 12px;
+    }
+
+    > time,
+    > .queue-progress {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    &.empty-row {
+      display: block;
+      padding: 36px 16px;
+      color: #8c8c8c;
+      text-align: center;
+    }
+  }
+}
+
+.queue-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 14px;
+}
+
 @media (max-width: 1080px) {
   .operations-summary,
   .evidence-grid {
@@ -706,6 +794,23 @@
     > div {
       padding: 16px;
     }
+  }
+
+  .queue-dialog-list li {
+    grid-template-columns: 78px minmax(0, 1fr);
+    padding: 11px 12px;
+    gap: 8px;
+
+    > time,
+    > .queue-progress {
+      grid-column: 2;
+      text-align: left;
+    }
+  }
+
+  .queue-dialog-footer {
+    justify-content: center;
+    overflow-x: auto;
   }
 }
 

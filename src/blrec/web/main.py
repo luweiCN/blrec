@@ -296,6 +296,7 @@ async def _realtime_archive_migration_snapshot() -> Mapping[str, object]:
                 'dailyLimit': status_value.daily_limit,
                 'dailyUsed': status_value.daily_used,
                 'quotaDay': status_value.quota_day,
+                'todayAnalyzedCount': status_value.today_analyzed_count,
             }
         )
         item_values = await service.list_items(status_value.id, limit=100)
@@ -606,6 +607,7 @@ async def _realtime_archive_backfill_snapshot() -> Mapping[str, object]:
                 'discoveryComplete': status_value.discovery_complete,
                 'seasonStartedAt': status_value.season_started_at,
                 'seasonEndedAt': status_value.season_ended_at,
+                'todayAnalyzedCount': status_value.today_analyzed_count,
             }
         )
         item_values = await service.list_items(status_value.account_id, limit=30)

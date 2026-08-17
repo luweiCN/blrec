@@ -9,7 +9,7 @@ import {
 import { Router } from '@angular/router';
 
 import { Subject } from 'rxjs';
-import { finalize, takeUntil } from 'rxjs/operators';
+import { finalize, map, takeUntil } from 'rxjs/operators';
 
 import { RealtimeService } from '../../core/services/realtime.service';
 import {
@@ -22,6 +22,7 @@ import { BiliAccountService } from '../../uploads/shared/bili-account.service';
 import {
   ArchiveBackfillStage,
   VaingloryAnalysisQueue,
+  VaingloryAnalysisQueueSummary,
   VaingloryAnalysisWorkerNodeStatus,
   VaingloryArchiveBackfillItem,
   VaingloryArchiveBackfillRealtimeSnapshot,
@@ -34,6 +35,11 @@ import {
 import { VaingloryService } from '../vainglory.service';
 
 type OperationsTab = 'live' | 'tasks' | 'workers' | 'history' | 'publication';
+type HistoryQueueItem = VaingloryArchiveBackfillItem | ArchiveMigrationItem;
+type HistoryQueuePage = {
+  readonly total: number;
+  readonly items: readonly HistoryQueueItem[];
+};
 
 @Component({
   selector: 'app-vainglory-operations',
@@ -97,6 +103,18 @@ export class OperationsComponent implements OnInit, OnDestroy {
   readonly retryingPublicationIds = new Set<number>();
   readonly archiveDailyLimitDrafts = new Map<number, number>();
   readonly migrationDailyLimitDrafts = new Map<number, number>();
+  processingQueueVisible = false;
+  processingQueueLoading = false;
+  processingQueueItems: readonly VaingloryAnalysisQueueSummary[] = [];
+  processingQueueTotal = 0;
+  processingQueuePage = 1;
+  readonly queuePageSize = 20;
+  historyQueueVisible = false;
+  historyQueueLoading = false;
+  historyQueueSource = '';
+  historyQueueItems: readonly HistoryQueueItem[] = [];
+  historyQueueTotal = 0;
+  historyQueuePage = 1;
 
   private readonly destroy$ = new Subject<void>();
 
@@ -117,10 +135,10 @@ export class OperationsComponent implements OnInit, OnDestroy {
       .pipe(takeUntil(this.destroy$))
       .subscribe((event) => {
         if (event.type === 'resync') {
-          this.loadAccounts();
-          this.loadMigrations();
-          this.loadPublicationAudit();
-          this.loadPublicationRecords();
+          this.loadAccounts(false);
+          this.loadMigrations(false);
+          this.loadPublicationAudit(false);
+          this.loadPublicationRecords(false);
           return;
         }
         if (event.type === 'vainglory_index') {
@@ -159,9 +177,15 @@ export class OperationsComponent implements OnInit, OnDestroy {
   }
 
   get activeHistoryCount(): number {
-    return this.archiveSyncs.filter(
-      (sync) => !sync.operatorPaused && sync.state !== 'ready',
-    ).length;
+    return (
+      this.archiveSyncs.filter(
+        (sync) => !sync.operatorPaused && sync.state !== 'ready',
+      ).length +
+      this.migrations.filter(
+        (migration) =>
+          !migration.operatorPaused && migration.state !== 'completed',
+      ).length
+    );
   }
 
   get historyIssueCount(): number {
@@ -178,8 +202,88 @@ export class OperationsComponent implements OnInit, OnDestroy {
     );
   }
 
+  get historyQueueSources(): readonly { key: string; label: string }[] {
+    return [
+      ...this.archiveSyncs.map((sync) => ({
+        key: `archive:${sync.accountId}`,
+        label: `历史接入 · ${this.accountLabel(sync.accountId)}`,
+      })),
+      ...this.migrations.map((migration) => ({
+        key: `migration:${migration.id}`,
+        label: `历史搬运 · ${migration.sourceName || `UID ${migration.sourceUid}`}`,
+      })),
+    ];
+  }
+
   selectTab(index: number): void {
     this.activeTab = this.tabs[index]?.key ?? 'tasks';
+  }
+
+  openProcessingQueue(): void {
+    this.processingQueueVisible = true;
+    this.processingQueuePage = 1;
+    this.loadProcessingQueue();
+  }
+
+  changeProcessingQueuePage(page: number): void {
+    this.processingQueuePage = page;
+    this.loadProcessingQueue();
+  }
+
+  openHistoryQueue(): void {
+    this.historyQueueVisible = true;
+    this.historyQueuePage = 1;
+    const sources = this.historyQueueSources;
+    if (!sources.some((source) => source.key === this.historyQueueSource)) {
+      this.historyQueueSource = sources[0]?.key ?? '';
+    }
+    this.loadHistoryQueue();
+  }
+
+  selectHistoryQueueSource(source: string): void {
+    this.historyQueueSource = source;
+    this.historyQueuePage = 1;
+    this.loadHistoryQueue();
+  }
+
+  changeHistoryQueuePage(page: number): void {
+    this.historyQueuePage = page;
+    this.loadHistoryQueue();
+  }
+
+  queueCategoryLabel(category: VaingloryAnalysisQueueSummary['category']): string {
+    return {
+      realtime: '近期直播',
+      manual: '人工任务',
+      archive: '历史接入',
+      migration: '历史搬运',
+      backlog: '普通积压',
+    }[category];
+  }
+
+  historyItemTitle(
+    item: VaingloryArchiveBackfillItem | ArchiveMigrationItem,
+  ): string {
+    return item.title || item.bvid;
+  }
+
+  historyItemState(
+    item: VaingloryArchiveBackfillItem | ArchiveMigrationItem,
+  ): string {
+    return 'stage' in item
+      ? this.archiveStageLabel(item.stage)
+      : this.migrationItemLabel(item);
+  }
+
+  historyItemDetail(
+    item: VaingloryArchiveBackfillItem | ArchiveMigrationItem,
+  ): string {
+    if ('stage' in item) {
+      return item.error || item.currentPartTitle || `已识别 ${item.matchCount} 局`;
+    }
+    return item.error || `分析：${item.analysisState || '等待'} · 投稿：${
+      item.uploadState || '等待'
+    }`;
   }
 
   tabIndex(): number {
@@ -704,8 +808,14 @@ export class OperationsComponent implements OnInit, OnDestroy {
     return item.id;
   }
 
-  private loadAccounts(): void {
-    this.accountsLoading = true;
+  trackPublication(_index: number, item: VaingloryPublicationRecord): number {
+    return item.id;
+  }
+
+  private loadAccounts(showLoading = true): void {
+    if (showLoading) {
+      this.accountsLoading = true;
+    }
     this.accountsService
       .listAccounts()
       .pipe(takeUntil(this.destroy$))
@@ -723,8 +833,68 @@ export class OperationsComponent implements OnInit, OnDestroy {
       });
   }
 
-  private loadMigrations(): void {
-    this.migrationLoading = true;
+  private loadProcessingQueue(): void {
+    this.processingQueueLoading = true;
+    const offset = (this.processingQueuePage - 1) * this.queuePageSize;
+    this.vainglory
+      .listAnalysisQueueItems(this.queuePageSize, offset)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (page) => {
+          this.processingQueueItems = page.items;
+          this.processingQueueTotal = page.total;
+          this.processingQueueLoading = false;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.processingQueueLoading = false;
+          this.pageError = this.errorMessage(error, '处理队列读取失败');
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  private loadHistoryQueue(): void {
+    if (!this.historyQueueSource) {
+      this.historyQueueItems = [];
+      this.historyQueueTotal = 0;
+      return;
+    }
+    this.historyQueueLoading = true;
+    const [kind, rawId] = this.historyQueueSource.split(':', 2);
+    const id = Number(rawId);
+    const offset = (this.historyQueuePage - 1) * this.queuePageSize;
+    const request =
+      kind === 'archive'
+        ? this.vainglory.listArchiveSyncItemPage(
+            id,
+            this.queuePageSize,
+            offset,
+          ).pipe(map((page): HistoryQueuePage => page))
+        : this.accountsService.listArchiveMigrationItemPage(
+            id,
+            this.queuePageSize,
+            offset,
+          ).pipe(map((page): HistoryQueuePage => page));
+    request.pipe(takeUntil(this.destroy$)).subscribe({
+      next: (page) => {
+        this.historyQueueItems = page.items;
+        this.historyQueueTotal = page.total;
+        this.historyQueueLoading = false;
+        this.changeDetector.markForCheck();
+      },
+      error: (error: unknown) => {
+        this.historyQueueLoading = false;
+        this.pageError = this.errorMessage(error, '历史队列读取失败');
+        this.changeDetector.markForCheck();
+      },
+    });
+  }
+
+  private loadMigrations(showLoading = true): void {
+    if (showLoading) {
+      this.migrationLoading = true;
+    }
     this.accountsService
       .listArchiveMigrations()
       .pipe(takeUntil(this.destroy$))
@@ -742,8 +912,10 @@ export class OperationsComponent implements OnInit, OnDestroy {
       });
   }
 
-  private loadPublicationAudit(): void {
-    this.auditLoading = true;
+  private loadPublicationAudit(showLoading = true): void {
+    if (showLoading) {
+      this.auditLoading = true;
+    }
     this.vainglory
       .getPublicationAudit(168)
       .pipe(takeUntil(this.destroy$))
@@ -761,8 +933,10 @@ export class OperationsComponent implements OnInit, OnDestroy {
       });
   }
 
-  private loadPublicationRecords(): void {
-    this.publicationRecordsLoading = true;
+  private loadPublicationRecords(showLoading = true): void {
+    if (showLoading) {
+      this.publicationRecordsLoading = true;
+    }
     const offset =
       (this.publicationRecordPage - 1) * this.publicationRecordPageSize;
     this.vainglory

@@ -125,6 +125,7 @@ export interface ArchiveMigrationStatus {
   dailyLimit: number;
   dailyUsed: number;
   quotaDay: string | null;
+  todayAnalyzedCount: number;
 }
 
 export interface ArchiveMigrationControl {
@@ -153,6 +154,11 @@ export interface ArchiveMigrationItem {
   targetBvid: string | null;
   error: string | null;
   updatedAt: number;
+}
+
+export interface ArchiveMigrationItemPage {
+  total: number;
+  items: readonly ArchiveMigrationItem[];
 }
 
 export interface ArchiveMigrationRealtimeSnapshot {

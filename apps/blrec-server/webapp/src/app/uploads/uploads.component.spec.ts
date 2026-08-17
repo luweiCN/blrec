@@ -119,6 +119,7 @@ describe('UploadsComponent', () => {
         dailyLimit: 20,
         dailyUsed: 0,
         quotaDay: null,
+        todayAnalyzedCount: 0,
       })
     );
     accountService.listArchiveMigrationItems.and.returnValue(of([]));
@@ -643,6 +644,7 @@ describe('UploadsComponent', () => {
         dailyLimit: 20,
         dailyUsed: 2,
         quotaDay: '1970-01-01',
+        todayAnalyzedCount: 0,
       })
     );
     fixture.detectChanges();
@@ -695,6 +697,7 @@ describe('UploadsComponent', () => {
       dailyLimit: 20,
       dailyUsed: 5,
       quotaDay: '1970-01-01',
+      todayAnalyzedCount: 0,
     };
     accountService.listArchiveMigrations.and.returnValue(of([migration]));
     accountService.updateArchiveMigration.and.returnValue(

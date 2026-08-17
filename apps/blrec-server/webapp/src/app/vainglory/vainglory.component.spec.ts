@@ -194,6 +194,7 @@ function archiveSync(
     discoveryComplete: false,
     seasonStartedAt: null,
     seasonEndedAt: null,
+    todayAnalyzedCount: 0,
     ...overrides,
   };
 }
@@ -522,6 +523,7 @@ describe('VaingloryComponent remote media', () => {
         discoveryComplete: true,
         seasonStartedAt: null,
         seasonEndedAt: null,
+        todayAnalyzedCount: 0,
       }),
     );
     vainglory.requestArchiveSync.and.returnValue(
@@ -544,6 +546,7 @@ describe('VaingloryComponent remote media', () => {
         discoveryComplete: false,
         seasonStartedAt: null,
         seasonEndedAt: null,
+        todayAnalyzedCount: 0,
       }),
     );
 

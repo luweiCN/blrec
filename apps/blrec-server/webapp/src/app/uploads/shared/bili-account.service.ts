@@ -9,6 +9,7 @@ import {
   AccountRemovalRequest,
   AccountRemovalResult,
   ArchiveMigrationItem,
+  ArchiveMigrationItemPage,
   ArchiveMigrationControl,
   ArchiveMigrationRequest,
   ArchiveMigrationStatus,
@@ -99,6 +100,19 @@ export class BiliAccountService {
       `/api/v1/bili-accounts/archive-migrations/${migrationId}/items`
     );
     return this.http.get<ArchiveMigrationItem[]>(url);
+  }
+
+  listArchiveMigrationItemPage(
+    migrationId: number,
+    limit = 20,
+    offset = 0
+  ): Observable<ArchiveMigrationItemPage> {
+    const url = this.url.makeApiUrl(
+      `/api/v1/bili-accounts/archive-migrations/${migrationId}/item-page`
+    );
+    return this.http.get<ArchiveMigrationItemPage>(url, {
+      params: { limit, offset },
+    });
   }
 
   retryArchiveMigrationItem(

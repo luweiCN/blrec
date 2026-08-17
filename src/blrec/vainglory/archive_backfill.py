@@ -46,6 +46,7 @@ class ArchiveSync:
     discovery_complete: bool = False
     season_started_at: Optional[int] = None
     season_ended_at: Optional[int] = None
+    today_analyzed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -312,13 +313,29 @@ class ArchiveBackfillService:
         )
         if row is None:
             raise ArchiveBackfillNotFound('该账号还没有历史回填任务')
-        return self._sync(row)
+        counts = await self._today_analyzed_counts()
+        return self._sync(row, counts.get(int(account_id), 0))
 
     async def list_statuses(self) -> Tuple[ArchiveSync, ...]:
         rows = await self._database.fetchall(
             'SELECT * FROM vainglory_archive_syncs ORDER BY account_id'
         )
-        return tuple(self._sync(row) for row in rows)
+        counts = await self._today_analyzed_counts()
+        return tuple(
+            self._sync(row, counts.get(int(row['account_id']), 0)) for row in rows
+        )
+
+    async def _today_analyzed_counts(self) -> Dict[int, int]:
+        started_at, ended_at = self._analysis_day_bounds(self._now())
+        rows = await self._database.fetchall(
+            'SELECT imported.account_id,COUNT(DISTINCT imported.id) AS count '
+            'FROM vainglory_archive_imports imported '
+            'JOIN vainglory_scan_jobs scan ON scan.session_id=imported.session_id '
+            "WHERE scan.state='ready' AND scan.completed_at>=? "
+            'AND scan.completed_at<? GROUP BY imported.account_id',
+            (started_at, ended_at),
+        )
+        return {int(row['account_id']): int(row['count']) for row in rows}
 
     async def reconcile_session_pages(self, session_id: int) -> int:
         """Refresh a published session's page catalog before reanalysis.
@@ -523,10 +540,12 @@ class ArchiveBackfillService:
         return imported
 
     async def list_items(
-        self, account_id: int, *, limit: int = 30
+        self, account_id: int, *, limit: int = 30, offset: int = 0
     ) -> Tuple[ArchiveBackfillItem, ...]:
         if not 1 <= int(limit) <= 100:
             raise ValueError('历史稿件明细数量必须在 1 到 100 之间')
+        if int(offset) < 0:
+            raise ValueError('历史稿件明细偏移量不能为负数')
         if (
             await self._database.scalar(
                 'SELECT 1 FROM vainglory_archive_syncs WHERE account_id=?',
@@ -613,10 +632,34 @@ class ArchiveBackfillService:
             "WHEN 'pending' THEN 1 ELSE 2 END,"
             "CASE imported.state WHEN 'downloading' THEN 0 "
             "WHEN 'queued' THEN 1 WHEN 'analyzing' THEN 2 ELSE 3 END,"
-            'imported.updated_at DESC,imported.id DESC LIMIT ?',
-            (int(account_id), int(limit)),
+            'imported.updated_at DESC,imported.id DESC LIMIT ? OFFSET ?',
+            (int(account_id), int(limit), int(offset)),
         )
         return tuple(self._item(row) for row in rows)
+
+    async def count_items(self, account_id: int) -> int:
+        if (
+            await self._database.scalar(
+                'SELECT 1 FROM vainglory_archive_syncs WHERE account_id=?',
+                (int(account_id),),
+            )
+            != 1
+        ):
+            raise ArchiveBackfillNotFound('该账号还没有历史回填任务')
+        return int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM vainglory_archive_imports imported '
+                'WHERE imported.account_id=? AND NOT EXISTS('
+                'SELECT 1 FROM archive_migration_items migration '
+                'JOIN upload_jobs migrated_upload '
+                'ON migrated_upload.id=migration.upload_job_id '
+                'WHERE migrated_upload.account_id=imported.account_id '
+                'AND migrated_upload.bvid=imported.bvid '
+                'AND migrated_upload.session_id=migration.session_id)',
+                (int(account_id),),
+            )
+            or 0
+        )
 
     async def list_suspected_non_vainglory(
         self, *, limit: int = 50, offset: int = 0
@@ -2089,6 +2132,14 @@ class ArchiveBackfillService:
         return datetime.fromtimestamp(now, ZoneInfo('Asia/Shanghai')).date().isoformat()
 
     @staticmethod
+    def _analysis_day_bounds(now: int) -> Tuple[int, int]:
+        local = datetime.fromtimestamp(now, ZoneInfo('Asia/Shanghai'))
+        started_at = int(
+            local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        )
+        return started_at, started_at + 86_400
+
+    @staticmethod
     def _positive_int(value: Any) -> Optional[int]:
         if isinstance(value, bool):
             return None
@@ -2245,7 +2296,7 @@ class ArchiveBackfillService:
         return 'analysis_pending'
 
     @staticmethod
-    def _sync(row: sqlite3.Row) -> ArchiveSync:
+    def _sync(row: sqlite3.Row, today_analyzed_count: int = 0) -> ArchiveSync:
         return ArchiveSync(
             account_id=int(row['account_id']),
             state=str(row['state']),
@@ -2273,4 +2324,5 @@ class ArchiveBackfillService:
             season_ended_at=(
                 None if row['season_ended_at'] is None else int(row['season_ended_at'])
             ),
+            today_analyzed_count=max(0, int(today_analyzed_count)),
         )

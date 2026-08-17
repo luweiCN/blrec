@@ -330,6 +330,7 @@ class FakePublicationProtocol:
         self.public_chapter_cards: Optional[Tuple[Mapping[str, Any], ...]] = None
         self.public_reply_result: Any = None
         self.add_reply_result: Any = {'code': 0, 'data': {'rpid': 501}}
+        self.chapter_result: Any = None
         self.pin_write_becomes_visible = True
         self.pinned_rpid: Optional[int] = None
         self.list_replies_result: Mapping[str, Any] = {
@@ -409,6 +410,8 @@ class FakePublicationProtocol:
         permanent: bool,
     ) -> Mapping[str, Any]:
         assert (aid, cid, permanent) == (303, 401, True)
+        if isinstance(self.chapter_result, Exception):
+            raise self.chapter_result
         self.chapter_batches.append(tuple(cards))
         self.chapter_cards = tuple(cards)
         self.chapter_calls.extend(cards)
@@ -1411,6 +1414,7 @@ async def test_definite_comment_api_error_returns_comment_to_prepared(
             account_gates=AccountWriteGate(database),
             clock=lambda: 1000,
         )
+        await database.execute('UPDATE vainglory_publications SET priority=1')
 
         for _ in range(4):
             assert await service.run_once() is True
@@ -1423,6 +1427,37 @@ async def test_definite_comment_api_error_returns_comment_to_prepared(
             await database.scalar('SELECT state FROM vainglory_publications')
             == 'paused'
         )
+        assert await database.scalar('SELECT priority FROM vainglory_publications') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_chapter_failure_records_the_rejected_operation(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        protocol.chapter_result = BiliApiError(
+            -400, '请求参数错误', operation='submit_archive_chapters'
+        )
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1_000,
+        )
+
+        for _ in range(2):
+            assert await service.run_once() is True
+
+        error = await database.scalar(
+            'SELECT error FROM vainglory_publications LIMIT 1'
+        )
+        assert error == 'B 站写入视频分段失败（-400）：请求参数错误，将自动重试'
     finally:
         await database.close()
 

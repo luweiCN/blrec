@@ -866,6 +866,23 @@ async def test_api_business_error_is_code_only_when_message_contains_secrets() -
 
 
 @pytest.mark.asyncio
+async def test_api_business_error_retains_a_safe_chinese_message() -> None:
+    response = ProtocolResponse(
+        status=200,
+        headers={},
+        body=json.dumps({'code': -400, 'message': '请求参数错误'}).encode('utf8'),
+    )
+    client = protocol_client(StaticResponseTransport(response))
+
+    with pytest.raises(BiliApiError) as error:
+        await client.archive_cards(credential_fixture(), aid=303, cid=401)
+
+    assert error.value.code == -400
+    assert error.value.operation == 'archive_cards'
+    assert error.value.public_message == '请求参数错误'
+
+
+@pytest.mark.asyncio
 async def test_bvc_business_error_retains_only_safe_part_diagnostics() -> None:
     response = ProtocolResponse(
         status=200,

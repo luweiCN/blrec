@@ -1141,12 +1141,10 @@ class BiliProtocolClient:
             return None
         return value
 
-    @staticmethod
-    def _safe_message(payload: Mapping[str, Any]) -> Optional[str]:
+    @classmethod
+    def _safe_message(cls, payload: Mapping[str, Any]) -> Optional[str]:
         message = payload.get('message') or payload.get('msg')
-        if isinstance(message, str) and message.isascii() and message.isalpha():
-            return message
-        return None
+        return cls._safe_public_text(message)
 
     @classmethod
     def _safe_error_details(cls, payload: Mapping[str, Any]) -> Mapping[str, Any]:

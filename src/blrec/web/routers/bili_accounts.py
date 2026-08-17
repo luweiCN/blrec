@@ -1,4 +1,5 @@
 import hashlib
+from dataclasses import asdict
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
@@ -135,6 +136,7 @@ class ArchiveMigrationResponse(ApiModel):
     daily_limit: int
     daily_used: int
     quota_day: Optional[str]
+    today_analyzed_count: int
 
 
 class ArchiveMigrationControlRequest(ApiModel):
@@ -163,6 +165,11 @@ class ArchiveMigrationItemResponse(ApiModel):
     target_bvid: Optional[str]
     error: Optional[str]
     updated_at: int
+
+
+class ArchiveMigrationItemPageResponse(ApiModel):
+    total: int
+    items: List[ArchiveMigrationItemResponse]
 
 
 def get_account_manager() -> AccountManager:
@@ -279,6 +286,30 @@ async def list_archive_migration_items(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
         ) from None
+
+
+@router.get(
+    '/archive-migrations/{migration_id}/item-page',
+    response_model=ArchiveMigrationItemPageResponse,
+)
+async def list_archive_migration_item_page(
+    migration_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    service: ArchiveMigrationService = Depends(get_archive_migration),
+) -> ArchiveMigrationItemPageResponse:
+    try:
+        total = await service.count_items(migration_id)
+        items = await service.list_items(migration_id, limit=limit, offset=offset)
+    except ArchiveMigrationNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+    return ArchiveMigrationItemPageResponse(
+        total=total,
+        items=[ArchiveMigrationItemResponse(**asdict(item)) for item in items],
+    )
 
 
 @router.post(

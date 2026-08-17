@@ -40,20 +40,36 @@
         <small>{{ activeTaskCount }} 个任务正在处理</small>
       </div>
     </article>
-    <article>
+    <article
+      class="summary-action"
+      role="button"
+      tabindex="0"
+      aria-label="查看处理队列"
+      (click)="openProcessingQueue()"
+      (keydown.enter)="openProcessingQueue()"
+      (keydown.space)="openProcessingQueue(); $event.preventDefault()"
+    >
       <span class="summary-icon queue"><i nz-icon nzType="ordered-list"></i></span>
       <div>
         <span>处理队列</span>
         <strong *ngIf="queue; else loadingSummary">
           {{ pendingTaskCount }} 项等待
         </strong>
-        <small>实时录播优先，历史数据使用剩余容量</small>
+        <small>手动任务与近期直播优先，历史任务使用剩余容量</small>
       </div>
     </article>
-    <article>
+    <article
+      class="summary-action"
+      role="button"
+      tabindex="0"
+      aria-label="查看历史队列"
+      (click)="openHistoryQueue()"
+      (keydown.enter)="openHistoryQueue()"
+      (keydown.space)="openHistoryQueue(); $event.preventDefault()"
+    >
       <span class="summary-icon history"><i nz-icon nzType="history"></i></span>
       <div>
-        <span>历史流水线</span>
+        <span>历史队列</span>
         <strong>{{ activeHistoryCount }} 条运行中</strong>
         <small [class.has-issue]="historyIssueCount > 0">
           {{ historyIssueCount > 0 ? historyIssueCount + " 项需要处理" : "运行正常" }}
@@ -197,7 +213,10 @@
             [nzStatus]="sync.state === 'failed' ? 'exception' : 'active'"
           ></nz-progress>
           <div class="pipeline-controls">
-            <span>今日 {{ sync.dailyUsed }}/{{ sync.dailyLimit }} 个稿件</span>
+            <span>
+              今日下载 {{ sync.dailyUsed }} · 已分析
+              {{ sync.todayAnalyzedCount }} · 上限 {{ sync.dailyLimit }}
+            </span>
             <label>
               每日上限
               <nz-input-number
@@ -319,7 +338,8 @@
           ></nz-progress>
           <div class="pipeline-controls">
             <span>
-              今日 {{ migration.dailyUsed }}/{{ migration.dailyLimit }} 个稿件
+              今日搬运 {{ migration.dailyUsed }} · 已分析
+              {{ migration.todayAnalyzedCount }} · 上限 {{ migration.dailyLimit }}
             </span>
             <label>
               每日上限
@@ -488,7 +508,7 @@
           <nz-spin nzSimple></nz-spin><span>正在读取回填记录…</span>
         </div>
         <ol *ngIf="!publicationRecordsLoading" class="publication-record-list">
-          <li *ngFor="let record of publicationRecords">
+          <li *ngFor="let record of publicationRecords; trackBy: trackPublication">
             <nz-tag [nzColor]="publicationStatusColor(record)">
               {{ record.statusLabel }}
             </nz-tag>
@@ -620,5 +640,96 @@
         placeholder="例如 Mac Studio 分析节点"
       />
     </label>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="processingQueueVisible"
+  nzTitle="处理队列"
+  [nzWidth]="760"
+  [nzFooter]="null"
+  (nzOnCancel)="processingQueueVisible = false"
+>
+  <ng-container *nzModalContent>
+    <div *ngIf="processingQueueLoading" class="loading-block large">
+      <nz-spin nzSimple></nz-spin><span>正在读取处理队列…</span>
+    </div>
+    <ol *ngIf="!processingQueueLoading" class="queue-dialog-list">
+      <li *ngFor="let item of processingQueueItems">
+        <nz-tag>{{ queueCategoryLabel(item.category) }}</nz-tag>
+        <div>
+          <strong>{{ item.title }}</strong>
+          <span>
+            {{ item.anchorName || "未知主播" }} · P{{ item.partIndex }} ·
+            {{ item.matchCount }} 局
+          </span>
+        </div>
+        <span class="queue-progress">
+          {{ item.progress * 100 | number: "1.0-0" }}%
+        </span>
+      </li>
+      <li *ngIf="processingQueueItems.length === 0" class="empty-row">
+        当前没有等待处理的任务
+      </li>
+    </ol>
+    <footer *ngIf="processingQueueTotal > queuePageSize" class="queue-dialog-footer">
+      <nz-pagination
+        [nzPageIndex]="processingQueuePage"
+        [nzPageSize]="queuePageSize"
+        [nzTotal]="processingQueueTotal"
+        [nzShowSizeChanger]="false"
+        (nzPageIndexChange)="changeProcessingQueuePage($event)"
+      ></nz-pagination>
+    </footer>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="historyQueueVisible"
+  nzTitle="历史队列"
+  [nzWidth]="820"
+  [nzFooter]="null"
+  (nzOnCancel)="historyQueueVisible = false"
+>
+  <ng-container *nzModalContent>
+    <nz-select
+      class="history-source-select"
+      nzPlaceHolder="选择历史流水线"
+      [ngModel]="historyQueueSource"
+      (ngModelChange)="selectHistoryQueueSource($event)"
+    >
+      <nz-option
+        *ngFor="let source of historyQueueSources"
+        [nzValue]="source.key"
+        [nzLabel]="source.label"
+      ></nz-option>
+    </nz-select>
+    <div *ngIf="historyQueueLoading" class="loading-block large">
+      <nz-spin nzSimple></nz-spin><span>正在读取历史任务…</span>
+    </div>
+    <ol *ngIf="!historyQueueLoading" class="queue-dialog-list history-list">
+      <li *ngFor="let item of historyQueueItems">
+        <nz-tag>{{ historyItemState(item) }}</nz-tag>
+        <div>
+          <strong>{{ historyItemTitle(item) }}</strong>
+          <span>{{ item.bvid }} · {{ historyItemDetail(item) }}</span>
+        </div>
+        <time [attr.datetime]="item.updatedAt * 1000 | date: 'yyyy-MM-ddTHH:mm:ss'">
+          {{ item.updatedAt * 1000 | date: "MM-dd HH:mm" }}
+        </time>
+      </li>
+      <li *ngIf="historyQueueItems.length === 0" class="empty-row">
+        当前流水线还没有任务
+      </li>
+    </ol>
+    <footer *ngIf="historyQueueTotal > queuePageSize" class="queue-dialog-footer">
+      <nz-pagination
+        [nzPageIndex]="historyQueuePage"
+        [nzPageSize]="queuePageSize"
+        [nzTotal]="historyQueueTotal"
+        [nzShowSizeChanger]="false"
+        (nzPageIndexChange)="changeHistoryQueuePage($event)"
+      ></nz-pagination>
+    </footer>
   </ng-container>
 </nz-modal>

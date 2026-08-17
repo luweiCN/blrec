@@ -944,8 +944,10 @@ class VaingloryIndexService:
     async def get_job(self, session_id: int) -> Optional[ScanJob]:
         return await self._repository.get_job(session_id)
 
-    async def analysis_queue_status(self) -> AnalysisQueueStatus:
-        queue = await self._repository.analysis_queue_status()
+    async def analysis_queue_status(
+        self, *, limit: int = 8, offset: int = 0
+    ) -> AnalysisQueueStatus:
+        queue = await self._repository.analysis_queue_status(limit=limit, offset=offset)
         with self._runtime_lock:
             statuses = dict(self._runtime_status)
             events = {

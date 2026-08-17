@@ -1205,7 +1205,8 @@ class VaingloryPublicationService:
             'SELECT 1 FROM archive_migration_items priority_item '
             'WHERE priority_item.upload_job_id=publication.upload_job_id) THEN 0 '
             "WHEN publication.source_kind='archive' THEN 1 ELSE 2 END,"
-            'publication.created_at,publication.id LIMIT 1'
+            'session.started_at DESC,publication.updated_at DESC,'
+            'publication.id DESC LIMIT 1'
         )
         row = await self._database.fetchone(
             work_query,
@@ -1542,7 +1543,8 @@ class VaingloryPublicationService:
             'AND paused_job.operator_paused=1) '
             'ORDER BY publication.priority DESC,CASE '
             "WHEN publication.source_kind='upload' THEN 0 ELSE 1 END,"
-            'session.started_at,publication.id LIMIT 1'
+            'publication.updated_at DESC,session.started_at DESC,'
+            'publication.id DESC LIMIT 1'
         )
         if row is None:
             return None
@@ -2299,22 +2301,29 @@ class VaingloryPublicationService:
             if error.code in self._RETRYABLE_CODES:
                 await self._handle_api_error(publication_id, publication, error)
             else:
+                action = {
+                    'archive_view': '读取稿件分 P',
+                    'public_archive_view': '读取公开稿件分 P',
+                    'archive_cards': '读取已有视频分段',
+                    'submit_archive_chapters': '写入视频分段',
+                }.get(error.operation or '', '处理视频分段')
+                detail = (
+                    ''
+                    if not error.public_message
+                    else '：{}'.format(error.public_message)
+                )
                 logger.warning(
-                    'Bilibili chapters rejected and will retry: bvid={} code={}',
+                    'Bilibili chapters rejected and will retry: '
+                    'bvid={} operation={} code={} message={}',
                     str(publication['bvid']),
+                    error.operation or 'unknown',
                     error.code,
+                    error.public_message or '',
                 )
                 await self._retry_publication(
                     publication_id,
                     int(publication['attempt_count']),
-                    'B 站章节接口拒绝写入（{}）{}，将继续重试'.format(
-                        error.code,
-                        (
-                            ''
-                            if not error.public_message
-                            else '：{}'.format(error.public_message)
-                        ),
-                    ),
+                    'B 站{}失败（{}）{}，将自动重试'.format(action, error.code, detail),
                     minimum_delay=6 * 3600,
                 )
         except ProtocolContractError:
@@ -3011,7 +3020,7 @@ class VaingloryPublicationService:
         delay = max(minimum_delay, min(6 * 3600, 2 ** min(attempt + 1, 14)))
         await self._database.execute(
             "UPDATE vainglory_publications SET state='paused',"
-            'next_attempt_at=?,error=?,updated_at=? WHERE id=?',
+            'next_attempt_at=?,error=?,priority=0,updated_at=? WHERE id=?',
             (self._now() + delay, message[:500], self._now(), publication_id),
         )
 

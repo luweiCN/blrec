@@ -2857,9 +2857,9 @@ class VaingloryRepository:
                 'WHERE all_part.session_id=job.session_id) '
                 'AS recording_duration_seconds,'
                 "CASE WHEN session.state='open' THEN 0 "
+                "WHEN job.request_kind='manual' THEN 1 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
-                'AND migration_item.id IS NULL AND session.started_at>=? THEN 1 '
-                "WHEN job.request_kind='manual' THEN 2 "
+                'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
                 'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
                 "WHEN session.started_at>=? AND (source.origin IS NULL OR ("
                 "source.origin!='archive' AND source.cache_path IS NULL)) THEN 4 "
@@ -2927,7 +2927,7 @@ class VaingloryRepository:
             return ScanClaim(
                 session_id=session_id,
                 part=part,
-                realtime=int(row['priority']) <= 1,
+                realtime=int(row['priority']) <= 2,
                 part_duration_seconds=(
                     None
                     if row['record_duration_seconds'] is None
@@ -3026,9 +3026,9 @@ class VaingloryRepository:
                 'WHERE all_part.session_id=ocr.session_id) '
                 'AS recording_duration_seconds,'
                 "CASE WHEN session.state='open' THEN 0 "
+                "WHEN job.request_kind='manual' THEN 1 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
-                'AND migration_item.id IS NULL AND session.started_at>=? THEN 1 '
-                "WHEN job.request_kind='manual' THEN 2 "
+                'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
                 'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
                 "WHEN source.origin='archive' THEN 4 ELSE 5 END AS priority,"
                 'COALESCE(archive_import.published_at,'
@@ -3215,9 +3215,13 @@ class VaingloryRepository:
         )
         return bool(value)
 
-    async def analysis_queue_status(self, *, limit: int = 8) -> AnalysisQueueStatus:
-        if not 1 <= limit <= 20:
-            raise ValueError('analysis queue limit must be between 1 and 20')
+    async def analysis_queue_status(
+        self, *, limit: int = 8, offset: int = 0
+    ) -> AnalysisQueueStatus:
+        if not 1 <= limit <= 100:
+            raise ValueError('analysis queue limit must be between 1 and 100')
+        if offset < 0:
+            raise ValueError('analysis queue offset must not be negative')
         now = self._now()
         recent_cutoff = max(1, now - self._REALTIME_WINDOW_SECONDS)
         season_start = current_season_started_at(now)
@@ -3231,9 +3235,9 @@ class VaingloryRepository:
         )
         priority_sql = (
             "CASE WHEN session.state='open' THEN 0 "
+            "WHEN job.request_kind='manual' THEN 1 "
             "WHEN (source.origin IS NULL OR source.origin!='archive') "
-            'AND migration_item.id IS NULL AND session.started_at>=? THEN 1 '
-            "WHEN job.request_kind='manual' THEN 2 "
+            'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
             'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
             "WHEN session.started_at>=? AND (source.origin IS NULL OR ("
             "source.origin!='archive' AND source.cache_path IS NULL)) THEN 4 "
@@ -3410,8 +3414,15 @@ class VaingloryRepository:
                 (recent_cutoff, recent_cutoff, season_start, season_start),
             ).fetchall()
             queued_rows = connection.execute(
-                queued_select + ' ORDER BY priority,sort_time DESC,2 LIMIT ?',
-                (recent_cutoff, recent_cutoff, season_start, season_start, limit),
+                queued_select + ' ORDER BY priority,sort_time DESC,2 LIMIT ? OFFSET ?',
+                (
+                    recent_cutoff,
+                    recent_cutoff,
+                    season_start,
+                    season_start,
+                    limit,
+                    offset,
+                ),
             ).fetchall()
             live_status = connection.execute(
                 'SELECT '
@@ -3510,7 +3521,7 @@ class VaingloryRepository:
                 "WHERE job.state='ready' AND job.completed_at IS NOT NULL "
                 'AND job.ignored_reason IS NULL '
                 'ORDER BY job.completed_at DESC,job.part_id DESC LIMIT ?',
-                (limit,),
+                (min(limit, 20),),
             ).fetchall()
             part_ids = {
                 int(row['part_id'])
@@ -4495,7 +4506,7 @@ class VaingloryRepository:
             )
         )
         order_by = (
-            'ordering_scan.completed_at DESC,session.started_at DESC,session.id DESC'
+            'ordering_scan.updated_at DESC,session.started_at DESC,session.id DESC'
             if sort_by == 'analyzed'
             else 'session.started_at DESC,session.id DESC'
         )

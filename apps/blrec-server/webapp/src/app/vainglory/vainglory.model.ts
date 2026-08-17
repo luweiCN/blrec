@@ -77,6 +77,7 @@ export interface VaingloryArchiveSync {
   readonly discoveryComplete: boolean;
   readonly seasonStartedAt: number | null;
   readonly seasonEndedAt: number | null;
+  readonly todayAnalyzedCount: number;
 }
 
 export interface VaingloryArchiveSyncControl {
@@ -129,6 +130,11 @@ export interface VaingloryArchiveBackfillItem {
   readonly publicationProgress: number;
   readonly error: string | null;
   readonly updatedAt: number;
+}
+
+export interface VaingloryArchiveBackfillItemPage {
+  readonly total: number;
+  readonly items: readonly VaingloryArchiveBackfillItem[];
 }
 
 export type VaingloryAnalysisQueueCategory =
@@ -268,6 +274,28 @@ export interface VaingloryAnalysisQueueItem {
   readonly localVideoAvailable?: boolean;
   readonly imageCount: number;
   readonly matchPreviews: readonly VaingloryAnalysisMatchPreview[];
+}
+
+export interface VaingloryAnalysisQueueSummary {
+  readonly sessionId: number;
+  readonly partId: number;
+  readonly partIndex: number;
+  readonly title: string;
+  readonly anchorName: string;
+  readonly state: 'pending' | 'analyzing';
+  readonly stage: 'video_scan' | 'ocr_waiting' | 'ocr_recognition';
+  readonly category: VaingloryAnalysisQueueCategory;
+  readonly progress: number;
+  readonly requestedAt: number;
+  readonly startedAt: number | null;
+  readonly updatedAt: number;
+  readonly matchCount: number;
+  readonly partCount: number;
+}
+
+export interface VaingloryAnalysisQueuePage {
+  readonly total: number;
+  readonly items: readonly VaingloryAnalysisQueueSummary[];
 }
 
 export interface VaingloryAnalysisWorkerStatus {

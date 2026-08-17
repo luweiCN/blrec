@@ -1179,6 +1179,38 @@ async def test_repository_prioritizes_open_recording_over_older_backlog(
 
 
 @pytest.mark.asyncio
+async def test_repository_prioritizes_manual_task_over_recent_recording(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        manual_video = tmp_path / 'manual.mp4'
+        recent_video = tmp_path / 'recent.mp4'
+        manual_video.write_bytes(b'manual')
+        recent_video.write_bytes(b'recent')
+        await seed_session(database, manual_video, session_id=1)
+        await seed_session(database, recent_video, session_id=2)
+        now = 2_000_000_000
+        await database.execute(
+            'UPDATE recording_sessions SET started_at=? WHERE id=2', (now - 60,)
+        )
+        repository = VaingloryRepository(database, clock=lambda: now)
+        await repository.discover_ready_parts()
+        await repository.request_scan(1)
+
+        status = await repository.analysis_queue_status()
+        claim = await repository.claim_next(discover=False)
+
+        assert [item.category for item in status.queued[:2]] == ['manual', 'realtime']
+        assert claim is not None
+        assert claim.session_id == 1
+        assert claim.realtime is True
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_prioritizes_published_video_without_publication_task(
     tmp_path: Path,
 ) -> None:
@@ -1829,6 +1861,73 @@ async def test_repository_lists_one_summary_per_recording_session(
         renamed = await repository.update_session_title(1, '  整场标题  ')
         assert renamed.title == '整场标题'
         assert renamed.source_title == '样本录播'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_sorts_sessions_by_latest_analysis_activity(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first-sort.mp4'
+        second = tmp_path / 'second-sort.mp4'
+        first.write_bytes(b'first')
+        second.write_bytes(b'second')
+        await seed_session(database, first, session_id=1)
+        await seed_session(database, second, session_id=2)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        assert await repository.claim_next() is not None
+        await repository.complete_part(2, (replace(analyzed_match(), part_id=2),))
+        await database.execute(
+            'UPDATE recording_sessions SET started_at=CASE id '
+            'WHEN 1 THEN 2_000 ELSE 1_000 END WHERE id IN (1,2)'
+        )
+        await database.execute(
+            "UPDATE vainglory_scan_jobs SET state='ready',completed_at=300,"
+            'updated_at=300 WHERE session_id=1'
+        )
+        await database.execute(
+            "UPDATE vainglory_scan_jobs SET state='analyzing',completed_at=NULL,"
+            'updated_at=400 WHERE session_id=2'
+        )
+
+        analyzed = await repository.list_match_sessions(sort_by='analyzed')
+        started = await repository.list_match_sessions(sort_by='started')
+
+        assert [item.session_id for item in analyzed.items] == [2, 1]
+        assert [item.session_id for item in started.items] == [1, 2]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_analysis_queue_supports_server_side_pagination(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first-queue.mp4'
+        second = tmp_path / 'second-queue.mp4'
+        first.write_bytes(b'first')
+        second.write_bytes(b'second')
+        await seed_session(database, first, session_id=1)
+        await seed_session(database, second, session_id=2)
+        repository = VaingloryRepository(database, clock=lambda: 2_000)
+        await repository.discover_ready_parts()
+
+        first_page = await repository.analysis_queue_status(limit=1, offset=0)
+        second_page = await repository.analysis_queue_status(limit=1, offset=1)
+
+        assert first_page.pending_count == 2
+        assert second_page.pending_count == 2
+        assert len(first_page.queued) == 1
+        assert len(second_page.queued) == 1
+        assert first_page.queued[0].session_id != second_page.queued[0].session_id
     finally:
         await database.close()
 

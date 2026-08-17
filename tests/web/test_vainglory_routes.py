@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from blrec.vainglory.analyzer import VideoPart
 from blrec.vainglory.archive_backfill import (
+    ArchiveBackfillItem,
     ArchiveContentReview,
     ArchiveContentReviewPage,
     ArchiveSync,
@@ -20,6 +21,8 @@ from blrec.vainglory.publication import (
     PublicationTaskStatus,
 )
 from blrec.vainglory.repository import (
+    AnalysisQueueItem,
+    AnalysisQueueStatus,
     AnchorStatsRecord,
     GameModeStatsRecord,
     HeroStatsRecord,
@@ -349,6 +352,7 @@ class FakeArchiveBackfill:
         self.requested_accounts = []
         self.requested_imports = []
         self.import_sessions: Dict[int, Optional[int]] = {}
+        self.item_requests = []
 
     async def request(self, account_id: int) -> ArchiveSync:
         self.requested_accounts.append(account_id)
@@ -382,6 +386,46 @@ class FakeArchiveBackfill:
     async def request_import_reanalysis(self, import_id: int) -> Optional[int]:
         self.requested_imports.append(import_id)
         return self.import_sessions.get(import_id)
+
+    async def count_items(self, account_id: int) -> int:
+        assert account_id == 7
+        return 21
+
+    async def list_items(
+        self, account_id: int, *, limit: int = 30, offset: int = 0
+    ) -> tuple:
+        self.item_requests.append((account_id, limit, offset))
+        return (
+            ArchiveBackfillItem(
+                id=3,
+                account_id=account_id,
+                aid=123,
+                bvid='BV1abcdefgh',
+                title='历史直播',
+                published_at=900,
+                state='queued',
+                stage='analysis_pending',
+                progress=0.5,
+                page_count=1,
+                completed_page_count=1,
+                current_page=1,
+                current_part_title='P1',
+                download_progress=1,
+                downloaded_bytes=100,
+                total_bytes=100,
+                analysis_state='pending',
+                analysis_progress=0,
+                match_count=0,
+                publication_state=None,
+                description_state=None,
+                comment_count=0,
+                confirmed_comment_count=0,
+                pin_state=None,
+                publication_progress=0,
+                error=None,
+                updated_at=1_002,
+            ),
+        )
 
     async def list_suspected_non_vainglory(
         self, *, limit: int, offset: int
@@ -930,6 +974,10 @@ def test_requests_and_reads_account_archive_backfill() -> None:
     with TestClient(application) as client:
         requested = client.post('/api/v1/vainglory/archive-syncs/7')
         status_response = client.get('/api/v1/vainglory/archive-syncs/7')
+        item_page = client.get(
+            '/api/v1/vainglory/archive-syncs/7/item-page',
+            params={'limit': 20, 'offset': 20},
+        )
 
     assert requested.status_code == 202
     assert requested.json()['state'] == 'discovering'
@@ -937,6 +985,63 @@ def test_requests_and_reads_account_archive_backfill() -> None:
     assert status_response.status_code == 200
     assert status_response.json()['progress'] == 0.25
     assert status_response.json()['discoveredCount'] == 20
+    assert item_page.status_code == 200
+    assert item_page.json()['total'] == 21
+    assert item_page.json()['items'][0]['bvid'] == 'BV1abcdefgh'
+    assert fake.item_requests == [(7, 20, 20)]
+
+
+def test_lists_the_paginated_analysis_queue() -> None:
+    service = SimpleNamespace()
+    service.analysis_queue_status = AsyncMock(
+        return_value=AnalysisQueueStatus(
+            active=(),
+            queued=(
+                AnalysisQueueItem(
+                    part_id=3,
+                    session_id=7,
+                    part_index=1,
+                    title='今天的直播',
+                    anchor_name='主播',
+                    state='pending',
+                    stage='video_scan',
+                    category='realtime',
+                    progress=0,
+                    requested_at=1_000,
+                    started_at=None,
+                    updated_at=1_001,
+                    live_started_at=900,
+                    part_duration_seconds=3_600,
+                    recording_duration_seconds=3_600,
+                    match_count=0,
+                    part_count=1,
+                    completed_part_count=0,
+                ),
+            ),
+            pending_count=21,
+            manual_pending=1,
+            realtime_pending=2,
+            archive_pending=18,
+            migration_pending=0,
+            backlog_pending=0,
+        )
+    )
+    application = FastAPI()
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[vainglory.authenticated_manager_subject] = (
+        lambda: 'manager'
+    )
+    application.dependency_overrides[vainglory.get_service] = lambda: service
+
+    with TestClient(application) as client:
+        response = client.get(
+            '/api/v1/vainglory/analysis-queue-items', params={'limit': 20, 'offset': 20}
+        )
+
+    assert response.status_code == 200
+    assert response.json()['total'] == 21
+    assert response.json()['items'][0]['category'] == 'realtime'
+    service.analysis_queue_status.assert_awaited_once_with(limit=20, offset=20)
 
 
 def test_requests_archive_import_reanalysis_and_delegates_existing_session(

@@ -16,6 +16,7 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Dict,
     List,
     Mapping,
     Optional,
@@ -123,6 +124,7 @@ class ArchiveMigrationStatus:
     daily_limit: int = _DEFAULT_DAILY_LIMIT
     daily_used: int = 0
     quota_day: Optional[str] = None
+    today_analyzed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -665,19 +667,35 @@ class ArchiveMigrationService:
         )
         if row is None:
             raise ArchiveMigrationNotFound('稿件迁移任务不存在')
-        return self._status(row)
+        counts = await self._today_analyzed_counts()
+        return self._status(row, counts.get(int(migration_id), 0))
 
     async def list_statuses(self) -> Tuple[ArchiveMigrationStatus, ...]:
         rows = await self._database.fetchall(
             _STATUS_SELECT + ' ORDER BY job.requested_at DESC,job.id DESC'
         )
-        return tuple(self._status(row) for row in rows)
+        counts = await self._today_analyzed_counts()
+        return tuple(self._status(row, counts.get(int(row['id']), 0)) for row in rows)
+
+    async def _today_analyzed_counts(self) -> Dict[int, int]:
+        started_at, ended_at = self._analysis_day_bounds(self._now())
+        rows = await self._database.fetchall(
+            'SELECT item.migration_id,COUNT(DISTINCT item.id) AS count '
+            'FROM archive_migration_items item '
+            'JOIN vainglory_scan_jobs scan ON scan.session_id=item.session_id '
+            "WHERE scan.state='ready' AND scan.completed_at>=? "
+            'AND scan.completed_at<? GROUP BY item.migration_id',
+            (started_at, ended_at),
+        )
+        return {int(row['migration_id']): int(row['count']) for row in rows}
 
     async def list_items(
-        self, migration_id: int, *, limit: int = 100
+        self, migration_id: int, *, limit: int = 100, offset: int = 0
     ) -> Tuple[ArchiveMigrationItem, ...]:
         if not 1 <= int(limit) <= 200:
             raise ValueError('稿件明细数量必须在 1 到 200 之间')
+        if int(offset) < 0:
+            raise ValueError('稿件明细偏移量不能为负数')
         if (
             await self._database.scalar(
                 'SELECT 1 FROM archive_migration_jobs WHERE id=?', (int(migration_id),)
@@ -705,10 +723,26 @@ class ArchiveMigrationService:
             "ORDER BY CASE item.state WHEN 'downloading' THEN 0 "
             "WHEN 'creating_task' THEN 1 ELSE 2 END,"
             'CASE WHEN item.published_at IS NULL THEN 1 ELSE 0 END,'
-            'item.published_at DESC,item.id DESC LIMIT ?',
-            (int(migration_id), int(limit)),
+            'item.published_at DESC,item.id DESC LIMIT ? OFFSET ?',
+            (int(migration_id), int(limit), int(offset)),
         )
         return tuple(self._item(row) for row in rows)
+
+    async def count_items(self, migration_id: int) -> int:
+        if (
+            await self._database.scalar(
+                'SELECT 1 FROM archive_migration_jobs WHERE id=?', (int(migration_id),)
+            )
+            != 1
+        ):
+            raise ArchiveMigrationNotFound('稿件迁移任务不存在')
+        return int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM archive_migration_items WHERE migration_id=?',
+                (int(migration_id),),
+            )
+            or 0
+        )
 
     async def update_control(
         self,
@@ -1420,7 +1454,9 @@ class ArchiveMigrationService:
         return result.st_size if path.is_file() and result.st_size > 0 else None
 
     @staticmethod
-    def _status(row: sqlite3.Row) -> ArchiveMigrationStatus:
+    def _status(
+        row: sqlite3.Row, today_analyzed_count: int = 0
+    ) -> ArchiveMigrationStatus:
         return ArchiveMigrationStatus(
             id=int(row['id']),
             source_uid=int(row['source_uid']),
@@ -1445,6 +1481,7 @@ class ArchiveMigrationService:
             daily_limit=int(row['daily_limit_override'] or row['daily_limit']),
             daily_used=int(row['daily_used']),
             quota_day=(None if row['quota_day'] is None else str(row['quota_day'])),
+            today_analyzed_count=max(0, int(today_analyzed_count)),
         )
 
     @staticmethod
@@ -1498,6 +1535,14 @@ class ArchiveMigrationService:
     @staticmethod
     def _quota_day(now: int) -> str:
         return datetime.fromtimestamp(now, ZoneInfo('Asia/Shanghai')).date().isoformat()
+
+    @staticmethod
+    def _analysis_day_bounds(now: int) -> Tuple[int, int]:
+        local = datetime.fromtimestamp(now, ZoneInfo('Asia/Shanghai'))
+        started_at = int(
+            local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        )
+        return started_at, started_at + 86_400
 
 
 def _positive_int(value: Any) -> Optional[int]:

@@ -163,6 +163,28 @@ class PublicationRecordPageResponse(ApiModel):
     items: List[PublicationRecordResponse]
 
 
+class AnalysisQueueItemResponse(ApiModel):
+    session_id: int
+    part_id: int
+    part_index: int
+    title: str
+    anchor_name: str
+    state: str
+    stage: str
+    category: str
+    progress: float
+    requested_at: int
+    started_at: Optional[int]
+    updated_at: int
+    match_count: int
+    part_count: int
+
+
+class AnalysisQueuePageResponse(ApiModel):
+    total: int
+    items: List[AnalysisQueueItemResponse]
+
+
 class AnalysisTimelineSegmentRequest(ApiModel):
     start_ms: int = Field(..., ge=0)
     end_ms: int = Field(..., ge=0)
@@ -583,6 +605,7 @@ class ArchiveSyncResponse(ApiModel):
     discovery_complete: bool
     season_started_at: Optional[int]
     season_ended_at: Optional[int]
+    today_analyzed_count: int
 
 
 class ArchiveSyncControlRequest(ApiModel):
@@ -618,6 +641,11 @@ class ArchiveBackfillItemResponse(ApiModel):
     publication_progress: float
     error: Optional[str]
     updated_at: int
+
+
+class ArchiveBackfillItemPageResponse(ApiModel):
+    total: int
+    items: List[ArchiveBackfillItemResponse]
 
 
 class ArchiveContentReviewResponse(ApiModel):
@@ -1003,6 +1031,38 @@ async def list_analysis_workers(
             for worker in await index.list_analysis_workers()
         ]
     }
+
+
+@router.get('/analysis-queue-items', response_model=AnalysisQueuePageResponse)
+async def list_analysis_queue_items(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> AnalysisQueuePageResponse:
+    queue = await index.analysis_queue_status(limit=limit, offset=offset)
+    return AnalysisQueuePageResponse(
+        total=queue.pending_count,
+        items=[
+            AnalysisQueueItemResponse(
+                session_id=item.session_id,
+                part_id=item.part_id,
+                part_index=item.part_index,
+                title=item.title,
+                anchor_name=item.anchor_name,
+                state=item.state,
+                stage=item.stage,
+                category=item.category,
+                progress=item.progress,
+                requested_at=item.requested_at,
+                started_at=item.started_at,
+                updated_at=item.updated_at,
+                match_count=item.match_count,
+                part_count=item.part_count,
+            )
+            for item in queue.queued
+        ],
+    )
 
 
 @router.post('/workers', status_code=status.HTTP_201_CREATED)
@@ -1430,6 +1490,29 @@ async def list_archive_sync_items(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
         ) from None
+
+
+@router.get(
+    '/archive-syncs/{account_id}/item-page',
+    response_model=ArchiveBackfillItemPageResponse,
+)
+async def list_archive_sync_item_page(
+    account_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    backfill: ArchiveBackfillService = Depends(get_archive_backfill),
+) -> ArchiveBackfillItemPageResponse:
+    try:
+        total = await backfill.count_items(account_id)
+        items = await backfill.list_items(account_id, limit=limit, offset=offset)
+    except ArchiveBackfillNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+    return ArchiveBackfillItemPageResponse(
+        total=total, items=[_archive_backfill_item(item) for item in items]
+    )
 
 
 @router.get('/archive-content-reviews', response_model=ArchiveContentReviewListResponse)

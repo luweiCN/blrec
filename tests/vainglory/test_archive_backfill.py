@@ -336,6 +336,66 @@ async def test_manual_archive_reanalysis_returns_an_existing_session(
 
 
 @pytest.mark.asyncio
+async def test_archive_status_counts_only_analysis_completed_today(
+    tmp_path: Path,
+) -> None:
+    now = 1_000_000
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            'INSERT INTO vainglory_archive_syncs('
+            'account_id,state,progress,discovered_count,completed_count,error,'
+            'requested_at,updated_at) '
+            "VALUES(1,'running',0,2,0,NULL,1,1)"
+        )
+        for session_id, completed_at in ((1, now - 100), (2, now - 86_400)):
+            await database.execute(
+                'INSERT INTO recording_sessions('
+                'id,room_id,broadcast_session_key,state,started_at,title) '
+                "VALUES(?,100,?,'closed',1,'历史直播')",
+                (session_id, 'archive:{}'.format(session_id)),
+            )
+            await database.execute(
+                'INSERT INTO vainglory_archive_imports('
+                'id,account_id,aid,bvid,title,session_id,state,progress,'
+                'page_count,completed_page_count,created_at,updated_at) '
+                "VALUES(?,?,?,?,'历史直播',?,'ready',1,1,1,1,1)",
+                (
+                    session_id,
+                    1,
+                    100 + session_id,
+                    'BV1abcdefg{}'.format(session_id),
+                    session_id,
+                ),
+            )
+            await database.execute(
+                'INSERT INTO vainglory_scan_jobs('
+                'session_id,state,progress,algorithm_version,match_count,error,'
+                'requested_at,started_at,completed_at,updated_at) '
+                "VALUES(?,'ready',1,1,0,NULL,1,1,?,?)",
+                (session_id, completed_at, completed_at),
+            )
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: now,
+        )
+
+        status = await service.status(1)
+
+        assert status.today_analyzed_count == 1
+        assert await service.count_items(1) == 2
+        page = await service.list_items(1, limit=1, offset=1)
+        assert [item.id for item in page] == [1]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_manual_archive_reanalysis_does_not_interrupt_active_import(
     tmp_path: Path,
 ) -> None:

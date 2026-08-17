@@ -768,7 +768,10 @@ async def test_scan_task_log_includes_part_and_recording_durations(
             self.candidate_count = candidate_count
             self.completed.append((part_id, matches))
 
-        async def analysis_queue_status(self) -> AnalysisQueueStatus:
+        async def analysis_queue_status(
+            self, *, limit: int = 8, offset: int = 0
+        ) -> AnalysisQueueStatus:
+            assert (limit, offset) == (8, 0)
             recent_completions = (
                 ()
                 if not self.completed

@@ -282,6 +282,23 @@ describe('VaingloryService', () => {
     const status = http.expectOne('/api/v1/vainglory/archive-syncs/7');
     expect(status.request.method).toBe('GET');
     status.flush({ accountId: 7, state: 'running' });
+
+    service.listArchiveSyncItemPage(7, 20, 40).subscribe();
+    const page = http.expectOne(
+      '/api/v1/vainglory/archive-syncs/7/item-page?limit=20&offset=40',
+    );
+    expect(page.request.method).toBe('GET');
+    page.flush({ total: 0, items: [] });
+  });
+
+  it('loads one page of waiting analysis tasks', () => {
+    service.listAnalysisQueueItems(20, 40).subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/vainglory/analysis-queue-items?limit=20&offset=40',
+    );
+    expect(request.request.method).toBe('GET');
+    request.flush({ total: 0, items: [] });
   });
 
   it('lists suspected non-Vainglory public archives', () => {

@@ -42,6 +42,7 @@ class FakeArchiveMigration:
     request_error: Optional[Exception] = None
     requested: Optional[tuple] = None
     retried: Optional[tuple] = None
+    item_request: Optional[tuple] = None
 
     async def request(
         self, *, source_uid: int, download_account_id: int, target_account_id: int
@@ -54,8 +55,15 @@ class FakeArchiveMigration:
     async def list_statuses(self) -> tuple:
         return (self.status(),)
 
-    async def list_items(self, migration_id: int, *, limit: int = 100) -> tuple:
-        assert limit == 100
+    async def count_items(self, migration_id: int) -> int:
+        if migration_id != 9:
+            raise ArchiveMigrationNotFound('稿件迁移任务不存在')
+        return 21
+
+    async def list_items(
+        self, migration_id: int, *, limit: int = 100, offset: int = 0
+    ) -> tuple:
+        self.item_request = (migration_id, limit, offset)
         if migration_id != 9:
             raise ArchiveMigrationNotFound('稿件迁移任务不存在')
         return (
@@ -363,6 +371,11 @@ def test_archive_migration_can_be_requested_and_polled(
     items = client.get(
         '/api/v1/bili-accounts/archive-migrations/9/items', headers=auth_headers()
     )
+    item_page = client.get(
+        '/api/v1/bili-accounts/archive-migrations/9/item-page',
+        headers=auth_headers(),
+        params={'limit': 20, 'offset': 20},
+    )
     retried = client.post(
         '/api/v1/bili-accounts/archive-migrations/9/items/12/retry',
         headers=auth_headers(),
@@ -398,6 +411,10 @@ def test_archive_migration_can_be_requested_and_polled(
         'error': None,
         'updatedAt': 1_700_000_100,
     }
+    assert item_page.status_code == 200
+    assert item_page.json()['total'] == 21
+    assert item_page.json()['items'][0]['bvid'] == 'BV1wQSSBvEqY'
+    assert migration.item_request == (9, 20, 20)
     assert retried.status_code == 202
     assert retried.json()['id'] == 9
     assert migration.retried == (9, 12)

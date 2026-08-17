@@ -8,11 +8,13 @@ import {
   GameMode,
   VaingloryAnchorStats,
   VaingloryArchiveBackfillItem,
+  VaingloryArchiveBackfillItemPage,
   VaingloryHero,
   VaingloryHeroStats,
   VaingloryArchiveSync,
   VaingloryArchiveSyncControl,
   VaingloryAnalysisWorkerNodeStatus,
+  VaingloryAnalysisQueuePage,
   VaingloryArchiveContentReviewList,
   VaingloryMatch,
   VaingloryMatchFilters,
@@ -215,6 +217,18 @@ export class VaingloryService {
     return this.http.get<{
       readonly workers: readonly VaingloryAnalysisWorkerNodeStatus[];
     }>(this.url.makeApiUrl('/api/v1/vainglory/workers'));
+  }
+
+  listAnalysisQueueItems(
+    limit = 20,
+    offset = 0,
+  ): Observable<VaingloryAnalysisQueuePage> {
+    return this.http.get<VaingloryAnalysisQueuePage>(
+      this.url.makeApiUrl('/api/v1/vainglory/analysis-queue-items'),
+      {
+        params: new HttpParams().set('limit', limit).set('offset', offset),
+      },
+    );
   }
 
   addAnalysisWorker(
@@ -483,6 +497,21 @@ export class VaingloryService {
         `/api/v1/vainglory/archive-syncs/${accountId}/items`,
       ),
       { params: new HttpParams().set('limit', limit) },
+    );
+  }
+
+  listArchiveSyncItemPage(
+    accountId: number,
+    limit = 20,
+    offset = 0,
+  ): Observable<VaingloryArchiveBackfillItemPage> {
+    return this.http.get<VaingloryArchiveBackfillItemPage>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/archive-syncs/${accountId}/item-page`,
+      ),
+      {
+        params: new HttpParams().set('limit', limit).set('offset', offset),
+      },
     );
   }
 

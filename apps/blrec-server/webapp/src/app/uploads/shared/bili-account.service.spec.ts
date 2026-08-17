@@ -135,6 +135,13 @@ describe('BiliAccountService', () => {
     expect(request.request.method).toBe('GET');
     request.flush([]);
 
+    service.listArchiveMigrationItemPage(9, 20, 40).subscribe();
+    request = http.expectOne(
+      '/api/v1/bili-accounts/archive-migrations/9/item-page?limit=20&offset=40'
+    );
+    expect(request.request.method).toBe('GET');
+    request.flush({ total: 0, items: [] });
+
     service.retryArchiveMigrationItem(9, 12).subscribe();
     request = http.expectOne(
       '/api/v1/bili-accounts/archive-migrations/9/items/12/retry'
