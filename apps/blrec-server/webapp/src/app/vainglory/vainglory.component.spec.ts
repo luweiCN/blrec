@@ -1,10 +1,13 @@
 import { ChangeDetectorRef } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 
-import { NEVER, of, throwError } from 'rxjs';
+import { NEVER, of, Subject, throwError } from 'rxjs';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
-import { RealtimeService } from '../core/services/realtime.service';
+import {
+  RealtimeEvent,
+  RealtimeService,
+} from '../core/services/realtime.service';
 import { TaskService } from '../tasks/shared/services/task.service';
 import {
   RecordingSessionDetail,
@@ -18,6 +21,7 @@ import {
   ArchiveBackfillStage,
   VaingloryArchiveBackfillItem,
   VaingloryArchiveSync,
+  VaingloryIndexRealtimeSnapshot,
   VaingloryMatch,
   VaingloryMatchSession,
   VaingloryPlayer,
@@ -85,6 +89,51 @@ function scanJob(sessionId: number): VaingloryScanJob {
     originalPartCount: 1,
     ignoredPartCount: 0,
     ignoredPartReasons: [],
+  };
+}
+
+function indexSnapshot(matchCount: number): VaingloryIndexRealtimeSnapshot {
+  return {
+    sampledAt: matchCount,
+    analysisQueue: {
+      workerState: 'running',
+      worker: {
+        state: 'running',
+        remoteEnabled: true,
+        workerId: 'mac-studio',
+        modelPackageId: 'vg-vision-v1',
+        pipelineVersion: 'timeline-v2',
+        lastSeenAt: matchCount,
+      },
+      workers: [],
+      active: [],
+      queued: [],
+      recentCompletions: [],
+      pendingCount: 0,
+      manualPending: 0,
+      realtimePending: 0,
+      archivePending: 0,
+      migrationPending: 0,
+      backlogPending: 0,
+      liveStreamCount: 0,
+      liveRunningCount: 0,
+      livePendingWindowCount: 0,
+      liveSampleCount: 0,
+      liveProvisionalMatchCount: 0,
+      liveLastObservedAt: null,
+      liveItems: [],
+    },
+    indexSummary: {
+      matchCount,
+      sessionCount: 1,
+      anchorCount: 1,
+      unassignedSessionCount: 0,
+      winCount: matchCount,
+      lossCount: 0,
+      unknownCount: 0,
+      playerSlotCount: matchCount * 6,
+      recognizedHeroCount: matchCount * 6,
+    },
   };
 }
 
@@ -225,6 +274,7 @@ describe('VaingloryComponent remote media', () => {
   let vainglory: jasmine.SpyObj<VaingloryService>;
   let accounts: jasmine.SpyObj<BiliAccountService>;
   let tasks: jasmine.SpyObj<TaskService>;
+  let realtimeEvents: Subject<RealtimeEvent>;
 
   beforeEach(() => {
     vainglory = jasmine.createSpyObj<VaingloryService>('VaingloryService', [
@@ -266,6 +316,7 @@ describe('VaingloryComponent remote media', () => {
       ['getSession', 'requestRemoteMedia', 'getRemoteMediaStatus'],
     );
     vainglory.listAnchorStats.and.returnValue(of([]));
+    vainglory.listHeroes.and.returnValue(of([]));
     vainglory.listZeroMatchSessions.and.returnValue(
       of({ total: 0, items: [] }),
     );
@@ -297,6 +348,7 @@ describe('VaingloryComponent remote media', () => {
       'getAllTaskData',
     ]);
     tasks.getAllTaskData.and.returnValue(of([]));
+    realtimeEvents = new Subject<RealtimeEvent>();
     const route = {
       queryParamMap: NEVER,
     } as Pick<ActivatedRoute, 'queryParamMap'>;
@@ -313,7 +365,9 @@ describe('VaingloryComponent remote media', () => {
       router,
       accounts,
       tasks,
-      { events$: NEVER } as Pick<RealtimeService, 'events$'> as RealtimeService,
+      {
+        events$: realtimeEvents.asObservable(),
+      } as Pick<RealtimeService, 'events$'> as RealtimeService,
     );
   });
 
@@ -591,6 +645,57 @@ describe('VaingloryComponent remote media', () => {
       state: 'ready',
       items: [match()],
     });
+  });
+
+  it('keeps an open session detail stable when the realtime index changes', () => {
+    const summary: VaingloryMatchSession = {
+      sessionId: 9,
+      title: '直播标题',
+      sourceTitle: '原始直播标题',
+      anchorName: '主播',
+      startedAt: 1_000,
+      liveStartedAt: 1_000,
+      partCount: 1,
+      originalPartCount: 1,
+      ignoredPartCount: 0,
+      recordingDurationSeconds: 585,
+      matchCount: 1,
+      tealWinCount: 1,
+      orangeWinCount: 0,
+      winCount: 1,
+      lossCount: 0,
+      unknownCount: 0,
+      surrenderCount: 0,
+      durationSeconds: 585,
+      gameModes: ['3v3'],
+      publicationState: null,
+      descriptionState: null,
+      pinState: null,
+      chapterState: null,
+      publicationPriority: false,
+      publicationUpdatedAt: null,
+    };
+    const loadedMatch = match();
+    vainglory.listMatches.and.returnValues(
+      of({ total: 1, items: [loadedMatch] }),
+      NEVER,
+    );
+    vainglory.listMatchSessions.and.returnValue(
+      of({ total: 1, items: [summary] }),
+    );
+    component.ngOnInit();
+    component.openSessionDetails(summary);
+
+    realtimeEvents.next({ type: 'vainglory_index', data: indexSnapshot(1) });
+    realtimeEvents.next({ type: 'vainglory_index', data: indexSnapshot(2) });
+
+    expect(vainglory.listMatchSessions).toHaveBeenCalledTimes(1);
+    expect(vainglory.listMatches).toHaveBeenCalledTimes(1);
+    expect(component.detailsFor(9)).toEqual({
+      state: 'ready',
+      items: [loadedMatch],
+    });
+    component.ngOnDestroy();
   });
 
   it('saves one title for the whole recording session', () => {

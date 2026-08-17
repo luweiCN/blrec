@@ -2926,9 +2926,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (shouldRefreshLists) {
       this.loadSessions(true);
       this.loadZeroMatchSessions(true);
-      if (this.detailsDrawerVisible && this.selectedSession !== null) {
-        this.loadSessionDetails(this.selectedSession.sessionId);
-      }
     }
     this.changeDetector.markForCheck();
   }
