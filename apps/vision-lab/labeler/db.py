@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime
@@ -876,17 +877,32 @@ def _migrate_training_review_player_slot(conn: sqlite3.Connection) -> None:
 
 
 def repair_managed_paths(conn: sqlite3.Connection) -> Dict[str, int]:
-    """修复目录重组后仍指向旧工作目录的帧路径。
+    """修复迁移到 NAS 后仍指向旧工作目录的受管文件路径。
 
-    只在原路径已经失效、且当前 Vision Lab 目录下能按 SHA-256 找到同名
-    文件时更新。帧 ID、哈希、标注和数据集版本均保持不变。
+    只在原路径已经失效、且当前工作目录存在对应文件时更新。记录按工作目录
+    区分，因此同一份数据库从 Mac 搬到 /data 后会执行一次，而不会每次连接扫描。
     """
-    migration_id = 'managed-frame-paths-v1'
+    workspace_key = hashlib.sha256(
+        str(config.WORK_DIR.resolve()).encode('utf-8')
+    ).hexdigest()[:12]
+    migration_id = f'managed-workspace-paths-v2-{workspace_key}'
     if conn.execute(
         'SELECT 1 FROM workspace_migrations WHERE id = ?', (migration_id,)
     ).fetchone():
-        return {'frames': 0, 'thumbs': 0}
-    repaired = {'frames': 0, 'thumbs': 0}
+        return {
+            'frames': 0,
+            'thumbs': 0,
+            'datasets': 0,
+            'training_runs': 0,
+            'model_packages': 0,
+        }
+    repaired = {
+        'frames': 0,
+        'thumbs': 0,
+        'datasets': 0,
+        'training_runs': 0,
+        'model_packages': 0,
+    }
     rows = conn.execute(
         "SELECT id, sha256, frame_path, thumb_path FROM frames "
         "WHERE frame_path != '' OR thumb_path != ''"
@@ -917,8 +933,62 @@ def repair_managed_paths(conn: sqlite3.Connection) -> Dict[str, int]:
                 f'UPDATE frames SET {assignments} WHERE id = ?',
                 [*updates.values(), int(row['id'])],
             )
+    for row in conn.execute('SELECT id, manifest_path FROM dataset_versions'):
+        current = Path(str(row['manifest_path'] or ''))
+        managed = config.EXPORT_DIR / str(row['id']) / 'samples.jsonl'
+        if (
+            str(row['manifest_path'] or '')
+            and not current.is_file()
+            and managed.is_file()
+        ):
+            conn.execute(
+                'UPDATE dataset_versions SET manifest_path = ? WHERE id = ?',
+                (str(managed), str(row['id'])),
+            )
+            repaired['datasets'] += 1
+    for row in conn.execute(
+        'SELECT id, log_path, artifact_path, published_path FROM training_runs'
+    ):
+        updates = {}
+        run_dir = config.WORK_DIR / 'training-runs' / str(row['id'])
+        for column, fallback in (
+            ('log_path', 'train.log'),
+            ('artifact_path', 'model.onnx'),
+        ):
+            raw = str(row[column] or '')
+            if not raw or Path(raw).is_file():
+                continue
+            managed = run_dir / (Path(raw).name or fallback)
+            if managed.is_file():
+                updates[column] = str(managed)
+        published = str(row['published_path'] or '')
+        if published and not Path(published).is_file():
+            managed = config.MODELS_DIR / Path(published).name
+            if managed.is_file():
+                updates['published_path'] = str(managed)
+        if updates:
+            assignments = ', '.join(f'{column} = ?' for column in updates)
+            conn.execute(
+                f'UPDATE training_runs SET {assignments} WHERE id = ?',
+                [*updates.values(), str(row['id'])],
+            )
+            repaired['training_runs'] += 1
+    for row in conn.execute('SELECT id, path FROM model_packages'):
+        current = Path(str(row['path'] or ''))
+        if current.exists():
+            continue
+        package_id = str(row['id'])
+        managed_dir = config.WORK_DIR / 'model-packages' / package_id
+        managed_zip = config.WORK_DIR / 'model-packages' / f'{package_id}.zip'
+        managed = managed_dir if managed_dir.is_dir() else managed_zip
+        if managed.exists():
+            conn.execute(
+                'UPDATE model_packages SET path = ? WHERE id = ?',
+                (str(managed), package_id),
+            )
+            repaired['model_packages'] += 1
     conn.execute(
-        'INSERT INTO workspace_migrations (id, applied_at, detail_json) '
+        'INSERT OR IGNORE INTO workspace_migrations (id, applied_at, detail_json) '
         'VALUES (?, ?, ?)',
         (migration_id, now(), json.dumps(repaired, ensure_ascii=False)),
     )

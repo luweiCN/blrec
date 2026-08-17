@@ -2,7 +2,7 @@
 
 FROM python:3.12-slim-bookworm AS wheel-builder
 WORKDIR /build
-COPY apps/vision-lab ./apps/vision-lab
+COPY . ./apps/vision-lab
 RUN python -m pip install --no-cache-dir build && \
     python -m build --wheel --outdir /wheels apps/vision-lab
 

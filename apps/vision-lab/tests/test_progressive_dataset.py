@@ -15,16 +15,25 @@ class TestManagedPathMigration(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.old_work_dir = config.WORK_DIR
         self.old_frame_dir = config.FRAME_DIR
         self.old_thumb_dir = config.THUMB_DIR
+        self.old_export_dir = config.EXPORT_DIR
+        self.old_models_dir = config.MODELS_DIR
+        config.WORK_DIR = self.root
         config.FRAME_DIR = self.root / 'frames'
         config.THUMB_DIR = self.root / 'thumbs'
+        config.EXPORT_DIR = self.root / 'datasets'
+        config.MODELS_DIR = self.root / 'models'
         self.conn = db.connect(self.root / 'lab.db')
 
     def tearDown(self):
         self.conn.close()
+        config.WORK_DIR = self.old_work_dir
         config.FRAME_DIR = self.old_frame_dir
         config.THUMB_DIR = self.old_thumb_dir
+        config.EXPORT_DIR = self.old_export_dir
+        config.MODELS_DIR = self.old_models_dir
         self.tmp.cleanup()
 
     def test_only_missing_old_paths_are_repaired_by_sha(self):
@@ -61,15 +70,92 @@ class TestManagedPathMigration(unittest.TestCase):
         (config.FRAME_DIR / f'{sha}.jpg').write_bytes(b'frame')
         (config.THUMB_DIR / f'{sha}.jpg').write_bytes(b'thumb')
         self.conn.execute(
-            "DELETE FROM workspace_migrations WHERE id = 'managed-frame-paths-v1'"
+            "DELETE FROM workspace_migrations "
+            "WHERE id LIKE 'managed-workspace-paths-v2-%'"
         )
 
         repaired = db.repair_managed_paths(self.conn)
         frame = db.get_frame(self.conn, frame_id)
 
-        self.assertEqual(repaired, {'frames': 1, 'thumbs': 1})
+        self.assertEqual(
+            repaired,
+            {
+                'frames': 1,
+                'thumbs': 1,
+                'datasets': 0,
+                'training_runs': 0,
+                'model_packages': 0,
+            },
+        )
         self.assertEqual(frame['frame_path'], str(config.FRAME_DIR / f'{sha}.jpg'))
         self.assertEqual(frame['thumb_path'], str(config.THUMB_DIR / f'{sha}.jpg'))
+
+    def test_dataset_training_and_package_paths_follow_new_workspace(self):
+        dataset_dir = config.EXPORT_DIR / 'match-flow-v1'
+        dataset_dir.mkdir(parents=True)
+        manifest = dataset_dir / 'samples.jsonl'
+        manifest.write_text('{}\n', encoding='utf-8')
+        db.create_dataset_version(
+            self.conn,
+            version_id='match-flow-v1',
+            task_id='match_flow',
+            filter_json={},
+            counts={'total': 1},
+            manifest_path='/old/data/datasets/match-flow-v1/samples.jsonl',
+        )
+        run_dir = config.WORK_DIR / 'training-runs' / 'match-flow-run-1'
+        run_dir.mkdir(parents=True)
+        artifact = run_dir / 'model.onnx'
+        log = run_dir / 'train.log'
+        artifact.write_bytes(b'model')
+        log.write_text('done', encoding='utf-8')
+        db.create_training_run(
+            self.conn,
+            run_id='match-flow-run-1',
+            task_id='match_flow',
+            dataset_version_id='match-flow-v1',
+            epochs=1,
+            config_json={},
+            log_path='/old/data/training-runs/match-flow-run-1/train.log',
+        )
+        db.update_training_run(
+            self.conn,
+            'match-flow-run-1',
+            status='succeeded',
+            artifact_path='/old/data/training-runs/match-flow-run-1/model.onnx',
+        )
+        package = config.WORK_DIR / 'model-packages' / 'package-v1.zip'
+        package.parent.mkdir(parents=True)
+        package.write_bytes(b'zip')
+        db.create_model_package(
+            self.conn,
+            package_id='package-v1',
+            status='ready',
+            path='/old/data/model-packages/package-v1',
+            manifest={'package_id': 'package-v1'},
+        )
+        self.conn.execute(
+            "DELETE FROM workspace_migrations "
+            "WHERE id LIKE 'managed-workspace-paths-v2-%'"
+        )
+
+        repaired = db.repair_managed_paths(self.conn)
+        dataset = self.conn.execute(
+            'SELECT manifest_path FROM dataset_versions WHERE id = ?',
+            ('match-flow-v1',),
+        ).fetchone()
+        run = db.get_training_run(self.conn, 'match-flow-run-1')
+        model_package = self.conn.execute(
+            'SELECT path FROM model_packages WHERE id = ?', ('package-v1',)
+        ).fetchone()
+
+        self.assertEqual(repaired['datasets'], 1)
+        self.assertEqual(repaired['training_runs'], 1)
+        self.assertEqual(repaired['model_packages'], 1)
+        self.assertEqual(dataset['manifest_path'], str(manifest))
+        self.assertEqual(run['artifact_path'], str(artifact))
+        self.assertEqual(run['log_path'], str(log))
+        self.assertEqual(model_package['path'], str(package))
 
 
 class TestScreenStateSnapshot(unittest.TestCase):

@@ -175,6 +175,7 @@ def _require_local_heavy_operation(name: str) -> None:
 @app.get('/api/config')
 def api_config() -> Dict[str, Any]:
     return {
+        'version': __version__,
         'content_families': config.CONTENT_FAMILIES,
         'non_vainglory_types': config.NON_VAINGLORY_TYPES,
         'game_stages': config.GAME_STAGES,

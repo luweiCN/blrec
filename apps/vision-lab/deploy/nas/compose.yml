@@ -1,0 +1,20 @@
+services:
+  vision-lab:
+    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.2}
+    container_name: blrec-vision-lab
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - ${VISION_LAB_ENV_FILE:-/volume1/docker/blrec-next/vision-lab/workspace/.env}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      VISION_LAB_HOST: 0.0.0.0
+      VISION_LAB_PORT: '8800'
+      VISION_LAB_DATA_DIR: /data
+      VISION_LAB_CANDIDATE_LOCAL_DIR: /candidates
+      VISION_LAB_SYNC_RESULT_ARCHIVE: '0'
+      VISION_LAB_CONTROL_PLANE_ONLY: '1'
+    volumes:
+      - /volume1/docker/blrec-next/vision-lab/data:/data
+      - /volume1/docker/blrec-next/vision-data/candidates:/candidates
+      - /volume1/docker/blrec-next/vision-models:/published-models
