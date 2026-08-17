@@ -54,7 +54,7 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     test = (WORKFLOWS / 'test-vision-lab.yml').read_text(encoding='utf8')
     release = (WORKFLOWS / 'release-vision-lab.yml').read_text(encoding='utf8')
     assert 'working-directory: apps/vision-lab' in test
-    assert "python-version: '3.14'" in test
+    assert "python-version: '3.12'" in test
     assert 'python -m unittest discover' in test
     assert 'python -m build' in test
     assert "tags: ['vision-lab-v*.*.*']" in release
