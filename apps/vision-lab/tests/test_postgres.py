@@ -50,6 +50,18 @@ class PostgresCompatibilityTests(unittest.TestCase):
             with self.subTest(schema=schema), self.assertRaises(ValueError):
                 postgres.validate_schema_name(schema)
 
+    def test_migration_digest_does_not_depend_on_database_sort_order(self) -> None:
+        rows = [
+            ('-卢伟-', 'hud', 0.25),
+            ('IICelery', 'result', 0.5),
+            ('忧郁的乌贼娘', 'scoreboard', 0.75),
+        ]
+
+        forward = postgres._rows_digest(iter(rows))
+        reverse = postgres._rows_digest(iter(reversed(rows)))
+
+        self.assertEqual(forward, reverse)
+
     def test_sqlite_remains_the_default_for_local_tests(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             connection = db.connect_sqlite(Path(temporary) / 'lab.db')

@@ -471,14 +471,24 @@ def _hash_value(digest: Any, value: Any) -> None:
     digest.update(payload)
 
 
-def _rows_digest(rows: Iterator[Sequence[Any]]) -> Tuple[int, str]:
+def _row_digest(row: Sequence[Any]) -> bytes:
     digest = hashlib.sha256()
-    count = 0
-    for row in rows:
-        count += 1
-        for value in row:
-            _hash_value(digest, value)
-    return count, digest.hexdigest()
+    for value in row:
+        _hash_value(digest, value)
+    return digest.digest()
+
+
+def _row_hashes_digest(row_hashes: Sequence[bytes]) -> str:
+    digest = hashlib.sha256()
+    for row_hash in sorted(row_hashes):
+        digest.update(row_hash)
+    return digest.hexdigest()
+
+
+def _rows_digest(rows: Iterator[Sequence[Any]]) -> Tuple[int, str]:
+    row_hashes = [_row_digest(row) for row in rows]
+    count = len(row_hashes)
+    return count, _row_hashes_digest(row_hashes)
 
 
 def migrate_sqlite_database(
@@ -549,7 +559,7 @@ def migrate_sqlite_database(
                 ', '.join(f'"{name}"' for name in order_columns),
             )
             source_rows = source.execute(source_sql)
-            source_digest = hashlib.sha256()
+            source_row_hashes: List[bytes] = []
             source_count = 0
             copy_sql = sql.SQL('COPY {} ({}) FROM STDIN').format(
                 sql.Identifier(table),
@@ -560,8 +570,7 @@ def migrate_sqlite_database(
                     values = tuple(row[name] for name in columns)
                     copy.write_row(values)
                     source_count += 1
-                    for value in values:
-                        _hash_value(source_digest, value)
+                    source_row_hashes.append(_row_digest(values))
             target_rows = target.execute(
                 sql.SQL('SELECT {} FROM {} ORDER BY {}').format(
                     sql.SQL(', ').join(sql.Identifier(name) for name in columns),
@@ -570,7 +579,7 @@ def migrate_sqlite_database(
                 )
             )
             target_count, target_hash = _rows_digest(iter(target_rows))
-            source_hash = source_digest.hexdigest()
+            source_hash = _row_hashes_digest(source_row_hashes)
             if target_count != source_count or target_hash != source_hash:
                 raise RuntimeError(
                     f'{table} 迁移校验失败：'

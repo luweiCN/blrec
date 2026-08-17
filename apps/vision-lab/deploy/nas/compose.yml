@@ -1,6 +1,6 @@
 services:
   vision-lab:
-    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.4}
+    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.5}
     container_name: blrec-vision-lab
     network_mode: host
     restart: unless-stopped
