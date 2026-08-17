@@ -70,6 +70,9 @@ WORKER_LAUNCHD_PLIST = os.environ.get(
 
 SERVER_HOST = os.environ.get('VISION_LAB_HOST', '127.0.0.1').strip()
 SERVER_PORT = int(os.environ.get('VISION_LAB_PORT', '8800'))
+CONTROL_PLANE_ONLY = os.environ.get(
+    'VISION_LAB_CONTROL_PLANE_ONLY', '0'
+).strip().lower() in {'1', 'true', 'yes', 'on'}
 VISION_WORKER_TOKEN = os.environ.get('VISION_LAB_WORKER_TOKEN', '').strip()
 VISION_WORKER_LEASE_SECONDS = max(
     60, int(os.environ.get('VISION_LAB_WORKER_LEASE_SECONDS', '300'))

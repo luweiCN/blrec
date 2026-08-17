@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.14-slim-bookworm AS wheel-builder
+FROM python:3.12-slim-bookworm AS wheel-builder
 WORKDIR /build
 COPY apps/vision-lab ./apps/vision-lab
 RUN python -m pip install --no-cache-dir build && \
     python -m build --wheel --outdir /wheels apps/vision-lab
 
-FROM python:3.14-slim-bookworm AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends libglib2.0-0 libgl1 && \
@@ -21,6 +21,7 @@ ENV VISION_LAB_HOST=0.0.0.0 \
     VISION_LAB_DATA_DIR=/data \
     VISION_LAB_CANDIDATE_LOCAL_DIR=/candidates \
     VISION_LAB_SYNC_RESULT_ARCHIVE=0 \
+    VISION_LAB_CONTROL_PLANE_ONLY=1 \
     TZ=Asia/Shanghai
 VOLUME ["/data", "/candidates", "/published-models"]
 EXPOSE 8800

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -16,9 +17,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
-from . import __version__
+from PIL import Image
+
+from . import __version__, inference, model_prefill, model_testing
 from .remote_dataset import materialize_dataset
 from .training import PROGRESS_PREFIX, RESULT_PREFIX
 
@@ -92,7 +95,7 @@ class VisionLabClient:
 
 
 class VisionWorker:
-    capabilities = ['train_model']
+    capabilities = ['model_prefill', 'train_model', 'validate_model', 'package_models']
 
     def __init__(
         self,
@@ -149,9 +152,17 @@ class VisionWorker:
 
     def _execute(self, job: Dict[str, Any]) -> None:
         try:
-            if job.get('kind') != 'train_model':
+            kind = str(job.get('kind') or '')
+            if kind == 'train_model':
+                result = self._train(job)
+            elif kind == 'model_prefill':
+                result = self._prefill(job)
+            elif kind == 'validate_model':
+                result = self._validate_model(job)
+            elif kind == 'package_models':
+                result = self._package_models(job)
+            else:
                 raise ValueError(f"不支持的 Vision Worker 任务: {job.get('kind')}")
-            result = self._train(job)
             self.client.json(
                 'POST',
                 f"/api/vision-workers/jobs/{job['id']}/complete",
@@ -174,6 +185,256 @@ class VisionWorker:
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+    def _model_contexts(
+        self, models: Dict[str, Any], *, required: Iterable[str] = ()
+    ) -> Dict[str, Dict[str, Any]]:
+        contexts: Dict[str, Dict[str, Any]] = {}
+        for task_id, raw in models.items():
+            if not isinstance(raw, dict):
+                continue
+            run_id = str(raw.get('run_id') or '').strip()
+            metadata = raw.get('metadata')
+            if not run_id or not isinstance(metadata, dict):
+                continue
+            destination = self.work_dir / 'model-cache' / run_id / 'model.onnx'
+            expected_size = int(raw.get('artifact_size') or 0)
+            if not destination.is_file() or (
+                expected_size > 0 and destination.stat().st_size != expected_size
+            ):
+                self.client.download(
+                    '/api/vision-workers/model-runs/{}/artifact'.format(
+                        urllib.parse.quote(run_id)
+                    ),
+                    destination,
+                )
+            contexts[str(task_id)] = {
+                'run_id': run_id,
+                'artifact': destination,
+                'metadata': metadata,
+            }
+        missing = [task_id for task_id in required if task_id not in contexts]
+        if missing:
+            raise RuntimeError('缺少可用模型：' + '、'.join(missing))
+        return contexts
+
+    def _prefill(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        payload = job.get('payload') or {}
+        frame_id = int(payload['frame_id'])
+        operation = str(payload.get('operation') or 'core')
+        frame_path = self.work_dir / 'prefill-cache' / f'{frame_id}.jpg'
+        self.client.download(f'/api/vision-workers/frames/{frame_id}/image', frame_path)
+        contexts = self._model_contexts(payload.get('models') or {})
+        if operation == 'core':
+            return {
+                'operation': operation,
+                'frame_id': frame_id,
+                **model_prefill.run_core_prefill(frame_path, contexts),
+            }
+        screen_type = str(payload.get('screen_type') or '')
+        team_size = int(payload.get('team_size') or 0)
+        if operation == 'hero_lineup':
+            result = model_prefill.run_hero_lineup_prefill(
+                frame_path, contexts, screen_type=screen_type, team_size=team_size
+            )
+        elif operation == 'hero_slots':
+            result = model_prefill.run_hero_slots_prefill(
+                frame_path,
+                list(payload.get('slots') or []),
+                contexts,
+                screen_type=screen_type,
+                team_size=team_size,
+            )
+        else:
+            raise ValueError(f'未知预填操作: {operation}')
+        return {
+            'operation': operation,
+            'frame_id': frame_id,
+            'screen_type': screen_type,
+            'team_size': team_size,
+            **result,
+        }
+
+    def _heartbeat_once(
+        self, job: Dict[str, Any], *, progress: float, stage: str, detail: str
+    ) -> None:
+        response = self.client.json(
+            'POST',
+            f"/api/vision-workers/jobs/{job['id']}/heartbeat",
+            {
+                'worker_id': self.worker_id,
+                'lease_token': job['lease_token'],
+                'progress': progress,
+                'stage': stage,
+                'detail': detail,
+            },
+        )
+        if response.get('cancel_requested'):
+            raise RuntimeError('用户取消')
+
+    def _validate_model(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        payload = job.get('payload') or {}
+        run_id = str(payload['run_id'])
+        split = str(payload['split'])
+        sample_id = str(payload.get('sample_id') or '')
+        query = {'split': split}
+        if sample_id:
+            query['sample_id'] = sample_id
+        plan = self.client.json(
+            'GET',
+            '/api/vision-workers/model-tests/{}/plan?{}'.format(
+                urllib.parse.quote(run_id), urllib.parse.urlencode(query)
+            ),
+        )
+        task_id = str(plan['task_id'])
+        contexts = self._model_contexts({task_id: plan['model']}, required=(task_id,))
+        context = contexts[task_id]
+        samples = list(plan.get('samples') or [])
+        predictions: Dict[str, Dict[str, Any]] = {}
+        job_dir = self.work_dir / 'jobs' / str(job['id']) / 'validation'
+        originals = job_dir / 'frames'
+        crops = job_dir / 'crops'
+        started = time.perf_counter()
+        last_heartbeat = 0.0
+        try:
+            for index, sample in enumerate(samples, start=1):
+                current_id = str(sample.get('sample_id') or '')
+                try:
+                    frame_id = int(sample.get('frame_id') or 0)
+                    if frame_id <= 0:
+                        raise ValueError('样本缺少可追溯 frame_id')
+                    source = originals / f'{frame_id}.jpg'
+                    if not source.is_file():
+                        self.client.download(
+                            f'/api/vision-workers/frames/{frame_id}/image', source
+                        )
+                    inference_path = source
+                    crop = sample.get('crop')
+                    if isinstance(crop, dict):
+                        inference_path = crops / f'{current_id}.jpg'
+                        inference_path.parent.mkdir(parents=True, exist_ok=True)
+                        with Image.open(source) as opened:
+                            model_prefill._crop_to_path(  # noqa: SLF001
+                                opened.convert('RGB'), crop, inference_path
+                            )
+                    predictions[current_id] = {
+                        'result': inference.run_artifact(
+                            context['artifact'],
+                            context['metadata'],
+                            inference_path,
+                            conf_thr=float(payload.get('conf_thr', 0.25)),
+                        )
+                    }
+                except Exception as error:  # noqa: BLE001
+                    predictions[current_id] = {'error': str(error)}
+                now = time.monotonic()
+                if now - last_heartbeat >= 10 or index == len(samples):
+                    self._heartbeat_once(
+                        job,
+                        progress=index / max(1, len(samples)),
+                        stage='批量验收模型',
+                        detail=f'{index}/{len(samples)} 张',
+                    )
+                    last_heartbeat = now
+            report = model_testing.evaluation_report_from_predictions(
+                run_id=run_id,
+                task_id=task_id,
+                kind=str(plan['kind']),
+                split=split,
+                samples=samples,
+                predictions=predictions,
+                total=int(plan.get('total') or len(samples)),
+                conf_thr=float(payload.get('conf_thr', 0.25)),
+                iou_threshold=float(payload.get('iou_threshold', 0.5)),
+                elapsed_seconds=time.perf_counter() - started,
+            )
+            result: Dict[str, Any] = {'report': report}
+            if sample_id:
+                outcome = predictions.get(sample_id) or {}
+                if isinstance(outcome.get('result'), dict):
+                    result['prediction'] = outcome['result']
+            return result
+        finally:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _package_models(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        payload = job.get('payload') or {}
+        package_id = str(payload['package_id'])
+        job_dir = self.work_dir / 'jobs' / str(job['id']) / package_id
+        models_dir = job_dir / 'models'
+        models_dir.mkdir(parents=True, exist_ok=True)
+        manifest = dict(payload.get('manifest') or {})
+        manifest_models: Dict[str, Any] = {}
+        models = payload.get('models') or {}
+        try:
+            for index, (role, spec) in enumerate(sorted(models.items()), start=1):
+                run_id = str(spec['run_id'])
+                destination = models_dir / f'{role}.onnx'
+                self.client.download(
+                    '/api/vision-workers/model-runs/{}/artifact'.format(
+                        urllib.parse.quote(run_id)
+                    ),
+                    destination,
+                )
+                expected_size = int(spec.get('artifact_size') or 0)
+                if expected_size and destination.stat().st_size != expected_size:
+                    raise RuntimeError(f'{role} 模型大小校验失败')
+                manifest_models[role] = {
+                    **dict(spec.get('manifest') or {}),
+                    'sha256': self._sha256(destination),
+                }
+                self._heartbeat_once(
+                    job,
+                    progress=0.75 * index / max(1, len(models)),
+                    stage='组装模型包',
+                    detail=f'{index}/{len(models)} 个模型',
+                )
+            manifest['models'] = manifest_models
+            for name, value in (
+                ('manifest.json', manifest),
+                ('dataset-lock.json', payload.get('dataset_lock') or {}),
+                ('metrics.json', payload.get('metrics') or {}),
+            ):
+                (job_dir / name).write_text(
+                    json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8'
+                )
+            archive_base = job_dir.parent / package_id
+            archive_path = Path(
+                shutil.make_archive(
+                    str(archive_base),
+                    'zip',
+                    root_dir=job_dir.parent,
+                    base_dir=job_dir.name,
+                )
+            )
+            self._heartbeat_once(
+                job,
+                progress=0.9,
+                stage='上传模型包',
+                detail=f'{archive_path.stat().st_size / 1024 / 1024:.1f} MB',
+            )
+            self.client.upload(
+                f"/api/vision-workers/jobs/{job['id']}/artifacts/package.zip",
+                archive_path,
+                query={'worker_id': self.worker_id, 'lease_token': job['lease_token']},
+            )
+            return {
+                'package_id': package_id,
+                'status': str(payload.get('status') or 'incomplete'),
+                'missing_tasks': payload.get('missing_tasks') or [],
+                'evaluation_gaps': payload.get('evaluation_gaps') or {},
+                'manifest': manifest,
+            }
+        finally:
+            shutil.rmtree(job_dir.parent, ignore_errors=True)
 
     def _train(self, job: Dict[str, Any]) -> Dict[str, Any]:
         payload = job.get('payload') or {}

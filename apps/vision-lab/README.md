@@ -1,7 +1,9 @@
 # 虚荣视觉标注工作台(Vainglory Vision Lab)
 
-《虚荣》(Vainglory)所有视觉模型共用的数据工作台:从 NAS 录制视频抽帧 → 事件分组 →
-分层人工标注 → 导出不可变数据集版本 → 本机训练与模型验证。
+《虚荣》(Vainglory)所有视觉模型共用的数据工作台。生产环境的页面与轻量 API
+部署在 NAS；候选图片从 NAS 挂载目录按需读取，不再全量同步到浏览器所在电脑。
+数据集物化、模型预填、训练、批量验收和模型组包均由可暂停的 Vision Worker
+领取，NAS Web 进程不执行这些重任务。
 当前统一训练七个目标：四个核心任务（是否处于对局流程、英雄选择及其模式、
 对局画面模式、结算面板检测）和三个按需运行的英雄增强任务（英雄头像位置、
 英雄头像身份、主播本人位置）。旧 BP、光栅、关键界面和通用分层标注完整保留
@@ -47,7 +49,7 @@ apps/vision-lab/
 └── data/               # 外置工作数据(gitignore):库、帧、数据集、模型和训练产物
 ```
 
-## 安装与启动
+## 开发环境启动
 
 ```bash
 cd apps/vision-lab
@@ -59,6 +61,7 @@ export SYNO_ADMIN_PASSWORD=你的群晖密码
 export VISION_LAB_WORKER_SSH_HOST=MacBook-Pro-14.local
 export VISION_LAB_WORKER_SSH_USER=luwei
 ./start.sh
+# 仅用于源码开发；生产页面部署在 NAS
 # 打开 http://127.0.0.1:8800
 ```
 
@@ -66,7 +69,22 @@ export VISION_LAB_WORKER_SSH_USER=luwei
 `~/.local/share/blrec-vision-lab`。也可以用 `VISION_LAB_DATA_DIR` 明确指定，
 因此数据、权重和训练产物不会进入发布包。
 
-## NAS 导入
+## NAS 控制面与 Vision Worker
+
+生产容器设置 `VISION_LAB_CONTROL_PLANE_ONLY=1`，只运行页面、标注 API、任务队列、
+元数据索引和按需图片读取。需要另外启动至少一台 `blrec-vision-worker`，并配置：
+
+```bash
+export VISION_LAB_SERVER_URL=http://NAS地址:8800
+export VISION_LAB_WORKER_TOKEN=与NAS一致的专用Token
+export VISION_WORKER_ID=唯一Worker名称
+blrec-vision-worker
+```
+
+Worker 可以在页面中随时暂停领取任务。打开页面不会自动在访问者电脑上执行训练
+或推理。生产镜像只由 `release-vision-lab.yml` 构建，NAS 直接从 GHCR 拉取。
+
+## 旧视频导入（仅源码开发模式）
 
 - 数据源页点"同步 NAS 视频清单":SSH 扫描 `192.168.50.24:/volume1/docker/blrec-next/rec`
   (只读,绝不修改/删除 NAS 文件),支持按主播/房间号过滤。
@@ -82,9 +100,9 @@ MacBook Pro 上的 Analysis Worker 只复用正常分析已经解码的帧，不
 `/volume1/docker/blrec-next/vision-data/candidates`；Server 只存文件，
 不运行 ONNX。
 
-打开“新模型统一打标”页点“同步 NAS（Worker＋历史结算图）”会：
+打开“新模型统一打标”页点“刷新 NAS 素材”会：
 
-1. 下载本机没有的候选图片和预标；
+1. 扫描 NAS 候选 JSON 并建立索引，不复制候选图片；
 2. 导入 BLREC 已识别对局保存的历史结算截图；
 3. 拉取 NAS 上已有的人工复核结果，便于换电脑审查；
 4. 回传本机已确认或已跳过的结果。
@@ -204,12 +222,13 @@ MacBook Pro 上的 Analysis Worker 只复用正常分析已经解码的帧，不
 
 ## 训练与模型版本
 
-首次使用前执行 `.venv/bin/pip install -r requirements-train.txt`。
+在承担训练的 Worker 上安装训练依赖；NAS 容器不安装 PyTorch/Ultralytics。
 打开“训练与模型”页，每个任务会显示当前可用数量、缺少条件和建议量。
 点“用当前数据开始训练”时:
 
 1. 先冻结当前数据为新的不可变快照。
-2. 后台串行训练，页面显示 epoch、百分比、指标和日志;其间可以继续打标。
+2. 任务进入 Vision Worker 队列，Worker 远程取图并训练；页面显示 epoch、百分比、
+   指标和日志，其间可以继续打标。
 3. 训练成功后保留 ONNX、数据快照、配置和指标。
 4. 后续增加标注再点一次，会生成新快照和新模型，不会改动旧版本。
 

@@ -184,6 +184,27 @@ class TestModelTesting(unittest.TestCase):
         self.assertEqual(result['items'][0]['expected'], 'in_match')
         self.assertTrue(result['items'][0]['has_snapshot_image'])
 
+    def test_worker_plan_uses_source_frame_for_manifest_only_snapshot(self):
+        self.snapshot_image.unlink()
+
+        plan = model_testing.worker_evaluation_plan(
+            self.conn, 'screen-state-run-1', split='test'
+        )
+
+        self.assertEqual(plan['task_id'], 'screen_state')
+        self.assertEqual(plan['kind'], 'classify')
+        self.assertEqual(plan['samples'][0]['frame_id'], self.frame_id)
+        self.assertTrue(plan['samples'][0]['has_snapshot_image'])
+        self.assertEqual(
+            model_testing.run_sample_image_path(
+                self.conn,
+                'screen-state-run-1',
+                sample_id=f'f{self.frame_id:08d}',
+                split='test',
+            ),
+            self.image.resolve(),
+        )
+
     def test_testable_run_exposes_recorded_input_contract(self):
         metadata = json.loads(
             self.artifact.with_suffix('.json').read_text(encoding='utf-8')

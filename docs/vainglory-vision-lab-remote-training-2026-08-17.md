@@ -25,9 +25,9 @@ Vision Lab 作为独立容器运行在 NAS，直接挂载：
 NAS 只承担前端、轻量 API、任务调度、元数据索引和按需文件返回，不执行批量图片解码、
 预标、数据集物化、模型训练、批量验收或模型打包。
 
-### Mac Studio：可插拔 Vision Worker
+### 独立计算节点：可插拔 Vision Worker
 
-Mac Studio 运行独立 Vision Worker。它由用户启用或暂停，可声明自己支持的数据处理、训练、
+独立计算节点运行 Vision Worker。它由用户启用或暂停，可声明自己支持的数据处理、训练、
 验收和打包能力：
 
 1. 使用专用 token 向 Vision Lab 领取兼容自身能力的任务；
@@ -38,7 +38,8 @@ Mac Studio 运行独立 Vision Worker。它由用户启用或暂停，可声明�
 6. 本地任务缓存可用于同一任务断点恢复，完成后可按保留策略清理。
 
 Vision Lab 容器不安装 PyTorch/Ultralytics，也不占用 NAS 进行图片批处理或模型训练。
-这台电脑只在 Vision Worker 被明确启用时执行重活；关闭 Worker 不影响 NAS 上的标注页面。
+访问页面的电脑不承担任何计算；关闭所有 Worker 只会让任务留在队列，不影响 NAS 上的
+标注页面。
 
 ### Analysis Worker：模型消费面
 
@@ -103,6 +104,6 @@ Vision Lab 容器不安装 PyTorch/Ultralytics，也不占用 NAS 进行图片�
 2. 在 NAS 创建独立持久目录并迁移 `lab.db`、永久数据集、模型与必要原帧；
 3. 校验 SQLite `quick_check`、文件数量和随机样本哈希；
 4. 启动 NAS Vision Lab，确认旧标注、测试集和模型记录完整；
-5. 在 Mac Studio 安装可暂停的 Vision Worker；
+5. 在独立计算节点安装可暂停的 Vision Worker；
 6. 发布支持自动模型包更新的 Analysis Worker；
 7. 确认 NAS 副本和备份后，清理本机派生数据。

@@ -74,6 +74,19 @@ def _latest_model_contexts(
     return result
 
 
+def latest_model_specs(conn: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    """返回可序列化的模型描述，供远端 Vision Worker 按需下载。"""
+    contexts = _latest_model_contexts(conn, task_ids)
+    return {
+        task_id: {
+            'run_id': str(context['run_id']),
+            'metadata': context['metadata'],
+            'artifact_size': int(context['artifact'].stat().st_size),
+        }
+        for task_id, context in contexts.items()
+    }
+
+
 def _classification_suggestion(
     task_id: str, context: Dict[str, Any], result: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -111,40 +124,10 @@ def _result_suggestion(
     }
 
 
-def prefill_training_review_item(
-    conn: Any,
-    frame_id: int,
-    *,
-    task_ids: Iterable[str] = CORE_PREFILL_TASKS,
-    force: bool = False,
+def run_core_prefill(
+    frame_path: Path, contexts: Dict[str, Dict[str, Any]]
 ) -> Dict[str, Any]:
-    item = db.get_training_review_item(conn, int(frame_id))
-    if item is None:
-        raise KeyError(f'训练复核图片不存在: {frame_id}')
-    frame_path = Path(str(item['frame_path']))
-    if not frame_path.is_file():
-        raise FileNotFoundError(frame_path)
-    requested_tasks = tuple(dict.fromkeys((*task_ids, 'hero_avatar_detector')))
-    contexts = _latest_model_contexts(conn, requested_tasks)
-    if not contexts:
-        return {'applied': False, 'cached': False, 'models': {}, 'item': item}
-    model_runs = {task_id: context['run_id'] for task_id, context in contexts.items()}
-    source_id = f'frame:{int(frame_id)}'
-    previous = conn.execute(
-        'SELECT metadata_json FROM training_review_sources '
-        'WHERE source_type = ? AND source_id = ?',
-        ('new_model_prefill', source_id),
-    ).fetchone()
-    if previous is not None and not force:
-        metadata = json.loads(previous['metadata_json'] or '{}')
-        if metadata.get('model_runs') == model_runs and not metadata.get('errors'):
-            return {
-                'applied': False,
-                'cached': True,
-                'models': model_runs,
-                'item': item,
-            }
-
+    """只执行推理，不读写数据库；既可本机调用，也可在 Worker 调用。"""
     suggestions: Dict[str, Dict[str, Any]] = {}
     model_outputs = []
     suggested_boxes = []
@@ -154,7 +137,10 @@ def prefill_training_review_item(
             continue
         try:
             output = inference.run_artifact(
-                context['artifact'], context['metadata'], frame_path, conf_thr=0.25
+                Path(context['artifact']),
+                context['metadata'],
+                frame_path,
+                conf_thr=0.25,
             )
             if task_id == 'result_detector':
                 suggestion = _result_suggestion(context, output)
@@ -200,7 +186,7 @@ def prefill_training_review_item(
     if hero_detector is not None:
         try:
             hero_output = inference.run_artifact(
-                hero_detector['artifact'],
+                Path(hero_detector['artifact']),
                 hero_detector['metadata'],
                 frame_path,
                 conf_thr=0.25,
@@ -223,27 +209,85 @@ def prefill_training_review_item(
             )
         except Exception as exc:  # noqa: BLE001
             errors['hero_avatar_detector'] = str(exc)[:300]
+    return {
+        'suggestions': suggestions,
+        'model_outputs': model_outputs,
+        'suggested_boxes': suggested_boxes,
+        'hero_context_suggestion': hero_context_suggestion,
+        'errors': errors,
+        'model_runs': {
+            task_id: str(context['run_id']) for task_id, context in contexts.items()
+        },
+    }
+
+
+def apply_core_prefill(
+    conn: Any, frame_id: int, result: Dict[str, Any]
+) -> Dict[str, Any]:
+    """把 Worker 推理结果保存为建议；永远不覆盖人工真值。"""
+    item = db.get_training_review_item(conn, int(frame_id))
+    if item is None:
+        raise KeyError(f'训练复核图片不存在: {frame_id}')
     db.add_training_review_source(
         conn,
         frame_id=int(frame_id),
         source_type='new_model_prefill',
-        source_id=source_id,
-        suggestions=suggestions,
+        source_id=f'frame:{int(frame_id)}',
+        suggestions=result.get('suggestions') or {},
         metadata={
-            'model_runs': model_runs,
-            'model_outputs': model_outputs,
-            'suggested_boxes': suggested_boxes,
-            'hero_context_suggestion': hero_context_suggestion,
-            'errors': errors,
+            'model_runs': result.get('model_runs') or {},
+            'model_outputs': result.get('model_outputs') or [],
+            'suggested_boxes': result.get('suggested_boxes') or [],
+            'hero_context_suggestion': result.get('hero_context_suggestion'),
+            'errors': result.get('errors') or {},
         },
-        image_path=str(frame_path),
+        image_path=str(item['frame_path']),
     )
+    return db.get_training_review_item(conn, int(frame_id)) or item
+
+
+def prefill_training_review_item(
+    conn: Any,
+    frame_id: int,
+    *,
+    task_ids: Iterable[str] = CORE_PREFILL_TASKS,
+    force: bool = False,
+) -> Dict[str, Any]:
+    item = db.get_training_review_item(conn, int(frame_id))
+    if item is None:
+        raise KeyError(f'训练复核图片不存在: {frame_id}')
+    frame_path = Path(str(item['frame_path']))
+    if not frame_path.is_file():
+        raise FileNotFoundError(frame_path)
+    requested_tasks = tuple(dict.fromkeys((*task_ids, 'hero_avatar_detector')))
+    contexts = _latest_model_contexts(conn, requested_tasks)
+    if not contexts:
+        return {'applied': False, 'cached': False, 'models': {}, 'item': item}
+    model_runs = {task_id: context['run_id'] for task_id, context in contexts.items()}
+    source_id = f'frame:{int(frame_id)}'
+    previous = conn.execute(
+        'SELECT metadata_json FROM training_review_sources '
+        'WHERE source_type = ? AND source_id = ?',
+        ('new_model_prefill', source_id),
+    ).fetchone()
+    if previous is not None and not force:
+        metadata = json.loads(previous['metadata_json'] or '{}')
+        if metadata.get('model_runs') == model_runs and not metadata.get('errors'):
+            return {
+                'applied': False,
+                'cached': True,
+                'models': model_runs,
+                'item': item,
+            }
+
+    result = run_core_prefill(frame_path, contexts)
+    item = apply_core_prefill(conn, int(frame_id), result)
     return {
-        'applied': bool(suggestions),
+        'applied': bool(result['suggestions']),
         'cached': False,
         'models': model_runs,
-        'errors': errors,
-        'item': db.get_training_review_item(conn, int(frame_id)),
+        'errors': result['errors'],
+        'item': item,
     }
 
 
@@ -433,15 +477,15 @@ def _player_position_suggestion(
     return {'side': side, 'slot': slot, 'confidence': float(top1.get('prob') or 0)}
 
 
-def prefill_hero_slots(
-    conn: Any,
+def run_hero_slots_prefill(
     frame_path: Path,
     slots: List[Dict[str, Any]],
+    contexts: Dict[str, Dict[str, Any]],
     *,
     screen_type: str,
     team_size: int,
 ) -> Dict[str, Any]:
-    """对已经人工或缓存定位的头像框只运行新英雄身份模型。"""
+    """对已有头像框执行身份/本人推理，不读写数据库。"""
     if screen_type not in {'gameplay_hud', 'scoreboard', 'result_page'}:
         raise ValueError('英雄阵容画面类型无效')
     if team_size not in {3, 5}:
@@ -459,7 +503,6 @@ def prefill_hero_slots(
         }
         for slot in slots
     ]
-    contexts = _latest_model_contexts(conn, ('hero_identity', 'player_position'))
     model_runs = {task_id: context['run_id'] for task_id, context in contexts.items()}
     identity = contexts.get('hero_identity')
     if identity is None:
@@ -497,10 +540,28 @@ def prefill_hero_slots(
     }
 
 
-def prefill_hero_lineup(
-    conn: Any, frame_path: Path, *, screen_type: str, team_size: int
+def prefill_hero_slots(
+    conn: Any,
+    frame_path: Path,
+    slots: List[Dict[str, Any]],
+    *,
+    screen_type: str,
+    team_size: int,
 ) -> Dict[str, Any]:
-    """头像检测 → 槽位排序 → 单头像身份；结果仍只是待人工确认建议。"""
+    contexts = _latest_model_contexts(conn, ('hero_identity', 'player_position'))
+    return run_hero_slots_prefill(
+        frame_path, slots, contexts, screen_type=screen_type, team_size=team_size
+    )
+
+
+def run_hero_lineup_prefill(
+    frame_path: Path,
+    contexts: Dict[str, Dict[str, Any]],
+    *,
+    screen_type: str,
+    team_size: int,
+) -> Dict[str, Any]:
+    """头像检测 → 槽位排序 → 身份识别，不读写数据库。"""
     if screen_type not in {'gameplay_hud', 'scoreboard', 'result_page'}:
         raise ValueError('英雄阵容画面类型无效')
     if team_size not in {3, 5}:
@@ -508,7 +569,6 @@ def prefill_hero_lineup(
     source = Path(frame_path)
     if not source.is_file():
         raise FileNotFoundError(source)
-    contexts = _latest_model_contexts(conn, HERO_PREFILL_TASKS)
     detector = contexts.get('hero_avatar_detector')
     model_runs = {task_id: context['run_id'] for task_id, context in contexts.items()}
     if detector is None:
@@ -563,3 +623,15 @@ def prefill_hero_lineup(
         'model_runs': model_runs,
         'detected': len(detection.get('detections') or []),
     }
+
+
+def prefill_hero_lineup(
+    conn: Any, frame_path: Path, *, screen_type: str, team_size: int
+) -> Dict[str, Any]:
+    """兼容开发模式的同步英雄预填入口。"""
+    return run_hero_lineup_prefill(
+        frame_path,
+        _latest_model_contexts(conn, HERO_PREFILL_TASKS),
+        screen_type=screen_type,
+        team_size=team_size,
+    )

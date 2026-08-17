@@ -618,7 +618,27 @@ def run_sample_image_path(
     )
     if sample is None:
         raise KeyError(f'训练快照中不存在样本: {sample_id}')
-    return _sample_image_path(context, sample)
+    try:
+        return _sample_image_path(context, sample)
+    except FileNotFoundError:
+        frame_id = sample.get('frame_id')
+        if frame_id is None and sample_id.startswith('f'):
+            digits = sample_id[1:].split('-', 1)[0]
+            if digits.isdigit():
+                frame_id = int(digits)
+        if frame_id is None:
+            raise
+        row = conn.execute(
+            'SELECT frame_path FROM frames WHERE id = ?', (int(frame_id),)
+        ).fetchone()
+        if row is None:
+            raise
+        fallback = {
+            '_frame_path': str(row['frame_path']),
+            '_crop': sample.get('crop'),
+            'sample_id': sample_id,
+        }
+        return _challenge_image_path(context, fallback)
 
 
 def list_run_samples(
@@ -684,8 +704,10 @@ def list_run_samples(
     for sample in selected[: max(1, min(10_000, int(limit)))]:
         sample_id = str(sample.get('sample_id') or '')
         frame_id: Optional[int] = None
-        if sample_id.startswith('f') and sample_id[1:].isdigit():
-            frame_id = int(sample_id[1:])
+        if sample_id.startswith('f'):
+            digits = sample_id[1:].split('-', 1)[0]
+            if digits.isdigit():
+                frame_id = int(digits)
         if frame_id is None and sample.get('sha256'):
             row = conn.execute(
                 'SELECT id FROM frames WHERE sha256 = ?', (str(sample['sha256']),)
@@ -734,7 +756,16 @@ def list_run_samples(
             _sample_image_path(context, sample)
             has_snapshot_image = True
         except (FileNotFoundError, ValueError):
-            has_snapshot_image = False
+            row = (
+                conn.execute(
+                    'SELECT frame_path FROM frames WHERE id = ?', (frame_id,)
+                ).fetchone()
+                if frame_id is not None
+                else None
+            )
+            has_snapshot_image = bool(
+                row is not None and Path(str(row['frame_path'])).is_file()
+            )
         if isinstance(expected, dict):
             evaluation_scenario = sample.get('evaluation_scenario') or (
                 sample.get('hero_screen_type')
@@ -774,6 +805,56 @@ def list_run_samples(
         'items': output,
         'distribution': _sample_distribution(selected),
         'is_fixed_snapshot': True,
+    }
+
+
+def worker_evaluation_plan(
+    conn: Any, run_id: str, *, split: str = 'test'
+) -> Dict[str, Any]:
+    """生成轻量验收清单；原图和推理均由 Vision Worker 处理。"""
+    context = _run_context(conn, run_id)
+    listed = list_run_samples(conn, run_id, split=split, limit=10_000)
+    private: Dict[str, Dict[str, Any]] = {}
+    if split == POST_RUN_CHALLENGE_SPLIT:
+        private = {
+            str(value['sample_id']): value
+            for value in _post_run_challenge_samples(conn, context)
+        }
+    elif split in FIXED_DATASET_SPLITS:
+        private = {
+            str(value.get('sample_id') or ''): value
+            for value in _manifest_samples(Path(context['dataset']['manifest_path']))
+            if value.get('split') == split
+        }
+    samples = []
+    for public in listed['items']:
+        sample_id = str(public.get('sample_id') or '')
+        raw = private.get(sample_id) or {}
+        frame_id = public.get('frame_id') or raw.get('frame_id')
+        if frame_id is None and sample_id.startswith('f'):
+            digits = sample_id[1:].split('-', 1)[0]
+            if digits.isdigit():
+                frame_id = int(digits)
+        samples.append(
+            {
+                **public,
+                'frame_id': int(frame_id) if frame_id is not None else None,
+                'crop': raw.get('_crop') or raw.get('crop'),
+            }
+        )
+    artifact = Path(context['artifact'])
+    return {
+        'run_id': run_id,
+        'task_id': str(context['run']['task_id']),
+        'kind': str(context['metadata'].get('kind') or ''),
+        'split': split,
+        'total': int(listed['total']),
+        'samples': samples,
+        'model': {
+            'run_id': run_id,
+            'metadata': context['metadata'],
+            'artifact_size': int(artifact.stat().st_size),
+        },
     }
 
 
@@ -882,47 +963,24 @@ def _finalize_report_groups(groups: Dict[str, Dict[str, Any]]) -> None:
         value['accuracy'] = round(int(value['correct']) / total, 6) if total else 0.0
 
 
-def evaluate_run_samples(
-    conn: Any,
-    run_id: str,
+def evaluation_report_from_predictions(
     *,
-    split: str = 'test',
+    run_id: str,
+    task_id: str,
+    kind: str,
+    split: str,
+    samples: Sequence[Dict[str, Any]],
+    predictions: Dict[str, Dict[str, Any]],
+    total: Optional[int] = None,
     conf_thr: float = 0.25,
     iou_threshold: float = 0.5,
+    elapsed_seconds: float = 0.0,
 ) -> Dict[str, Any]:
-    """对人工真值切分批量推理，并返回可定位错例的结构化报告。"""
-    if split not in FIXED_DATASET_SPLITS | {
-        SCOREBOARD_CHALLENGE_SPLIT,
-        POST_RUN_CHALLENGE_SPLIT,
-    }:
-        raise ValueError('数据来源无效')
-    context = _run_context(conn, run_id)
-    maximum = 10_000
-    listed = list_run_samples(conn, run_id, split=split, limit=maximum)
-    samples = list(listed['items'])
-    raw_by_id: Dict[str, Dict[str, Any]] = {}
-    challenge_paths: Dict[str, Path] = {}
-    if split == POST_RUN_CHALLENGE_SPLIT:
-        challenge_paths = {
-            sample['sample_id']: _challenge_image_path(context, sample)
-            for sample in _post_run_challenge_samples(conn, context)
-        }
-    elif split == SCOREBOARD_CHALLENGE_SPLIT:
-        for row in _scoreboard_challenge_rows(conn):
-            sample_id = f'f{int(row["frame_id"]):08d}'
-            challenge_paths[sample_id] = Path(str(row['frame_path'])).resolve()
-    else:
-        manifest = Path(context['dataset']['manifest_path'])
-        raw_by_id = {
-            str(sample.get('sample_id') or ''): sample
-            for sample in _manifest_samples(manifest)
-            if sample.get('split') == split
-        }
-    threshold = max(0.0, min(1.0, float(conf_thr)))
-    required_iou = max(0.0, min(1.0, float(iou_threshold)))
-    kind = str(context['metadata'].get('kind') or '')
+    """根据 Worker 返回的逐样本结果生成与本机验收一致的报告。"""
     if kind not in {'classify', 'detect'}:
         raise ValueError(f'未知训练产物类型: {kind}')
+    threshold = max(0.0, min(1.0, float(conf_thr)))
+    required_iou = max(0.0, min(1.0, float(iou_threshold)))
     correct = 0
     evaluated = 0
     errors: List[Dict[str, Any]] = []
@@ -931,28 +989,16 @@ def evaluate_run_samples(
     by_label: Dict[str, Dict[str, Any]] = {}
     by_scenario: Dict[str, Dict[str, Any]] = {}
     by_mode: Dict[str, Dict[str, Any]] = {}
-    started = perf_counter()
     for sample in samples:
         sample_id = str(sample.get('sample_id') or '')
-        try:
-            if split in {SCOREBOARD_CHALLENGE_SPLIT, POST_RUN_CHALLENGE_SPLIT}:
-                frame_path = challenge_paths[sample_id]
-                if not frame_path.is_file():
-                    raise FileNotFoundError(frame_path)
-            else:
-                raw = raw_by_id.get(sample_id)
-                if raw is None:
-                    raise KeyError(sample_id)
-                frame_path = _sample_image_path(context, raw)
-            result = inference.run_artifact(
-                context['artifact'], context['metadata'], frame_path, conf_thr=threshold
-            )
-        except Exception as exc:  # noqa: BLE001
+        outcome = predictions.get(sample_id) or {}
+        result = outcome.get('result')
+        if not isinstance(result, dict):
             failures.append(
                 {
                     'sample_id': sample_id,
                     'frame_id': sample.get('frame_id'),
-                    'error': str(exc),
+                    'error': str(outcome.get('error') or 'Worker 没有返回结果'),
                 }
             )
             continue
@@ -986,7 +1032,6 @@ def evaluate_run_samples(
             expected_boxes = expected_value.get('boxes') or []
             predicted_boxes = result.get('detections') or []
             best_iou = _best_detection_iou(expected_boxes, predicted_boxes)
-            task_id = str(context['run']['task_id'])
             avatar_summary: Optional[Dict[str, Any]] = None
             if task_id == 'hero_avatar_detector':
                 avatar_summary = _detection_match_summary(
@@ -1051,20 +1096,21 @@ def evaluate_run_samples(
     _finalize_report_groups(by_label)
     _finalize_report_groups(by_scenario)
     _finalize_report_groups(by_mode)
+    reported_total = len(samples) if total is None else int(total)
     return {
         'run_id': run_id,
-        'task_id': str(context['run']['task_id']),
+        'task_id': task_id,
         'kind': kind,
         'split': split,
-        'total': int(listed['total']),
+        'total': reported_total,
         'evaluated': evaluated,
         'correct': correct,
         'accuracy': round(correct / evaluated, 6) if evaluated else 0.0,
         'failed': len(failures),
-        'truncated': int(listed['total']) > len(samples),
+        'truncated': reported_total > len(samples),
         'conf_thr': threshold,
         'iou_threshold': required_iou if kind == 'detect' else None,
-        'elapsed_seconds': round(perf_counter() - started, 3),
+        'elapsed_seconds': round(float(elapsed_seconds), 3),
         'by_label': by_label,
         'by_scenario': by_scenario,
         'scoreboard_by_mode': by_mode,
@@ -1072,6 +1118,81 @@ def evaluate_run_samples(
         'errors': errors,
         'failures': failures,
     }
+
+
+def evaluate_run_samples(
+    conn: Any,
+    run_id: str,
+    *,
+    split: str = 'test',
+    conf_thr: float = 0.25,
+    iou_threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """对人工真值切分批量推理，并返回可定位错例的结构化报告。"""
+    if split not in FIXED_DATASET_SPLITS | {
+        SCOREBOARD_CHALLENGE_SPLIT,
+        POST_RUN_CHALLENGE_SPLIT,
+    }:
+        raise ValueError('数据来源无效')
+    context = _run_context(conn, run_id)
+    maximum = 10_000
+    listed = list_run_samples(conn, run_id, split=split, limit=maximum)
+    samples = list(listed['items'])
+    raw_by_id: Dict[str, Dict[str, Any]] = {}
+    challenge_paths: Dict[str, Path] = {}
+    if split == POST_RUN_CHALLENGE_SPLIT:
+        challenge_paths = {
+            sample['sample_id']: _challenge_image_path(context, sample)
+            for sample in _post_run_challenge_samples(conn, context)
+        }
+    elif split == SCOREBOARD_CHALLENGE_SPLIT:
+        for row in _scoreboard_challenge_rows(conn):
+            sample_id = f'f{int(row["frame_id"]):08d}'
+            challenge_paths[sample_id] = Path(str(row['frame_path'])).resolve()
+    else:
+        manifest = Path(context['dataset']['manifest_path'])
+        raw_by_id = {
+            str(sample.get('sample_id') or ''): sample
+            for sample in _manifest_samples(manifest)
+            if sample.get('split') == split
+        }
+    threshold = max(0.0, min(1.0, float(conf_thr)))
+    kind = str(context['metadata'].get('kind') or '')
+    if kind not in {'classify', 'detect'}:
+        raise ValueError(f'未知训练产物类型: {kind}')
+    predictions: Dict[str, Dict[str, Any]] = {}
+    started = perf_counter()
+    for sample in samples:
+        sample_id = str(sample.get('sample_id') or '')
+        try:
+            if split in {SCOREBOARD_CHALLENGE_SPLIT, POST_RUN_CHALLENGE_SPLIT}:
+                frame_path = challenge_paths[sample_id]
+                if not frame_path.is_file():
+                    raise FileNotFoundError(frame_path)
+            else:
+                raw = raw_by_id.get(sample_id)
+                if raw is None:
+                    raise KeyError(sample_id)
+                frame_path = _sample_image_path(context, raw)
+            result = inference.run_artifact(
+                context['artifact'], context['metadata'], frame_path, conf_thr=threshold
+            )
+        except Exception as exc:  # noqa: BLE001
+            predictions[sample_id] = {'error': str(exc)}
+        else:
+            predictions[sample_id] = {'result': result}
+    return evaluation_report_from_predictions(
+        run_id=run_id,
+        task_id=str(context['run']['task_id']),
+        kind=kind,
+        split=split,
+        samples=samples,
+        predictions=predictions,
+        total=int(listed['total']),
+        conf_thr=threshold,
+        iou_threshold=iou_threshold,
+        elapsed_seconds=perf_counter() - started,
+    )
 
 
 def validate_run(
@@ -1175,6 +1296,145 @@ def _evaluation_gaps(context: Dict[str, Any]) -> List[str]:
                     gaps.append(f'固定测试集缺少：{mode_label}{suffix}')
         return gaps
     return [f'未知训练产物类型 {kind}']
+
+
+def prepare_model_package(
+    conn: Any, run_ids: Sequence[str], *, package_id: str = ''
+) -> Dict[str, Any]:
+    """生成可序列化组包计划；模型复制、哈希和 ZIP 由 Worker 完成。"""
+    if not run_ids:
+        raise ValueError('至少选择一个已经验收通过的训练 run')
+    contexts: Dict[str, Dict[str, Any]] = {}
+    for run_id in run_ids:
+        context = _run_context(conn, str(run_id))
+        task_id = str(context['run']['task_id'])
+        if task_id not in TASK_ROLES:
+            raise ValueError(f'训练任务不能进入 Worker 模型包: {task_id}')
+        validation = db.get_model_validation(conn, str(run_id))
+        if validation is None or validation['status'] != 'passed':
+            raise ValueError(f'模型尚未验收通过: {run_id}')
+        if task_id in contexts:
+            raise ValueError(f'同一个模型角色只能选择一个 run: {task_id}')
+        contexts[task_id] = context
+    missing = [task for task in REQUIRED_TASKS if task not in contexts]
+    evaluation_gaps = {
+        TASK_ROLES[task_id]: gaps
+        for task_id, context in contexts.items()
+        if (gaps := _evaluation_gaps(context))
+    }
+    status = 'ready' if not missing and not evaluation_gaps else 'incomplete'
+    if not package_id:
+        package_id = 'vg-vision-{}-{}'.format(
+            datetime.now().strftime('%Y%m%d-%H%M%S'), uuid4().hex[:6]
+        )
+    if not package_id.replace('-', '').replace('_', '').isalnum():
+        raise ValueError('模型包 ID 只能包含字母、数字、连字符和下划线')
+    package_root = config.WORK_DIR / 'model-packages'
+    destination = package_root / package_id
+    archive = package_root / f'{package_id}.zip'
+    if (
+        destination.exists()
+        or archive.exists()
+        or conn.execute(
+            'SELECT 1 FROM model_packages WHERE id = ?', (package_id,)
+        ).fetchone()
+    ):
+        raise ValueError(f'模型包 ID 已存在: {package_id}')
+
+    models: Dict[str, Any] = {}
+    dataset_lock: Dict[str, Any] = {}
+    metrics: Dict[str, Any] = {}
+    for task_id, context in contexts.items():
+        role = TASK_ROLES[task_id]
+        metadata = context['metadata']
+        classes = _class_names(metadata)
+        kind = str(metadata.get('kind'))
+        recorded_input = metadata.get('input') or {}
+        preprocessing = metadata.get('preprocessing') or {}
+        default_size = int(metadata.get('imgsz') or 224)
+        artifact = Path(context['artifact'])
+        models[role] = {
+            'task_id': task_id,
+            'run_id': str(context['run']['id']),
+            'artifact_size': int(artifact.stat().st_size),
+            'metadata': metadata,
+            'manifest': {
+                'file': f'models/{role}.onnx',
+                'kind': 'classification' if kind == 'classify' else 'detection',
+                'input': {
+                    'width': int(recorded_input.get('width') or default_size),
+                    'height': int(recorded_input.get('height') or default_size),
+                    'color': str(preprocessing.get('color') or 'RGB'),
+                    'resize': str(
+                        preprocessing.get('resize')
+                        or (
+                            'shortest_edge_center_crop'
+                            if kind == 'classify'
+                            else 'letterbox'
+                        )
+                    ),
+                    'pad_value': preprocessing.get('pad_value'),
+                    'preserve_full_image': bool(
+                        preprocessing.get('preserve_full_image', False)
+                    ),
+                    'scale': str(preprocessing.get('scale') or '0_to_1'),
+                    'normalize': str(
+                        preprocessing.get('normalize')
+                        or ('imagenet' if kind == 'classify' else 'none')
+                    ),
+                },
+                'training_augmentation': preprocessing.get('training_augmentation'),
+                'classes': classes,
+                'dataset_version': context['run']['dataset_version_id'],
+                'training_run_id': context['run']['id'],
+            },
+        }
+        dataset_manifest = Path(context['dataset']['manifest_path'])
+        dataset_lock[role] = {
+            'dataset_version': context['run']['dataset_version_id'],
+            'manifest_sha256': _sha256(dataset_manifest),
+            'counts': json.loads(context['dataset']['counts_json'] or '{}'),
+        }
+        metrics[role] = context['run']['metrics_json']
+    manifest = {
+        'schema_version': 2,
+        'package_id': package_id,
+        'pipeline_version': 'timeline-v2',
+        'status': status,
+        'missing_roles': [TASK_ROLES[task] for task in missing],
+        'evaluation_gaps': evaluation_gaps,
+        'models': {},
+        'runtime': {
+            'coarse_interval_ms': 60_000,
+            'maximum_keyframe_distance_ms': 5_000,
+            'result_scan_fps': 4,
+            'result_window_before_ms': 40_000,
+            'result_window_after_ms': 25_000,
+            'thresholds': {
+                'match_flow': 0.55,
+                'hero_select': 0.55,
+                'match_mode': 0.50,
+                'result_panel': 0.55,
+                'hero_avatar': 0.25,
+                'hero_identity': 0.50,
+                'player_position': 0.50,
+            },
+        },
+        'compatibility': {
+            'analysis_protocol_version': 2,
+            'product': 'blrec-analysis-worker',
+        },
+    }
+    return {
+        'package_id': package_id,
+        'status': status,
+        'missing_tasks': missing,
+        'evaluation_gaps': evaluation_gaps,
+        'models': models,
+        'manifest': manifest,
+        'dataset_lock': dataset_lock,
+        'metrics': metrics,
+    }
 
 
 def build_model_package(
@@ -1346,6 +1606,8 @@ def model_package_archive(conn: Any, package_id: str) -> Path:
         path.relative_to(root)
     except ValueError as error:
         raise ValueError('模型包路径不在 Vision Lab 工作目录内') from error
+    if path.is_file() and path.suffix == '.zip':
+        return path
     if not path.is_dir():
         raise FileNotFoundError(path)
     archive = root / f'{package_id}.zip'

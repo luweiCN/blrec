@@ -145,3 +145,25 @@ def test_duplicate_active_related_job_is_reused() -> None:
             assert second['payload'] == {'attempt': 1}
         finally:
             conn.close()
+
+
+def test_job_list_omits_large_payload_but_detail_endpoint_keeps_it() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        conn = _database(temporary)
+        try:
+            created = vision_jobs.create_job(
+                conn,
+                kind='validate_model',
+                related_id='validation-1',
+                payload={'large': 'x' * 10_000},
+            )
+
+            listed = vision_jobs.list_jobs(conn)
+            detailed = vision_jobs.get_job(conn, created['id'])
+
+            assert listed[0]['payload'] == {}
+            assert listed[0]['result'] == {}
+            assert detailed is not None
+            assert detailed['payload']['large'] == 'x' * 10_000
+        finally:
+            conn.close()

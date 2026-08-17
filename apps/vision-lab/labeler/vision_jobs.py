@@ -180,7 +180,11 @@ def create_job(
 
 def list_jobs(conn: sqlite3.Connection, *, limit: int = 100) -> List[Dict[str, Any]]:
     rows = conn.execute(
-        'SELECT * FROM vision_jobs ORDER BY created_at DESC, id DESC LIMIT ?',
+        "SELECT id, kind, related_id, status, priority, '{}' AS payload_json, "
+        "progress, stage, detail, '{}' AS result_json, error, worker_id, "
+        'lease_token, lease_expires_at, cancel_requested, created_at, started_at, '
+        'finished_at, updated_at FROM vision_jobs '
+        'ORDER BY created_at DESC, id DESC LIMIT ?',
         (max(1, min(1_000, int(limit))),),
     ).fetchall()
     return [_job_dict(row) for row in rows]

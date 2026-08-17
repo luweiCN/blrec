@@ -81,13 +81,26 @@ const api = async (path, opts = {}) => {
   return res.json();
 };
 
+const delay = (milliseconds) => new Promise(
+  (resolve) => window.setTimeout(resolve, milliseconds));
+
+async function waitForVisionJob(jobId, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await api(`/api/vision-jobs/${encodeURIComponent(jobId)}`);
+    const job = response.job || {};
+    if (['succeeded', 'failed', 'cancelled'].includes(job.status)) return job;
+    await delay(1000);
+  }
+  return null;
+}
+
 // ---------- 初始化 ----------
 async function init() {
   CFG = await api('/api/config');
   buildSelects();
   buildBoxToolbar();
   buildStrategySelect();
-  loadVideos();
   loadStats();
   loadDatasets();
   loadPairs();
@@ -98,6 +111,17 @@ async function init() {
   bindCandidateReview();
   bindModelTesting();
   setTask(state.task, false);
+  if (CFG.control_plane_only) {
+    const sourceNav = $('.nav-item[data-view="source"]');
+    if (sourceNav) sourceNav.classList.add('hidden');
+    const candidateNav = $('.nav-item[data-view="candidates"][data-candidate-source="new"]');
+    if (candidateNav) activateNav(candidateNav);
+    const foot = $('.side-foot');
+    if (foot) foot.textContent = 'NAS 控制面 · 重任务由 Worker 执行';
+    loadCandidateReview();
+    return;
+  }
+  loadVideos();
   if (isGateTask()) {
     const gateNav = $('.nav-item[data-task="mode_gate"]');
     if (gateNav) activateNav(gateNav);
@@ -1452,6 +1476,7 @@ async function loadCandidateHeroLineup(item) {
   $('#btn-candidate-save').disabled = true;
   const query = new URLSearchParams({screen_type: context.screenType});
   if (context.teamSize) query.set('team_size', String(context.teamSize));
+  let queuedJobId = '';
   try {
     const [, lineup] = await Promise.all([
       ensureCandidateHeroCatalog(),
@@ -1463,6 +1488,7 @@ async function loadCandidateHeroLineup(item) {
       $('#btn-candidate-save').disabled = false;
       return;
     }
+    queuedJobId = String((lineup.prefill_job || {}).id || '');
     if (lineup.needs_team_size) {
       candidateHeroLineup = null;
       renderCandidateHeroLineup();
@@ -1500,6 +1526,21 @@ async function loadCandidateHeroLineup(item) {
       $('#btn-candidate-save').disabled = false;
       renderCandidateHeroLineup();
     }
+  }
+  if (queuedJobId) {
+    refreshCandidateHeroAfterWorker(item, queuedJobId, token);
+  }
+}
+
+async function refreshCandidateHeroAfterWorker(item, jobId, token) {
+  try {
+    const finished = await waitForVisionJob(jobId);
+    if (!finished || finished.status !== 'succeeded') return;
+    if (token !== candidateHeroLoadToken || currentCandidate() !== item ||
+        candidateHeroDirty || candidateFormTouched) return;
+    await loadCandidateHeroLineup(item);
+  } catch (_error) {
+    // Worker 暂停或暂时离线时保留人工标注能力，不打断当前图片。
   }
 }
 
@@ -1579,6 +1620,10 @@ async function persistCandidateHeroLayout(
     candidateHeroDraft = candidateHeroDraftForLineup(
       item, lineup, previousDraft);
     candidateHeroDirty = true;
+    const queuedJobId = String((lineup.prefill_job || {}).id || '');
+    if (queuedJobId) {
+      refreshCandidateHeroLayoutAfterWorker(item, queuedJobId);
+    }
     if (lineup.template_saved) {
       $('#candidate-save-state').textContent =
         '英雄圆框已识别，并缓存为该主播的同类画面布局';
@@ -1592,6 +1637,28 @@ async function persistCandidateHeroLayout(
     $('#btn-candidate-save').disabled = false;
     renderCandidateHeroLineup();
     renderCandidateChoices();
+  }
+}
+
+async function refreshCandidateHeroLayoutAfterWorker(item, jobId) {
+  try {
+    const finished = await waitForVisionJob(jobId);
+    if (!finished || finished.status !== 'succeeded' ||
+        currentCandidate() !== item) return;
+    const context = candidateHeroContext(item);
+    if (!context) return;
+    const query = new URLSearchParams({screen_type: context.screenType});
+    if (context.teamSize) query.set('team_size', String(context.teamSize));
+    const lineup = await api(
+      `/api/training-review/items/${item.frame_id}/hero-lineup?${query}`);
+    if (currentCandidate() !== item || !lineup.applicable) return;
+    const previousDraft = new Map(candidateHeroDraft);
+    candidateHeroLineup = lineup;
+    candidateHeroDraft = candidateHeroDraftForLineup(
+      item, lineup, previousDraft);
+    renderCandidateHeroLineup();
+  } catch (_error) {
+    // Worker 不在线时继续保留人工选择，不把异步错误盖到当前操作上。
   }
 }
 
@@ -2319,10 +2386,24 @@ async function requestCandidateModelPrefill(item) {
       `/api/training-review/items/${frameId}/prefill`, {
         method: 'POST', body: JSON.stringify({}),
       });
-    if (!result.item) return;
+    let updatedItem = result.item;
+    if (result.queued && result.job && result.job.id) {
+      if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&
+          !candidateFormTouched) {
+        $('#candidate-save-state').textContent =
+          '已交给 Vision Worker 预填；你可以先人工标注，不必等待';
+      }
+      const finished = await waitForVisionJob(result.job.id);
+      if (finished && finished.status === 'succeeded') {
+        updatedItem = (((finished.result || {}).application || {}).item) || updatedItem;
+      } else {
+        return;
+      }
+    }
+    if (!updatedItem) return;
     const index = candidateQueue.findIndex(
       (value) => Number(value.frame_id) === frameId);
-    if (index >= 0) candidateQueue[index] = result.item;
+    if (index >= 0) candidateQueue[index] = updatedItem;
     if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&
         !candidateFormTouched) {
       renderCandidateItem();
@@ -5921,7 +6002,7 @@ async function runModelTestBatch() {
   $('#model-test-state').textContent =
     `正在自动测试 ${modelTestSamples.length} 张，完成后会直接生成报告…`;
   try {
-    modelTestBatchReport = await api(
+    const response = await api(
       `/api/model-tests/runs/${encodeURIComponent(runId)}/batch`, {
         method: 'POST',
         body: JSON.stringify({
@@ -5930,6 +6011,18 @@ async function runModelTestBatch() {
           iou_threshold: 0.5,
         }),
       });
+    if (response.queued && response.job && response.job.id) {
+      $('#model-test-state').textContent =
+        '验收任务已交给 Vision Worker，正在远程取图并测试…';
+      const finished = await waitForVisionJob(response.job.id, 30 * 60 * 1000);
+      if (!finished || finished.status !== 'succeeded') {
+        throw new Error((finished && finished.error) || 'Vision Worker 验收未完成');
+      }
+      modelTestBatchReport = (finished.result || {}).report || null;
+    } else {
+      modelTestBatchReport = response;
+    }
+    if (!modelTestBatchReport) throw new Error('验收报告为空');
     renderModelTestBatchReport();
     const report = modelTestBatchReport;
     $('#model-test-state').textContent =
@@ -5954,7 +6047,7 @@ async function predictModelTestSample() {
   $('#model-test-output').textContent = '推理中…';
   $('#btn-model-test-predict').disabled = true;
   try {
-    const result = await api(
+    const response = await api(
       `/api/model-tests/runs/${encodeURIComponent(runId)}/predict`, {
         method: 'POST',
         body: JSON.stringify({
@@ -5963,6 +6056,16 @@ async function predictModelTestSample() {
           conf_thr: Number($('#model-test-conf').value || 0.25),
         }),
       });
+    let result = response;
+    if (response.queued && response.job && response.job.id) {
+      $('#model-test-output').textContent = '已交给 Vision Worker 推理…';
+      const finished = await waitForVisionJob(response.job.id);
+      if (!finished || finished.status !== 'succeeded') {
+        throw new Error((finished && finished.error) || 'Vision Worker 推理未完成');
+      }
+      result = (finished.result || {}).prediction;
+    }
+    if (!result) throw new Error('推理结果为空');
     renderModelTestPrediction(result);
   } catch (error) {
     $('#model-test-output').textContent = '推理失败：' + error.message;
@@ -6162,6 +6265,15 @@ async function buildModelPackage() {
     const result = await api('/api/model-packages', {
       method: 'POST', body: JSON.stringify({run_ids: runIds}),
     });
+    if (result.queued && result.job && result.job.id) {
+      $('#model-package-state').textContent =
+        `已交给 Vision Worker 组装 ${result.id}，正在生成校验值和模型包…`;
+      const finished = await waitForVisionJob(
+        result.job.id, 30 * 60 * 1000);
+      if (!finished || finished.status !== 'succeeded') {
+        throw new Error((finished && finished.error) || 'Vision Worker 组包未完成');
+      }
+    }
     $('#model-package-state').textContent = result.status === 'ready'
       ? `已生成可部署版本：${result.id}（尚未部署）`
       : `未达到发布条件：${Object.keys(result.evaluation_gaps || {}).length ? '固定测试集覆盖不足' : '模型不完整'}`;

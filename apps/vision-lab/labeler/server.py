@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import threading
@@ -161,6 +162,13 @@ def _require_vision_worker(request: Request) -> None:
         raise HTTPException(401, 'Vision Worker token 无效')
 
 
+def _require_local_heavy_operation(name: str) -> None:
+    if config.CONTROL_PLANE_ONLY:
+        raise HTTPException(
+            409, f'{name} 已禁止在 NAS 控制面直接运行，请从 Vision Worker 任务入口执行'
+        )
+
+
 # ---------- 配置与任务 ----------
 
 
@@ -187,6 +195,7 @@ def api_config() -> Dict[str, Any]:
         'strategies': config.STRATEGIES,
         'scoreboard_vs_result_hint': config.SCOREBOARD_VS_RESULT_HINT,
         'nas_rec_dir': config.NAS_REC_DIR,
+        'control_plane_only': config.CONTROL_PLANE_ONLY,
     }
 
 
@@ -276,6 +285,7 @@ def api_videos(
 
 @app.post('/api/sync')
 def api_sync() -> Dict[str, Any]:
+    _require_local_heavy_operation('NAS 录像清单同步')
     if _sync_state['running']:
         raise HTTPException(409, '同步任务已在运行')
 
@@ -310,6 +320,7 @@ def api_sync_state() -> Dict[str, Any]:
 
 @app.post('/api/extract')
 def api_extract(body: Dict[str, Any]) -> Dict[str, Any]:
+    _require_local_heavy_operation('视频抽帧')
     video_ids = [int(x) for x in body.get('video_ids', [])]
     strategy = body.get('strategy', 'existing_model_hits')
     if not video_ids:
@@ -487,6 +498,7 @@ def api_live_frame(body: Dict[str, Any]) -> Dict[str, Any]:
     与上一帧内容重复时返回 {'duplicate': True}(前端可自动重试)。
     SSH 网络操作在数据库锁外执行,入库用独立连接。
     """
+    _require_local_heavy_operation('远程视频抽帧')
     video_id = int(body.get('video_id', 0))
     if not video_id:
         raise HTTPException(400, '缺少 video_id')
@@ -619,6 +631,7 @@ def api_save_live_state(body: Dict[str, Any]) -> Dict[str, Any]:
 @app.post('/api/live/videos/{video_id}/download')
 def api_download_video(video_id: int) -> Dict[str, Any]:
     """把视频下载到本地并转 mp4(后台),用于本地播放与丝滑抽帧。"""
+    _require_local_heavy_operation('完整视频下载与转码')
     with _db_lock:
         conn = _conn()
         try:
@@ -653,6 +666,7 @@ def api_media(video_id: int) -> FileResponse:
 @app.post('/api/live/frame-local')
 def api_live_frame_local(body: Dict[str, Any]) -> Dict[str, Any]:
     """本地抽帧:在已下载的 mp4 上 seek 抽一帧入库。"""
+    _require_local_heavy_operation('本地视频抽帧')
     video_id = int(body.get('video_id', 0))
     pts_ms = int(body.get('pts_ms', 0))
     interval_ms = int(body.get('interval_ms', 5000))
@@ -1184,6 +1198,61 @@ def api_training_review_items(
 
 @app.post('/api/training-review/items/{frame_id}/prefill')
 def api_training_review_prefill(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    if config.CONTROL_PLANE_ONLY:
+        with _db_lock:
+            conn = _conn()
+            try:
+                item = db.get_training_review_item(conn, frame_id)
+                if item is None:
+                    raise HTTPException(404, '训练复核图片不存在')
+                models = model_prefill.latest_model_specs(
+                    conn, (*model_prefill.CORE_PREFILL_TASKS, 'hero_avatar_detector')
+                )
+                model_runs = {
+                    task_id: value['run_id'] for task_id, value in models.items()
+                }
+                previous = next(
+                    (
+                        source
+                        for source in item.get('sources') or []
+                        if source.get('source_type') == 'new_model_prefill'
+                        and (source.get('metadata') or {}).get('model_runs')
+                        == model_runs
+                        and not (source.get('metadata') or {}).get('errors')
+                    ),
+                    None,
+                )
+                if previous is not None and not bool(body.get('force')):
+                    return {
+                        'applied': False,
+                        'cached': True,
+                        'models': model_runs,
+                        'item': item,
+                    }
+                if not models:
+                    return {
+                        'applied': False,
+                        'cached': False,
+                        'models': {},
+                        'item': item,
+                    }
+                job = _queue_model_prefill(
+                    conn,
+                    frame_id=frame_id,
+                    operation='core',
+                    models=models,
+                    force=bool(body.get('force')),
+                )
+                return {
+                    'applied': False,
+                    'cached': False,
+                    'queued': True,
+                    'models': model_runs,
+                    'job': job,
+                    'item': item,
+                }
+            finally:
+                conn.close()
     with _db_lock:
         conn = _conn()
         try:
@@ -1197,6 +1266,67 @@ def api_training_review_prefill(frame_id: int, body: Dict[str, Any]) -> Dict[str
                 raise HTTPException(422, str(exc)) from exc
         finally:
             conn.close()
+
+
+def _queue_model_prefill(
+    conn: Any,
+    *,
+    frame_id: int,
+    operation: str,
+    models: Dict[str, Any],
+    screen_type: str = '',
+    team_size: Optional[int] = None,
+    slots: Optional[List[Dict[str, Any]]] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        'operation': operation,
+        'frame_id': int(frame_id),
+        'models': models,
+    }
+    if screen_type:
+        payload['screen_type'] = screen_type
+    if team_size is not None:
+        payload['team_size'] = int(team_size)
+    if slots is not None:
+        payload['slots'] = slots
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+    ).hexdigest()[:16]
+    related_id = f'{operation}:{int(frame_id)}:{fingerprint}'
+    if force:
+        related_id += ':' + secrets.token_hex(4)
+    return vision_jobs.create_job(
+        conn, kind='model_prefill', related_id=related_id, priority=80, payload=payload
+    )
+
+
+def _queue_model_validation(
+    conn: Any,
+    *,
+    run_id: str,
+    split: str,
+    conf_thr: float,
+    iou_threshold: float,
+    sample_id: str = '',
+) -> Dict[str, Any]:
+    payload = {
+        'run_id': run_id,
+        'split': split,
+        'conf_thr': max(0.0, min(1.0, float(conf_thr))),
+        'iou_threshold': max(0.0, min(1.0, float(iou_threshold))),
+        'sample_id': sample_id,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+    ).hexdigest()[:16]
+    return vision_jobs.create_job(
+        conn,
+        kind='validate_model',
+        related_id=f'validate:{run_id}:{fingerprint}',
+        priority=90 if sample_id else 70,
+        payload=payload,
+    )
 
 
 def _hero_lineup_payload(
@@ -1251,6 +1381,144 @@ def _save_new_model_hero_prefill_source(
     )
 
 
+def _remote_training_review_hero_lineup(
+    frame_id: int,
+    *,
+    screen_type: Optional[str],
+    team_size: Optional[int],
+    refresh: bool,
+) -> Dict[str, Any]:
+    """NAS 控制面只保存布局并排队，头像推理全部交给 Vision Worker。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            item = db.get_training_review_item(conn, frame_id)
+            if item is None:
+                raise HTTPException(404, '训练复核图片不存在')
+            existing = db.get_training_review_hero_lineup(conn, frame_id)
+            try:
+                context = hero_review.infer_lineup_context(
+                    item, screen_type_hint=screen_type, team_size_hint=team_size
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            if context is None:
+                if existing is not None and screen_type is None:
+                    return _hero_lineup_payload(existing, item=item)
+                return {'applicable': False, 'reason': '尚未选择英雄头像所在画面'}
+            inferred_screen, inferred_size = context
+            if inferred_size is None:
+                return {
+                    'applicable': True,
+                    'screen_type': inferred_screen,
+                    'needs_team_size': True,
+                    'slots': [],
+                }
+            same_existing = bool(
+                existing
+                and existing['screen_type'] == inferred_screen
+                and int(existing['team_size']) == inferred_size
+            )
+            if same_existing and existing and existing['review_status'] == 'confirmed':
+                return _hero_lineup_payload(existing, item=item)
+
+            source_slots: List[Dict[str, Any]] = []
+            if same_existing and existing and existing.get('slots'):
+                source_slots = [
+                    {
+                        'side': value['side'],
+                        'slot': int(value['slot']),
+                        'crop': dict(value['crop']),
+                    }
+                    for value in existing['slots']
+                ]
+            if not source_slots:
+                template = db.get_training_review_hero_template(
+                    conn,
+                    streamer=str(item['streamer'] or ''),
+                    screen_type=inferred_screen,
+                    team_size=inferred_size,
+                    layout_key=db.hero_layout_key(
+                        int(item['width']), int(item['height'])
+                    ),
+                )
+                if template is not None:
+                    source_slots = [
+                        {
+                            'side': value['side'],
+                            'slot': int(value['slot']),
+                            'crop': dict(value['crop']),
+                        }
+                        for value in template['slots']
+                    ]
+                    existing = db.replace_training_review_hero_layout(
+                        conn,
+                        frame_id=frame_id,
+                        screen_type=inferred_screen,
+                        team_size=inferred_size,
+                        method='layout-template+worker-pending-v1',
+                        slots=source_slots,
+                    )
+                    same_existing = True
+
+            operation = 'hero_slots' if source_slots else 'hero_lineup'
+            task_ids = (
+                ('hero_identity', 'player_position')
+                if operation == 'hero_slots'
+                else model_prefill.HERO_PREFILL_TASKS
+            )
+            models = model_prefill.latest_model_specs(conn, task_ids)
+            if not models:
+                if same_existing and existing is not None:
+                    return _hero_lineup_payload(existing, item=item)
+                return {
+                    'applicable': True,
+                    'screen_type': inferred_screen,
+                    'team_size': inferred_size,
+                    'review_status': 'pending',
+                    'suggestion_method': 'manual-circle-v1',
+                    'template_found': False,
+                    'slots': [],
+                }
+            already_prefilled = bool(
+                same_existing
+                and existing
+                and existing.get('slots')
+                and all(
+                    str(value.get('suggested_label') or '')
+                    for value in existing['slots']
+                )
+            )
+            if already_prefilled and not refresh:
+                return _hero_lineup_payload(existing, item=item)
+            job = _queue_model_prefill(
+                conn,
+                frame_id=frame_id,
+                operation=operation,
+                models=models,
+                screen_type=inferred_screen,
+                team_size=inferred_size,
+                slots=source_slots if source_slots else None,
+                force=refresh,
+            )
+            if same_existing and existing is not None:
+                payload = _hero_lineup_payload(existing, item=item)
+            else:
+                payload = {
+                    'applicable': True,
+                    'screen_type': inferred_screen,
+                    'team_size': inferred_size,
+                    'review_status': 'pending',
+                    'suggestion_method': 'worker-pending-v1',
+                    'template_found': False,
+                    'slots': [],
+                }
+            payload['prefill_job'] = job
+            return payload
+        finally:
+            conn.close()
+
+
 @app.get('/api/training-review/heroes')
 def api_training_review_heroes() -> Dict[str, Any]:
     try:
@@ -1292,6 +1560,10 @@ def api_training_review_hero_lineup(
     team_size: Optional[int] = Query(None),
     refresh: bool = False,
 ) -> Dict[str, Any]:
+    if config.CONTROL_PLANE_ONLY:
+        return _remote_training_review_hero_lineup(
+            frame_id, screen_type=screen_type, team_size=team_size, refresh=refresh
+        )
     with _db_lock:
         conn = _conn()
         try:
@@ -1493,8 +1765,9 @@ def api_save_training_review_hero_layout(
         if isinstance(value, dict)
     ]
     model_result: Optional[Dict[str, Any]] = None
+    queued_job: Optional[Dict[str, Any]] = None
     try:
-        if recognize:
+        if recognize and not config.CONTROL_PLANE_ONLY:
             with _db_lock:
                 conn = _conn()
                 try:
@@ -1532,7 +1805,11 @@ def api_save_training_review_hero_layout(
                     method=(
                         'manual-circle+hero-identity-v1'
                         if recognize and model_result and model_result.get('complete')
-                        else 'manual-circle-v1'
+                        else (
+                            'manual-circle+worker-pending-v1'
+                            if recognize and config.CONTROL_PLANE_ONLY
+                            else 'manual-circle-v1'
+                        )
                     ),
                     slots=slots,
                 )
@@ -1557,6 +1834,27 @@ def api_save_training_review_hero_layout(
                         ),
                         slots=slots,
                     )
+                if recognize and config.CONTROL_PLANE_ONLY and slots:
+                    models = model_prefill.latest_model_specs(
+                        conn, ('hero_identity', 'player_position')
+                    )
+                    if models:
+                        queued_job = _queue_model_prefill(
+                            conn,
+                            frame_id=frame_id,
+                            operation='hero_slots',
+                            models=models,
+                            screen_type=screen_type,
+                            team_size=team_size,
+                            slots=[
+                                {
+                                    'side': value['side'],
+                                    'slot': int(value['slot']),
+                                    'crop': dict(value['crop']),
+                                }
+                                for value in slots
+                            ],
+                        )
             except KeyError as exc:
                 raise HTTPException(404, str(exc)) from exc
             except ValueError as exc:
@@ -1564,7 +1862,10 @@ def api_save_training_review_hero_layout(
         finally:
             conn.close()
     lineup['template_saved'] = save_template and bool(template_streamer)
-    return _hero_lineup_payload(lineup, item=item)
+    payload = _hero_lineup_payload(lineup, item=item)
+    if queued_job is not None:
+        payload['prefill_job'] = queued_job
+    return payload
 
 
 @app.get('/api/training-review/items/{frame_id}/heroes/{side}/{slot}/crop')
@@ -1875,6 +2176,7 @@ def _collect_bp_candidates(
 
 @app.post('/api/bp-review/collect')
 def api_collect_bp_review(body: Dict[str, Any]) -> Dict[str, Any]:
+    _require_local_heavy_operation('旧 BP 候选批量推理')
     with _bp_collect_lock:
         if _bp_collect_state['running']:
             raise HTTPException(409, 'BP 候选收集任务已在运行')
@@ -2057,6 +2359,7 @@ def api_models() -> List[Dict[str, Any]]:
 @app.post('/api/models/{model_name}/test')
 def api_model_test(model_name: str, body: Dict[str, Any]) -> Dict[str, Any]:
     """对指定帧跑模型推理,返回原始输出 + 格式化结果。"""
+    _require_local_heavy_operation('旧模型单帧推理')
     frame_id = body.get('frame_id')
     if not frame_id:
         raise HTTPException(400, '需要 frame_id')
@@ -2124,6 +2427,27 @@ def api_model_test_run_predict(run_id: str, body: Dict[str, Any]) -> Dict[str, A
         'post_run_challenge',
     }:
         raise HTTPException(400, '需要有效的 sample_id 和 split')
+    if config.CONTROL_PLANE_ONLY:
+        with _db_lock:
+            conn = _conn()
+            try:
+                try:
+                    model_testing.worker_evaluation_plan(conn, run_id, split=split)
+                    job = _queue_model_validation(
+                        conn,
+                        run_id=run_id,
+                        split=split,
+                        sample_id=sample_id,
+                        conf_thr=float(body.get('conf_thr', 0.25)),
+                        iou_threshold=float(body.get('iou_threshold', 0.5)),
+                    )
+                except KeyError as exc:
+                    raise HTTPException(404, str(exc)) from exc
+                except (FileNotFoundError, ValueError) as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                return {'queued': True, 'job': job}
+            finally:
+                conn.close()
     with _db_lock:
         conn = _conn()
         try:
@@ -2156,6 +2480,26 @@ def api_model_test_run_batch(run_id: str, body: Dict[str, Any]) -> Dict[str, Any
         'post_run_challenge',
     }:
         raise HTTPException(400, '需要有效的 split')
+    if config.CONTROL_PLANE_ONLY:
+        with _db_lock:
+            conn = _conn()
+            try:
+                try:
+                    model_testing.worker_evaluation_plan(conn, run_id, split=split)
+                    job = _queue_model_validation(
+                        conn,
+                        run_id=run_id,
+                        split=split,
+                        conf_thr=float(body.get('conf_thr', 0.25)),
+                        iou_threshold=float(body.get('iou_threshold', 0.5)),
+                    )
+                except KeyError as exc:
+                    raise HTTPException(404, str(exc)) from exc
+                except (FileNotFoundError, ValueError) as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                return {'queued': True, 'job': job}
+            finally:
+                conn.close()
     with _db_lock:
         conn = _conn()
         try:
@@ -2228,6 +2572,35 @@ def api_model_packages() -> Dict[str, Any]:
 @app.post('/api/model-packages')
 def api_build_model_package(body: Dict[str, Any]) -> Dict[str, Any]:
     run_ids = [str(value) for value in body.get('run_ids') or []]
+    if config.CONTROL_PLANE_ONLY:
+        with _db_lock:
+            conn = _conn()
+            try:
+                try:
+                    plan = model_testing.prepare_model_package(
+                        conn, run_ids, package_id=str(body.get('package_id') or '')
+                    )
+                    job = vision_jobs.create_job(
+                        conn,
+                        kind='package_models',
+                        related_id=str(plan['package_id']),
+                        priority=60,
+                        payload=plan,
+                    )
+                    return {
+                        'id': plan['package_id'],
+                        'status': plan['status'],
+                        'missing_tasks': plan['missing_tasks'],
+                        'evaluation_gaps': plan['evaluation_gaps'],
+                        'queued': True,
+                        'job': job,
+                    }
+                except KeyError as exc:
+                    raise HTTPException(404, str(exc)) from exc
+                except (FileNotFoundError, ValueError) as exc:
+                    raise HTTPException(400, str(exc)) from exc
+            finally:
+                conn.close()
     with _db_lock:
         conn = _conn()
         try:
@@ -2852,6 +3225,18 @@ def api_save_pair(body: Dict[str, Any]) -> Dict[str, Any]:
 @app.post('/api/export')
 def api_export(body: Dict[str, Any]) -> Dict[str, Any]:
     task_id = body.get('task_id', 'result_detector')
+    if config.CONTROL_PLANE_ONLY:
+        definition = training.TRAINING_TASKS.get(str(task_id))
+        if definition is None or not definition.get('active', True):
+            _require_local_heavy_operation('旧数据集物化导出')
+        with _db_lock:
+            conn = _conn()
+            try:
+                return training.export_snapshot(conn, str(task_id), materialize=False)
+            except RuntimeError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            finally:
+                conn.close()
     with _db_lock:
         conn = _conn()
         try:
@@ -2913,6 +3298,19 @@ def api_update_vision_worker(worker_id: str, body: Dict[str, Any]) -> Dict[str, 
                 )
             except KeyError:
                 raise HTTPException(404, 'Vision Worker 不存在')
+        finally:
+            conn.close()
+
+
+@app.get('/api/vision-jobs/{job_id}')
+def api_vision_job(job_id: str) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            job = vision_jobs.get_job(conn, job_id)
+            if job is None:
+                raise HTTPException(404, 'Vision Worker 任务不存在')
+            return {'job': job}
         finally:
             conn.close()
 
@@ -3043,6 +3441,53 @@ def api_vision_worker_frame_image(frame_id: int, request: Request) -> FileRespon
     return api_frame_image(frame_id)
 
 
+@app.get('/api/vision-workers/model-runs/{run_id}/artifact')
+def api_vision_worker_model_artifact(run_id: str, request: Request) -> FileResponse:
+    _require_vision_worker(request)
+    with _db_lock:
+        conn = _conn()
+        try:
+            run = db.get_training_run(conn, run_id)
+        finally:
+            conn.close()
+    if run is None or run['status'] != 'succeeded':
+        raise HTTPException(404, '训练产物不存在')
+    artifact = Path(str(run['artifact_path']))
+    if not artifact.is_file() or artifact.stat().st_size <= 0:
+        raise HTTPException(404, '训练模型文件不存在')
+    return FileResponse(
+        artifact, media_type='application/octet-stream', filename=f'{run_id}.onnx'
+    )
+
+
+@app.get('/api/vision-workers/model-tests/{run_id}/plan')
+def api_vision_worker_model_test_plan(
+    run_id: str, request: Request, split: str = 'test', sample_id: str = ''
+) -> Dict[str, Any]:
+    _require_vision_worker(request)
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                plan = model_testing.worker_evaluation_plan(conn, run_id, split=split)
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(400, str(exc)) from exc
+        finally:
+            conn.close()
+    if sample_id:
+        plan['samples'] = [
+            value
+            for value in plan['samples']
+            if str(value.get('sample_id') or '') == sample_id
+        ]
+        if not plan['samples']:
+            raise HTTPException(404, '测试样本不存在')
+        plan['total'] = 1
+    return plan
+
+
 @app.put('/api/vision-workers/jobs/{job_id}/artifacts/{filename}')
 async def api_upload_vision_job_artifact(
     job_id: str,
@@ -3052,7 +3497,7 @@ async def api_upload_vision_job_artifact(
     lease_token: str = Query(..., min_length=1, max_length=200),
 ) -> Dict[str, Any]:
     _require_vision_worker(request)
-    if filename not in {'model.onnx', 'model.json', 'train.log'}:
+    if filename not in {'model.onnx', 'model.json', 'train.log', 'package.zip'}:
         raise HTTPException(400, '不支持的训练产物文件名')
     with _db_lock:
         conn = _conn()
@@ -3065,11 +3510,20 @@ async def api_upload_vision_job_artifact(
                 raise HTTPException(409, str(exc))
         finally:
             conn.close()
-    if job['kind'] != 'train_model' or not job['related_id']:
-        raise HTTPException(400, '该任务不接受训练产物')
-    destination_dir = config.WORK_DIR / 'training-runs' / job['related_id']
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    destination = destination_dir / filename
+    if job['kind'] == 'train_model' and filename in {
+        'model.onnx',
+        'model.json',
+        'train.log',
+    }:
+        destination_dir = config.WORK_DIR / 'training-runs' / job['related_id']
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / filename
+    elif job['kind'] == 'package_models' and filename == 'package.zip':
+        destination_dir = config.WORK_DIR / 'model-packages'
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / f"{job['related_id']}.zip"
+    else:
+        raise HTTPException(400, '该任务不接受这个产物')
     temporary = destination.with_name(f'.{filename}.{job_id}.upload')
     size = 0
     try:
@@ -3086,6 +3540,96 @@ async def api_upload_vision_job_artifact(
     finally:
         temporary.unlink(missing_ok=True)
     return {'saved': True, 'filename': filename, 'size_bytes': size}
+
+
+def _apply_remote_model_prefill(
+    conn: Any, leased: Dict[str, Any], result: Dict[str, Any]
+) -> Dict[str, Any]:
+    payload = leased.get('payload') or {}
+    frame_id = int(payload.get('frame_id') or result.get('frame_id') or 0)
+    operation = str(payload.get('operation') or result.get('operation') or 'core')
+    if frame_id <= 0:
+        raise ValueError('预填任务缺少 frame_id')
+    if operation == 'core':
+        item = model_prefill.apply_core_prefill(conn, frame_id, result)
+        return {'applied': True, 'frame_id': frame_id, 'item': item}
+    item = db.get_training_review_item(conn, frame_id)
+    if item is None:
+        raise KeyError(f'训练复核图片不存在: {frame_id}')
+    existing = db.get_training_review_hero_lineup(conn, frame_id)
+    if existing is not None and existing['review_status'] == 'confirmed':
+        return {'applied': False, 'frame_id': frame_id, 'reason': '人工已确认'}
+    screen_type = str(payload.get('screen_type') or result.get('screen_type') or '')
+    team_size = int(payload.get('team_size') or result.get('team_size') or 0)
+    result_slots = result.get('slots') if isinstance(result.get('slots'), list) else []
+    if not result.get('complete') or len(result_slots) != team_size * 2:
+        return {
+            'applied': False,
+            'frame_id': frame_id,
+            'reason': str(result.get('reason') or '模型没有找全头像'),
+        }
+    if operation == 'hero_slots':
+        expected_slots = (
+            payload.get('slots') if isinstance(payload.get('slots'), list) else []
+        )
+        existing_by_key = {
+            (str(value['side']), int(value['slot'])): value
+            for value in (existing or {}).get('slots', [])
+        }
+        unchanged = len(expected_slots) == len(existing_by_key) and all(
+            (key := (str(value.get('side')), int(value.get('slot') or 0)))
+            in existing_by_key
+            and _same_hero_crop(
+                dict(value.get('crop') or {}), existing_by_key[key]['crop']
+            )
+            for value in expected_slots
+        )
+        if not unchanged:
+            return {
+                'applied': False,
+                'frame_id': frame_id,
+                'reason': '等待期间头像框已被人工修改',
+            }
+        lineup = db.replace_training_review_hero_layout(
+            conn,
+            frame_id=frame_id,
+            screen_type=screen_type,
+            team_size=team_size,
+            method='manual-circle+hero-identity-worker-v1',
+            slots=result_slots,
+        )
+    elif operation == 'hero_lineup':
+        if (
+            existing is not None
+            and existing.get('slots')
+            and not str(existing.get('suggestion_method') or '').startswith(
+                'worker-pending'
+            )
+        ):
+            return {
+                'applied': False,
+                'frame_id': frame_id,
+                'reason': '等待期间已人工绘制头像框',
+            }
+        lineup = db.replace_training_review_hero_suggestions(
+            conn,
+            frame_id=frame_id,
+            screen_type=screen_type,
+            team_size=team_size,
+            method='new-model-cascade-worker-v1',
+            slots=result_slots,
+        )
+    else:
+        raise ValueError(f'未知预填操作: {operation}')
+    _save_new_model_hero_prefill_source(
+        conn,
+        frame_id=frame_id,
+        item=item,
+        screen_type=screen_type,
+        team_size=team_size,
+        result=result,
+    )
+    return {'applied': True, 'frame_id': frame_id, 'lineup': lineup}
 
 
 @app.post('/api/vision-workers/jobs/{job_id}/complete')
@@ -3127,6 +3671,29 @@ def api_complete_vision_job(
                     ),
                     artifact_path=str(artifact),
                     finished_at=db.now(),
+                )
+            elif leased['kind'] == 'model_prefill':
+                result = {
+                    **result,
+                    'application': _apply_remote_model_prefill(conn, leased, result),
+                }
+            elif leased['kind'] == 'package_models':
+                package_id = str(leased['related_id'])
+                archive = config.WORK_DIR / 'model-packages' / f'{package_id}.zip'
+                if not archive.is_file() or archive.stat().st_size <= 0:
+                    raise HTTPException(409, '模型包尚未上传或文件为空')
+                if str(result.get('package_id') or '') != package_id:
+                    raise HTTPException(409, 'Worker 返回的模型包 ID 不一致')
+                db.create_model_package(
+                    conn,
+                    package_id=package_id,
+                    status=str(result.get('status') or 'incomplete'),
+                    path=str(archive),
+                    manifest=(
+                        result.get('manifest')
+                        if isinstance(result.get('manifest'), dict)
+                        else {}
+                    ),
                 )
             job = vision_jobs.finish_job(
                 conn,
