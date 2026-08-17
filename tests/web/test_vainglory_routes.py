@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from blrec.bili_upload.remote_media import RemoteMediaQueueStatus
 from blrec.vainglory.analyzer import VideoPart
 from blrec.vainglory.archive_backfill import (
     ArchiveBackfillItem,
@@ -1033,6 +1034,64 @@ def test_requests_and_reads_account_archive_backfill() -> None:
     assert item_page.json()['total'] == 21
     assert item_page.json()['items'][0]['bvid'] == 'BV1abcdefgh'
     assert fake.item_requests == [(7, 20, 20)]
+
+
+def test_reads_and_updates_remote_media_download_queue() -> None:
+    cache = SimpleNamespace()
+    cache.queue_status = AsyncMock(
+        return_value=RemoteMediaQueueStatus(
+            pending_download_count=2_385,
+            active_download_count=6,
+            downloaded_waiting_analysis_count=243,
+            active_analysis_count=3,
+            failed_download_count=86,
+            downloads_per_interface=3,
+            interface_count=2,
+            total_concurrency=6,
+        )
+    )
+    cache.update_downloads_per_interface = AsyncMock(
+        return_value=RemoteMediaQueueStatus(
+            pending_download_count=2_385,
+            active_download_count=6,
+            downloaded_waiting_analysis_count=243,
+            active_analysis_count=3,
+            failed_download_count=86,
+            downloads_per_interface=4,
+            interface_count=2,
+            total_concurrency=8,
+        )
+    )
+    application = FastAPI()
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[vainglory.authenticated_manager_subject] = (
+        lambda: 'manager'
+    )
+    application.dependency_overrides[vainglory.get_remote_media_cache] = lambda: cache
+
+    with TestClient(application) as client:
+        current = client.get('/api/v1/vainglory/archive-download-queue')
+        updated = client.patch(
+            '/api/v1/vainglory/archive-download-queue',
+            json={'downloadsPerInterface': 4},
+        )
+
+    assert current.status_code == 200
+    assert current.json() == {
+        'pendingDownloadCount': 2_385,
+        'activeDownloadCount': 6,
+        'downloadedWaitingAnalysisCount': 243,
+        'activeAnalysisCount': 3,
+        'failedDownloadCount': 86,
+        'downloadsPerInterface': 3,
+        'interfaceCount': 2,
+        'totalConcurrency': 6,
+    }
+    assert updated.status_code == 200
+    assert updated.json()['downloadsPerInterface'] == 4
+    assert updated.json()['totalConcurrency'] == 8
+    cache.queue_status.assert_awaited_once_with()
+    cache.update_downloads_per_interface.assert_awaited_once_with(4)
 
 
 def test_lists_the_paginated_analysis_queue() -> None:

@@ -74,6 +74,7 @@ REQUIRED_TABLES = {
     'vainglory_archive_imports',
     'vainglory_archive_parts',
     'vainglory_video_sources',
+    'vainglory_remote_media_controls',
     'vainglory_publications',
     'vainglory_publication_comments',
     'vainglory_publication_stale_comments',
@@ -2210,6 +2211,45 @@ async def test_migration_77_adds_player_visibility_and_repairs_private_uploads(
             'visibility_verified_at': 2,
             'public_visible_at': None,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 77
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 78
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_78_adds_remote_media_download_control(tmp_path: Path) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 78):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        row = await database.fetchone(
+            'SELECT downloads_per_interface,updated_at '
+            'FROM vainglory_remote_media_controls WHERE singleton_id=1'
+        )
+
+        assert row is not None and dict(row) == {
+            'downloads_per_interface': 3,
+            'updated_at': 1,
+        }
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 78
     finally:
         await database.close()

@@ -18,12 +18,14 @@ __all__ = (
     'RemoteMediaCache',
     'RemoteMediaDownloader',
     'RemoteMediaNotFound',
+    'RemoteMediaQueueStatus',
     'RemoteMediaStatus',
     'RemoteMediaUnavailable',
 )
 
 _TEN_DAYS_SECONDS = 10 * 24 * 60 * 60
-_DOWNLOADS_PER_INTERFACE = 3
+_DEFAULT_DOWNLOADS_PER_INTERFACE = 3
+_MAX_DOWNLOADS_PER_INTERFACE = 8
 
 
 class RemoteMediaNotFound(ValueError):
@@ -66,6 +68,18 @@ class RemoteMediaStatus:
     error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class RemoteMediaQueueStatus:
+    pending_download_count: int
+    active_download_count: int
+    downloaded_waiting_analysis_count: int
+    active_analysis_count: int
+    failed_download_count: int
+    downloads_per_interface: int
+    interface_count: int
+    total_concurrency: int
+
+
 class RemoteMediaCache:
     def __init__(
         self,
@@ -91,6 +105,7 @@ class RemoteMediaCache:
         self._wake = asyncio.Event()
         self._claim_lock = asyncio.Lock()
         self._paused_part_interfaces: Dict[int, str] = {}
+        self._downloads_per_interface = _DEFAULT_DOWNLOADS_PER_INTERFACE
         self._task: Optional[asyncio.Task[None]] = None
 
     @property
@@ -100,6 +115,7 @@ class RemoteMediaCache:
     async def start(self) -> None:
         if self._task is not None:
             return
+        self._downloads_per_interface = await self._load_downloads_per_interface()
         await self.recover_interrupted()
         self._wake.set()
         self._task = asyncio.create_task(self._run(), name='bili-remote-media-cache')
@@ -118,6 +134,58 @@ class RemoteMediaCache:
             "WHERE state='downloading'",
             (self._now(),),
         )
+
+    async def queue_status(self) -> RemoteMediaQueueStatus:
+        counts = await self._database.fetchone(
+            'SELECT '
+            "COALESCE(SUM(CASE WHEN source.state='pending' THEN 1 ELSE 0 END),0) "
+            'AS pending_download_count,'
+            "COALESCE(SUM(CASE WHEN source.state='downloading' THEN 1 ELSE 0 END),0) "
+            'AS active_download_count,'
+            'COALESCE(SUM(CASE WHEN source.state=\'ready\' '
+            "AND (analysis.state IS NULL OR analysis.state='pending') "
+            'THEN 1 ELSE 0 END),0) AS downloaded_waiting_analysis_count,'
+            'COALESCE(SUM(CASE WHEN source.state=\'ready\' '
+            "AND analysis.state='analyzing' THEN 1 ELSE 0 END),0) "
+            'AS active_analysis_count,'
+            "COALESCE(SUM(CASE WHEN source.state='failed' THEN 1 ELSE 0 END),0) "
+            'AS failed_download_count '
+            'FROM vainglory_video_sources source '
+            'LEFT JOIN vainglory_part_jobs analysis ON analysis.part_id=source.part_id'
+        )
+        downloads_per_interface = await self._load_downloads_per_interface()
+        self._downloads_per_interface = downloads_per_interface
+        interface_count = max(1, len(self._download_interfaces))
+        assert counts is not None
+        return RemoteMediaQueueStatus(
+            pending_download_count=int(counts['pending_download_count']),
+            active_download_count=int(counts['active_download_count']),
+            downloaded_waiting_analysis_count=int(
+                counts['downloaded_waiting_analysis_count']
+            ),
+            active_analysis_count=int(counts['active_analysis_count']),
+            failed_download_count=int(counts['failed_download_count']),
+            downloads_per_interface=downloads_per_interface,
+            interface_count=interface_count,
+            total_concurrency=downloads_per_interface * interface_count,
+        )
+
+    async def update_downloads_per_interface(
+        self, downloads_per_interface: int
+    ) -> RemoteMediaQueueStatus:
+        value = int(downloads_per_interface)
+        if not 1 <= value <= _MAX_DOWNLOADS_PER_INTERFACE:
+            raise ValueError('每条线路的下载并发必须在 1 到 8 之间')
+        changed = await self._database.execute(
+            'UPDATE vainglory_remote_media_controls '
+            'SET downloads_per_interface=?,updated_at=? WHERE singleton_id=1',
+            (value, self._now()),
+        )
+        if changed != 1:
+            raise RuntimeError('远程视频下载并发配置不存在')
+        self._downloads_per_interface = value
+        self._wake.set()
+        return await self.queue_status()
 
     async def request(
         self,
@@ -556,26 +624,28 @@ class RemoteMediaCache:
         )
 
     async def _run(self) -> None:
-        bindings: Tuple[Optional[str], ...]
-        if self._download_interfaces:
-            bindings = tuple(
-                interface_name
-                for interface_name in self._download_interfaces
-                for _ in range(_DOWNLOADS_PER_INTERFACE)
-            )
-        else:
-            bindings = (None,) * _DOWNLOADS_PER_INTERFACE
+        interfaces: Tuple[Optional[str], ...] = (
+            tuple(self._download_interfaces) if self._download_interfaces else (None,)
+        )
         await asyncio.gather(
             *(
-                self._run_worker(interface_name, worker_index)
-                for worker_index, interface_name in enumerate(bindings)
+                self._run_worker(
+                    interface_name,
+                    interface_index * _MAX_DOWNLOADS_PER_INTERFACE + slot_index,
+                    slot_index,
+                )
+                for interface_index, interface_name in enumerate(interfaces)
+                for slot_index in range(_MAX_DOWNLOADS_PER_INTERFACE)
             )
         )
 
     async def _run_worker(
-        self, interface_name: Optional[str], worker_index: int
+        self, interface_name: Optional[str], worker_index: int, slot_index: int
     ) -> None:
         while True:
+            if slot_index >= self._downloads_per_interface:
+                await asyncio.sleep(1)
+                continue
             if (
                 interface_name is not None
                 and self._network_manager is not None
@@ -595,6 +665,18 @@ class RemoteMediaCache:
                 await asyncio.wait_for(self._wake.wait(), timeout=30)
             except asyncio.TimeoutError:
                 pass
+
+    async def _load_downloads_per_interface(self) -> int:
+        value = await self._database.scalar(
+            'SELECT downloads_per_interface '
+            'FROM vainglory_remote_media_controls WHERE singleton_id=1'
+        )
+        if value is None:
+            raise RuntimeError('远程视频下载并发配置不存在')
+        normalized = int(value)
+        if not 1 <= normalized <= _MAX_DOWNLOADS_PER_INTERFACE:
+            raise RuntimeError('远程视频下载并发配置无效')
+        return normalized
 
     def _target_path(self, account_id: int, bvid: str, page: int) -> Path:
         target = (

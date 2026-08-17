@@ -1405,8 +1405,7 @@
 >
   <ng-container *nzModalContent>
     <p class="archive-manager-help">
-      这里负责查找历史稿件，并把稿件依次加入下载队列。每日上限只控制一天最多加入多少个稿件，不会增加同时下载的数量；下载器仍按 3
-      路并发处理。标题含“直播剪辑”的稿件会自动排除。下载完成后，稿件会自动转到“对局分析任务”。
+      这里负责查找历史稿件，并把稿件依次加入下载队列。每日上限只控制一天最多加入多少个稿件，不代表已经下载完成；实际积压和下载并发可在“运行中心 → 历史流水线”查看和调整。标题含“直播剪辑”的稿件会自动排除。下载完成后，稿件会自动转到“对局分析任务”。
     </p>
     <nz-alert
       *ngIf="archiveAccountsError"
@@ -1530,8 +1529,7 @@
                 <span>下载完成后会从这里移走，后续进度到“对局分析任务”查看</span>
               </div>
               <span>
-                {{ archiveDownloadingItems(account.id).length }} / 3
-                路正在下载
+                当前样本中 {{ archiveDownloadingItems(account.id).length }} 个正在下载
               </span>
             </header>
             <div

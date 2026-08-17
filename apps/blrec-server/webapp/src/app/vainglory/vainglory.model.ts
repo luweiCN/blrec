@@ -85,6 +85,17 @@ export interface VaingloryArchiveSyncControl {
   readonly dailyLimit?: number;
 }
 
+export interface VaingloryArchiveDownloadQueue {
+  readonly pendingDownloadCount: number;
+  readonly activeDownloadCount: number;
+  readonly downloadedWaitingAnalysisCount: number;
+  readonly activeAnalysisCount: number;
+  readonly failedDownloadCount: number;
+  readonly downloadsPerInterface: number;
+  readonly interfaceCount: number;
+  readonly totalConcurrency: number;
+}
+
 export type ArchiveBackfillStage =
   | 'queued'
   | 'reading_metadata'

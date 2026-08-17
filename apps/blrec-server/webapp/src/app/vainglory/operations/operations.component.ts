@@ -26,6 +26,7 @@ import {
   VaingloryAnalysisWorkerNodeStatus,
   VaingloryArchiveBackfillItem,
   VaingloryArchiveBackfillRealtimeSnapshot,
+  VaingloryArchiveDownloadQueue,
   VaingloryArchiveSync,
   VaingloryIndexRealtimeSnapshot,
   VaingloryPublicationAudit,
@@ -59,6 +60,10 @@ export class OperationsComponent implements OnInit, OnDestroy {
   queue: VaingloryAnalysisQueue | null = null;
   sampledAt: number | null = null;
   archiveSyncs: readonly VaingloryArchiveSync[] = [];
+  archiveDownloadQueue: VaingloryArchiveDownloadQueue | null = null;
+  archiveDownloadQueueLoading = true;
+  archiveDownloadQueueSaving = false;
+  archiveDownloadConcurrencyDraft: number | null = null;
   archiveItemsByAccountId: ReadonlyMap<
     number,
     readonly VaingloryArchiveBackfillItem[]
@@ -129,6 +134,7 @@ export class OperationsComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadAccounts();
     this.loadMigrations();
+    this.loadArchiveDownloadQueue();
     this.loadPublicationAudit();
     this.loadPublicationRecords();
     this.realtime.events$
@@ -137,6 +143,7 @@ export class OperationsComponent implements OnInit, OnDestroy {
         if (event.type === 'resync') {
           this.loadAccounts(false);
           this.loadMigrations(false);
+          this.loadArchiveDownloadQueue(false);
           this.loadPublicationAudit(false);
           this.loadPublicationRecords(false);
           return;
@@ -381,6 +388,48 @@ export class OperationsComponent implements OnInit, OnDestroy {
 
   toggleArchiveSync(sync: VaingloryArchiveSync): void {
     this.updateArchiveControl(sync, { paused: !sync.operatorPaused });
+  }
+
+  setArchiveDownloadConcurrency(value: number | null): void {
+    this.archiveDownloadConcurrencyDraft = value;
+  }
+
+  refreshArchiveDownloadQueue(): void {
+    this.loadArchiveDownloadQueue();
+  }
+
+  saveArchiveDownloadConcurrency(): void {
+    if (this.archiveDownloadQueueSaving) {
+      return;
+    }
+    const value = Number(
+      this.archiveDownloadConcurrencyDraft ??
+        this.archiveDownloadQueue?.downloadsPerInterface,
+    );
+    if (!Number.isInteger(value) || value < 1 || value > 8) {
+      this.pageError = '每条线路的下载并发必须在 1 到 8 之间';
+      return;
+    }
+    this.archiveDownloadQueueSaving = true;
+    this.vainglory
+      .updateArchiveDownloadQueue(value)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.archiveDownloadQueueSaving = false;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (queue) => {
+          this.archiveDownloadQueue = queue;
+          this.archiveDownloadConcurrencyDraft = queue.downloadsPerInterface;
+          this.actionMessage = `下载并发已调整为每条线路 ${queue.downloadsPerInterface} 路，共 ${queue.totalConcurrency} 路`;
+        },
+        error: (error: unknown) => {
+          this.pageError = this.errorMessage(error, '下载并发更新失败');
+        },
+      });
   }
 
   requestArchiveSync(account: BiliAccount): void {
@@ -907,6 +956,28 @@ export class OperationsComponent implements OnInit, OnDestroy {
         error: (error: unknown) => {
           this.migrationLoading = false;
           this.pageError = this.errorMessage(error, '历史搬运状态读取失败');
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  private loadArchiveDownloadQueue(showLoading = true): void {
+    if (showLoading) {
+      this.archiveDownloadQueueLoading = true;
+    }
+    this.vainglory
+      .getArchiveDownloadQueue()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (queue) => {
+          this.archiveDownloadQueue = queue;
+          this.archiveDownloadConcurrencyDraft = queue.downloadsPerInterface;
+          this.archiveDownloadQueueLoading = false;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.archiveDownloadQueueLoading = false;
+          this.pageError = this.errorMessage(error, '下载队列读取失败');
           this.changeDetector.markForCheck();
         },
       });

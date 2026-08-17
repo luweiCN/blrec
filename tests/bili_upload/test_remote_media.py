@@ -375,5 +375,73 @@ async def test_does_not_download_migration_target_discovered_by_history_intake(
         await database.close()
 
 
+@pytest.mark.asyncio
+async def test_reports_and_persists_remote_download_queue_concurrency(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        missing = tmp_path / 'deleted.mp4'
+        await seed_remote_part(database, missing)
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=FakeDownloader(),
+            download_interfaces=('wan-a', 'wan-b'),
+            clock=lambda: 1_000,
+        )
+        assert (await cache.request(1, force_remote=True)).state == 'pending'
+
+        initial = await cache.queue_status()
+
+        assert initial.pending_download_count == 1
+        assert initial.active_download_count == 0
+        assert initial.downloaded_waiting_analysis_count == 0
+        assert initial.active_analysis_count == 0
+        assert initial.failed_download_count == 0
+        assert initial.downloads_per_interface == 3
+        assert initial.interface_count == 2
+        assert initial.total_concurrency == 6
+
+        updated = await cache.update_downloads_per_interface(5)
+
+        assert updated.downloads_per_interface == 5
+        assert updated.total_concurrency == 10
+        restarted = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=FakeDownloader(),
+            download_interfaces=('wan-a', 'wan-b'),
+            clock=lambda: 1_001,
+        )
+        assert (await restarted.queue_status()).downloads_per_interface == 5
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_rejects_unsafe_remote_download_concurrency(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=FakeDownloader(),
+            clock=lambda: 1_000,
+        )
+
+        with pytest.raises(ValueError, match='1 到 8'):
+            await cache.update_downloads_per_interface(0)
+        with pytest.raises(ValueError, match='1 到 8'):
+            await cache.update_downloads_per_interface(9)
+    finally:
+        await database.close()
+
+
 async def async_value(value: object) -> object:
     return value

@@ -60,7 +60,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
     {
       key: 'archiveDownload',
       name: '历史稿件下载',
-      help: '固定线路使用 3 路下载；多线路并行时，每条开启“历史下载”的线路固定运行 3 路，可单独暂停。',
+      help: '下载并发在“运行中心 → 历史流水线”设置；多线路并行时，每条开启“历史下载”的线路使用相同并发，可单独暂停。',
     },
     {
       key: 'dashboardPublish',

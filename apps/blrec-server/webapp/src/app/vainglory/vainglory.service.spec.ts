@@ -299,6 +299,23 @@ describe('VaingloryService', () => {
     page.flush({ total: 0, items: [] });
   });
 
+  it('reads and updates remote media download concurrency', () => {
+    service.getArchiveDownloadQueue().subscribe();
+    const current = http.expectOne(
+      '/api/v1/vainglory/archive-download-queue',
+    );
+    expect(current.request.method).toBe('GET');
+    current.flush({ downloadsPerInterface: 3, totalConcurrency: 6 });
+
+    service.updateArchiveDownloadQueue(4).subscribe();
+    const updated = http.expectOne(
+      '/api/v1/vainglory/archive-download-queue',
+    );
+    expect(updated.request.method).toBe('PATCH');
+    expect(updated.request.body).toEqual({ downloadsPerInterface: 4 });
+    updated.flush({ downloadsPerInterface: 4, totalConcurrency: 8 });
+  });
+
   it('loads one page of waiting analysis tasks', () => {
     service.listAnalysisQueueItems(20, 40).subscribe();
 

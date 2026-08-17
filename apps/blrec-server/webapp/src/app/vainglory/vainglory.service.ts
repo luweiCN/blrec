@@ -9,6 +9,7 @@ import {
   VaingloryAnchorStats,
   VaingloryArchiveBackfillItem,
   VaingloryArchiveBackfillItemPage,
+  VaingloryArchiveDownloadQueue,
   VaingloryHero,
   VaingloryHeroStats,
   VaingloryArchiveSync,
@@ -534,6 +535,21 @@ export class VaingloryService {
     return this.http.patch<VaingloryArchiveSync>(
       this.url.makeApiUrl(`/api/v1/vainglory/archive-syncs/${accountId}`),
       control,
+    );
+  }
+
+  getArchiveDownloadQueue(): Observable<VaingloryArchiveDownloadQueue> {
+    return this.http.get<VaingloryArchiveDownloadQueue>(
+      this.url.makeApiUrl('/api/v1/vainglory/archive-download-queue'),
+    );
+  }
+
+  updateArchiveDownloadQueue(
+    downloadsPerInterface: number,
+  ): Observable<VaingloryArchiveDownloadQueue> {
+    return this.http.patch<VaingloryArchiveDownloadQueue>(
+      this.url.makeApiUrl('/api/v1/vainglory/archive-download-queue'),
+      { downloadsPerInterface },
     );
   }
 

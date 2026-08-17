@@ -174,6 +174,90 @@
         <a nz-button routerLink="/uploads">投稿账号与迁移设置</a>
       </header>
 
+      <section class="download-queue-panel" aria-labelledby="download-queue-title">
+        <header>
+          <div>
+            <h3 id="download-queue-title">远程视频下载队列</h3>
+            <p>
+              这里显示真实分 P 数量；“今日入队”是稿件加入流水线的数量，不代表已经下载完成。
+            </p>
+          </div>
+          <button
+            nz-button
+            nzSize="small"
+            [nzLoading]="archiveDownloadQueueLoading"
+            (click)="refreshArchiveDownloadQueue()"
+          >
+            刷新
+          </button>
+        </header>
+        <div *ngIf="archiveDownloadQueue as downloadQueue; else downloadQueueLoading">
+          <div class="download-queue-stats">
+            <article>
+              <span>等待下载</span>
+              <strong>{{ downloadQueue.pendingDownloadCount }}</strong>
+              <small>分 P</small>
+            </article>
+            <article>
+              <span>正在下载</span>
+              <strong>
+                {{ downloadQueue.activeDownloadCount }}<small>/{{ downloadQueue.totalConcurrency }}</small>
+              </strong>
+              <small>实际占用 / 总并发</small>
+            </article>
+            <article>
+              <span>已下载待分析</span>
+              <strong>{{ downloadQueue.downloadedWaitingAnalysisCount }}</strong>
+              <small>分 P</small>
+            </article>
+            <article>
+              <span>正在分析</span>
+              <strong>{{ downloadQueue.activeAnalysisCount }}</strong>
+              <small>远程视频分 P</small>
+            </article>
+            <article [class.has-error]="downloadQueue.failedDownloadCount > 0">
+              <span>下载失败</span>
+              <strong>{{ downloadQueue.failedDownloadCount }}</strong>
+              <small>可在任务列表处理</small>
+            </article>
+          </div>
+          <div class="download-concurrency-control">
+            <div>
+              <strong>下载并发</strong>
+              <span>
+                每条线路 {{ downloadQueue.downloadsPerInterface }} 路 ×
+                {{ downloadQueue.interfaceCount }} 条线路 =
+                {{ downloadQueue.totalConcurrency }} 路
+              </span>
+              <small>调低时不会中断正在下载的任务，任务结束后按新并发运行。</small>
+            </div>
+            <label>
+              每条线路
+              <nz-input-number
+                [nzMin]="1"
+                [nzMax]="8"
+                [nzStep]="1"
+                [ngModel]="archiveDownloadConcurrencyDraft"
+                (ngModelChange)="setArchiveDownloadConcurrency($event)"
+              ></nz-input-number>
+              路
+            </label>
+            <button
+              nz-button
+              nzType="primary"
+              nzSize="small"
+              [nzLoading]="archiveDownloadQueueSaving"
+              (click)="saveArchiveDownloadConcurrency()"
+            >
+              保存并发
+            </button>
+          </div>
+        </div>
+        <ng-template #downloadQueueLoading>
+          <div class="loading-block"><nz-spin nzSimple></nz-spin><span>正在读取下载队列…</span></div>
+        </ng-template>
+      </section>
+
       <section class="pipeline-section" aria-labelledby="archive-intake-title">
         <header>
           <div>
@@ -214,7 +298,7 @@
           ></nz-progress>
           <div class="pipeline-controls">
             <span>
-              今日入队 {{ sync.dailyUsed }} · 已分析
+              今日加入下载队列 {{ sync.dailyUsed }} · 今日已分析
               {{ sync.todayAnalyzedCount }} · 上限 {{ sync.dailyLimit }}
             </span>
             <label>

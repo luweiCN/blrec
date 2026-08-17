@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from blrec.bili_upload.remote_media import RemoteMediaCache, RemoteMediaQueueStatus
 from blrec.logging.audit import audit
 from blrec.utils.string import camel_case
 from blrec.vainglory.analysis_protocol import (
@@ -653,6 +654,21 @@ class ArchiveBackfillItemPageResponse(ApiModel):
     items: List[ArchiveBackfillItemResponse]
 
 
+class ArchiveDownloadQueueResponse(ApiModel):
+    pending_download_count: int
+    active_download_count: int
+    downloaded_waiting_analysis_count: int
+    active_analysis_count: int
+    failed_download_count: int
+    downloads_per_interface: int
+    interface_count: int
+    total_concurrency: int
+
+
+class ArchiveDownloadQueueControlRequest(ApiModel):
+    downloads_per_interface: int = Field(..., ge=1, le=8)
+
+
 class ArchiveContentReviewResponse(ApiModel):
     id: int
     account_id: int
@@ -685,6 +701,10 @@ def get_archive_backfill() -> ArchiveBackfillService:
             detail=unavailable_reason or 'Vainglory archive backfill is unavailable',
         )
     return archive_backfill
+
+
+def get_remote_media_cache() -> RemoteMediaCache:
+    return recording_sessions_router.get_remote_media_cache()
 
 
 def get_publication() -> VaingloryPublicationService:
@@ -945,6 +965,12 @@ def _archive_sync(value: ArchiveSync) -> ArchiveSyncResponse:
 
 def _archive_backfill_item(value: ArchiveBackfillItem) -> ArchiveBackfillItemResponse:
     return ArchiveBackfillItemResponse(**value.__dict__)
+
+
+def _archive_download_queue(
+    value: RemoteMediaQueueStatus,
+) -> ArchiveDownloadQueueResponse:
+    return ArchiveDownloadQueueResponse(**value.__dict__)
 
 
 def _archive_content_review(
@@ -1442,6 +1468,30 @@ async def request_archive_sync(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from None
+
+
+@router.get('/archive-download-queue', response_model=ArchiveDownloadQueueResponse)
+async def get_archive_download_queue(
+    _subject: str = Depends(authenticated_manager_subject),
+    cache: RemoteMediaCache = Depends(get_remote_media_cache),
+) -> ArchiveDownloadQueueResponse:
+    return _archive_download_queue(await cache.queue_status())
+
+
+@router.patch('/archive-download-queue', response_model=ArchiveDownloadQueueResponse)
+async def update_archive_download_queue(
+    payload: ArchiveDownloadQueueControlRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    cache: RemoteMediaCache = Depends(get_remote_media_cache),
+) -> ArchiveDownloadQueueResponse:
+    result = await cache.update_downloads_per_interface(payload.downloads_per_interface)
+    audit(
+        'vainglory_archive_download_concurrency_updated',
+        downloads_per_interface=result.downloads_per_interface,
+        interface_count=result.interface_count,
+        total_concurrency=result.total_concurrency,
+    )
+    return _archive_download_queue(result)
 
 
 @router.get('/archive-syncs/{account_id}', response_model=ArchiveSyncResponse)

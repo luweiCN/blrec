@@ -10,6 +10,7 @@ import {
 import { BiliAccountService } from '../../uploads/shared/bili-account.service';
 import {
   VaingloryAnalysisQueue,
+  VaingloryArchiveDownloadQueue,
   VaingloryPublicationAudit,
 } from '../vainglory.model';
 import { VaingloryService } from '../vainglory.service';
@@ -79,6 +80,19 @@ function audit(staleCount = 2): VaingloryPublicationAudit {
   };
 }
 
+function downloadQueue(): VaingloryArchiveDownloadQueue {
+  return {
+    pendingDownloadCount: 2_385,
+    activeDownloadCount: 6,
+    downloadedWaitingAnalysisCount: 243,
+    activeAnalysisCount: 3,
+    failedDownloadCount: 86,
+    downloadsPerInterface: 3,
+    interfaceCount: 2,
+    totalConcurrency: 6,
+  };
+}
+
 describe('OperationsComponent', () => {
   it('separates live, worker, queue, history, and publication evidence views', () => {
     const events = new Subject<RealtimeEvent>();
@@ -96,6 +110,8 @@ describe('OperationsComponent', () => {
         'retryPublicationStep',
         'requestScan',
         'updateAnalysisWorker',
+        'getArchiveDownloadQueue',
+        'updateArchiveDownloadQueue',
       ],
     );
     vainglory.getPublicationAudit.and.returnValue(of(audit()));
@@ -109,6 +125,10 @@ describe('OperationsComponent', () => {
     vainglory.retryPublicationStep.and.returnValue(of(void 0));
     vainglory.updateAnalysisWorker.and.returnValue(
       of({ ...analysisQueue().workers[0], desiredConcurrency: 4 }),
+    );
+    vainglory.getArchiveDownloadQueue.and.returnValue(of(downloadQueue()));
+    vainglory.updateArchiveDownloadQueue.and.returnValue(
+      of({ ...downloadQueue(), downloadsPerInterface: 4, totalConcurrency: 8 }),
     );
     const accounts = jasmine.createSpyObj<BiliAccountService>(
       'BiliAccountService',
@@ -183,6 +203,7 @@ describe('OperationsComponent', () => {
     expect(component.pendingTaskCount).toBe(7);
     expect(component.activeHistoryCount).toBe(1);
     expect(component.publicationAudit?.verifiedCount).toBe(24);
+    expect(component.archiveDownloadQueue?.pendingDownloadCount).toBe(2_385);
 
     component.queuePublicationAudit();
 
@@ -195,6 +216,11 @@ describe('OperationsComponent', () => {
       { desiredConcurrency: 4 },
     );
     expect(component.queue?.workers[0].desiredConcurrency).toBe(4);
+
+    component.setArchiveDownloadConcurrency(4);
+    component.saveArchiveDownloadConcurrency();
+    expect(vainglory.updateArchiveDownloadQueue).toHaveBeenCalledOnceWith(4);
+    expect(component.archiveDownloadQueue?.totalConcurrency).toBe(8);
     component.ngOnDestroy();
   });
 
@@ -206,7 +232,11 @@ describe('OperationsComponent', () => {
     );
     const vainglory = jasmine.createSpyObj<VaingloryService>(
       'VaingloryService',
-      ['getPublicationAudit', 'listPublicationRecords'],
+      [
+        'getPublicationAudit',
+        'listPublicationRecords',
+        'getArchiveDownloadQueue',
+      ],
     );
     vainglory.getPublicationAudit.and.returnValues(of(audit()), NEVER);
     vainglory.listPublicationRecords.and.returnValues(
@@ -232,6 +262,10 @@ describe('OperationsComponent', () => {
           },
         ],
       }),
+      NEVER,
+    );
+    vainglory.getArchiveDownloadQueue.and.returnValues(
+      of(downloadQueue()),
       NEVER,
     );
     const accounts = jasmine.createSpyObj<BiliAccountService>(

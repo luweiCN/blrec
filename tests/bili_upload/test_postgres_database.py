@@ -117,6 +117,14 @@ def test_postgres_schema_migration_77_has_explicit_supported_statements() -> Non
     assert 'ADD COLUMN daily_limit_override_v2 BIGINT' in statements[2]
 
 
+def test_postgres_schema_migration_78_has_explicit_supported_statements() -> None:
+    statements = tuple(_migration_statements(78))
+
+    assert len(statements) == 2
+    assert 'CREATE TABLE vainglory_remote_media_controls' in statements[0]
+    assert 'downloads_per_interface BIGINT NOT NULL DEFAULT 3' in statements[0]
+
+
 def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() -> None:
     database_url = os.environ.get('BLREC_TEST_POSTGRES_URL', '').strip()
     if not database_url:
@@ -188,7 +196,7 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
 
         assert migrate_postgres_schema(
             schema_url, expected_database=database_name, expected_schema=schema
-        ) == (77,)
+        ) == (77, 78)
 
         with psycopg.connect(schema_url, autocommit=True) as connection:
             assert connection.execute(
@@ -216,7 +224,7 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
             ).fetchall() == [('owner', None), ('owner', None)]
             assert connection.execute(
                 'SELECT MAX(version) FROM schema_migrations'
-            ).fetchone() == (77,)
+            ).fetchone() == (78,)
     finally:
         with psycopg.connect(database_url, autocommit=True) as connection:
             connection.execute(
@@ -250,7 +258,7 @@ async def test_postgres_backend_migrates_schema_and_preserves_writes(
         expected_schema='core',
         backup_directory=tmp_path / 'backups',
     )
-    assert len(copied) == 69
+    assert len(copied) == 70
     with psycopg.connect(core_database_url, autocommit=True) as connection:
         connection.execute(POSTGRES_COMPATIBILITY_SQL)
 
