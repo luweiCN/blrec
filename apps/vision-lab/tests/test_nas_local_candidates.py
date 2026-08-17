@@ -62,6 +62,28 @@ class LocalCandidateStoreTests(unittest.TestCase):
 
         self.assertEqual(self.client.list_training_candidate_reviews(), [review])
 
+    def test_candidate_and_review_lists_share_one_directory_scan(self) -> None:
+        metadata = self._candidate()
+        review = {
+            'schema_version': 2,
+            'image_path': metadata['image_path'],
+            'review_status': 'confirmed',
+        }
+        self.client.write_training_candidate_review(str(metadata['image_path']), review)
+        scans = 0
+        original = self.client._scan_local_candidate_json
+
+        def counted():
+            nonlocal scans
+            scans += 1
+            return original()
+
+        self.client._scan_local_candidate_json = counted
+
+        self.assertEqual(self.client.list_training_candidates(), [metadata])
+        self.assertEqual(self.client.list_training_candidate_reviews(), [review])
+        self.assertEqual(scans, 1)
+
     def test_rejects_path_outside_mount(self) -> None:
         with self.assertRaises(ValueError):
             self.client.training_candidate_local_path('../secret.jpg')

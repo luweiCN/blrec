@@ -103,6 +103,9 @@ class NasClient:
             )
         )
         self._result_frame_root = NAS_RESULT_FRAME_DIR
+        self._candidate_json_cache: Optional[
+            Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]
+        ] = None
 
     def _require_remote_credentials(self) -> None:
         if not self._user:
@@ -356,23 +359,35 @@ class NasClient:
         return resolved
 
     def _list_local_candidate_json(self, *, review: bool) -> List[Dict[str, Any]]:
+        candidates, reviews = self._load_local_candidate_json()
+        return list(reviews if review else candidates)
+
+    def _load_local_candidate_json(
+        self,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        if self._candidate_json_cache is None:
+            self._candidate_json_cache = self._scan_local_candidate_json()
+        return self._candidate_json_cache
+
+    def _scan_local_candidate_json(
+        self,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         root = self._candidate_local_root
         assert root is not None
         if not root.is_dir():
-            return []
+            return [], []
         suffix = '.review.json'
         paths = sorted(root.rglob('*.json'))
-        result: List[Dict[str, Any]] = []
+        candidates: List[Dict[str, Any]] = []
+        reviews: List[Dict[str, Any]] = []
         for path in paths:
             is_review = path.name.endswith(suffix)
-            if is_review != review:
-                continue
             value = json.loads(path.read_text(encoding='utf-8'))
             if not isinstance(value, dict):
                 raise ValueError('NAS worker 候选说明不是 JSON 对象')
             self._candidate_relative_path(value.get('image_path'))
-            result.append(value)
-        return result
+            (reviews if is_review else candidates).append(value)
+        return candidates, reviews
 
     def _write_local_candidate_review(
         self, relative_image_path: str, review: Dict[str, Any]
@@ -405,6 +420,7 @@ class NasClient:
                 os.fsync(output.fileno())
             os.replace(temporary_path, destination)
             destination.chmod(0o600)
+            self._candidate_json_cache = None
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)

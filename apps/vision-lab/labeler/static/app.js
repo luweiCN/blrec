@@ -3149,7 +3149,8 @@ async function refreshBpWorkerSyncState(reloadWhenDone = true) {
       `已下载 ${sync.downloaded || 0}，失败 ${sync.failed || 0}`;
   } else if (sync.processed) {
     $('#bp-worker-sync-state').textContent =
-      `已处理 ${sync.processed} 张，新增 ${sync.inserted}，更新 ${sync.updated}，` +
+      `已处理 ${sync.processed} 张，新增 ${sync.inserted}，` +
+      `已登记 ${sync.unchanged || 0}，更新 ${sync.updated}，` +
       `下载 ${sync.downloaded}，失败 ${sync.failed}` +
       (sync.last_error ? `（最近错误：${sync.last_error}）` : '');
   } else {

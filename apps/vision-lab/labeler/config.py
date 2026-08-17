@@ -84,7 +84,7 @@ VISION_WORKER_JOB_LIMIT = max(
     1, int(os.environ.get('VISION_LAB_WORKER_JOB_LIMIT', '1000'))
 )
 CANDIDATE_INDEX_INTERVAL_SECONDS = max(
-    15, int(os.environ.get('VISION_LAB_CANDIDATE_INDEX_INTERVAL_SECONDS', '60'))
+    15, int(os.environ.get('VISION_LAB_CANDIDATE_INDEX_INTERVAL_SECONDS', '900'))
 )
 
 VIDEO_EXTS = {'.flv', '.mp4', '.ts', '.mkv', '.m4s'}

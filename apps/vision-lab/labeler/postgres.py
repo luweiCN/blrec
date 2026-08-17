@@ -8,7 +8,18 @@ import sqlite3
 import struct
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 
 POSTGRES_SCHEMA_VERSION = 1
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
@@ -122,7 +133,9 @@ class PostgresConnection:
         else:
             self.rollback()
 
-    def execute(self, sql: str, parameters: Sequence[Any] = ()) -> PostgresCursor:
+    def execute(
+        self, sql: str, parameters: Union[Sequence[Any], Mapping[str, Any]] = ()
+    ) -> PostgresCursor:
         statement = postgres_sql(sql)
         match = _INSERT_TABLE.match(statement)
         table = (
@@ -135,8 +148,11 @@ class PostgresConnection:
         if returns_identity:
             statement = statement.rstrip(';') + ' RETURNING id'
         cursor = self._connection.cursor()
+        bound_parameters: Any = (
+            dict(parameters) if isinstance(parameters, Mapping) else tuple(parameters)
+        )
         try:
-            cursor.execute(statement, tuple(parameters))
+            cursor.execute(statement, bound_parameters)
         except Exception as error:
             _raise_compatible_error(error)
         lastrowid: Optional[int] = None
@@ -149,13 +165,14 @@ class PostgresConnection:
         return PostgresCursor(cursor, lastrowid=lastrowid)
 
     def executemany(
-        self, sql: str, parameters: Sequence[Sequence[Any]]
+        self, sql: str, parameters: Sequence[Union[Sequence[Any], Mapping[str, Any]]]
     ) -> PostgresCursor:
         cursor = self._connection.cursor()
+        bound_parameters = tuple(
+            dict(row) if isinstance(row, Mapping) else tuple(row) for row in parameters
+        )
         try:
-            cursor.executemany(
-                postgres_sql(sql), tuple(tuple(row) for row in parameters)
-            )
+            cursor.executemany(postgres_sql(sql), bound_parameters)
         except Exception as error:
             _raise_compatible_error(error)
         if cursor.rowcount > 0:
@@ -195,7 +212,7 @@ def validate_schema_name(schema: str) -> str:
 
 
 def postgres_placeholders(sql: str) -> str:
-    """Translate qmark placeholders without changing quoted question marks."""
+    """Translate SQLite qmark/named placeholders without changing SQL literals."""
 
     translated: List[str] = []
     index = 0
@@ -230,6 +247,17 @@ def postgres_placeholders(sql: str) -> str:
             index = end + 1
         elif character == '?':
             translated.append('%s')
+        elif (
+            character == ':'
+            and (following.isalpha() or following == '_')
+            and (index == 0 or sql[index - 1] != ':')
+        ):
+            end = index + 2
+            while end < len(sql) and (sql[end].isalnum() or sql[end] == '_'):
+                end += 1
+            name = sql[index + 1 : end]
+            translated.append(f'%({name})s')
+            index = end - 1
         elif character == '%':
             translated.append('%%')
         else:

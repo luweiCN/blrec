@@ -3,7 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 from labeler import db, postgres
 
@@ -27,6 +27,101 @@ class PostgresCompatibilityTests(unittest.TestCase):
             translated,
             'INSERT INTO annotation_tasks (id) VALUES (%s) ON CONFLICT DO NOTHING',
         )
+
+    def test_named_placeholders_are_translated_without_touching_casts(self) -> None:
+        translated = postgres.postgres_sql(
+            "INSERT INTO samples (payload, label) "
+            "VALUES (:payload::jsonb, :label) -- :comment\n"
+            "RETURNING ':literal'"
+        )
+
+        self.assertEqual(
+            translated,
+            "INSERT INTO samples (payload, label) "
+            "VALUES (%(payload)s::jsonb, %(label)s) -- :comment\n"
+            "RETURNING ':literal'",
+        )
+
+    def test_connection_keeps_named_parameters_and_returns_insert_id(self) -> None:
+        class Cursor:
+            rowcount = 1
+
+            def __init__(self) -> None:
+                self.statement = ''
+                self.parameters: Any = None
+
+            def execute(self, statement: str, parameters: Any) -> None:
+                self.statement = statement
+                self.parameters = parameters
+
+            def fetchone(self) -> Tuple[int]:
+                return (37,)
+
+        class Connection:
+            def __init__(self) -> None:
+                self.cursor_instance = Cursor()
+
+            def cursor(self) -> Cursor:
+                return self.cursor_instance
+
+        connection = Connection()
+        adapter = postgres.PostgresConnection(
+            connection, pool=None, identity_tables={'frames'}
+        )
+        values: Dict[str, Any] = {'video_id': 12}
+
+        cursor = adapter.execute(
+            'INSERT OR IGNORE INTO frames (video_id) VALUES (:video_id)', values
+        )
+
+        self.assertEqual(
+            connection.cursor_instance.statement,
+            'INSERT INTO frames (video_id) VALUES (%(video_id)s) '
+            'ON CONFLICT DO NOTHING RETURNING id',
+        )
+        self.assertEqual(connection.cursor_instance.parameters, values)
+        self.assertEqual(cursor.lastrowid, 37)
+
+    def test_add_frames_uses_adapter_insert_id(self) -> None:
+        class Cursor:
+            rowcount = 1
+            lastrowid = 91
+
+        class Connection:
+            def __init__(self) -> None:
+                self.committed = False
+
+            def execute(self, statement: str, _parameters: Any = ()) -> Cursor:
+                if 'last_insert_rowid' in statement:
+                    raise AssertionError('不应在 PostgreSQL 适配器上查询 SQLite ID')
+                return Cursor()
+
+            def commit(self) -> None:
+                self.committed = True
+
+        connection = Connection()
+
+        frame_ids = db.add_frames(
+            connection,
+            7,
+            [
+                {
+                    'timestamp_ms': 1000,
+                    'width': 1920,
+                    'height': 1080,
+                    'sha256': 'a' * 64,
+                    'phash': 'b' * 16,
+                    'frame_path': '/candidates/frame.jpg',
+                    'thumb_path': '',
+                    'strategy': 'worker_candidate',
+                    'model_source': 'worker-unified-v3',
+                    'model_confidence': 0.9,
+                }
+            ],
+        )
+
+        self.assertEqual(frame_ids, [91])
+        self.assertTrue(connection.committed)
 
     def test_json_extract_compatibility_function_is_parallel_safe_sql(self) -> None:
         self.assertIn(

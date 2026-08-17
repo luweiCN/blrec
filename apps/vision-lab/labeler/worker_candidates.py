@@ -242,14 +242,40 @@ def sync_worker_candidates(
         'processed': 0,
         'inserted': 0,
         'updated': 0,
+        'unchanged': 0,
         'downloaded': 0,
         'failed': 0,
         'last_error': '',
         'by_task': {},
     }
+    source_types = tuple(sorted(_REMOTE_SOURCE_TYPES))
+    source_placeholders = ','.join('?' for _ in source_types)
+    known_sources = {
+        (str(row['source_type']), str(row['source_id']))
+        for row in conn.execute(
+            'SELECT source_type, source_id FROM training_review_sources '
+            f'WHERE source_type IN ({source_placeholders})',
+            source_types,
+        ).fetchall()
+    }
     for raw_item in ordered:
         try:
             item = _validate(raw_item)
+            source_type = ''
+            if item['schema_version'] == 3:
+                source_type = str(item.get('source_type') or 'worker')
+                if source_type not in _REMOTE_SOURCE_TYPES:
+                    source_type = 'worker'
+                if (source_type, item['source_id']) in known_sources:
+                    result['unchanged'] += 1
+                    task_counts = result['by_task'].setdefault(
+                        item['task'], {'inserted': 0, 'updated': 0, 'unchanged': 0}
+                    )
+                    task_counts['unchanged'] += 1
+                    result['processed'] += 1
+                    if progress is not None:
+                        progress(dict(result))
+                    continue
             frame = conn.execute(
                 'SELECT id FROM frames WHERE sha256 = ?', (item['image_sha256'],)
             ).fetchone()
@@ -323,9 +349,6 @@ def sync_worker_candidates(
                 frame_id = int(frame['id'])
 
             if item['schema_version'] == 3:
-                source_type = str(item.get('source_type') or 'worker')
-                if source_type not in _REMOTE_SOURCE_TYPES:
-                    source_type = 'worker'
                 was_inserted = db.add_training_review_source(
                     conn,
                     frame_id=frame_id,
@@ -336,9 +359,10 @@ def sync_worker_candidates(
                     metadata={**item, 'source': source_type},
                     source_created_at=_created_at(item),
                 )
+                known_sources.add((source_type, item['source_id']))
                 result['inserted' if was_inserted else 'updated'] += 1
                 task_counts = result['by_task'].setdefault(
-                    item['task'], {'inserted': 0, 'updated': 0}
+                    item['task'], {'inserted': 0, 'updated': 0, 'unchanged': 0}
                 )
                 task_counts['inserted' if was_inserted else 'updated'] += 1
                 result['processed'] += 1
@@ -440,7 +464,7 @@ def sync_worker_candidates(
                     )
             result['inserted' if was_inserted else 'updated'] += 1
             task_counts = result['by_task'].setdefault(
-                item['task'], {'inserted': 0, 'updated': 0}
+                item['task'], {'inserted': 0, 'updated': 0, 'unchanged': 0}
             )
             task_counts['inserted' if was_inserted else 'updated'] += 1
         except Exception as error:  # noqa: BLE001

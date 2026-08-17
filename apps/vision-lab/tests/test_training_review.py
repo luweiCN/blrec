@@ -1313,6 +1313,19 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         self.assertEqual(rows[0]['suggestions']['match_flow']['label'], 'match_flow')
         self.assertEqual(rows[0]['source_count'], 1)
 
+    def test_schema_v3_resync_skips_an_already_indexed_source(self):
+        image = self.candidate_image()
+        nas = FakeNas(image)
+        item = self.unified_item(image)
+        worker_candidates.sync_worker_candidates(self.conn, nas, [item])
+
+        result = worker_candidates.sync_worker_candidates(self.conn, nas, [item])
+
+        self.assertEqual(result['unchanged'], 1)
+        self.assertEqual(result['inserted'], 0)
+        self.assertEqual(result['updated'], 0)
+        self.assertEqual(nas.downloads, 1)
+
     def test_manual_correction_source_imports_authoritative_partial_review(self):
         image = self.candidate_image()
         nas = FakeNas(image)

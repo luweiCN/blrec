@@ -1159,7 +1159,10 @@ def add_frames(
             data,
         )
         if cur.rowcount:
-            ids.append(int(conn.execute('SELECT last_insert_rowid()').fetchone()[0]))
+            inserted_id = getattr(cur, 'lastrowid', None)
+            if inserted_id is None:
+                inserted_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+            ids.append(int(inserted_id))
     conn.commit()
     return ids
 
