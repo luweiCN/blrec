@@ -1886,7 +1886,8 @@ async def test_repository_sorts_sessions_by_latest_analysis_activity(
         await repository.complete_part(2, (replace(analyzed_match(), part_id=2),))
         await database.execute(
             'UPDATE recording_sessions SET started_at=CASE id '
-            'WHEN 1 THEN 2_000 ELSE 1_000 END WHERE id IN (1,2)'
+            'WHEN 1 THEN ? ELSE ? END WHERE id IN (1,2)',
+            (2_000, 1_000),
         )
         await database.execute(
             "UPDATE vainglory_scan_jobs SET state='ready',completed_at=300,"
