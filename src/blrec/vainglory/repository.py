@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import struct
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -648,6 +649,47 @@ class MatchRecord:
 class MatchPage:
     total: int
     items: Tuple[MatchRecord, ...]
+
+
+def _manual_correction_snapshot(match: MatchRecord) -> Dict[str, Any]:
+    return {
+        'game_mode': match.game_mode,
+        'team_size': match.team_size,
+        'result_text': match.result_text,
+        'end_reason': match.end_reason,
+        'duration_seconds': match.duration_seconds,
+        'winner_side': match.winner_side,
+        'winner_color': match.winner_color,
+        'left_kills': match.left_kills,
+        'right_kills': match.right_kills,
+        'left_economy': match.left_economy,
+        'right_economy': match.right_economy,
+        'match_kind': match.match_kind,
+        'view_context': match.view_context,
+        'recorded_player': next(
+            (
+                {'side': player.side, 'slot': player.slot}
+                for player in match.players
+                if player.is_recorded_player
+            ),
+            None,
+        ),
+        'players': [
+            {
+                'side': player.side,
+                'slot': player.slot,
+                'name': player.name,
+                'hero_id': player.hero_id,
+                'hero_label': player.hero_label,
+                'kills': player.kills,
+                'deaths': player.deaths,
+                'assists': player.assists,
+                'economy': player.economy,
+                'last_hits': player.last_hits,
+            }
+            for player in match.players
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -5235,6 +5277,216 @@ class VaingloryRepository:
             )
             return None
         return path if path.is_file() else None
+
+    async def record_manual_correction_candidate(
+        self, *, before: MatchRecord, after: MatchRecord, changed_fields: Sequence[str]
+    ) -> bool:
+        """把后台人工纠错连同模型原值保存为高优先级训练候选。"""
+        relevant_fields = sorted(
+            {
+                str(field)
+                for field in changed_fields
+                if str(field)
+                not in {'title', 'stats_eligible', 'stats_exclusion_reason'}
+            }
+        )
+        if not relevant_fields:
+            return False
+        path = await self.result_frame_path(after.id)
+        if path is None:
+            return False
+        try:
+            content = await asyncio.get_running_loop().run_in_executor(
+                None, path.read_bytes
+            )
+            if not content:
+                return False
+            before_value = _manual_correction_snapshot(before)
+            after_value = _manual_correction_snapshot(after)
+            changed = {
+                name: {'before': before_value.get(name), 'after': after_value.get(name)}
+                for name in relevant_fields
+            }
+            changed = {
+                name: value
+                for name, value in changed.items()
+                if value['before'] != value['after']
+            }
+            if not changed:
+                return False
+            created_at = self._now()
+            image_digest = hashlib.sha256(content).hexdigest()
+            correction_payload = json.dumps(
+                changed, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+            ).encode('utf8')
+            correction_digest = hashlib.sha256(
+                correction_payload + str(created_at).encode('ascii')
+            ).hexdigest()
+            extension = '.png' if content.startswith(b'\x89PNG\r\n\x1a\n') else '.jpg'
+            image_relative = 'objects/{}/{}{}'.format(
+                image_digest[:2], image_digest, extension
+            )
+            metadata_relative = (
+                'items/session-{}/part-{}/{:012d}-{}-manual-{}.json'.format(
+                    after.session_id,
+                    after.part_id,
+                    after.result_at_ms,
+                    image_digest[:16],
+                    correction_digest[:16],
+                )
+            )
+            width, height = self._training_image_dimensions(content)
+            source_id = 'manual-match-{}-{}'.format(after.id, correction_digest[:24])
+            before_mode = (
+                before.game_mode
+                if before.game_mode in {'3v3', 'aram', '5v5'}
+                else 'unreadable'
+            )
+            after_mode = (
+                after.game_mode
+                if after.game_mode in {'3v3', 'aram', '5v5'}
+                else 'unreadable'
+            )
+            suggestions = {
+                'match_flow': {
+                    'label': 'match_flow',
+                    'confidence': float(before.confidence),
+                    'origin': 'before_manual_correction',
+                },
+                'match_mode': {
+                    'label': before_mode,
+                    'confidence': float(before.confidence),
+                    'origin': 'before_manual_correction',
+                },
+                'hero_select': {
+                    'label': 'not_select',
+                    'confidence': float(before.confidence),
+                    'origin': 'before_manual_correction',
+                },
+                'result_panel': {
+                    'label': 'result_panel',
+                    'confidence': float(before.confidence),
+                    'origin': 'before_manual_correction',
+                },
+            }
+            metadata = {
+                'schema_version': 3,
+                'task': 'unified_review',
+                'source_type': 'manual_correction',
+                'source_id': source_id,
+                'session_id': after.session_id,
+                'part_id': after.part_id,
+                'part_index': after.part_index,
+                'at_ms': after.result_at_ms,
+                'segment_start_ms': after.started_at_ms,
+                'streamer': after.title,
+                'room_id': '',
+                'session_title': after.session_title,
+                'filename': path.name,
+                'suggestions': suggestions,
+                'suggested_boxes': [],
+                'model_outputs': [
+                    {
+                        'task': 'manual_correction_before',
+                        'match_id': after.id,
+                        'confidence': before.confidence,
+                        'values': before_value,
+                    }
+                ],
+                'manual_correction': {
+                    'match_id': after.id,
+                    'changed_fields': sorted(changed),
+                    'changes': changed,
+                    'before': before_value,
+                    'after': after_value,
+                },
+                'image_path': image_relative,
+                'image_sha256': image_digest,
+                'image_width': width,
+                'image_height': height,
+                'created_at': created_at,
+            }
+            review = {
+                'schema_version': 2,
+                'source_ids': [source_id],
+                'image_path': image_relative,
+                'image_sha256': image_digest,
+                'review_status': 'partial',
+                'labels': {
+                    'match_flow_label': 'match_flow',
+                    'match_mode_label': after_mode,
+                    'hero_select_label': 'not_select',
+                    'hero_select_variant': None,
+                    'hero_select_visibility': None,
+                    'result_panel_label': 'result_panel',
+                    'hero_layout_label': 'result_page',
+                },
+                'result_box': None,
+                'result_quality': {
+                    'panel_render_state': 'clear',
+                    'ocr_usable': 'yes',
+                    'result_occlusion': 'none',
+                    'occluder_types': [],
+                },
+                'hero_lineup': None,
+                'notes': '后台人工纠正：{}'.format('、'.join(sorted(changed))),
+                'reviewed_at': str(created_at),
+                'reviewer': 'blrec_admin_manual_correction',
+            }
+
+            def write() -> None:
+                self._write_training_candidate(
+                    self._resolve_training_candidate_path(image_relative),
+                    content,
+                    metadata,
+                    self._resolve_training_candidate_path(metadata_relative),
+                )
+                review_destination = self._resolve_training_candidate_path(
+                    str(Path(metadata_relative).with_suffix('.review.json'))
+                )
+                self._write_training_candidate_file(
+                    review_destination,
+                    json.dumps(
+                        review,
+                        ensure_ascii=False,
+                        separators=(',', ':'),
+                        sort_keys=True,
+                    ).encode('utf8'),
+                    prefix='.manual-review-',
+                )
+
+            await asyncio.get_running_loop().run_in_executor(None, write)
+            return True
+        except (OSError, ValueError) as error:
+            logger.warning(
+                'Vainglory manual correction candidate skipped: match_id={} '
+                'error={!r}',
+                after.id,
+                error,
+            )
+            return False
+
+    @staticmethod
+    def _training_image_dimensions(content: bytes) -> Tuple[int, int]:
+        if len(content) >= 24 and content.startswith(b'\x89PNG\r\n\x1a\n'):
+            return struct.unpack('>II', content[16:24])
+        if len(content) >= 4 and content.startswith(b'\xff\xd8'):
+            index = 2
+            while index + 9 <= len(content):
+                if content[index] != 0xFF:
+                    index += 1
+                    continue
+                marker = content[index + 1]
+                if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7}:
+                    height, width = struct.unpack('>HH', content[index + 5 : index + 9])
+                    return width, height
+                if index + 4 > len(content):
+                    break
+                length = struct.unpack('>H', content[index + 2 : index + 4])[0]
+                if length < 2:
+                    break
+                index += 2 + length
+        return 0, 0
 
     async def next_hero_rematch(self) -> Optional[HeroRematchClaim]:
         row = await self._database.fetchone(

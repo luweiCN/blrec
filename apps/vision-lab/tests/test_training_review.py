@@ -549,6 +549,54 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
                 self.conn, status='needs_review', source_scope='mystery'
             )
 
+    def test_review_queue_filters_worker_metadata_without_loading_images(self):
+        correction = self.frame(10)
+        ordinary = self.frame(11)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=correction,
+            source_type='manual_correction',
+            source_id='manual-10',
+            suggestions={
+                'match_mode': {'label': 'aram', 'confidence': 0.55},
+                'hero_select': {'label': 'select_aram', 'confidence': 0.55},
+            },
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=ordinary,
+            source_type='worker',
+            source_id='worker-11',
+            suggestions={
+                'match_mode': {'label': '3v3', 'confidence': 0.95},
+                'hero_select': {'label': 'not_select', 'confidence': 0.95},
+            },
+        )
+
+        items = db.list_training_review_items(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            streamer='测试主播',
+            source_type='manual_correction',
+            scene='hero_select',
+            match_mode='aram',
+            confidence='low',
+        )
+        count = db.count_training_review_items(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            streamer='测试主播',
+            source_type='manual_correction',
+            scene='hero_select',
+            match_mode='aram',
+            confidence='low',
+        )
+
+        self.assertEqual([item['frame_id'] for item in items], [correction])
+        self.assertEqual(count, 1)
+
     def test_review_queue_prioritizes_aram_evidence(self):
         normal = self.frame(1)
         inferred_aram = self.frame(2)
@@ -1189,6 +1237,38 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         self.assertIsNone(rows[0]['match_flow_label'])
         self.assertEqual(rows[0]['suggestions']['match_flow']['label'], 'match_flow')
         self.assertEqual(rows[0]['source_count'], 1)
+
+    def test_manual_correction_source_imports_authoritative_partial_review(self):
+        image = self.candidate_image()
+        nas = FakeNas(image)
+        item = self.unified_item(image)
+        item['source_type'] = 'manual_correction'
+        review = {
+            'schema_version': 2,
+            'source_ids': [item['source_id']],
+            'review_status': 'partial',
+            'labels': {
+                'match_flow_label': 'match_flow',
+                'match_mode_label': '3v3',
+                'hero_select_label': 'not_select',
+                'hero_select_variant': None,
+                'hero_select_visibility': None,
+                'result_panel_label': 'result_panel',
+                'hero_layout_label': 'result_page',
+            },
+            'result_box': None,
+            'result_quality': {},
+            'hero_lineup': None,
+        }
+
+        worker_candidates.sync_worker_candidates(self.conn, nas, [item])
+        pulled = worker_candidates.pull_training_review_reviews(self.conn, [review])
+
+        self.assertEqual(pulled['reviews_pulled'], 1)
+        confirmed = db.list_training_review_items(self.conn, status='partial')[0]
+        self.assertEqual(confirmed['match_mode_label'], '3v3')
+        self.assertIn('manual_correction', confirmed['source_categories'])
+        self.assertEqual(confirmed['suggestions']['match_mode']['label'], 'aram')
 
     def test_confirmed_unified_labels_are_pushed_as_one_sidecar(self):
         image = self.candidate_image()

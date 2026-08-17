@@ -7,22 +7,42 @@
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, bp_review, config, db, events
+from . import (
+    __version__,
+    bp_review,
+    config,
+    db,
+    events,
+)
 from . import export as export_mod
-from . import hero_review
+from . import (
+    hero_review,
+)
 from . import inference as inference_mod
-from . import local, model_prefill, model_testing, result_archive
+from . import (
+    local,
+    model_prefill,
+    model_testing,
+    result_archive,
+)
 from . import stats as stats_mod
-from . import training, training_review, worker_candidates, worker_deployment
+from . import (
+    training,
+    training_review,
+    vision_jobs,
+    worker_candidates,
+    worker_deployment,
+)
 from .extract import (
     cancel_extraction,
     extract_videos_multi,
@@ -61,8 +81,12 @@ async def lifespan(_app: FastAPI):
         )
         conn.execute(
             "UPDATE training_runs SET status='interrupted', "
-            "error='标注服务重启，训练进程已中断', finished_at=? "
-            "WHERE status IN ('queued', 'running')",
+            "error='旧版本机训练被服务重启中断', finished_at=? "
+            "WHERE status = 'running' AND NOT EXISTS ("
+            "SELECT 1 FROM vision_jobs job "
+            "WHERE job.kind = 'train_model' "
+            "AND job.related_id = training_runs.id "
+            "AND job.status IN ('queued', 'running'))",
             (db.now(),),
         )
         db.fail_interrupted_model_deployments(conn)
@@ -73,7 +97,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        _training_manager.shutdown()
+        pass
 
 
 app = FastAPI(title='虚荣视觉标注工作台', version=__version__, lifespan=lifespan)
@@ -113,7 +137,6 @@ _worker_candidate_sync_state: Dict[str, Any] = {
     'archive_failed': 0,
     'error': None,
 }
-_training_manager = training.TrainingManager(config.DB_PATH)
 _training_start_lock = threading.RLock()
 _worker_deployment_lock = threading.RLock()
 
@@ -124,6 +147,18 @@ def _conn():
 
 def _nas() -> NasClient:
     return NasClient()
+
+
+def _require_vision_worker(request: Request) -> None:
+    configured = config.VISION_WORKER_TOKEN
+    if not configured:
+        raise HTTPException(503, '尚未配置 Vision Worker token')
+    authorization = request.headers.get('authorization', '')
+    scheme, _, supplied = authorization.partition(' ')
+    if scheme.lower() != 'bearer' or not secrets.compare_digest(
+        supplied.strip(), configured
+    ):
+        raise HTTPException(401, 'Vision Worker token 无效')
 
 
 # ---------- 配置与任务 ----------
@@ -1097,6 +1132,11 @@ def api_training_review_items(
     source_scope: str = 'all',
     streamer: str = '',
     hero_screen_type: str = '',
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: str = '',
+    confidence: str = '',
 ) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
@@ -1110,6 +1150,23 @@ def api_training_review_items(
                     source_scope=source_scope,
                     streamer=streamer,
                     hero_screen_type=hero_screen_type,
+                    source_type=source_type,
+                    scene=scene,
+                    match_mode=match_mode,
+                    hero=hero,
+                    confidence=confidence,
+                )
+                filtered_total = db.count_training_review_items(
+                    conn,
+                    status=status,
+                    source_scope=source_scope,
+                    streamer=streamer,
+                    hero_screen_type=hero_screen_type,
+                    source_type=source_type,
+                    scene=scene,
+                    match_mode=match_mode,
+                    hero=hero,
+                    confidence=confidence,
                 )
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
@@ -1120,7 +1177,7 @@ def api_training_review_items(
                 stats['legacy_hero_filtered'] = db.legacy_hero_review_stats(
                     conn, streamer=streamer, screen_type=hero_screen_type
                 )
-            return {'items': items, 'stats': stats}
+            return {'items': items, 'stats': stats, 'filtered_total': filtered_total}
         finally:
             conn.close()
 
@@ -2828,6 +2885,324 @@ def api_datasets() -> List[Dict[str, Any]]:
 # ---------- 训练与本机模型版本 ----------
 
 
+@app.get('/api/vision-workers')
+def api_vision_workers() -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return {
+                'workers': vision_jobs.list_workers(conn),
+                'jobs': vision_jobs.list_jobs(
+                    conn, limit=config.VISION_WORKER_JOB_LIMIT
+                ),
+            }
+        finally:
+            conn.close()
+
+
+@app.patch('/api/vision-workers/{worker_id}')
+def api_update_vision_worker(worker_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    if 'enabled' not in body:
+        raise HTTPException(400, '缺少 enabled')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return vision_jobs.set_worker_enabled(
+                    conn, worker_id=worker_id, enabled=bool(body['enabled'])
+                )
+            except KeyError:
+                raise HTTPException(404, 'Vision Worker 不存在')
+        finally:
+            conn.close()
+
+
+@app.post('/api/vision-workers/register')
+def api_register_vision_worker(
+    request: Request, body: Dict[str, Any]
+) -> Dict[str, Any]:
+    _require_vision_worker(request)
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return vision_jobs.register_worker(
+                    conn,
+                    worker_id=str(body.get('worker_id') or ''),
+                    display_name=str(body.get('display_name') or ''),
+                    capabilities=body.get('capabilities') or [],
+                    version=str(body.get('version') or ''),
+                    platform=str(body.get('platform') or ''),
+                    detail=(
+                        body.get('detail')
+                        if isinstance(body.get('detail'), dict)
+                        else {}
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
+@app.post('/api/vision-workers/claim')
+def api_claim_vision_job(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
+    _require_vision_worker(request)
+    worker_id = str(body.get('worker_id') or '')
+    capabilities = body.get('capabilities') or []
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                job = vision_jobs.claim_job(
+                    conn,
+                    worker_id=worker_id,
+                    capabilities=capabilities,
+                    lease_seconds=config.VISION_WORKER_LEASE_SECONDS,
+                )
+            except KeyError:
+                raise HTTPException(409, '请先注册 Vision Worker')
+            return {'job': job}
+        finally:
+            conn.close()
+
+
+@app.post('/api/vision-workers/jobs/{job_id}/heartbeat')
+def api_heartbeat_vision_job(
+    job_id: str, request: Request, body: Dict[str, Any]
+) -> Dict[str, Any]:
+    _require_vision_worker(request)
+    worker_id = str(body.get('worker_id') or '')
+    lease_token = str(body.get('lease_token') or '')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                job = vision_jobs.update_job_lease(
+                    conn,
+                    job_id=job_id,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    lease_seconds=config.VISION_WORKER_LEASE_SECONDS,
+                    progress=(
+                        None
+                        if body.get('progress') is None
+                        else float(body['progress'])
+                    ),
+                    stage=(None if body.get('stage') is None else str(body['stage'])),
+                    detail=(
+                        None if body.get('detail') is None else str(body['detail'])
+                    ),
+                )
+            except PermissionError as exc:
+                raise HTTPException(409, str(exc))
+            if job['kind'] == 'train_model':
+                updates: Dict[str, Any] = {
+                    'status': 'running',
+                    'progress': float(job['progress']),
+                    'error': '',
+                }
+                if body.get('current_epoch') is not None:
+                    updates['current_epoch'] = int(body['current_epoch'])
+                if isinstance(body.get('metrics'), dict):
+                    updates['metrics'] = body['metrics']
+                run = db.get_training_run(conn, job['related_id'])
+                if run is not None:
+                    if not run.get('started_at'):
+                        updates['started_at'] = db.now()
+                    db.update_training_run(conn, job['related_id'], **updates)
+            return {'job': job, 'cancel_requested': job['cancel_requested']}
+        finally:
+            conn.close()
+
+
+@app.get('/api/vision-workers/datasets/{version_id}/manifest')
+def api_vision_worker_dataset_manifest(
+    version_id: str, request: Request
+) -> FileResponse:
+    _require_vision_worker(request)
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                'SELECT manifest_path FROM dataset_versions WHERE id = ?', (version_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        raise HTTPException(404, '数据集版本不存在')
+    manifest = Path(str(row['manifest_path']))
+    if not manifest.is_file():
+        raise HTTPException(404, '数据集清单不存在')
+    return FileResponse(manifest, media_type='application/x-ndjson')
+
+
+@app.get('/api/vision-workers/frames/{frame_id}/image')
+def api_vision_worker_frame_image(frame_id: int, request: Request) -> FileResponse:
+    _require_vision_worker(request)
+    return api_frame_image(frame_id)
+
+
+@app.put('/api/vision-workers/jobs/{job_id}/artifacts/{filename}')
+async def api_upload_vision_job_artifact(
+    job_id: str,
+    filename: str,
+    request: Request,
+    worker_id: str = Query(..., min_length=1, max_length=120),
+    lease_token: str = Query(..., min_length=1, max_length=200),
+) -> Dict[str, Any]:
+    _require_vision_worker(request)
+    if filename not in {'model.onnx', 'model.json', 'train.log'}:
+        raise HTTPException(400, '不支持的训练产物文件名')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                job = vision_jobs.validate_lease(
+                    conn, job_id=job_id, worker_id=worker_id, lease_token=lease_token
+                )
+            except PermissionError as exc:
+                raise HTTPException(409, str(exc))
+        finally:
+            conn.close()
+    if job['kind'] != 'train_model' or not job['related_id']:
+        raise HTTPException(400, '该任务不接受训练产物')
+    destination_dir = config.WORK_DIR / 'training-runs' / job['related_id']
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / filename
+    temporary = destination.with_name(f'.{filename}.{job_id}.upload')
+    size = 0
+    try:
+        with temporary.open('wb') as output:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                output.write(chunk)
+                size += len(chunk)
+            output.flush()
+        if size <= 0:
+            raise HTTPException(400, '上传产物为空')
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {'saved': True, 'filename': filename, 'size_bytes': size}
+
+
+@app.post('/api/vision-workers/jobs/{job_id}/complete')
+def api_complete_vision_job(
+    job_id: str, request: Request, body: Dict[str, Any]
+) -> Dict[str, Any]:
+    _require_vision_worker(request)
+    worker_id = str(body.get('worker_id') or '')
+    lease_token = str(body.get('lease_token') or '')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                leased = vision_jobs.validate_lease(
+                    conn, job_id=job_id, worker_id=worker_id, lease_token=lease_token
+                )
+            except PermissionError as exc:
+                raise HTTPException(409, str(exc))
+            result = body.get('result') if isinstance(body.get('result'), dict) else {}
+            if leased['kind'] == 'train_model':
+                artifact = (
+                    config.WORK_DIR
+                    / 'training-runs'
+                    / leased['related_id']
+                    / 'model.onnx'
+                )
+                if not artifact.is_file() or artifact.stat().st_size <= 0:
+                    raise HTTPException(409, '训练模型尚未上传或文件为空')
+                db.update_training_run(
+                    conn,
+                    leased['related_id'],
+                    status='succeeded',
+                    current_epoch=int(result.get('epochs') or 0),
+                    progress=1.0,
+                    metrics=(
+                        result.get('metrics')
+                        if isinstance(result.get('metrics'), dict)
+                        else {}
+                    ),
+                    artifact_path=str(artifact),
+                    finished_at=db.now(),
+                )
+            job = vision_jobs.finish_job(
+                conn,
+                job_id=job_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                succeeded=True,
+                result=result,
+            )
+            return {'job': job}
+        finally:
+            conn.close()
+
+
+@app.post('/api/vision-workers/jobs/{job_id}/fail')
+def api_fail_vision_job(
+    job_id: str, request: Request, body: Dict[str, Any]
+) -> Dict[str, Any]:
+    _require_vision_worker(request)
+    worker_id = str(body.get('worker_id') or '')
+    lease_token = str(body.get('lease_token') or '')
+    error = str(body.get('error') or 'Vision Worker 任务失败')[:2_000]
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                leased = vision_jobs.validate_lease(
+                    conn, job_id=job_id, worker_id=worker_id, lease_token=lease_token
+                )
+            except PermissionError as exc:
+                raise HTTPException(409, str(exc))
+            if leased['kind'] == 'train_model':
+                db.update_training_run(
+                    conn,
+                    leased['related_id'],
+                    status='failed',
+                    error=error,
+                    finished_at=db.now(),
+                )
+            job = vision_jobs.finish_job(
+                conn,
+                job_id=job_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                succeeded=False,
+                error=error,
+            )
+            return {'job': job}
+        finally:
+            conn.close()
+
+
+@app.post('/api/vision-jobs/{job_id}/cancel')
+def api_cancel_vision_job(job_id: str) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                job = vision_jobs.request_cancel(conn, job_id)
+            except KeyError:
+                raise HTTPException(404, 'Vision Worker 任务不存在')
+            if job['kind'] == 'train_model' and job['status'] == 'cancelled':
+                run = db.get_training_run(conn, job['related_id'])
+                if run is not None:
+                    db.update_training_run(
+                        conn,
+                        job['related_id'],
+                        status='cancelled',
+                        error='用户取消',
+                        finished_at=db.now(),
+                    )
+            return {'job': job}
+        finally:
+            conn.close()
+
+
 @app.get('/api/training/tasks')
 def api_training_tasks() -> List[Dict[str, Any]]:
     with _db_lock:
@@ -2843,8 +3218,13 @@ def api_training_runs(limit: int = Query(100, ge=1, le=1000)) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
+            active = conn.execute(
+                "SELECT id FROM training_runs WHERE status IN ('running', 'queued') "
+                "ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, "
+                'created_at, id LIMIT 1'
+            ).fetchone()
             return {
-                'active_run_id': _training_manager.active_run_id(),
+                'active_run_id': str(active['id']) if active is not None else None,
                 'runs': db.list_training_runs(conn, limit=limit),
             }
         finally:
@@ -2861,8 +3241,6 @@ def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
     if not 1 <= epochs <= 500:
         raise HTTPException(400, 'epochs 必须在 1 到 500 之间')
     with _training_start_lock:
-        if _training_manager.active_run_id() is not None:
-            raise HTTPException(409, '已有模型正在训练，请等待或先取消')
         with _db_lock:
             conn = _conn()
             try:
@@ -2876,7 +3254,7 @@ def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
                         400,
                         '当前数据还不能训练：' + '；'.join(summary['blocking_reasons']),
                     )
-                snapshot = training.export_snapshot(conn, task_id)
+                snapshot = training.export_snapshot(conn, task_id, materialize=False)
                 run_id = training.new_run_id(task_id)
                 log_path = config.WORK_DIR / 'training-runs' / run_id / 'train.log'
                 db.create_training_run(
@@ -2894,64 +3272,92 @@ def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
                     },
                     log_path=str(log_path),
                 )
+                job = vision_jobs.create_job(
+                    conn,
+                    kind='train_model',
+                    related_id=run_id,
+                    priority=100,
+                    payload={
+                        'run_id': run_id,
+                        'task_id': task_id,
+                        'dataset_version_id': snapshot['version'],
+                        'epochs': epochs,
+                        'kind': definition['kind'],
+                        'imgsz': definition['imgsz'],
+                        'input_width': definition.get('input_width'),
+                        'input_height': definition.get('input_height'),
+                        'base_model': definition['base_model'],
+                    },
+                )
                 run = db.get_training_run(conn, run_id)
             except RuntimeError as exc:
                 raise HTTPException(400, str(exc))
             finally:
                 conn.close()
-        try:
-            _training_manager.start(run_id)
-        except RuntimeError as exc:
-            with _db_lock:
-                conn = _conn()
-                try:
-                    db.update_training_run(
-                        conn,
-                        run_id,
-                        status='failed',
-                        error=str(exc),
-                        finished_at=db.now(),
-                    )
-                finally:
-                    conn.close()
-            raise HTTPException(409, str(exc))
     assert run is not None
+    run['vision_job'] = job
     return run
 
 
 @app.post('/api/training/runs/{run_id}/cancel')
 def api_cancel_training(run_id: str) -> Dict[str, Any]:
-    try:
-        _training_manager.cancel(run_id)
-    except KeyError as exc:
-        raise HTTPException(409, str(exc))
-    return {'cancel_requested': True, 'run_id': run_id}
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT id FROM vision_jobs WHERE kind='train_model' "
+                "AND related_id=? AND status IN ('queued', 'running') "
+                'ORDER BY created_at DESC LIMIT 1',
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(409, '训练任务未在排队或运行')
+            job = vision_jobs.request_cancel(conn, str(row['id']))
+            if job['status'] == 'cancelled':
+                db.update_training_run(
+                    conn,
+                    run_id,
+                    status='cancelled',
+                    error='用户取消',
+                    finished_at=db.now(),
+                )
+            return {'cancel_requested': True, 'run_id': run_id, 'job': job}
+        finally:
+            conn.close()
 
 
 @app.post('/api/training/runs/{run_id}/resume')
 def api_resume_training(run_id: str) -> Dict[str, Any]:
     with _training_start_lock:
-        if _training_manager.active_run_id() is not None:
-            raise HTTPException(409, '已有模型正在训练，请等待或先取消')
         with _db_lock:
             conn = _conn()
             try:
                 run = db.get_training_run(conn, run_id)
                 if run is None:
                     raise HTTPException(404, '训练记录不存在')
-                try:
-                    checkpoint = training.interrupted_run_checkpoint(run)
-                except ValueError as exc:
-                    raise HTTPException(409, str(exc)) from exc
-                except FileNotFoundError as exc:
-                    raise HTTPException(400, str(exc)) from exc
+                if run['status'] != 'interrupted':
+                    raise HTTPException(409, '只有已中断的训练才能恢复')
+                payload = {
+                    'run_id': run_id,
+                    'task_id': run['task_id'],
+                    'dataset_version_id': run['dataset_version_id'],
+                    'epochs': run['epochs'],
+                    **run['config_json'],
+                    'resume': True,
+                }
+                db.update_training_run(
+                    conn, run_id, status='queued', error='', finished_at=None
+                )
+                job = vision_jobs.create_job(
+                    conn,
+                    kind='train_model',
+                    related_id=run_id,
+                    priority=110,
+                    payload=payload,
+                )
             finally:
                 conn.close()
-        try:
-            _training_manager.start(run_id)
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
-    return {'run_id': run_id, 'resume_checkpoint': str(checkpoint), 'status': 'running'}
+    return {'run_id': run_id, 'status': 'queued', 'vision_job': job}
 
 
 @app.get('/api/training/runs/{run_id}/log')

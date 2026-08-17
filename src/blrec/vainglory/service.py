@@ -1184,7 +1184,12 @@ class VaingloryIndexService:
     async def update_match_fields(
         self, match_id: int, changes: Dict[str, Any]
     ) -> MatchRecord:
-        return await self._repository.update_match_fields(match_id, changes)
+        before = await self._repository.get_match(match_id)
+        updated = await self._repository.update_match_fields(match_id, changes)
+        await self._repository.record_manual_correction_candidate(
+            before=before, after=updated, changed_fields=tuple(changes)
+        )
+        return updated
 
     async def request_match_rerun(self, match_id: int) -> None:
         match = await self._repository.get_match(match_id)
@@ -1198,16 +1203,26 @@ class VaingloryIndexService:
     async def set_recorded_player(
         self, match_id: int, *, side: str, slot: int
     ) -> MatchRecord:
-        return await self._repository.set_recorded_player(
+        before = await self._repository.get_match(match_id)
+        updated = await self._repository.set_recorded_player(
             match_id, side=side, slot=slot
         )
+        await self._repository.record_manual_correction_candidate(
+            before=before, after=updated, changed_fields=('recorded_player',)
+        )
+        return updated
 
     async def set_player_hero(
         self, match_id: int, *, side: str, slot: int, hero_id: int
     ) -> MatchRecord:
-        return await self._repository.set_player_hero(
+        before = await self._repository.get_match(match_id)
+        updated = await self._repository.set_player_hero(
             match_id, side=side, slot=slot, hero_id=hero_id
         )
+        await self._repository.record_manual_correction_candidate(
+            before=before, after=updated, changed_fields=('players',)
+        )
+        return updated
 
     async def update_session_title(
         self, session_id: int, title: str

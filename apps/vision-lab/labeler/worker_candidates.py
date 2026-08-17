@@ -29,6 +29,7 @@ _LABELS_BY_TASK = {
     'result_detector': {'result_panel', 'no_result_panel'},
     'mode_gate': {'blocked_gate', 'open_entrance', 'no_evidence'},
 }
+_REMOTE_SOURCE_TYPES = {'worker', 'manual_correction'}
 
 
 def _confidence(item: Mapping[str, Any], name: str) -> float:
@@ -322,14 +323,17 @@ def sync_worker_candidates(
                 frame_id = int(frame['id'])
 
             if item['schema_version'] == 3:
+                source_type = str(item.get('source_type') or 'worker')
+                if source_type not in _REMOTE_SOURCE_TYPES:
+                    source_type = 'worker'
                 was_inserted = db.add_training_review_source(
                     conn,
                     frame_id=frame_id,
-                    source_type='worker',
+                    source_type=source_type,
                     source_id=item['source_id'],
                     image_path=str(item['image_path']),
                     suggestions=dict(item['suggestions']),
-                    metadata={**item, 'source': 'macbook_worker'},
+                    metadata={**item, 'source': source_type},
                     source_created_at=_created_at(item),
                 )
                 result['inserted' if was_inserted else 'updated'] += 1
@@ -577,7 +581,8 @@ def _unified_review_sources(
             continue
         seen.add(normalized)
         row = conn.execute(
-            "SELECT * FROM training_review_sources WHERE source_type = 'worker' "
+            "SELECT * FROM training_review_sources WHERE source_type IN "
+            "('worker', 'manual_correction') "
             'AND source_id = ?',
             (normalized,),
         ).fetchone()
@@ -617,7 +622,11 @@ def pull_training_review_reviews(
             continue
         labels = raw.get('labels')
         status = str(raw.get('review_status') or '')
-        if not isinstance(labels, dict) or status not in ('confirmed', 'skipped'):
+        if not isinstance(labels, dict) or status not in (
+            'partial',
+            'confirmed',
+            'skipped',
+        ):
             result['reviews_ignored'] += 1
             continue
         frame_id = frame_ids.pop()
@@ -628,7 +637,7 @@ def pull_training_review_reviews(
             if not isinstance(result_quality, dict):
                 result_quality = {}
             result_box = raw.get('result_box')
-            if result_label == 'result_panel':
+            if result_label == 'result_panel' and result_box is not None:
                 boxes = db.normalize_candidate_boxes([result_box])
                 box = boxes[0]
                 db.save_box(
@@ -643,48 +652,50 @@ def pull_training_review_reviews(
             if hero_layout_label in {'gameplay_hud', 'scoreboard', 'result_page'}:
                 raw_lineup = raw.get('hero_lineup')
                 if not isinstance(raw_lineup, dict):
-                    raise ValueError('远端英雄阵容无效')
-                screen_type = str(raw_lineup.get('screen_type') or '')
-                if screen_type != hero_layout_label:
-                    raise ValueError('远端英雄阵容画面类型不一致')
-                team_size = int(raw_lineup.get('team_size'))
-                raw_slots = raw_lineup.get('slots')
-                if not isinstance(raw_slots, list):
-                    raise ValueError('远端英雄阵容位置无效')
-                slots = [
-                    {
-                        'side': slot.get('side'),
-                        'slot': slot.get('slot'),
-                        'crop': slot.get('crop'),
-                    }
-                    for slot in raw_slots
-                    if isinstance(slot, dict)
-                ]
-                db.replace_training_review_hero_layout(
-                    conn,
-                    frame_id=frame_id,
-                    screen_type=screen_type,
-                    team_size=team_size,
-                    method='remote-human-v1',
-                    slots=slots,
-                )
-                db.save_training_review_hero_lineup(
-                    conn,
-                    frame_id=frame_id,
-                    labels=[
+                    if status == 'confirmed':
+                        raise ValueError('远端英雄阵容无效')
+                else:
+                    screen_type = str(raw_lineup.get('screen_type') or '')
+                    if screen_type != hero_layout_label:
+                        raise ValueError('远端英雄阵容画面类型不一致')
+                    team_size = int(raw_lineup.get('team_size'))
+                    raw_slots = raw_lineup.get('slots')
+                    if not isinstance(raw_slots, list):
+                        raise ValueError('远端英雄阵容位置无效')
+                    slots = [
                         {
                             'side': slot.get('side'),
                             'slot': slot.get('slot'),
-                            'hero_label': slot.get('hero_label'),
+                            'crop': slot.get('crop'),
                         }
                         for slot in raw_slots
                         if isinstance(slot, dict)
-                    ],
-                    allowed_labels=hero_review.allowed_hero_labels(),
-                    player_status=raw_lineup.get('player_status'),
-                    player_side=raw_lineup.get('player_side'),
-                    player_slot=raw_lineup.get('player_slot'),
-                )
+                    ]
+                    db.replace_training_review_hero_layout(
+                        conn,
+                        frame_id=frame_id,
+                        screen_type=screen_type,
+                        team_size=team_size,
+                        method='remote-human-v1',
+                        slots=slots,
+                    )
+                    db.save_training_review_hero_lineup(
+                        conn,
+                        frame_id=frame_id,
+                        labels=[
+                            {
+                                'side': slot.get('side'),
+                                'slot': slot.get('slot'),
+                                'hero_label': slot.get('hero_label'),
+                            }
+                            for slot in raw_slots
+                            if isinstance(slot, dict)
+                        ],
+                        allowed_labels=hero_review.allowed_hero_labels(),
+                        player_status=raw_lineup.get('player_status'),
+                        player_side=raw_lineup.get('player_side'),
+                        player_slot=raw_lineup.get('player_slot'),
+                    )
             db.save_training_review(
                 conn,
                 frame_id=frame_id,
@@ -704,6 +715,15 @@ def pull_training_review_reviews(
                 status=status,
                 notes=str(raw.get('notes') or ''),
             )
+            if any(
+                str(source['source_type']) == 'manual_correction' for source in sources
+            ):
+                db.audit(
+                    conn,
+                    'training_review',
+                    frame_id=frame_id,
+                    detail='imported manual correction from BLREC admin',
+                )
         except (KeyError, TypeError, ValueError):
             result['reviews_ignored'] += 1
             continue
@@ -711,7 +731,8 @@ def pull_training_review_reviews(
         conn.execute(
             "UPDATE training_review_sources SET sync_state = 'clean', "
             'remote_review_hash = ?, remote_reviewed_at = ?, updated_at = ? '
-            "WHERE frame_id = ? AND source_type = 'worker'",
+            "WHERE frame_id = ? AND source_type IN "
+            "('worker', 'manual_correction')",
             (digest, reviewed_at, db.now(), frame_id),
         )
         conn.commit()
@@ -724,7 +745,8 @@ def push_training_review_reviews(conn: Any, nas: NasClient) -> Dict[str, int]:
     result = {'reviews_pushed': 0, 'push_failed': 0}
     rows = conn.execute(
         "SELECT DISTINCT frame_id FROM training_review_sources "
-        "WHERE source_type = 'worker' AND sync_state = 'dirty' "
+        "WHERE source_type IN ('worker', 'manual_correction') "
+        "AND sync_state = 'dirty' "
         'ORDER BY frame_id'
     ).fetchall()
     for row in rows:
@@ -734,7 +756,8 @@ def push_training_review_reviews(conn: Any, nas: NasClient) -> Dict[str, int]:
             continue
         sources = conn.execute(
             "SELECT source_id, image_path FROM training_review_sources "
-            "WHERE frame_id = ? AND source_type = 'worker' ORDER BY id",
+            "WHERE frame_id = ? AND source_type IN "
+            "('worker', 'manual_correction') ORDER BY id",
             (frame_id,),
         ).fetchall()
         image_path = next(
@@ -812,7 +835,8 @@ def push_training_review_reviews(conn: Any, nas: NasClient) -> Dict[str, int]:
             conn.execute(
                 "UPDATE training_review_sources SET sync_state = 'clean', "
                 'remote_review_hash = ?, remote_reviewed_at = ?, updated_at = ? '
-                "WHERE frame_id = ? AND source_type = 'worker'",
+                "WHERE frame_id = ? AND source_type IN "
+                "('worker', 'manual_correction')",
                 (digest, review['reviewed_at'], db.now(), frame_id),
             )
             conn.commit()

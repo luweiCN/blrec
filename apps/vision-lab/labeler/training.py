@@ -313,7 +313,11 @@ def _training_review_labels(
         f'SELECT r.frame_id, r.{column} AS label, f.frame_path '
         'FROM training_review_items r '
         'JOIN frames f ON f.id = r.frame_id '
-        "WHERE r.review_status = 'confirmed' "
+        "WHERE (r.review_status = 'confirmed' OR ("
+        "r.review_status = 'partial' AND EXISTS ("
+        'SELECT 1 FROM training_review_sources source '
+        'WHERE source.frame_id = r.frame_id '
+        "AND source.source_type = 'manual_correction'))) "
         f'AND r.{column} IS NOT NULL'
     ).fetchall()
     accepted = set(allowed)
@@ -1109,9 +1113,13 @@ def task_summaries(conn: Any, *, include_legacy: bool = False) -> List[Dict[str,
     return summaries
 
 
-def export_snapshot(conn: Any, task_id: str) -> Dict[str, Any]:
+def export_snapshot(
+    conn: Any, task_id: str, *, materialize: bool = True
+) -> Dict[str, Any]:
     if task_id in export.UNIFIED_CLASSIFICATION_LABELS:
-        return export.export_training_review_classifier(conn, task_id)
+        return export.export_training_review_classifier(
+            conn, task_id, materialize=materialize
+        )
     if task_id == 'screen_state':
         return export.export_screen_state_classifier(conn)
     if task_id == 'bp_review':
@@ -1122,14 +1130,14 @@ def export_snapshot(conn: Any, task_id: str) -> Dict[str, Any]:
         return export.export_mode_gate_detector(conn)
     if task_id == 'result_detector':
         return export.export_result_detector(
-            conn, include_negatives=True, max_negatives=1_500
+            conn, include_negatives=True, max_negatives=1_500, materialize=materialize
         )
     if task_id == 'hero_avatar_detector':
-        return export.export_hero_avatar_detector(conn)
+        return export.export_hero_avatar_detector(conn, materialize=materialize)
     if task_id == 'hero_identity':
-        return export.export_hero_identity_classifier(conn)
+        return export.export_hero_identity_classifier(conn, materialize=materialize)
     if task_id == 'player_position':
-        return export.export_player_position_classifier(conn)
+        return export.export_player_position_classifier(conn, materialize=materialize)
     raise ValueError(f'未知训练任务: {task_id}')
 
 

@@ -70,6 +70,13 @@ WORKER_LAUNCHD_PLIST = os.environ.get(
 
 SERVER_HOST = os.environ.get('VISION_LAB_HOST', '127.0.0.1').strip()
 SERVER_PORT = int(os.environ.get('VISION_LAB_PORT', '8800'))
+VISION_WORKER_TOKEN = os.environ.get('VISION_LAB_WORKER_TOKEN', '').strip()
+VISION_WORKER_LEASE_SECONDS = max(
+    60, int(os.environ.get('VISION_LAB_WORKER_LEASE_SECONDS', '300'))
+)
+VISION_WORKER_JOB_LIMIT = max(
+    1, int(os.environ.get('VISION_LAB_WORKER_JOB_LIMIT', '1000'))
+)
 
 VIDEO_EXTS = {'.flv', '.mp4', '.ts', '.mkv', '.m4s'}
 

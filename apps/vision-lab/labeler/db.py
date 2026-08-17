@@ -514,6 +514,55 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_model_deployments_active_target
     ON model_deployments (target)
     WHERE status IN ('queued', 'running');
 
+-- NAS 上的 Vision Lab 只负责轻量调度。数据集生成、批量预填、训练、验收和
+-- 打包等重任务由可暂停的 Vision Worker 领取。
+CREATE TABLE IF NOT EXISTS vision_workers (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    version TEXT NOT NULL DEFAULT '',
+    platform TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'idle',
+    active_job_id TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    last_seen_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vision_workers_seen
+    ON vision_workers (enabled, last_seen_at DESC, id);
+
+CREATE TABLE IF NOT EXISTS vision_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    related_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (
+        status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+    priority INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    progress REAL NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 1),
+    stage TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    worker_id TEXT REFERENCES vision_workers(id),
+    lease_token TEXT NOT NULL DEFAULT '',
+    lease_expires_at TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vision_jobs_queue
+    ON vision_jobs (status, priority DESC, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_vision_jobs_worker
+    ON vision_jobs (worker_id, status, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vision_jobs_active_related
+    ON vision_jobs (kind, related_id)
+    WHERE status IN ('queued', 'running') AND related_id != '';
+
 -- 本地工作目录迁移只执行一次，避免每次 API 打开连接都遍历数万张图片。
 CREATE TABLE IF NOT EXISTS workspace_migrations (
     id TEXT PRIMARY KEY,
@@ -3072,9 +3121,13 @@ def _training_review_item_dict(
         sources.append(source)
         for task, suggestion in source_suggestions.items():
             origin = str(suggestion.get('origin') or '')
-            source_priority = int(
-                source['source_type'] == 'new_model_prefill'
-                or origin in {'new_model_prefill', 'model_package'}
+            source_priority = (
+                2
+                if source['source_type'] == 'manual_correction'
+                else int(
+                    source['source_type'] == 'new_model_prefill'
+                    or origin in {'new_model_prefill', 'model_package'}
+                )
             )
             rank = (source_priority, float(suggestion.get('confidence', 0)))
             if rank > suggestion_ranks.get(task, (-1, -1.0)):
@@ -3284,6 +3337,8 @@ def training_review_result_groups(
 
 def _training_review_source_category(source_type: Any) -> str:
     normalized = str(source_type or '')
+    if normalized == 'manual_correction':
+        return 'manual_correction'
     if normalized == 'worker':
         return 'worker'
     if normalized == 'result_archive':
@@ -3312,7 +3367,8 @@ def _training_review_origin_frame_ids(
     else:
         rows = conn.execute(
             'SELECT DISTINCT frame_id FROM training_review_sources '
-            "WHERE source_type IN ('worker', 'result_archive')"
+            "WHERE source_type IN ('worker', 'result_archive', "
+            "'manual_correction')"
         ).fetchall()
     return {int(row['frame_id']) for row in rows}
 
@@ -3594,16 +3650,117 @@ def legacy_hero_review_stats(
     }
 
 
-def list_training_review_items(
+def _training_review_attribute_frame_ids(
     conn: sqlite3.Connection,
     *,
-    status: str = 'pending',
-    limit: int = 1000,
-    offset: int = 0,
-    source_scope: str = 'all',
     streamer: str = '',
-    hero_screen_type: str = '',
-) -> List[Dict[str, Any]]:
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: str = '',
+    confidence: str = '',
+) -> Optional[set[int]]:
+    if confidence not in {'', 'low', 'boundary', 'high'}:
+        raise ValueError('模型置信度筛选无效')
+    conditions: List[str] = []
+    parameters: List[Any] = []
+    if streamer:
+        conditions.append('video.streamer = ?')
+        parameters.append(streamer)
+    if source_type:
+        conditions.append(
+            'EXISTS (SELECT 1 FROM training_review_sources source '
+            'WHERE source.frame_id = item.frame_id AND source.source_type = ?)'
+        )
+        parameters.append(source_type)
+    if match_mode:
+        conditions.append(
+            '(item.match_mode_label = ? OR EXISTS ('
+            'SELECT 1 FROM training_review_sources source '
+            'WHERE source.frame_id = item.frame_id AND ('
+            "json_extract(source.suggestions_json, '$.match_mode.label') = ? OR "
+            "json_extract(source.metadata_json, "
+            "'$.manual_correction.after.game_mode') = ?)))"
+        )
+        parameters.extend((match_mode, match_mode, match_mode))
+    if scene:
+        if scene in _HERO_SCREEN_TYPES:
+            conditions.append('item.hero_layout_label = ?')
+            parameters.append(scene)
+        elif scene == 'hero_select':
+            conditions.append(
+                "(item.hero_select_label LIKE 'select_%' OR EXISTS ("
+                'SELECT 1 FROM training_review_sources source '
+                'WHERE source.frame_id = item.frame_id AND '
+                "json_extract(source.suggestions_json, '$.hero_select.label') "
+                "LIKE 'select_%'))"
+            )
+        elif scene == 'other':
+            conditions.append(
+                "COALESCE(item.hero_layout_label, '') NOT IN "
+                "('gameplay_hud', 'scoreboard', 'result_page') AND "
+                "COALESCE(item.hero_select_label, '') NOT LIKE 'select_%'"
+            )
+        else:
+            raise ValueError('画面类型筛选无效')
+    if hero:
+        conditions.append(
+            'EXISTS (SELECT 1 FROM training_review_hero_slots slot '
+            'WHERE slot.frame_id = item.frame_id AND '
+            '(slot.confirmed_label = ? OR slot.suggested_label = ?))'
+        )
+        parameters.extend((hero, hero))
+    if confidence:
+        ranges = {
+            'low': ('<', 0.6),
+            'boundary': ('BETWEEN', (0.6, 0.85)),
+            'high': ('>=', 0.85),
+        }
+        operator, value = ranges[confidence]
+        if operator == 'BETWEEN':
+            confidence_sql = (
+                "CAST(json_extract(suggestion.value, '$.confidence') AS REAL) "
+                'BETWEEN ? AND ?'
+            )
+            assert isinstance(value, tuple)
+            parameters.extend(value)
+        else:
+            confidence_sql = (
+                "CAST(json_extract(suggestion.value, '$.confidence') AS REAL) "
+                f'{operator} ?'
+            )
+            assert isinstance(value, float)
+            parameters.append(value)
+        conditions.append(
+            'EXISTS (SELECT 1 FROM training_review_sources source, '
+            'json_each(source.suggestions_json) suggestion '
+            'WHERE source.frame_id = item.frame_id AND '
+            f'{confidence_sql})'
+        )
+    if not conditions:
+        return None
+    rows = conn.execute(
+        'SELECT DISTINCT item.frame_id FROM training_review_items item '
+        'JOIN frames frame ON frame.id = item.frame_id '
+        'JOIN videos video ON video.id = frame.video_id WHERE '
+        + ' AND '.join(conditions),
+        parameters,
+    ).fetchall()
+    return {int(row['frame_id']) for row in rows}
+
+
+def _training_review_visible_frame_ids(
+    conn: sqlite3.Connection,
+    *,
+    status: str,
+    source_scope: str,
+    streamer: str = '',
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: str = '',
+    confidence: str = '',
+) -> Tuple[List[int], Dict[int, Dict[str, Any]]]:
     if status not in _TRAINING_REVIEW_STATUSES | {
         'all',
         'needs_review',
@@ -3613,19 +3770,16 @@ def list_training_review_items(
         'human_confirmed',
     }:
         raise ValueError('训练复核状态无效')
-    if limit < 1 or limit > 10_000 or offset < 0:
-        raise ValueError('训练复核分页参数无效')
     source_frame_ids = _training_review_origin_frame_ids(conn, source_scope)
-    if status == 'legacy_hero':
-        if source_scope == 'new':
-            return []
-        return list_legacy_hero_review_items(
-            conn,
-            streamer=streamer,
-            screen_type=hero_screen_type,
-            limit=limit,
-            offset=offset,
-        )
+    attribute_frame_ids = _training_review_attribute_frame_ids(
+        conn,
+        streamer=streamer,
+        source_type=source_type,
+        scene=scene,
+        match_mode=match_mode,
+        hero=hero,
+        confidence=confidence,
+    )
     base = (
         'SELECT frame_id FROM training_review_items '
         "ORDER BY CASE review_status WHEN 'pending' THEN 0 WHEN 'partial' THEN 1 "
@@ -3688,17 +3842,94 @@ def list_training_review_items(
         int(row['frame_id'])
         for row in rows
         if (source_frame_ids is None or int(row['frame_id']) in source_frame_ids)
+        if (attribute_frame_ids is None or int(row['frame_id']) in attribute_frame_ids)
         if result_groups.get(int(row['frame_id']), {}).get(
             'result_group_representative_frame_id', int(row['frame_id'])
         )
         == int(row['frame_id'])
     ]
+    return visible, result_groups
+
+
+def list_training_review_items(
+    conn: sqlite3.Connection,
+    *,
+    status: str = 'pending',
+    limit: int = 1000,
+    offset: int = 0,
+    source_scope: str = 'all',
+    streamer: str = '',
+    hero_screen_type: str = '',
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: str = '',
+    confidence: str = '',
+) -> List[Dict[str, Any]]:
+    if limit < 1 or limit > 10_000 or offset < 0:
+        raise ValueError('训练复核分页参数无效')
+    if status == 'legacy_hero':
+        if source_scope == 'new':
+            return []
+        return list_legacy_hero_review_items(
+            conn,
+            streamer=streamer,
+            screen_type=hero_screen_type,
+            limit=limit,
+            offset=offset,
+        )
+    visible, result_groups = _training_review_visible_frame_ids(
+        conn,
+        status=status,
+        source_scope=source_scope,
+        streamer=streamer,
+        source_type=source_type,
+        scene=scene,
+        match_mode=match_mode,
+        hero=hero,
+        confidence=confidence,
+    )
     result = []
     for frame_id in visible[offset : offset + limit]:
         item = get_training_review_item(conn, frame_id, result_groups=result_groups)
         if item is not None:
             result.append(item)
     return result
+
+
+def count_training_review_items(
+    conn: sqlite3.Connection,
+    *,
+    status: str,
+    source_scope: str,
+    streamer: str = '',
+    hero_screen_type: str = '',
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: str = '',
+    confidence: str = '',
+) -> int:
+    if status == 'legacy_hero':
+        if source_scope == 'new':
+            return 0
+        return int(
+            legacy_hero_review_stats(
+                conn, streamer=streamer, screen_type=hero_screen_type
+            )['remaining_groups']
+        )
+    visible, _groups = _training_review_visible_frame_ids(
+        conn,
+        status=status,
+        source_scope=source_scope,
+        streamer=streamer,
+        source_type=source_type,
+        scene=scene,
+        match_mode=match_mode,
+        hero=hero,
+        confidence=confidence,
+    )
+    return len(visible)
 
 
 def save_training_review(

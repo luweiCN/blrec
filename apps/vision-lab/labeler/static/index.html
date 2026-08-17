@@ -531,6 +531,50 @@
           <span id="candidate-legacy-summary" class="muted"
                 role="status" aria-live="polite"></span>
         </div>
+        <div id="candidate-data-filters" class="toolbar candidate-data-filters">
+          <strong>按数据缺口筛选</strong>
+          <label>来源
+            <select id="candidate-source-type-filter">
+              <option value="">全部来源</option>
+              <option value="manual_correction">后台人工纠错</option>
+              <option value="worker">Worker 新采样</option>
+              <option value="result_archive">历史结算归档</option>
+              <option value="new_model_prefill">新模型预填</option>
+            </select>
+          </label>
+          <label>画面
+            <select id="candidate-scene-filter">
+              <option value="">全部画面</option>
+              <option value="gameplay_hud">HUD</option>
+              <option value="scoreboard">积分板</option>
+              <option value="result_page">结算界面</option>
+              <option value="hero_select">英雄选择</option>
+              <option value="other">其他</option>
+            </select>
+          </label>
+          <label>模式
+            <select id="candidate-mode-filter">
+              <option value="">全部模式</option>
+              <option value="3v3">3V3</option>
+              <option value="aram">大乱斗</option>
+              <option value="5v5">5V5</option>
+              <option value="unreadable">看不清</option>
+            </select>
+          </label>
+          <label>置信度
+            <select id="candidate-confidence-filter">
+              <option value="">全部置信度</option>
+              <option value="low">低于 60%</option>
+              <option value="boundary">60%～85%</option>
+              <option value="high">85% 以上</option>
+            </select>
+          </label>
+          <label>主播 <input id="candidate-streamer-filter" size="10"
+            placeholder="精确名称"></label>
+          <label>英雄 <input id="candidate-hero-filter" size="9"
+            placeholder="英雄标签"></label>
+          <button id="btn-candidate-clear-filters" type="button">清空筛选</button>
+        </div>
         <p id="candidate-page-hint" class="hint small">这里只显示 Worker 新采样和 NAS 结算归档。新模型会先填写分类、结算框及可判断的英雄信息，你只需核对和修正；未经人工确认的图片不会进入训练集。</p>
       </header>
       <div id="candidate-layout">
@@ -778,9 +822,17 @@
           <button id="btn-training-refresh">刷新数据量与进度</button>
           <span id="training-global-state" class="muted"></span>
         </div>
-        <p class="hint small">点击训练时会先冻结“这一刻”的数据集快照，再启动后台训练。之后继续打标不会改变正在训练的内容；新增数据后再次点击，会生成新的数据集版本和训练记录，旧模型完整保留。</p>
+        <p class="hint small">点击训练时，NAS 只冻结一份轻量数据清单并排队；Vision Worker 从 NAS 按需取图、生成本地训练目录并训练。之后继续打标不会改变这一轮，旧数据快照和模型完整保留。</p>
         <div id="training-overview" class="training-overview"></div>
       </header>
+      <section class="vision-worker-section">
+        <div class="training-section-heading">
+          <div><h3 class="section-title">Vision Worker</h3>
+            <p>重任务不会在 NAS 页面进程中运行。暂停 Worker 后，它会完成或停止当前任务，并且不再领取新任务。</p></div>
+          <span id="vision-worker-count">0 台</span>
+        </div>
+        <div id="vision-worker-list" class="vision-worker-list"></div>
+      </section>
       <div id="training-task-grid"></div>
       <div class="training-section-heading">
         <div><h3 class="section-title">训练记录</h3>

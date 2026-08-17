@@ -204,6 +204,7 @@ const CANDIDATE_SUGGESTION_TITLES = {
 const CANDIDATE_SOURCE_LABELS = {
   legacy: '历史标签迁移',
   worker: 'Worker 新采样',
+  manual_correction: '后台人工纠错',
   result_archive: 'NAS 结算归档',
   model_prefill: '新模型预填',
   hero_model_prefill: '英雄模型预填',
@@ -2132,6 +2133,17 @@ function candidateReviewQuery(status, offset = null) {
     if (streamer) query.set('streamer', streamer);
     if (screenType) query.set('hero_screen_type', screenType);
   }
+  const filters = {
+    source_type: $('#candidate-source-type-filter').value,
+    scene: $('#candidate-scene-filter').value,
+    match_mode: $('#candidate-mode-filter').value,
+    confidence: $('#candidate-confidence-filter').value,
+    streamer: $('#candidate-streamer-filter').value.trim(),
+    hero: $('#candidate-hero-filter').value.trim(),
+  };
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) query.set(key, value);
+  });
   return `/api/training-review/items?${query}`;
 }
 
@@ -2334,7 +2346,8 @@ async function loadCandidateReview() {
     candidateLoadedSourceScope = sourceScope;
     candidateLoadedStatus = status;
     renderCandidateLegacyControls(data.stats || {}, status);
-    candidateFilteredTotal = candidateReviewTotal(data.stats || {}, status);
+    candidateFilteredTotal = Number(
+      data.filtered_total ?? candidateReviewTotal(data.stats || {}, status));
     candidateSessionCompleted = 0;
     candidatePrefillRequested.clear();
     candidateQueue = data.items || [];
@@ -2355,7 +2368,8 @@ async function refillCandidateReviewQueue() {
     candidateReviewQuery(status, offset));
   if ($('#candidate-status-filter').value !== status ||
       candidateSourceScope !== sourceScope) return 0;
-  candidateFilteredTotal = candidateReviewTotal(data.stats || {}, status);
+  candidateFilteredTotal = Number(
+    data.filtered_total ?? candidateReviewTotal(data.stats || {}, status));
   renderCandidateSyncStats(data.stats || {});
   const known = new Set(candidateQueue.map((item) => item.frame_id));
   const additions = (data.items || []).filter(
@@ -2602,6 +2616,21 @@ function bindCandidateReview() {
   $('#candidate-status-filter').onchange = loadCandidateReview;
   $('#candidate-legacy-streamer').onchange = loadCandidateReview;
   $('#candidate-legacy-screen').onchange = loadCandidateReview;
+  [
+    '#candidate-source-type-filter', '#candidate-scene-filter',
+    '#candidate-mode-filter', '#candidate-confidence-filter',
+    '#candidate-streamer-filter', '#candidate-hero-filter',
+  ].forEach((selector) => {
+    $(selector).onchange = loadCandidateReview;
+  });
+  $('#btn-candidate-clear-filters').onclick = () => {
+    [
+      '#candidate-source-type-filter', '#candidate-scene-filter',
+      '#candidate-mode-filter', '#candidate-confidence-filter',
+      '#candidate-streamer-filter', '#candidate-hero-filter',
+    ].forEach((selector) => { $(selector).value = ''; });
+    loadCandidateReview();
+  };
   $('#btn-candidate-refresh').onclick = loadCandidateReview;
   $('#btn-candidate-sync').onclick = syncCandidates;
   $('#btn-candidate-prev').onclick = () => moveCandidate(-1);
@@ -6367,11 +6396,11 @@ function renderTrainingOverview(tasks, runs) {
   const sourceVideos = Math.max(
     0, ...tasks.map((task) => Number((task.counts || {}).videos || 0)));
   const active = (runs.runs || []).find((run) => run.id === runs.active_run_id);
-  const activeTask = active ? modelTask(active.task_id).name : '本机算力空闲';
+  const activeTask = active ? modelTask(active.task_id).name : '没有排队任务';
   const activeDetail = active
     ? `${Math.round(Number(active.progress || 0) * 100)}% · ` +
       `${active.current_epoch || 0}/${active.epochs} epochs`
-    : '可以选择任一已就绪模型开始训练';
+    : '可以选择任一已就绪模型加入 Worker 队列';
   root.innerHTML = `
     <div><span>训练模型</span><b>${tasks.length}</b><small>${coreTasks} 个核心 + ${heroTasks} 个英雄增强</small></div>
     <div><span>可以训练</span><b>${ready}/${tasks.length}</b><small>${ready === tasks.length ? '全部达到最低结构要求' : '仍有任务缺少数据'}</small></div>
@@ -6379,7 +6408,7 @@ function renderTrainingOverview(tasks, runs) {
     <div><span>当前任务</span><b>${esc(activeTask)}</b><small>${esc(activeDetail)}</small></div>`;
 }
 
-function trainingTaskCard(task, activeRunId) {
+function trainingTaskCard(task) {
   const reasons = task.blocking_reasons || [];
   const warnings = task.quality_warnings || [];
   const metrics = trainingCountMetrics(task);
@@ -6403,13 +6432,13 @@ function trainingTaskCard(task, activeRunId) {
           ? `<details class="training-quality"${openTrainingQualityTasks.has(task.id) ? ' open' : ''}><summary>数据提醒（${warnings.length}）</summary><p>${esc(warnings.join('；'))}</p></details>`
           : '<div class="small status-done">数据结构达到当前建议量</div>'}
       <button class="primary training-start" data-task-id="${esc(task.id)}"
-        ${!task.ready || activeRunId ? 'disabled' : ''}>
-        用当前数据开始训练（${task.epochs} epochs）
+        ${!task.ready ? 'disabled' : ''}>
+        用当前数据加入训练队列（${task.epochs} epochs）
       </button>
     </article>`;
 }
 
-function renderTrainingTasks(tasks, activeRunId) {
+function renderTrainingTasks(tasks) {
   const grid = $('#training-task-grid');
   $$('.training-task-card[data-task-id]').forEach((card) => {
     const details = card.querySelector('.training-quality');
@@ -6430,7 +6459,7 @@ function renderTrainingTasks(tasks, activeRunId) {
         <div class="training-group-heading"><div><h3>${esc(group.title)}</h3>
           <p>${esc(group.description)}</p></div><span>${groupTasks.length} 个模型</span></div>
         <div class="training-task-cards">${groupTasks.map((task) =>
-          trainingTaskCard(task, activeRunId)).join('')}</div>
+          trainingTaskCard(task)).join('')}</div>
       </section>`);
   });
   const remaining = tasks.filter((task) => !rendered.has(task.id));
@@ -6438,7 +6467,7 @@ function renderTrainingTasks(tasks, activeRunId) {
     grid.insertAdjacentHTML('beforeend', `<section class="training-task-group">
       <div class="training-group-heading"><div><h3>其他训练任务</h3></div></div>
       <div class="training-task-cards">${remaining.map((task) =>
-        trainingTaskCard(task, activeRunId)).join('')}</div></section>`);
+        trainingTaskCard(task)).join('')}</div></section>`);
   }
   $$('.training-start').forEach((button) => {
     button.onclick = () => startTraining(button.dataset.taskId);
@@ -6485,8 +6514,7 @@ function renderTrainingRuns(data) {
   (data.runs || []).forEach((run) => {
     const percent = Math.round(Number(run.progress || 0) * 100);
     const statusLabel = TRAINING_STATUS_LABELS[run.status] || run.status;
-    const canCancel = ['queued', 'running'].includes(run.status) &&
-      run.id === activeRunId;
+    const canCancel = ['queued', 'running'].includes(run.status);
     const canTest = run.status === 'succeeded' && run.artifact_path;
     const taskName = modelTask(run.task_id).name;
     tbody.insertAdjacentHTML('beforeend', `
@@ -6529,17 +6557,61 @@ function renderTrainingRuns(data) {
     };
   });
   $('#training-global-state').textContent = activeRunId
-    ? `正在训练：${activeRunId}` : '当前没有训练任务占用本机算力';
+    ? `队列正在处理：${activeRunId}` : '当前没有排队或运行中的训练任务';
+}
+
+function renderVisionWorkers(data) {
+  const workers = data.workers || [];
+  const jobs = data.jobs || [];
+  $('#vision-worker-count').textContent = `${workers.length} 台`;
+  const root = $('#vision-worker-list');
+  if (!workers.length) {
+    root.innerHTML = '<div class="empty-state compact">还没有 Vision Worker 连接。NAS 页面不会自行执行训练。</div>';
+    return;
+  }
+  root.innerHTML = workers.map((worker) => {
+    const job = jobs.find((item) => item.id === worker.active_job_id);
+    const progress = job ? Math.round(Number(job.progress || 0) * 100) : 0;
+    const capabilities = (worker.capabilities || []).map((kind) => ({
+      train_model: '训练', model_prefill: '模型预填',
+      candidate_metadata: '素材整理', validate_model: '批量验收',
+      package_models: '模型打包',
+    }[kind] || kind)).join(' · ');
+    return `<article class="vision-worker-card ${worker.enabled ? '' : 'paused'}">
+      <div><b>${esc(worker.display_name)}</b><span>${worker.enabled ? (worker.state === 'busy' ? '工作中' : '可领取任务') : '已暂停'}</span></div>
+      <small>${esc(capabilities || '未声明能力')}</small>
+      <small>最后心跳 ${esc(worker.last_seen_at || '--')}</small>
+      ${job ? `<div class="vision-worker-job"><span>${esc(job.stage || job.kind)}</span><b>${progress}%</b></div><small>${esc(job.detail || '')}</small>` : ''}
+      <button class="vision-worker-toggle" data-worker-id="${esc(worker.id)}" data-enabled="${worker.enabled ? '1' : '0'}">${worker.enabled ? '暂停领取任务' : '恢复领取任务'}</button>
+    </article>`;
+  }).join('');
+  $$('.vision-worker-toggle').forEach((button) => {
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        await api(`/api/vision-workers/${encodeURIComponent(button.dataset.workerId)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: button.dataset.enabled !== '1' }),
+        });
+        loadTrainingDashboard();
+      } catch (error) {
+        $('#training-global-state').textContent = 'Worker 状态更新失败：' + error.message;
+        button.disabled = false;
+      }
+    };
+  });
 }
 
 async function loadTrainingDashboard() {
   try {
-    const [tasks, runs] = await Promise.all([
+    const [tasks, runs, workers] = await Promise.all([
       api('/api/training/tasks'),
       api('/api/training/runs'),
+      api('/api/vision-workers'),
     ]);
     renderTrainingOverview(tasks, runs);
-    renderTrainingTasks(tasks, runs.active_run_id);
+    renderVisionWorkers(workers);
+    renderTrainingTasks(tasks);
     renderTrainingRuns(runs);
     if (runs.active_run_id && !trainingPollTimer) {
       trainingPollTimer = setInterval(loadTrainingDashboard, 2000);
@@ -6556,7 +6628,7 @@ async function startTraining(taskId) {
   const taskCard = $(`.training-start[data-task-id="${taskId}"]`);
   if (!taskCard) return;
   const confirmed = window.confirm(
-    '现在会冻结当前标注数据并开始本机训练。之后新增的标注不会混进这一轮，' +
+    '现在会冻结当前标注数据并加入 Vision Worker 队列。之后新增的标注不会混进这一轮，' +
     '需要再点一次训练才会生成新版本。继续吗？');
   if (!confirmed) return;
   $('#training-global-state').textContent = '正在冻结数据集快照…';
@@ -6567,7 +6639,7 @@ async function startTraining(taskId) {
       body: JSON.stringify({ task_id: taskId }),
     });
     $('#training-global-state').textContent =
-      `已启动 ${run.id}，数据快照 ${run.dataset_version_id}`;
+      `已排队 ${run.id}，数据快照 ${run.dataset_version_id}`;
     if (!trainingPollTimer) {
       trainingPollTimer = setInterval(loadTrainingDashboard, 2000);
     }

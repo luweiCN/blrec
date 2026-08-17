@@ -96,6 +96,7 @@ def _frame_sample(conn: Any, f: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     boxes = db.get_boxes(conn, f['id'])
     return {
         'sample_id': f'f{f["id"]:08d}',
+        'frame_id': int(f['id']),
         'video_id': f['video_id'],
         'streamer': f['streamer'],
         'remote_path': f['remote_path'],
@@ -487,6 +488,7 @@ def export_result_detector(
     include_negatives: bool = True,
     max_negatives: Optional[int] = None,
     version: Optional[str] = None,
+    materialize: bool = True,
 ) -> Dict[str, Any]:
     """导出 result_detector 数据集(JSONL + YOLO + COCO),创建不可变版本。"""
     frames = _labeled_frames(conn)
@@ -650,34 +652,35 @@ def export_result_detector(
     out_dir = config.EXPORT_DIR / version_id
     if out_dir.exists():
         raise RuntimeError(f'数据集版本已存在,禁止覆盖: {version_id}')
+    out_dir.mkdir(parents=True, exist_ok=False)
     images_dir = out_dir / 'images'
     labels_dir = out_dir / 'labels'
-    for split_name in ('train', 'val', 'test'):
-        (images_dir / split_name).mkdir(parents=True, exist_ok=True)
-        (labels_dir / split_name).mkdir(parents=True, exist_ok=True)
+    if materialize:
+        for split_name in ('train', 'val', 'test'):
+            (images_dir / split_name).mkdir(parents=True, exist_ok=True)
+            (labels_dir / split_name).mkdir(parents=True, exist_ok=True)
 
     coco_images = []
     coco_annotations = []
     coco_id = 0
     for s in samples:
-        src = _path_for(conn, s)
-        if src is None:
-            continue
         split_name = s['split']
         img_name = f"{s['sample_id']}.jpg"
-        dst = images_dir / split_name / img_name
-        if not dst.exists():
-            shutil.copy2(src, dst)
-        # YOLO 标签:正样本写 result_panel 框,负样本空
         box = s['boxes'].get('result_panel')
-        txt = labels_dir / split_name / f"{s['sample_id']}.txt"
-        if box:
-            x = box['x'] + box['w'] / 2
-            y = box['y'] + box['h'] / 2
-            txt.write_text(f"0 {x:.6f} {y:.6f} {box['w']:.6f} {box['h']:.6f}\n")
-        else:
-            txt.write_text('')
-        # COCO
+        if materialize:
+            src = _path_for(conn, s)
+            if src is None:
+                continue
+            dst = images_dir / split_name / img_name
+            if not dst.exists():
+                shutil.copy2(src, dst)
+            txt = labels_dir / split_name / f"{s['sample_id']}.txt"
+            if box:
+                x = box['x'] + box['w'] / 2
+                y = box['y'] + box['h'] / 2
+                txt.write_text(f"0 {x:.6f} {y:.6f} {box['w']:.6f} {box['h']:.6f}\n")
+            else:
+                txt.write_text('')
         coco_id += 1
         coco_images.append(
             {
@@ -704,24 +707,23 @@ def export_result_detector(
                 }
             )
 
-    # COCO JSON
-    (out_dir / 'coco_annotations.json').write_text(
-        json.dumps(
-            {
-                'images': coco_images,
-                'annotations': coco_annotations,
-                'categories': [{'id': 1, 'name': 'result_panel'}],
-            },
-            ensure_ascii=False,
-        ),
-        encoding='utf-8',
-    )
-    # YOLO data.yaml
-    (out_dir / 'data.yaml').write_text(
-        f"path: {out_dir}\ntrain: images/train\nval: images/val\n"
-        f"test: images/test\nnc: 1\nnames: ['result_panel']\n",
-        encoding='utf-8',
-    )
+    if materialize:
+        (out_dir / 'coco_annotations.json').write_text(
+            json.dumps(
+                {
+                    'images': coco_images,
+                    'annotations': coco_annotations,
+                    'categories': [{'id': 1, 'name': 'result_panel'}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding='utf-8',
+        )
+        (out_dir / 'data.yaml').write_text(
+            f"path: {out_dir}\ntrain: images/train\nval: images/val\n"
+            f"test: images/test\nnc: 1\nnames: ['result_panel']\n",
+            encoding='utf-8',
+        )
     # JSONL 清单
     jsonl_path = out_dir / 'samples.jsonl'
     with jsonl_path.open('w', encoding='utf-8') as fh:
@@ -759,6 +761,7 @@ def export_result_detector(
             'negative_priority': ['scoreboard', 'death_scoreboard', 'frame_id'],
             'required_test_evaluation_groups': list(required_test_groups),
             'required_val_evaluation_groups': list(required_val_groups),
+            'materialized_by': 'vision_worker' if not materialize else 'vision_lab',
         },
         counts=counts,
         manifest_path=str(jsonl_path),
@@ -897,7 +900,9 @@ def confirmed_player_position_samples(conn: Any) -> List[Dict[str, Any]]:
     return samples
 
 
-def export_hero_avatar_detector(conn: Any) -> Dict[str, Any]:
+def export_hero_avatar_detector(
+    conn: Any, *, materialize: bool = True
+) -> Dict[str, Any]:
     """把 HUD／积分板／结算页上的人工头像圆框导出为单类检测数据。"""
     samples = _confirmed_hero_lineup_samples(conn)
     if not samples:
@@ -918,34 +923,36 @@ def export_hero_avatar_detector(conn: Any) -> Dict[str, Any]:
     out_dir = config.EXPORT_DIR / version_id
     if out_dir.exists():
         raise RuntimeError(f'数据集版本已存在: {version_id}')
-    for split_name in ('train', 'val', 'test'):
-        (out_dir / 'images' / split_name).mkdir(parents=True, exist_ok=True)
-        (out_dir / 'labels' / split_name).mkdir(parents=True, exist_ok=True)
-    for sample in samples:
-        source = _path_for(conn, sample)
-        if source is None:
-            continue
-        split_name = str(sample['split'])
-        destination = out_dir / 'images' / split_name / f"{sample['sample_id']}.jpg"
-        if not destination.exists():
-            shutil.copy2(source, destination)
-        labels = []
-        for box in sample['avatar_boxes']:
-            center_x = float(box['x']) + float(box['w']) / 2
-            center_y = float(box['y']) + float(box['h']) / 2
-            labels.append(
-                '0 {:.6f} {:.6f} {:.6f} {:.6f}'.format(
-                    center_x, center_y, float(box['w']), float(box['h'])
+    out_dir.mkdir(parents=True, exist_ok=False)
+    if materialize:
+        for split_name in ('train', 'val', 'test'):
+            (out_dir / 'images' / split_name).mkdir(parents=True, exist_ok=True)
+            (out_dir / 'labels' / split_name).mkdir(parents=True, exist_ok=True)
+        for sample in samples:
+            source = _path_for(conn, sample)
+            if source is None:
+                continue
+            split_name = str(sample['split'])
+            destination = out_dir / 'images' / split_name / f"{sample['sample_id']}.jpg"
+            if not destination.exists():
+                shutil.copy2(source, destination)
+            labels = []
+            for box in sample['avatar_boxes']:
+                center_x = float(box['x']) + float(box['w']) / 2
+                center_y = float(box['y']) + float(box['h']) / 2
+                labels.append(
+                    '0 {:.6f} {:.6f} {:.6f} {:.6f}'.format(
+                        center_x, center_y, float(box['w']), float(box['h'])
+                    )
                 )
+            (out_dir / 'labels' / split_name / f"{sample['sample_id']}.txt").write_text(
+                '\n'.join(labels) + '\n', encoding='utf-8'
             )
-        (out_dir / 'labels' / split_name / f"{sample['sample_id']}.txt").write_text(
-            '\n'.join(labels) + '\n', encoding='utf-8'
+        (out_dir / 'data.yaml').write_text(
+            f'path: {out_dir}\ntrain: images/train\nval: images/val\n'
+            "test: images/test\nnc: 1\nnames: ['hero_avatar']\n",
+            encoding='utf-8',
         )
-    (out_dir / 'data.yaml').write_text(
-        f'path: {out_dir}\ntrain: images/train\nval: images/val\n'
-        "test: images/test\nnc: 1\nnames: ['hero_avatar']\n",
-        encoding='utf-8',
-    )
     jsonl_path = out_dir / 'samples.jsonl'
     with jsonl_path.open('w', encoding='utf-8') as handle:
         for sample in samples:
@@ -982,6 +989,7 @@ def export_hero_avatar_detector(conn: Any) -> Dict[str, Any]:
             'confirmed_only': True,
             'classes': ['hero_avatar'],
             'split_unit': 'video',
+            'materialized_by': 'vision_worker' if not materialize else 'vision_lab',
         },
         counts=counts,
         manifest_path=str(jsonl_path),
@@ -1057,7 +1065,24 @@ def _write_hero_identity_images(
     return replicas
 
 
-def export_hero_identity_classifier(conn: Any) -> Dict[str, Any]:
+def _classification_balance_replicas(
+    samples: List[Dict[str, Any]], labels: Tuple[str, ...]
+) -> int:
+    counts = {
+        label: sum(
+            sample['split'] == 'train' and sample['label'] == label
+            for sample in samples
+        )
+        for label in labels
+    }
+    populated = [count for count in counts.values() if count]
+    target = min(100, max(1, round(median(populated)))) if populated else 0
+    return sum(max(0, target - count) for count in counts.values() if count)
+
+
+def export_hero_identity_classifier(
+    conn: Any, *, materialize: bool = True
+) -> Dict[str, Any]:
     """把人工确认且可读的头像裁剪导出为英雄身份分类数据。"""
     lineups = _confirmed_hero_lineup_samples(conn)
     samples = []
@@ -1103,7 +1128,11 @@ def export_hero_identity_classifier(conn: Any) -> Dict[str, Any]:
     if out_dir.exists():
         raise RuntimeError(f'数据集版本已存在: {version_id}')
     out_dir.mkdir(parents=True, exist_ok=False)
-    replicas = _write_hero_identity_images(conn, out_dir, samples, labels)
+    replicas = (
+        _write_hero_identity_images(conn, out_dir, samples, labels)
+        if materialize
+        else _classification_balance_replicas(samples, labels)
+    )
     jsonl_path = out_dir / 'samples.jsonl'
     with jsonl_path.open('w', encoding='utf-8') as handle:
         for sample in samples:
@@ -1139,6 +1168,7 @@ def export_hero_identity_classifier(conn: Any) -> Dict[str, Any]:
             'excluded_labels': ['unreadable', ''],
             'split_unit': 'video',
             'train_balance': 'repeat_to_class_median_capped_at_100',
+            'materialized_by': 'vision_worker' if not materialize else 'vision_lab',
         },
         counts=counts,
         manifest_path=str(jsonl_path),
@@ -1147,7 +1177,9 @@ def export_hero_identity_classifier(conn: Any) -> Dict[str, Any]:
     return {'version': version_id, 'dir': str(out_dir), **counts}
 
 
-def export_player_position_classifier(conn: Any) -> Dict[str, Any]:
+def export_player_position_classifier(
+    conn: Any, *, materialize: bool = True
+) -> Dict[str, Any]:
     """按完整积分板／结算图训练主播本人所在阵容位置。"""
     samples = confirmed_player_position_samples(conn)
     if not samples:
@@ -1175,25 +1207,27 @@ def export_player_position_classifier(conn: Any) -> Dict[str, Any]:
     with jsonl_path.open('w', encoding='utf-8') as handle:
         for sample in samples:
             handle.write(json.dumps(sample, ensure_ascii=False) + '\n')
-    _write_classification_images(conn, out_dir, samples, labels)
-
-    train_images = {
-        label: sorted((out_dir / 'images' / 'train' / label).glob('*.jpg'))
-        for label in labels
-    }
-    populated = [len(paths) for paths in train_images.values() if paths]
-    balance_target = min(100, max(1, round(median(populated)))) if populated else 0
-    replicas = 0
-    for label, paths in train_images.items():
-        if not paths:
-            continue
-        for index in range(len(paths), balance_target):
-            source = paths[index % len(paths)]
-            destination = source.with_name(
-                '{}-balance-{:04d}.jpg'.format(source.stem, index - len(paths) + 1)
-            )
-            shutil.copy2(source, destination)
-            replicas += 1
+    if materialize:
+        _write_classification_images(conn, out_dir, samples, labels)
+        train_images = {
+            label: sorted((out_dir / 'images' / 'train' / label).glob('*.jpg'))
+            for label in labels
+        }
+        populated = [len(paths) for paths in train_images.values() if paths]
+        balance_target = min(100, max(1, round(median(populated)))) if populated else 0
+        replicas = 0
+        for label, paths in train_images.items():
+            if not paths:
+                continue
+            for index in range(len(paths), balance_target):
+                source = paths[index % len(paths)]
+                destination = source.with_name(
+                    '{}-balance-{:04d}.jpg'.format(source.stem, index - len(paths) + 1)
+                )
+                shutil.copy2(source, destination)
+                replicas += 1
+    else:
+        replicas = _classification_balance_replicas(samples, labels)
 
     excluded_unreadable = int(
         conn.execute(
@@ -1263,6 +1297,7 @@ def export_player_position_classifier(conn: Any) -> Dict[str, Any]:
             'split_unit': 'video',
             'train_balance': 'repeat_to_class_median_capped_at_100',
             'preserve_full_image': True,
+            'materialized_by': 'vision_worker' if not materialize else 'vision_lab',
         },
         counts=counts,
         manifest_path=str(jsonl_path),
@@ -1278,7 +1313,9 @@ UNIFIED_CLASSIFICATION_LABELS = {
 }
 
 
-def export_training_review_classifier(conn: Any, task_id: str) -> Dict[str, Any]:
+def export_training_review_classifier(
+    conn: Any, task_id: str, *, materialize: bool = True
+) -> Dict[str, Any]:
     """从一图多标签人工复核中冻结一个分类任务的数据快照。"""
     labels = UNIFIED_CLASSIFICATION_LABELS.get(task_id)
     if labels is None:
@@ -1290,13 +1327,18 @@ def export_training_review_classifier(conn: Any, task_id: str) -> Dict[str, Any]
     }[task_id]
     rows = conn.execute(
         f'SELECT f.*, v.streamer, v.remote_path, r.{column} AS label, '
+        'r.review_status AS review_status, '
         'r.hero_select_variant AS hero_select_variant, '
         'r.hero_select_visibility AS hero_select_visibility, '
         'r.panel_render_state AS panel_render_state '
         'FROM training_review_items r '
         'JOIN frames f ON f.id = r.frame_id '
         'JOIN videos v ON v.id = f.video_id '
-        "WHERE r.review_status = 'confirmed' "
+        "WHERE (r.review_status = 'confirmed' OR ("
+        "r.review_status = 'partial' AND EXISTS ("
+        'SELECT 1 FROM training_review_sources source '
+        'WHERE source.frame_id = r.frame_id '
+        "AND source.source_type = 'manual_correction'))) "
         f'AND r.{column} IS NOT NULL '
         'ORDER BY f.video_id, f.timestamp_ms, f.id'
     ).fetchall()
@@ -1313,7 +1355,11 @@ def export_training_review_classifier(conn: Any, task_id: str) -> Dict[str, Any]
         if sample is None:
             continue
         sample['label'] = label
-        sample['label_source'] = 'training_review_confirmed'
+        sample['label_source'] = (
+            'manual_correction'
+            if frame['review_status'] == 'partial'
+            else 'training_review_confirmed'
+        )
         sample['panel_render_state'] = str(frame['panel_render_state'])
         if task_id == 'hero_select' and frame['hero_select_variant'] is not None:
             sample['hero_select_variant'] = str(frame['hero_select_variant'])
@@ -1340,7 +1386,8 @@ def export_training_review_classifier(conn: Any, task_id: str) -> Dict[str, Any]
     with jsonl_path.open('w', encoding='utf-8') as handle:
         for sample in samples:
             handle.write(json.dumps(sample, ensure_ascii=False) + '\n')
-    _write_classification_images(conn, out_dir, samples, labels)
+    if materialize:
+        _write_classification_images(conn, out_dir, samples, labels)
     excluded_unreadable = int(
         conn.execute(
             f'SELECT COUNT(*) FROM training_review_items '
@@ -1372,6 +1419,7 @@ def export_training_review_classifier(conn: Any, task_id: str) -> Dict[str, Any]
             'confirmed_only': True,
             'excluded_labels': ['unreadable'],
             'split_unit': 'video',
+            'materialized_by': 'vision_worker' if not materialize else 'vision_lab',
         },
         counts=counts,
         manifest_path=str(jsonl_path),

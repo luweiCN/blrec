@@ -295,6 +295,35 @@ tr:hover td { background: var(--panel2); }
 #training-task-grid {
   display: flex; flex-direction: column; gap: 12px; margin: 12px 0 18px;
 }
+.vision-worker-section { margin: 12px 0; }
+.vision-worker-list {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 8px;
+}
+.vision-worker-card {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 10px 12px;
+  border: 1px solid #285b3b; border-radius: 8px; background: var(--panel);
+}
+.vision-worker-card.paused { border-color: var(--border); opacity: .72; }
+.vision-worker-card > div:first-child {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.vision-worker-card > div:first-child span { color: var(--muted); font-size: 11px; }
+.vision-worker-card > small {
+  overflow: hidden; color: var(--muted); font-size: 10px;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.vision-worker-job { display: flex; align-items: center; justify-content: space-between; }
+.vision-worker-job span { color: #9fd6ff; font-size: 11px; }
+.vision-worker-toggle { align-self: flex-start; margin-top: 3px; }
+.empty-state.compact { padding: 18px; }
+.candidate-data-filters {
+  margin-top: 8px; padding: 7px 9px; border: 1px solid var(--border);
+  border-radius: 7px; background: var(--panel);
+}
+.candidate-data-filters strong { color: #cfe0ff; font-size: 11px; }
+.candidate-data-filters label { font-size: 10px; }
+.candidate-data-filters select,
+.candidate-data-filters input { max-width: 145px; }
 .training-task-group {
   padding: 12px; background: rgb(18 24 33 / 62%);
   border: 1px solid var(--border); border-radius: 9px;

@@ -1824,6 +1824,50 @@ async def test_manual_match_fields_survive_a_later_rescan(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_manual_match_correction_creates_training_candidate(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        candidate_root = tmp_path / 'candidates'
+        repository = VaingloryRepository(
+            database, training_candidate_root=candidate_root, clock=lambda: 100
+        )
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        before = (await repository.list_matches()).items[0]
+        after = await repository.update_match_fields(before.id, {'game_mode': 'aram'})
+
+        written = await repository.record_manual_correction_candidate(
+            before=before, after=after, changed_fields=('game_mode',)
+        )
+
+        assert written is True
+        metadata_paths = list(candidate_root.glob('items/**/*.json'))
+        metadata_paths = [
+            path for path in metadata_paths if not path.name.endswith('.review.json')
+        ]
+        assert len(metadata_paths) == 1
+        metadata = json.loads(metadata_paths[0].read_text())
+        assert metadata['source_type'] == 'manual_correction'
+        assert metadata['manual_correction']['changes']['game_mode'] == {
+            'before': '3v3',
+            'after': 'aram',
+        }
+        review = json.loads(metadata_paths[0].with_suffix('.review.json').read_text())
+        assert review['review_status'] == 'partial'
+        assert review['labels']['match_mode_label'] == 'aram'
+        image = candidate_root / metadata['image_path']
+        assert image.read_bytes() == analyzed_match().result_frame_png
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_lists_one_summary_per_recording_session(
     tmp_path: Path,
 ) -> None:
