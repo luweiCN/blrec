@@ -7,6 +7,7 @@ from urllib.parse import urlencode, urlsplit
 import psycopg
 import pytest
 from blrec_dashboard_publisher.snapshot import (
+    _allows_public_replay,
     _season_for,
     build_dashboard_api_source,
     build_dashboard_asset_source,
@@ -24,6 +25,29 @@ SHANGHAI = timezone(timedelta(hours=8))
 
 def timestamp(year: int, month: int, day: int, hour: int = 0) -> int:
     return int(datetime(year, month, day, hour, tzinfo=SHANGHAI).timestamp())
+
+
+def test_public_replay_rejects_private_upload_policy() -> None:
+    publication = {
+        'source_kind': 'upload',
+        'visibility_scope': 'public',
+        'archive_is_only_self': None,
+        'upload_policy_snapshot_json': '{"is_only_self":true}',
+    }
+
+    assert _allows_public_replay(publication) is False
+    assert (
+        _allows_public_replay(
+            {**publication, 'upload_policy_snapshot_json': '{"is_only_self":false}'}
+        )
+        is True
+    )
+    assert (
+        _allows_public_replay(
+            {**publication, 'upload_policy_snapshot_json': 'invalid json'}
+        )
+        is False
+    )
 
 
 async def seed_player(
@@ -197,10 +221,18 @@ async def seed_publication(
         'id,account_id,session_id,aid,bvid,source_kind,payload_hash,'
         'description_block,state,description_state,pin_state,attempt_count,'
         'next_attempt_at,created_at,updated_at,needs_refresh,chapter_state,'
-        'public_visible_at) '
+        'public_visible_at,visibility_scope) '
         "VALUES(?,1,?,?,?,'archive',?,'测试','confirmed','confirmed','confirmed',"
-        "0,0,1,1,0,'confirmed',?)",
-        (match_id, match_id, 1000 + match_id, bvid, 'a' * 64, 1 if public else None),
+        "0,0,1,1,0,'confirmed',?,?)",
+        (
+            match_id,
+            match_id,
+            1000 + match_id,
+            bvid,
+            'a' * 64,
+            1 if public else None,
+            'public' if public else 'unknown',
+        ),
     )
 
 
@@ -655,7 +687,10 @@ async def test_snapshot_exports_matches_by_live_time_and_hides_private_replays(
             ],
         )
         await seed_publication(
-            database, match_id=2, bvid='BV1private01', page=1, public=False
+            database, match_id=2, bvid='BV1private01', page=1, public=True
+        )
+        await database.execute(
+            'UPDATE vainglory_archive_imports SET is_only_self=1 WHERE id=2'
         )
 
         snapshot = await database.read(

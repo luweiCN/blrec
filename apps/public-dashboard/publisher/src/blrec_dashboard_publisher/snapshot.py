@@ -544,7 +544,16 @@ def _publications_by_session(
         placeholders = ','.join('?' for _ in batch)
         publication_rows = connection.execute(
             'SELECT publication.id,publication.session_id,publication.bvid,'
-            'publication.source_kind,publication.upload_job_id '
+            'publication.source_kind,publication.upload_job_id,'
+            'publication.visibility_scope,'
+            '(SELECT imported.is_only_self '
+            'FROM vainglory_archive_imports imported '
+            'WHERE imported.account_id=publication.account_id '
+            'AND imported.bvid=publication.bvid '
+            'ORDER BY imported.id DESC LIMIT 1) AS archive_is_only_self,'
+            '(SELECT source_job.policy_snapshot_json FROM upload_jobs source_job '
+            'WHERE source_job.id=publication.upload_job_id) '
+            'AS upload_policy_snapshot_json '
             'FROM vainglory_publications publication '
             'WHERE publication.session_id IN ('
             + placeholders
@@ -557,9 +566,37 @@ def _publications_by_session(
             batch,
         ).fetchall()
         publications.update(
-            (int(row['session_id']), dict(row)) for row in publication_rows
+            (int(row['session_id']), dict(row))
+            for row in publication_rows
+            if _allows_public_replay(row)
         )
     return publications
+
+
+def _allows_public_replay(publication: Mapping[str, Any]) -> bool:
+    if str(publication['visibility_scope'] or '') != 'public':
+        return False
+    if _true_flag(publication['archive_is_only_self']):
+        return False
+    source_kind = str(publication['source_kind'] or '')
+    if source_kind == 'archive':
+        return True
+    if source_kind != 'upload':
+        return False
+    raw_policy = publication['upload_policy_snapshot_json']
+    if raw_policy is None:
+        return False
+    try:
+        policy = json.loads(str(raw_policy))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(policy, Mapping):
+        return False
+    return not _true_flag(policy.get('is_only_self'))
+
+
+def _true_flag(value: Any) -> bool:
+    return value is True or value == 1 or str(value).strip().lower() == 'true'
 
 
 def _publication_parts(
