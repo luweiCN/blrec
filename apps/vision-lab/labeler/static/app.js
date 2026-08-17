@@ -2222,7 +2222,7 @@ function candidateStatusIsReviewQueue(status) {
 
 function candidateReviewQuery(status, offset = null) {
   const query = new URLSearchParams({
-    status, limit: '2000', source_scope: candidateSourceScope,
+    status, limit: '100', source_scope: candidateSourceScope,
   });
   if (offset !== null) query.set('offset', String(offset));
   if (status === 'legacy_hero') {

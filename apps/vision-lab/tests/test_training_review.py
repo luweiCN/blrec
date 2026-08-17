@@ -593,9 +593,22 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             match_mode='aram',
             confidence='low',
         )
+        page, page_total = db.training_review_page(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            streamer='测试主播',
+            source_type='manual_correction',
+            scene='hero_select',
+            match_mode='aram',
+            confidence='low',
+            limit=1,
+        )
 
         self.assertEqual([item['frame_id'] for item in items], [correction])
         self.assertEqual(count, 1)
+        self.assertEqual([item['frame_id'] for item in page], [correction])
+        self.assertEqual(page_total, 1)
 
     def test_review_queue_filters_any_selected_hero(self):
         adagio = self.frame(20)

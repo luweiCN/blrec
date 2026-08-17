@@ -3267,45 +3267,45 @@ def training_review_result_groups(
                ) AS has_complete_lineup
         FROM training_review_items item
         JOIN frames frame ON frame.id = item.frame_id
+        WHERE item.result_panel_label = 'result_panel'
+           OR (
+                item.result_panel_label IS NULL
+                AND EXISTS (
+                    SELECT 1
+                    FROM training_review_sources source
+                    WHERE source.frame_id = item.frame_id
+                      AND json_extract(
+                          source.suggestions_json, '$.result_panel.label'
+                      ) = 'result_panel'
+                )
+           )
         """
     ).fetchall()
     if not rows:
         return {}
     by_frame = {int(row['frame_id']): row for row in rows}
-    positive = {
-        frame_id
-        for frame_id, row in by_frame.items()
-        if row['result_panel_label'] == 'result_panel'
-    }
+    positive = set(by_frame)
     sources_by_frame: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
-    for source in conn.execute(
-        'SELECT frame_id, source_type, suggestions_json, metadata_json '
-        'FROM training_review_sources'
-    ).fetchall():
-        frame_id = int(source['frame_id'])
-        if frame_id not in by_frame:
-            continue
-        try:
-            suggestions = json.loads(source['suggestions_json'] or '{}')
-        except (TypeError, ValueError, json.JSONDecodeError):
-            suggestions = {}
-        suggestion = suggestions.get('result_panel')
-        if (
-            by_frame[frame_id]['result_panel_label'] is None
-            and isinstance(suggestion, dict)
-            and suggestion.get('label') == 'result_panel'
-        ):
-            positive.add(frame_id)
-        try:
-            metadata = json.loads(source['metadata_json'] or '{}')
-        except (TypeError, ValueError, json.JSONDecodeError):
-            metadata = {}
-        if isinstance(metadata, dict):
-            sources_by_frame.setdefault(frame_id, []).append(
-                (str(source['source_type']), metadata)
-            )
-    if not positive:
-        return {}
+    positive_ids = sorted(positive)
+    for offset in range(0, len(positive_ids), 500):
+        batch = positive_ids[offset : offset + 500]
+        placeholders = ', '.join('?' for _frame_id in batch)
+        sources = conn.execute(
+            'SELECT frame_id, source_type, metadata_json '
+            'FROM training_review_sources '
+            f'WHERE frame_id IN ({placeholders})',
+            batch,
+        ).fetchall()
+        for source in sources:
+            frame_id = int(source['frame_id'])
+            try:
+                metadata = json.loads(source['metadata_json'] or '{}')
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            if isinstance(metadata, dict):
+                sources_by_frame.setdefault(frame_id, []).append(
+                    (str(source['source_type']), metadata)
+                )
 
     parent = {frame_id: frame_id for frame_id in positive}
 
@@ -4005,17 +4005,55 @@ def list_training_review_items(
     hero: Sequence[str] | str = (),
     confidence: str = '',
 ) -> List[Dict[str, Any]]:
+    items, _total = training_review_page(
+        conn,
+        status=status,
+        limit=limit,
+        offset=offset,
+        source_scope=source_scope,
+        streamer=streamer,
+        hero_screen_type=hero_screen_type,
+        source_type=source_type,
+        scene=scene,
+        match_mode=match_mode,
+        hero=hero,
+        confidence=confidence,
+    )
+    return items
+
+
+def training_review_page(
+    conn: sqlite3.Connection,
+    *,
+    status: str = 'pending',
+    limit: int = 1000,
+    offset: int = 0,
+    source_scope: str = 'all',
+    streamer: str = '',
+    hero_screen_type: str = '',
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: Sequence[str] | str = (),
+    confidence: str = '',
+) -> Tuple[List[Dict[str, Any]], int]:
     if limit < 1 or limit > 10_000 or offset < 0:
         raise ValueError('训练复核分页参数无效')
     if status == 'legacy_hero':
         if source_scope == 'new':
-            return []
-        return list_legacy_hero_review_items(
-            conn,
-            streamer=streamer,
-            screen_type=hero_screen_type,
-            limit=limit,
-            offset=offset,
+            return [], 0
+        stats = legacy_hero_review_stats(
+            conn, streamer=streamer, screen_type=hero_screen_type
+        )
+        return (
+            list_legacy_hero_review_items(
+                conn,
+                streamer=streamer,
+                screen_type=hero_screen_type,
+                limit=limit,
+                offset=offset,
+            ),
+            int(stats['remaining_groups']),
         )
     visible, result_groups = _training_review_visible_frame_ids(
         conn,
@@ -4033,7 +4071,7 @@ def list_training_review_items(
         item = get_training_review_item(conn, frame_id, result_groups=result_groups)
         if item is not None:
             result.append(item)
-    return result
+    return result, len(visible)
 
 
 def count_training_review_items(

@@ -1188,23 +1188,11 @@ def api_training_review_items(
         conn = _conn()
         try:
             try:
-                items = db.list_training_review_items(
+                items, filtered_total = db.training_review_page(
                     conn,
                     status=status,
                     limit=limit,
                     offset=offset,
-                    source_scope=source_scope,
-                    streamer=streamer,
-                    hero_screen_type=hero_screen_type,
-                    source_type=source_type,
-                    scene=scene,
-                    match_mode=match_mode,
-                    hero=hero or (),
-                    confidence=confidence,
-                )
-                filtered_total = db.count_training_review_items(
-                    conn,
-                    status=status,
                     source_scope=source_scope,
                     streamer=streamer,
                     hero_screen_type=hero_screen_type,
