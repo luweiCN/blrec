@@ -5469,7 +5469,8 @@ class VaingloryRepository:
     @staticmethod
     def _training_image_dimensions(content: bytes) -> Tuple[int, int]:
         if len(content) >= 24 and content.startswith(b'\x89PNG\r\n\x1a\n'):
-            return struct.unpack('>II', content[16:24])
+            width, height = struct.unpack('>II', content[16:24])
+            return int(width), int(height)
         if len(content) >= 4 and content.startswith(b'\xff\xd8'):
             index = 2
             while index + 9 <= len(content):
