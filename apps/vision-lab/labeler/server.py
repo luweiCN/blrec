@@ -10,6 +10,7 @@ import hashlib
 import json
 import secrets
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -103,6 +104,7 @@ async def lifespan(_app: FastAPI):
                 name='vision-candidate-index',
             )
             candidate_index_thread.start()
+            _start_training_review_cache_refresh()
     except Exception:
         db.close_connections()
         raise
@@ -154,10 +156,97 @@ _worker_candidate_sync_state: Dict[str, Any] = {
 }
 _training_start_lock = threading.RLock()
 _worker_deployment_lock = threading.RLock()
+_training_review_cache_lock = threading.RLock()
+_training_review_cache: Dict[str, Any] = {
+    'groups': None,
+    'groups_expires_at': 0.0,
+    'stats': None,
+    'stats_expires_at': 0.0,
+    'refreshing': False,
+}
+_TRAINING_REVIEW_CACHE_SECONDS = 300.0
 
 
 def _conn():
     return db.connect(config.DB_PATH)
+
+
+def _cached_training_review_groups(conn: Any) -> Dict[int, Dict[str, Any]]:
+    now = time.monotonic()
+    with _training_review_cache_lock:
+        value = _training_review_cache['groups']
+        if value is not None:
+            if now >= _training_review_cache['groups_expires_at']:
+                _start_training_review_cache_refresh()
+            return value
+    value = db.training_review_result_groups(conn)
+    with _training_review_cache_lock:
+        _training_review_cache['groups'] = value
+        _training_review_cache['groups_expires_at'] = (
+            time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
+        )
+        return value
+
+
+def _cached_training_review_stats(conn: Any) -> Dict[str, Any]:
+    now = time.monotonic()
+    with _training_review_cache_lock:
+        value = _training_review_cache['stats']
+        if value is not None:
+            if now >= _training_review_cache['stats_expires_at']:
+                _start_training_review_cache_refresh()
+            return value
+    groups = _cached_training_review_groups(conn)
+    value = db.training_review_stats(conn, result_groups=groups)
+    with _training_review_cache_lock:
+        _training_review_cache['stats'] = value
+        _training_review_cache['stats_expires_at'] = (
+            time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
+        )
+        return value
+
+
+def _start_training_review_cache_refresh() -> None:
+    with _training_review_cache_lock:
+        if _training_review_cache['refreshing']:
+            return
+        _training_review_cache['refreshing'] = True
+    threading.Thread(
+        target=_refresh_training_review_cache,
+        daemon=True,
+        name='vision-review-cache-refresh',
+    ).start()
+
+
+def _invalidate_training_review_cache() -> None:
+    with _training_review_cache_lock:
+        _training_review_cache['groups_expires_at'] = 0.0
+        _training_review_cache['stats_expires_at'] = 0.0
+
+
+def _refresh_training_review_cache() -> None:
+    conn = None
+    try:
+        conn = _conn()
+        groups = db.training_review_result_groups(conn)
+        stats = db.training_review_stats(conn, result_groups=groups)
+        expires_at = time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
+        with _training_review_cache_lock:
+            _training_review_cache.update(
+                {
+                    'groups': groups,
+                    'groups_expires_at': expires_at,
+                    'stats': stats,
+                    'stats_expires_at': expires_at,
+                }
+            )
+    except Exception:  # noqa: BLE001 - stale cache remains available
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+        with _training_review_cache_lock:
+            _training_review_cache['refreshing'] = False
 
 
 def _nas() -> NasClient:
@@ -1112,6 +1201,17 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
                 'archive_box_suggested': archive['box_suggested'],
             }
         )
+        if any(
+            int(result.get(key) or 0)
+            for key in (
+                'inserted',
+                'updated',
+                'reviews_pulled',
+                'archive_inserted',
+                'archive_updated',
+            )
+        ):
+            _invalidate_training_review_cache()
         _set_worker_candidate_sync_state(
             **result, running=False, last_completed_at=db.now()
         )
@@ -1164,7 +1264,7 @@ def api_worker_candidate_state() -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
-            review = db.training_review_stats(conn)
+            review = _cached_training_review_stats(conn)
         finally:
             conn.close()
     return {'sync': sync, 'review': review}
@@ -1183,11 +1283,13 @@ def api_training_review_items(
     match_mode: str = '',
     hero: Optional[List[str]] = Query(None),
     confidence: str = '',
+    include_stats: bool = True,
 ) -> Dict[str, Any]:
     with _db_lock:
         conn = _conn()
         try:
             try:
+                result_groups = _cached_training_review_groups(conn)
                 items, filtered_total = db.training_review_page(
                     conn,
                     status=status,
@@ -1201,19 +1303,64 @@ def api_training_review_items(
                     match_mode=match_mode,
                     hero=hero or (),
                     confidence=confidence,
+                    result_groups=result_groups,
                 )
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
-            stats = db.training_review_stats(conn)
-            if source_scope == 'legacy' or status == 'legacy_hero':
-                stats['legacy_hero'] = db.legacy_hero_review_stats(conn)
-            if status == 'legacy_hero':
-                stats['legacy_hero_filtered'] = db.legacy_hero_review_stats(
-                    conn, streamer=streamer, screen_type=hero_screen_type
+            stats = (
+                _training_review_stats_response(
+                    conn,
+                    source_scope=source_scope,
+                    status=status,
+                    streamer=streamer,
+                    hero_screen_type=hero_screen_type,
                 )
+                if include_stats
+                else {}
+            )
             return {'items': items, 'stats': stats, 'filtered_total': filtered_total}
         finally:
             conn.close()
+
+
+def _training_review_stats_response(
+    conn: Any,
+    *,
+    source_scope: str,
+    status: str,
+    streamer: str = '',
+    hero_screen_type: str = '',
+) -> Dict[str, Any]:
+    stats = dict(_cached_training_review_stats(conn))
+    if source_scope == 'legacy' or status == 'legacy_hero':
+        stats['legacy_hero'] = db.legacy_hero_review_stats(conn)
+    if status == 'legacy_hero':
+        stats['legacy_hero_filtered'] = db.legacy_hero_review_stats(
+            conn, streamer=streamer, screen_type=hero_screen_type
+        )
+    return stats
+
+
+@app.get('/api/training-review/stats')
+def api_training_review_stats(
+    source_scope: str = 'all',
+    status: str = 'needs_review',
+    streamer: str = '',
+    hero_screen_type: str = '',
+) -> Dict[str, Any]:
+    conn = _conn()
+    try:
+        return {
+            'stats': _training_review_stats_response(
+                conn,
+                source_scope=source_scope,
+                status=status,
+                streamer=streamer,
+                hero_screen_type=hero_screen_type,
+            )
+        }
+    finally:
+        conn.close()
 
 
 @app.get('/api/training-review/filter-options')
@@ -2016,7 +2163,7 @@ def api_save_training_review_item(
                         result_box['h'],
                     )
             try:
-                return db.save_training_review(
+                saved = db.save_training_review(
                     conn,
                     frame_id=frame_id,
                     match_flow_label=body.get('match_flow_label'),
@@ -2033,6 +2180,8 @@ def api_save_training_review_item(
                     status=status,
                     notes=str(body.get('notes') or ''),
                 )
+                _invalidate_training_review_cache()
+                return saved
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
             except ValueError as exc:

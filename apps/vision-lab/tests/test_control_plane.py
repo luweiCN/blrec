@@ -36,3 +36,10 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'Worker 待复核' in html
     assert 'candidate-streamer-filter' in html
     assert 'candidate-hero-filter-options' in html
+
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    assert "limit: '20'" in script
+    assert "include_stats: 'false'" in script
+    assert '/api/training-review/stats?' in script

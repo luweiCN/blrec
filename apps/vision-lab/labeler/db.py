@@ -3502,10 +3502,17 @@ def training_review_filter_options(
     }
 
 
-def training_review_duplicate_result_frame_ids(conn: sqlite3.Connection) -> set[int]:
+def training_review_duplicate_result_frame_ids(
+    conn: sqlite3.Connection,
+    *,
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> set[int]:
+    groups = (
+        training_review_result_groups(conn) if result_groups is None else result_groups
+    )
     return {
         frame_id
-        for frame_id, group in training_review_result_groups(conn).items()
+        for frame_id, group in groups.items()
         if frame_id != group['result_group_representative_frame_id']
     }
 
@@ -3899,6 +3906,7 @@ def _training_review_visible_frame_ids(
     match_mode: str = '',
     hero: Sequence[str] | str = (),
     confidence: str = '',
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[List[int], Dict[int, Dict[str, Any]]]:
     if status not in _TRAINING_REVIEW_STATUSES | {
         'all',
@@ -3976,18 +3984,20 @@ def _training_review_visible_frame_ids(
         )
         parameters = (status,)
     rows = conn.execute(base, parameters).fetchall()
-    result_groups = training_review_result_groups(conn)
+    groups = (
+        training_review_result_groups(conn) if result_groups is None else result_groups
+    )
     visible = [
         int(row['frame_id'])
         for row in rows
         if (source_frame_ids is None or int(row['frame_id']) in source_frame_ids)
         if (attribute_frame_ids is None or int(row['frame_id']) in attribute_frame_ids)
-        if result_groups.get(int(row['frame_id']), {}).get(
+        if groups.get(int(row['frame_id']), {}).get(
             'result_group_representative_frame_id', int(row['frame_id'])
         )
         == int(row['frame_id'])
     ]
-    return visible, result_groups
+    return visible, groups
 
 
 def list_training_review_items(
@@ -4036,6 +4046,7 @@ def training_review_page(
     match_mode: str = '',
     hero: Sequence[str] | str = (),
     confidence: str = '',
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     if limit < 1 or limit > 10_000 or offset < 0:
         raise ValueError('训练复核分页参数无效')
@@ -4065,6 +4076,7 @@ def training_review_page(
         match_mode=match_mode,
         hero=hero,
         confidence=confidence,
+        result_groups=result_groups,
     )
     result = []
     for frame_id in visible[offset : offset + limit]:
@@ -4894,8 +4906,14 @@ def save_training_review_hero_lineup(
     return result
 
 
-def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
-    duplicates = training_review_duplicate_result_frame_ids(conn)
+def training_review_stats(
+    conn: sqlite3.Connection,
+    *,
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    duplicates = training_review_duplicate_result_frame_ids(
+        conn, result_groups=result_groups
+    )
     item_rows = conn.execute('SELECT * FROM training_review_items').fetchall()
     visible_rows = [row for row in item_rows if int(row['frame_id']) not in duplicates]
     visible_ids = {int(row['frame_id']) for row in visible_rows}

@@ -30,6 +30,7 @@ let candidateLoadedSourceScope = 'new';
 let candidateLoadedStatus = 'needs_review';
 let candidateFilteredTotal = 0;
 let candidateSessionCompleted = 0;
+let candidateReviewStats = {};
 let candidateDraft = null;
 let candidateBoxes = [];
 let candidateDrawStart = null;
@@ -296,6 +297,7 @@ function currentCandidate() {
 
 function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true) {
   candidateSourceScope = scope === 'legacy' ? 'legacy' : 'new';
+  candidateReviewStats = {};
   const options = CANDIDATE_QUEUE_OPTIONS[candidateSourceScope];
   const selected = options.some(([value]) => value === status)
     ? status : 'needs_review';
@@ -2222,7 +2224,8 @@ function candidateStatusIsReviewQueue(status) {
 
 function candidateReviewQuery(status, offset = null) {
   const query = new URLSearchParams({
-    status, limit: '100', source_scope: candidateSourceScope,
+    status, limit: '20', source_scope: candidateSourceScope,
+    include_stats: 'false',
   });
   if (offset !== null) query.set('offset', String(offset));
   if (status === 'legacy_hero') {
@@ -2243,6 +2246,29 @@ function candidateReviewQuery(status, offset = null) {
   });
   [...candidateHeroFilters].sort().forEach((hero) => query.append('hero', hero));
   return `/api/training-review/items?${query}`;
+}
+
+async function loadCandidateReviewStats(status, sourceScope) {
+  const query = new URLSearchParams({
+    status, source_scope: sourceScope,
+  });
+  if (status === 'legacy_hero') {
+    const streamer = $('#candidate-legacy-streamer').value;
+    const screenType = $('#candidate-legacy-screen').value;
+    if (streamer) query.set('streamer', streamer);
+    if (screenType) query.set('hero_screen_type', screenType);
+  }
+  try {
+    const data = await api(`/api/training-review/stats?${query}`);
+    if (sourceScope !== candidateSourceScope ||
+        status !== $('#candidate-status-filter').value) return;
+    candidateReviewStats = data.stats || {};
+    renderCandidateLegacyControls(candidateReviewStats, status);
+    renderCandidateSyncStats(candidateReviewStats);
+  } catch (error) {
+    $('#candidate-scope-summary').textContent =
+      '统计数据加载失败：' + error.message;
+  }
 }
 
 function renderCandidateHeroFilter() {
@@ -2527,13 +2553,14 @@ async function requestCandidateModelPrefill(item) {
 async function loadCandidateReview() {
   const status = $('#candidate-status-filter').value;
   const sourceScope = candidateSourceScope;
+  candidateReviewStats = {};
   try {
     const data = await api(candidateReviewQuery(status));
     if (sourceScope !== candidateSourceScope ||
         status !== $('#candidate-status-filter').value) return;
     candidateLoadedSourceScope = sourceScope;
     candidateLoadedStatus = status;
-    renderCandidateLegacyControls(data.stats || {}, status);
+    renderCandidateLegacyControls(candidateReviewStats, status);
     candidateFilteredTotal = Number(
       data.filtered_total ?? candidateReviewTotal(data.stats || {}, status));
     candidateSessionCompleted = 0;
@@ -2541,7 +2568,7 @@ async function loadCandidateReview() {
     candidateQueue = data.items || [];
     candidateIndex = 0;
     renderCandidateItem();
-    renderCandidateSyncStats(data.stats || {});
+    loadCandidateReviewStats(status, sourceScope);
   } catch (error) {
     $('#candidate-save-state').textContent = '加载失败：' + error.message;
   }
@@ -2557,8 +2584,8 @@ async function refillCandidateReviewQueue() {
   if ($('#candidate-status-filter').value !== status ||
       candidateSourceScope !== sourceScope) return 0;
   candidateFilteredTotal = Number(
-    data.filtered_total ?? candidateReviewTotal(data.stats || {}, status));
-  renderCandidateSyncStats(data.stats || {});
+    data.filtered_total ?? candidateReviewTotal(candidateReviewStats, status));
+  renderCandidateSyncStats(candidateReviewStats);
   const known = new Set(candidateQueue.map((item) => item.frame_id));
   const additions = (data.items || []).filter(
     (item) => !known.has(item.frame_id));
