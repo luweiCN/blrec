@@ -36,6 +36,8 @@ let candidateDrawStart = null;
 let candidateSyncTimer = null;
 let candidateHeroCatalog = [];
 let candidateHeroCatalogPromise = null;
+let candidateHeroFilters = new Set();
+let candidateFilterOptionsScope = '';
 let candidateHeroLineup = null;
 let candidateHeroDraft = new Map();
 let candidateHeroCachedSlots = new Set();
@@ -303,11 +305,11 @@ function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true)
   $('#candidate-status-filter').value = selected;
   const historical = candidateSourceScope === 'legacy';
   $('#candidate-page-title').textContent = historical
-    ? '历史人工数据' : '新同步数据';
+    ? '历史人工数据' : 'Worker 待复核';
   $('#candidate-scope-summary').textContent = historical
-    ? '正在读取历史人工数据…' : '正在读取新同步数据…';
-  $('#btn-candidate-sync').classList.toggle('hidden', historical);
-  $('#candidate-sync-state').classList.toggle('hidden', historical);
+    ? '正在读取历史人工数据…' : '正在读取 Worker 候选…';
+  $('#candidate-index-state').classList.toggle('hidden', historical);
+  loadCandidateFilterOptions();
   if (syncNav) {
     $$('.nav-item').forEach((button) => button.classList.remove('active'));
     const nav = $(`.nav-item[data-view="candidates"]` +
@@ -837,6 +839,35 @@ function renderCandidateSuggestions(item) {
   const reasonText = [...reasons].join('；');
   $('#candidate-reason').textContent = reasonText;
   $('#candidate-reason').title = reasonText;
+  renderCandidatePrefillStatus(item);
+}
+
+function renderCandidatePrefillStatus(item) {
+  const core = (item.sources || []).find(
+    (source) => source.source_type === 'new_model_prefill');
+  const heroes = (item.sources || []).find(
+    (source) => source.source_type === 'new_model_hero_prefill');
+  const parts = [];
+  const modelText = (source) => Object.entries(
+    source && source.metadata && source.metadata.model_runs || {})
+    .map(([task, run]) => `${task}=${run}`)
+    .join(' · ');
+  if (core) {
+    const errors = Object.keys(core.metadata && core.metadata.errors || {});
+    parts.push(errors.length
+      ? `分类预填部分完成（未产出：${errors.join('、')}）`
+      : '分类与结算框预填已完成');
+    const models = modelText(core);
+    if (models) parts.push(models);
+  } else if (['pending', 'partial'].includes(String(item.review_status || ''))) {
+    parts.push('分类预填等待 Vision Worker');
+  }
+  if (heroes) {
+    parts.push('头像位置与英雄预填已完成');
+    const models = modelText(heroes);
+    if (models) parts.push(models);
+  }
+  $('#candidate-prefill-status').textContent = parts.join(' · ');
 }
 
 function candidateHeroKey(side, slot) {
@@ -2205,13 +2236,76 @@ function candidateReviewQuery(status, offset = null) {
     scene: $('#candidate-scene-filter').value,
     match_mode: $('#candidate-mode-filter').value,
     confidence: $('#candidate-confidence-filter').value,
-    streamer: $('#candidate-streamer-filter').value.trim(),
-    hero: $('#candidate-hero-filter').value.trim(),
+    streamer: $('#candidate-streamer-filter').value,
   };
   Object.entries(filters).forEach(([key, value]) => {
     if (value) query.set(key, value);
   });
+  [...candidateHeroFilters].sort().forEach((hero) => query.append('hero', hero));
   return `/api/training-review/items?${query}`;
+}
+
+function renderCandidateHeroFilter() {
+  const query = $('#candidate-hero-filter-search').value.trim().toLocaleLowerCase();
+  const options = $('#candidate-hero-filter-options');
+  options.innerHTML = '';
+  candidateHeroCatalog
+    .filter((hero) => !query ||
+      `${hero.name} ${hero.label}`.toLocaleLowerCase().includes(query))
+    .forEach((hero) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'candidate-filter-hero-option';
+      const selected = candidateHeroFilters.has(hero.label);
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-pressed', String(selected));
+      const image = document.createElement('img');
+      image.src = hero.image_url;
+      image.alt = '';
+      image.loading = 'lazy';
+      const name = document.createElement('span');
+      name.textContent = hero.name;
+      button.append(image, name);
+      button.onclick = () => {
+        if (candidateHeroFilters.has(hero.label)) {
+          candidateHeroFilters.delete(hero.label);
+        } else {
+          candidateHeroFilters.add(hero.label);
+        }
+        renderCandidateHeroFilter();
+        const count = candidateHeroFilters.size;
+        $('#candidate-hero-filter-summary').textContent = count
+          ? `已选 ${count} 个英雄` : '全部英雄';
+        loadCandidateReview();
+      };
+      options.appendChild(button);
+    });
+}
+
+async function loadCandidateFilterOptions() {
+  const scope = candidateSourceScope;
+  if (candidateFilterOptionsScope === scope && candidateHeroCatalog.length) return;
+  try {
+    const [filters] = await Promise.all([
+      api(`/api/training-review/filter-options?source_scope=${encodeURIComponent(scope)}`),
+      ensureCandidateHeroCatalog(),
+    ]);
+    if (scope !== candidateSourceScope) return;
+    candidateFilterOptionsScope = scope;
+    const select = $('#candidate-streamer-filter');
+    const selected = select.value;
+    select.replaceChildren(
+      new Option('全部主播', ''),
+      ...(filters.streamers || []).map((value) =>
+        new Option(`${value.name} · ${value.frame_count}`, value.name)),
+    );
+    if ([...select.options].some((option) => option.value === selected)) {
+      select.value = selected;
+    }
+    renderCandidateHeroFilter();
+  } catch (error) {
+    $('#candidate-index-state').textContent = '筛选项加载失败：' + error.message;
+  }
 }
 
 function renderCandidateLegacyControls(stats, status) {
@@ -2219,7 +2313,7 @@ function renderCandidateLegacyControls(stats, status) {
   const active = historical && status === 'legacy_hero';
   $('#candidate-legacy-filters').classList.toggle('hidden', !active);
   $('#candidate-page-title').textContent = historical
-    ? '历史人工数据' : '新同步数据';
+    ? '历史人工数据' : 'Worker 待复核';
   $('#candidate-page-hint').textContent = active
     ? '这里只把历史 HUD、积分板和结算图按主播、同一局和画面类型折叠成代表组；你补一张代表图即可，不需要把约 7000 张旧图逐张重标。未补头像的旧图不会被当作“没有头像”的负样本。'
     : historical && status === 'migration_review'
@@ -2228,7 +2322,7 @@ function renderCandidateLegacyControls(stats, status) {
         ? '这里只显示你在统一打标页面亲自确认过的历史图片；迁移程序自动带入的旧标签不会出现在这里。'
         : historical
           ? '这里展示旧格式人工标签及其迁移状态，与新数据使用同一套分类、头像来源、圆框、英雄和本人位置标注。没有头像框的旧图不会成为头像模型的负样本。'
-          : '这里只显示 Worker 新采样和 NAS 结算归档。新模型会先填写分类、结算框及可判断的英雄信息，你只需核对和修正；未经人工确认的图片不会进入训练集。同一图片若已有历史人工标签，也可能同时出现在历史入口。';
+          : 'Worker 产出的候选会在 NAS 上自动建立索引，不需要再同步到本机。新模型会预填分类、结算框、头像位置、英雄和主播本人；你只需核对和修正。';
   if (!active) return;
   const globalStats = stats.legacy_hero || {};
   const filteredStats = stats.legacy_hero_filtered || globalStats;
@@ -2308,6 +2402,7 @@ function renderCandidateItem() {
     $('#candidate-meta').textContent = '';
     $('#candidate-label-actions').innerHTML = '';
     $('#candidate-suggestion').textContent = '--';
+    $('#candidate-prefill-status').textContent = '';
     $('#candidate-reason').textContent = '';
     $('#btn-candidate-save').disabled = true;
     candidateDraft = null;
@@ -2392,13 +2487,24 @@ async function requestCandidateModelPrefill(item) {
           !candidateFormTouched) {
         $('#candidate-save-state').textContent =
           '已交给 Vision Worker 预填；你可以先人工标注，不必等待';
+        $('#candidate-prefill-status').textContent =
+          '分类预填已排队，正在等待 Vision Worker';
       }
       const finished = await waitForVisionJob(result.job.id);
       if (finished && finished.status === 'succeeded') {
         updatedItem = (((finished.result || {}).application || {}).item) || updatedItem;
       } else {
+        if (currentCandidate() && Number(currentCandidate().frame_id) === frameId) {
+          $('#candidate-prefill-status').textContent = finished
+            ? `预填未完成：${finished.error || finished.status}`
+            : '预填仍在队列中，结果完成后会保存';
+        }
         return;
       }
+    }
+    if (!result.queued && !Object.keys(result.models || {}).length &&
+        currentCandidate() && Number(currentCandidate().frame_id) === frameId) {
+      $('#candidate-prefill-status').textContent = '没有可用的已发布模型';
     }
     if (!updatedItem) return;
     const index = candidateQueue.findIndex(
@@ -2413,6 +2519,7 @@ async function requestCandidateModelPrefill(item) {
         !candidateFormTouched) {
       $('#candidate-save-state').textContent =
         '新模型预填失败，仍可手工标注：' + error.message;
+      $('#candidate-prefill-status').textContent = '预填失败：' + error.message;
     }
   }
 }
@@ -2648,41 +2755,19 @@ function candidateHeroClickCrop(point) {
   };
 }
 
-async function refreshCandidateSync() {
+async function refreshCandidateIndexState() {
   try {
     const value = await api('/api/worker-candidates/state');
     const sync = value.sync || {};
-    $('#candidate-sync-state').textContent = sync.running
-      ? `同步中：Worker ${sync.processed || 0}/${sync.total || 0}，` +
-        `历史结算 ${sync.archive_processed || 0}/${sync.archive_total || 0}`
-      : sync.error ? `同步失败：${sync.error}`
+    $('#candidate-index-state').textContent = sync.running
+      ? `正在自动发现候选素材：${sync.processed || 0}/${sync.total || 0}`
+      : sync.error ? `候选素材自动索引失败：${sync.error}`
       : sync.archive_failed ?
         `历史结算图失败 ${sync.archive_failed} 张：${sync.archive_last_error || '未知错误'}`
-      : `同步完成：本次拉取 ${sync.reviews_pulled || 0}、` +
-        `回传 ${sync.reviews_pushed || 0} · ` +
-        `历史结算新增 ${sync.archive_inserted || 0}／预填框 ${sync.archive_box_suggested || 0}`;
-    if (!sync.running && candidateSyncTimer) {
-      clearInterval(candidateSyncTimer);
-      candidateSyncTimer = null;
-      await loadCandidateReview();
-    }
+      : `候选素材自动发现已开启` +
+        (sync.last_completed_at ? ` · 上次 ${sync.last_completed_at}` : '');
   } catch (error) {
-    $('#candidate-sync-state').textContent = '同步状态读取失败：' + error.message;
-  }
-}
-
-async function syncCandidates() {
-  $('#candidate-sync-state').textContent = '正在启动同步…';
-  try {
-    await api('/api/worker-candidates/sync', {
-      method: 'POST', body: JSON.stringify({maximum: 20000}),
-    });
-    if (!candidateSyncTimer) {
-      candidateSyncTimer = setInterval(refreshCandidateSync, 1000);
-    }
-    await refreshCandidateSync();
-  } catch (error) {
-    $('#candidate-sync-state').textContent = '同步失败：' + error.message;
+    $('#candidate-index-state').textContent = '自动索引状态读取失败：' + error.message;
   }
 }
 
@@ -2700,7 +2785,7 @@ function bindCandidateReview() {
   [
     '#candidate-source-type-filter', '#candidate-scene-filter',
     '#candidate-mode-filter', '#candidate-confidence-filter',
-    '#candidate-streamer-filter', '#candidate-hero-filter',
+    '#candidate-streamer-filter',
   ].forEach((selector) => {
     $(selector).onchange = loadCandidateReview;
   });
@@ -2708,12 +2793,20 @@ function bindCandidateReview() {
     [
       '#candidate-source-type-filter', '#candidate-scene-filter',
       '#candidate-mode-filter', '#candidate-confidence-filter',
-      '#candidate-streamer-filter', '#candidate-hero-filter',
+      '#candidate-streamer-filter',
     ].forEach((selector) => { $(selector).value = ''; });
+    candidateHeroFilters = new Set();
+    $('#candidate-hero-filter-search').value = '';
+    $('#candidate-hero-filter-summary').textContent = '全部英雄';
+    renderCandidateHeroFilter();
     loadCandidateReview();
   };
   $('#btn-candidate-refresh').onclick = loadCandidateReview;
-  $('#btn-candidate-sync').onclick = syncCandidates;
+  $('#candidate-hero-filter-search').oninput = renderCandidateHeroFilter;
+  refreshCandidateIndexState();
+  if (!candidateSyncTimer) {
+    candidateSyncTimer = setInterval(refreshCandidateIndexState, 5000);
+  }
   $('#btn-candidate-prev').onclick = () => moveCandidate(-1);
   $('#btn-candidate-next').onclick = () => moveCandidate(1);
   $('#btn-candidate-clear-boxes').onclick = () => {

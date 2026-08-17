@@ -597,7 +597,7 @@ DEFAULT_TASKS = [
 ]
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
+def connect_sqlite(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -610,6 +610,28 @@ def connect(db_path: Path) -> sqlite3.Connection:
     _migrate(conn)
     conn.commit()
     return conn
+
+
+def connect(db_path: Path) -> Any:
+    if config.DATABASE_URL:
+        from . import postgres
+
+        return postgres.connect(
+            config.DATABASE_URL,
+            schema=config.DATABASE_SCHEMA,
+            schema_sql=_SCHEMA,
+            default_tasks=DEFAULT_TASKS,
+            pool_size=config.DATABASE_POOL_SIZE,
+        )
+    return connect_sqlite(db_path)
+
+
+def close_connections() -> None:
+    if not config.DATABASE_URL:
+        return
+    from . import postgres
+
+    postgres.close_pool()
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -3443,6 +3465,43 @@ def _training_review_origin_frame_ids(
     return {int(row['frame_id']) for row in rows}
 
 
+def training_review_filter_options(
+    conn: sqlite3.Connection, *, source_scope: str = 'all'
+) -> Dict[str, Any]:
+    if source_scope not in _TRAINING_REVIEW_SOURCE_SCOPES:
+        raise ValueError('训练复核数据来源无效')
+    source_condition = ''
+    if source_scope == 'legacy':
+        source_condition = (
+            'AND EXISTS (SELECT 1 FROM training_review_sources source '
+            'WHERE source.frame_id = item.frame_id '
+            "AND source.source_type LIKE 'legacy_%')"
+        )
+    elif source_scope == 'new':
+        source_condition = (
+            'AND EXISTS (SELECT 1 FROM training_review_sources source '
+            'WHERE source.frame_id = item.frame_id '
+            "AND source.source_type IN ('worker', 'result_archive', "
+            "'manual_correction'))"
+        )
+    rows = conn.execute(
+        'SELECT video.streamer, COUNT(DISTINCT item.frame_id) AS frame_count '
+        'FROM training_review_items item '
+        'JOIN frames frame ON frame.id = item.frame_id '
+        'JOIN videos video ON video.id = frame.video_id '
+        "WHERE TRIM(video.streamer) != '' "
+        + source_condition
+        + ' GROUP BY video.streamer '
+        'ORDER BY frame_count DESC, video.streamer'
+    ).fetchall()
+    return {
+        'streamers': [
+            {'name': str(row['streamer']), 'frame_count': int(row['frame_count'])}
+            for row in rows
+        ]
+    }
+
+
 def training_review_duplicate_result_frame_ids(conn: sqlite3.Connection) -> set[int]:
     return {
         frame_id
@@ -3727,7 +3786,7 @@ def _training_review_attribute_frame_ids(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
-    hero: str = '',
+    hero: Sequence[str] | str = (),
     confidence: str = '',
 ) -> Optional[set[int]]:
     if confidence not in {'', 'low', 'boundary', 'high'}:
@@ -3773,13 +3832,23 @@ def _training_review_attribute_frame_ids(
             )
         else:
             raise ValueError('画面类型筛选无效')
-    if hero:
+    heroes = (
+        [hero.strip()]
+        if isinstance(hero, str) and hero.strip()
+        else [str(value).strip() for value in hero if str(value).strip()]
+    )
+    heroes = list(dict.fromkeys(heroes))
+    if len(heroes) > 100:
+        raise ValueError('英雄筛选数量过多')
+    if heroes:
+        placeholders = ', '.join('?' for _value in heroes)
         conditions.append(
             'EXISTS (SELECT 1 FROM training_review_hero_slots slot '
             'WHERE slot.frame_id = item.frame_id AND '
-            '(slot.confirmed_label = ? OR slot.suggested_label = ?))'
+            f'(slot.confirmed_label IN ({placeholders}) OR '
+            f'slot.suggested_label IN ({placeholders})))'
         )
-        parameters.extend((hero, hero))
+        parameters.extend((*heroes, *heroes))
     if confidence:
         ranges = {
             'low': ('<', 0.6),
@@ -3828,7 +3897,7 @@ def _training_review_visible_frame_ids(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
-    hero: str = '',
+    hero: Sequence[str] | str = (),
     confidence: str = '',
 ) -> Tuple[List[int], Dict[int, Dict[str, Any]]]:
     if status not in _TRAINING_REVIEW_STATUSES | {
@@ -3933,7 +4002,7 @@ def list_training_review_items(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
-    hero: str = '',
+    hero: Sequence[str] | str = (),
     confidence: str = '',
 ) -> List[Dict[str, Any]]:
     if limit < 1 or limit > 10_000 or offset < 0:
@@ -3977,7 +4046,7 @@ def count_training_review_items(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
-    hero: str = '',
+    hero: Sequence[str] | str = (),
     confidence: str = '',
 ) -> int:
     if status == 'legacy_hero':

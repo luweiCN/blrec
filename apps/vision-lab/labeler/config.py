@@ -19,6 +19,9 @@ FRAME_DIR = WORK_DIR / 'frames'
 THUMB_DIR = WORK_DIR / 'thumbs'
 EXPORT_DIR = WORK_DIR / 'datasets'
 DB_PATH = WORK_DIR / 'lab.db'
+DATABASE_URL = os.environ.get('VISION_LAB_DATABASE_URL', '').strip()
+DATABASE_SCHEMA = os.environ.get('VISION_LAB_DATABASE_SCHEMA', 'vision_lab').strip()
+DATABASE_POOL_SIZE = max(1, int(os.environ.get('VISION_LAB_DATABASE_POOL_SIZE', '8')))
 LOCAL_VIDEO_DIR = WORK_DIR / 'videos'  # 打标时下载到本地的视频(mp4)
 MODELS_DIR = WORK_DIR / 'models'  # 训练好的模型(onnx)
 THUMB_WIDTH = 960  # 网页显示缩略图宽度(原始帧永久保留)
@@ -79,6 +82,9 @@ VISION_WORKER_LEASE_SECONDS = max(
 )
 VISION_WORKER_JOB_LIMIT = max(
     1, int(os.environ.get('VISION_LAB_WORKER_JOB_LIMIT', '1000'))
+)
+CANDIDATE_INDEX_INTERVAL_SECONDS = max(
+    15, int(os.environ.get('VISION_LAB_CANDIDATE_INDEX_INTERVAL_SECONDS', '60'))
 )
 
 VIDEO_EXTS = {'.flv', '.mp4', '.ts', '.mkv', '.m4s'}

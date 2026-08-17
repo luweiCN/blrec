@@ -13,8 +13,24 @@
 
 ```dotenv
 VISION_LAB_WORKER_TOKEN=独立随机令牌
-VISION_LAB_IMAGE_TAG=vision-lab-v0.3.2
+VISION_LAB_IMAGE_TAG=vision-lab-v0.3.3
+VISION_LAB_DATABASE_URL=postgresql://...
+VISION_LAB_DATABASE_SCHEMA=vision_lab
 ```
+
+`VISION_LAB_DATABASE_URL` 应连到现有受管的正式 PostgreSQL 通道；不要让
+Vision Lab 绕过既有固定线路直连外网数据库。首次切换前先停止写入、
+备份 `lab.db` 与正式库，再运行：
+
+```bash
+python -m labeler.migrate_sqlite_to_postgres \
+  --sqlite /data/lab.db \
+  --schema vision_lab \
+  --report /data/postgres-migration-report.json
+```
+
+脚本只允许写入空 schema，并会逐表校验行数和内容摘要；校验不通过时整个
+数据事务回滚。
 
 不要在这个 Compose 项目中增加训练进程。计算节点使用 `blrec-vision-worker` 命令连接
 NAS 上的 Vision Lab API，并按自身能力领取任务。

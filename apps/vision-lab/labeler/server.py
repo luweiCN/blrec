@@ -65,6 +65,8 @@ class NoCacheStaticFiles(StaticFiles):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    candidate_index_stop = threading.Event()
+    candidate_index_thread = None
     # 启动时恢复遗留状态:上次进程被中断的任务标记为可重试
     try:
         conn = db.connect(config.DB_PATH)
@@ -93,12 +95,24 @@ async def lifespan(_app: FastAPI):
         db.fail_interrupted_model_deployments(conn)
         conn.commit()
         conn.close()
-    except Exception:  # noqa: BLE001
-        pass
+        if config.CONTROL_PLANE_ONLY and config.CANDIDATE_LOCAL_DIR is not None:
+            candidate_index_thread = threading.Thread(
+                target=_candidate_index_loop,
+                args=(candidate_index_stop,),
+                daemon=True,
+                name='vision-candidate-index',
+            )
+            candidate_index_thread.start()
+    except Exception:
+        db.close_connections()
+        raise
     try:
         yield
     finally:
-        pass
+        candidate_index_stop.set()
+        if candidate_index_thread is not None:
+            candidate_index_thread.join(timeout=5)
+        db.close_connections()
 
 
 app = FastAPI(title='虚荣视觉标注工作台', version=__version__, lifespan=lifespan)
@@ -197,6 +211,8 @@ def api_config() -> Dict[str, Any]:
         'scoreboard_vs_result_hint': config.SCOREBOARD_VS_RESULT_HINT,
         'nas_rec_dir': config.NAS_REC_DIR,
         'control_plane_only': config.CONTROL_PLANE_ONLY,
+        'database_backend': 'postgresql' if config.DATABASE_URL else 'sqlite',
+        'database_schema': (config.DATABASE_SCHEMA if config.DATABASE_URL else ''),
     }
 
 
@@ -208,7 +224,7 @@ def api_tasks() -> List[Dict[str, Any]]:
             return [
                 dict(r)
                 for r in conn.execute(
-                    'SELECT * FROM annotation_tasks ORDER BY rowid'
+                    'SELECT * FROM annotation_tasks ORDER BY id'
                 ).fetchall()
             ]
         finally:
@@ -1096,7 +1112,9 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
                 'archive_box_suggested': archive['box_suggested'],
             }
         )
-        _set_worker_candidate_sync_state(**result, running=False)
+        _set_worker_candidate_sync_state(
+            **result, running=False, last_completed_at=db.now()
+        )
     except Exception as exc:  # noqa: BLE001
         _set_worker_candidate_sync_state(running=False, error=str(exc))
     finally:
@@ -1104,16 +1122,29 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
             conn.close()
 
 
+def _begin_candidate_index() -> bool:
+    with _worker_candidate_sync_lock:
+        if _worker_candidate_sync_state['running']:
+            return False
+        _worker_candidate_sync_state['running'] = True
+        _worker_candidate_sync_state['error'] = None
+        return True
+
+
+def _candidate_index_loop(stop: threading.Event) -> None:
+    while not stop.is_set():
+        if _begin_candidate_index():
+            _sync_worker_candidate_queue(maximum=20_000)
+        stop.wait(config.CANDIDATE_INDEX_INTERVAL_SECONDS)
+
+
 @app.post('/api/bp-review/sync-worker')
 def api_sync_worker_candidates(body: Dict[str, Any]) -> Dict[str, Any]:
     maximum = int(body.get('maximum', 10_000))
     if not 1 <= maximum <= 20_000:
         raise HTTPException(400, 'maximum 必须在 1 到 20000 之间')
-    with _worker_candidate_sync_lock:
-        if _worker_candidate_sync_state['running']:
-            raise HTTPException(409, 'worker 候选同步任务已在运行')
-        _worker_candidate_sync_state['running'] = True
-        _worker_candidate_sync_state['error'] = None
+    if not _begin_candidate_index():
+        raise HTTPException(409, 'Worker 候选素材正在建立索引')
     threading.Thread(
         target=_sync_worker_candidate_queue, kwargs={'maximum': maximum}, daemon=True
     ).start()
@@ -1150,7 +1181,7 @@ def api_training_review_items(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
-    hero: str = '',
+    hero: Optional[List[str]] = Query(None),
     confidence: str = '',
 ) -> Dict[str, Any]:
     with _db_lock:
@@ -1168,7 +1199,7 @@ def api_training_review_items(
                     source_type=source_type,
                     scene=scene,
                     match_mode=match_mode,
-                    hero=hero,
+                    hero=hero or (),
                     confidence=confidence,
                 )
                 filtered_total = db.count_training_review_items(
@@ -1180,7 +1211,7 @@ def api_training_review_items(
                     source_type=source_type,
                     scene=scene,
                     match_mode=match_mode,
-                    hero=hero,
+                    hero=hero or (),
                     confidence=confidence,
                 )
             except ValueError as exc:
@@ -1193,6 +1224,18 @@ def api_training_review_items(
                     conn, streamer=streamer, screen_type=hero_screen_type
                 )
             return {'items': items, 'stats': stats, 'filtered_total': filtered_total}
+        finally:
+            conn.close()
+
+
+@app.get('/api/training-review/filter-options')
+def api_training_review_filter_options(source_scope: str = 'all') -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return db.training_review_filter_options(conn, source_scope=source_scope)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         finally:
             conn.close()
 

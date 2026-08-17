@@ -1,5 +1,7 @@
 """NAS 控制面不得直接执行视频处理或旧模型批量推理。"""
 
+from pathlib import Path
+
 from fastapi import HTTPException
 from labeler import config, server
 
@@ -23,3 +25,14 @@ def test_control_plane_rejects_local_heavy_operations(monkeypatch) -> None:
             assert 'Vision Worker' in str(error.detail)
         else:
             raise AssertionError('NAS 控制面不应直接执行重任务')
+
+
+def test_control_plane_uses_automatic_candidate_index_ui() -> None:
+    html = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/index.html'
+    ).read_text(encoding='utf-8')
+
+    assert 'btn-candidate-sync' not in html
+    assert 'Worker 待复核' in html
+    assert 'candidate-streamer-filter' in html
+    assert 'candidate-hero-filter-options' in html

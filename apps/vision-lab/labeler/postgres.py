@@ -1,0 +1,604 @@
+"""Vision Lab PostgreSQL compatibility layer and SQLite migration support."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import sqlite3
+import struct
+import threading
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
+
+POSTGRES_SCHEMA_VERSION = 1
+_SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
+_INSERT_TABLE = re.compile(
+    r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
+)
+_CREATE_TABLE = re.compile(
+    r'^\s*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)', re.I
+)
+_REFERENCES = re.compile(r'\bREFERENCES\s+([A-Za-z_][A-Za-z0-9_]*)', re.I)
+
+_pool_lock = threading.Lock()
+_pool: Any = None
+_pool_key: Optional[Tuple[str, str, int]] = None
+_identity_tables: Set[str] = set()
+
+
+POSTGRES_COMPATIBILITY_SQL = """
+CREATE OR REPLACE FUNCTION json_extract(document text, path text)
+RETURNS text LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+AS $$
+BEGIN
+    IF document IS NULL OR path IS NULL THEN
+        RETURN NULL;
+    END IF;
+    RETURN jsonb_path_query_first(document::jsonb, path::jsonpath) #>> '{}';
+EXCEPTION WHEN others THEN
+    RETURN NULL;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION json_each(document text)
+RETURNS TABLE(key text, value text)
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$
+    SELECT item.key, item.value::text
+    FROM jsonb_each(COALESCE(document, '{}')::jsonb) AS item
+$$;
+"""
+
+
+class PostgresRow(Mapping[str, Any]):
+    """Row compatible with both sqlite3.Row string and integer access."""
+
+    def __init__(self, columns: Sequence[str], values: Sequence[Any]) -> None:
+        self._columns = tuple(columns)
+        self._values = tuple(values)
+        self._mapping = dict(zip(self._columns, self._values))
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, int):
+            return self._values[key]
+        return self._mapping[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._columns)
+
+    def __len__(self) -> int:
+        return len(self._columns)
+
+
+class PostgresCursor:
+    def __init__(self, cursor: Any, *, lastrowid: Optional[int] = None) -> None:
+        self._cursor = cursor
+        self.lastrowid = lastrowid
+
+    @property
+    def rowcount(self) -> int:
+        return int(self._cursor.rowcount)
+
+    def _row(self, values: Optional[Sequence[Any]]) -> Optional[PostgresRow]:
+        if values is None:
+            return None
+        columns = tuple(column.name for column in (self._cursor.description or ()))
+        return PostgresRow(columns, values)
+
+    def fetchone(self) -> Optional[PostgresRow]:
+        return self._row(self._cursor.fetchone())
+
+    def fetchall(self) -> List[PostgresRow]:
+        result = [self._row(row) for row in self._cursor.fetchall()]
+        return [row for row in result if row is not None]
+
+    def __iter__(self) -> Iterator[PostgresRow]:
+        for row in self._cursor:
+            converted = self._row(row)
+            if converted is not None:
+                yield converted
+
+
+class PostgresConnection:
+    """Small DB-API adapter preserving Vision Lab's existing query surface."""
+
+    dialect = 'postgresql'
+
+    def __init__(self, connection: Any, pool: Any, identity_tables: Set[str]) -> None:
+        self._connection = connection
+        self._pool = pool
+        self._identity_tables = identity_tables
+        self._closed = False
+        self.total_changes = 0
+
+    @property
+    def in_transaction(self) -> bool:
+        from psycopg.pq import TransactionStatus
+
+        return (
+            not self._closed
+            and self._connection.info.transaction_status != TransactionStatus.IDLE
+        )
+
+    def __enter__(self) -> 'PostgresConnection':
+        return self
+
+    def __exit__(self, error_type: Any, _error: Any, _traceback: Any) -> None:
+        if error_type is None:
+            self.commit()
+        else:
+            self.rollback()
+
+    def execute(self, sql: str, parameters: Sequence[Any] = ()) -> PostgresCursor:
+        statement = postgres_sql(sql)
+        match = _INSERT_TABLE.match(statement)
+        table = (
+            '' if match is None else next(value for value in match.groups() if value)
+        )
+        returns_identity = (
+            table in self._identity_tables
+            and re.search(r'\bRETURNING\b', statement, re.I) is None
+        )
+        if returns_identity:
+            statement = statement.rstrip(';') + ' RETURNING id'
+        cursor = self._connection.cursor()
+        try:
+            cursor.execute(statement, tuple(parameters))
+        except Exception as error:
+            _raise_compatible_error(error)
+        lastrowid: Optional[int] = None
+        if returns_identity:
+            row = cursor.fetchone()
+            if row is not None:
+                lastrowid = int(row[0])
+        if cursor.rowcount > 0:
+            self.total_changes += int(cursor.rowcount)
+        return PostgresCursor(cursor, lastrowid=lastrowid)
+
+    def executemany(
+        self, sql: str, parameters: Sequence[Sequence[Any]]
+    ) -> PostgresCursor:
+        cursor = self._connection.cursor()
+        try:
+            cursor.executemany(
+                postgres_sql(sql), tuple(tuple(row) for row in parameters)
+            )
+        except Exception as error:
+            _raise_compatible_error(error)
+        if cursor.rowcount > 0:
+            self.total_changes += int(cursor.rowcount)
+        return PostgresCursor(cursor)
+
+    def commit(self) -> None:
+        self._connection.commit()
+
+    def rollback(self) -> None:
+        self._connection.rollback()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            if self.in_transaction:
+                self._connection.rollback()
+        finally:
+            self._closed = True
+            self._pool.putconn(self._connection)
+
+
+def _raise_compatible_error(error: Exception) -> None:
+    import psycopg
+
+    if isinstance(error, psycopg.IntegrityError):
+        raise sqlite3.IntegrityError(str(error)) from error
+    raise error
+
+
+def validate_schema_name(schema: str) -> str:
+    normalized = schema.strip()
+    if not _SCHEMA_NAME.fullmatch(normalized):
+        raise ValueError('VISION_LAB_DATABASE_SCHEMA 只能包含小写字母、数字和下划线')
+    return normalized
+
+
+def postgres_placeholders(sql: str) -> str:
+    """Translate qmark placeholders without changing quoted question marks."""
+
+    translated: List[str] = []
+    index = 0
+    quote = ''
+    while index < len(sql):
+        character = sql[index]
+        following = sql[index + 1] if index + 1 < len(sql) else ''
+        if quote:
+            translated.append('%%' if character == '%' else character)
+            if character == quote:
+                if following == quote:
+                    translated.append(following)
+                    index += 1
+                else:
+                    quote = ''
+        elif character in ("'", '"'):
+            quote = character
+            translated.append(character)
+        elif character == '-' and following == '-':
+            end = sql.find('\n', index + 2)
+            if end < 0:
+                translated.append(sql[index:])
+                break
+            translated.append(sql[index:end])
+            index = end - 1
+        elif character == '/' and following == '*':
+            end = sql.find('*/', index + 2)
+            if end < 0:
+                translated.append(sql[index:])
+                break
+            translated.append(sql[index : end + 2])
+            index = end + 1
+        elif character == '?':
+            translated.append('%s')
+        elif character == '%':
+            translated.append('%%')
+        else:
+            translated.append(character)
+        index += 1
+    return ''.join(translated)
+
+
+def postgres_sql(sql: str) -> str:
+    statement = sql.strip()
+    if re.fullmatch(r'BEGIN\s+IMMEDIATE;?', statement, re.I):
+        statement = 'BEGIN'
+    if re.match(r'^INSERT\s+OR\s+IGNORE\s+INTO\s+', statement, re.I):
+        statement = re.sub(
+            r'^INSERT\s+OR\s+IGNORE\s+INTO\s+', 'INSERT INTO ', statement, count=1
+        )
+        statement = statement.rstrip(';') + ' ON CONFLICT DO NOTHING'
+    statement = re.sub(r'\bIS\s+\?', 'IS NOT DISTINCT FROM ?', statement, flags=re.I)
+    return postgres_placeholders(statement)
+
+
+def postgres_schema_sql(sql: str) -> str:
+    statement = re.sub(
+        r'\bid\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b',
+        'id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY',
+        sql,
+        flags=re.I,
+    )
+    statement = re.sub(
+        r'\bid\s+INTEGER\s+PRIMARY\s+KEY\b',
+        'id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY',
+        statement,
+        flags=re.I,
+    )
+    statement = re.sub(r'\bINTEGER\b', 'BIGINT', statement, flags=re.I)
+    statement = re.sub(r'\bREAL\b', 'DOUBLE PRECISION', statement, flags=re.I)
+    statement = re.sub(r'\bBLOB\b', 'BYTEA', statement, flags=re.I)
+    return statement
+
+
+def _split_statements(script: str) -> List[str]:
+    without_comments = re.sub(r'--[^\n]*', '', script)
+    statements: List[str] = []
+    current: List[str] = []
+    quote = ''
+    index = 0
+    while index < len(without_comments):
+        character = without_comments[index]
+        following = (
+            without_comments[index + 1] if index + 1 < len(without_comments) else ''
+        )
+        if quote:
+            current.append(character)
+            if character == quote:
+                if following == quote:
+                    current.append(following)
+                    index += 1
+                else:
+                    quote = ''
+        elif character in ("'", '"'):
+            quote = character
+            current.append(character)
+        elif character == ';':
+            value = ''.join(current).strip()
+            if value:
+                statements.append(value)
+            current = []
+        else:
+            current.append(character)
+        index += 1
+    value = ''.join(current).strip()
+    if value:
+        statements.append(value)
+    return statements
+
+
+def ordered_schema_statements(script: str) -> Tuple[List[str], Set[str]]:
+    tables: Dict[str, str] = {}
+    trailing: List[str] = []
+    identities: Set[str] = set()
+    for raw in _split_statements(script):
+        statement = postgres_schema_sql(raw)
+        match = _CREATE_TABLE.match(statement)
+        if match is None:
+            trailing.append(statement)
+            continue
+        table = match.group(1)
+        tables[table] = statement
+        if 'GENERATED BY DEFAULT AS IDENTITY' in statement:
+            identities.add(table)
+    ordered: List[str] = []
+    while tables:
+        progress = False
+        for table, statement in list(tables.items()):
+            dependencies = {
+                value
+                for value in _REFERENCES.findall(statement)
+                if value != table and value in tables
+            }
+            if dependencies:
+                continue
+            ordered.append(statement)
+            del tables[table]
+            progress = True
+        if not progress:
+            raise RuntimeError('PostgreSQL 表依赖存在环：' + ', '.join(sorted(tables)))
+    return ordered + trailing, identities
+
+
+def _initialize_schema(
+    database_url: str,
+    schema: str,
+    schema_sql: str,
+    default_tasks: Sequence[Sequence[str]],
+) -> Set[str]:
+    import psycopg
+    from psycopg import sql
+
+    statements, identities = ordered_schema_statements(schema_sql)
+    connection = psycopg.connect(database_url, autocommit=False)
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            sql.SQL('CREATE SCHEMA IF NOT EXISTS {}').format(sql.Identifier(schema))
+        )
+        cursor.execute(
+            sql.SQL('SET LOCAL search_path TO {}').format(sql.Identifier(schema))
+        )
+        cursor.execute(POSTGRES_COMPATIBILITY_SQL)
+        cursor.execute(
+            'CREATE TABLE IF NOT EXISTS vision_schema_migrations ('
+            'version BIGINT PRIMARY KEY, applied_at TEXT NOT NULL)'
+        )
+        row = cursor.execute(
+            'SELECT COALESCE(MAX(version), 0) FROM vision_schema_migrations'
+        ).fetchone()
+        version = 0 if row is None else int(row[0])
+        if version not in (0, POSTGRES_SCHEMA_VERSION):
+            raise RuntimeError(f'Vision Lab PostgreSQL schema 版本 {version} 不受支持')
+        if version == 0:
+            for statement in statements:
+                cursor.execute(statement)
+            cursor.executemany(
+                'INSERT INTO annotation_tasks (id, name, description) '
+                'VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING',
+                tuple(tuple(row) for row in default_tasks),
+            )
+            cursor.execute(
+                'INSERT INTO vision_schema_migrations (version, applied_at) '
+                "VALUES (%s, to_char(clock_timestamp(), 'YYYY-MM-DD\"T\"HH24:MI:SS'))",
+                (POSTGRES_SCHEMA_VERSION,),
+            )
+        connection.commit()
+        return identities
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def connect(
+    database_url: str,
+    *,
+    schema: str,
+    schema_sql: str,
+    default_tasks: Sequence[Sequence[str]],
+    pool_size: int = 8,
+) -> PostgresConnection:
+    global _pool, _pool_key, _identity_tables
+
+    normalized_schema = validate_schema_name(schema)
+    key = (database_url, normalized_schema, max(1, int(pool_size)))
+    with _pool_lock:
+        if _pool_key != key:
+            close_pool()
+            _identity_tables = _initialize_schema(
+                database_url, normalized_schema, schema_sql, default_tasks
+            )
+            from psycopg_pool import ConnectionPool
+
+            _pool = ConnectionPool(
+                conninfo=database_url,
+                min_size=1,
+                max_size=key[2],
+                timeout=10,
+                kwargs={
+                    'autocommit': False,
+                    'options': f'-csearch_path={normalized_schema}',
+                    'application_name': 'blrec-vision-lab',
+                },
+                open=True,
+            )
+            _pool_key = key
+        connection = _pool.getconn()
+    return PostgresConnection(connection, _pool, set(_identity_tables))
+
+
+def close_pool() -> None:
+    global _pool, _pool_key, _identity_tables
+    if _pool is not None:
+        _pool.close()
+    _pool = None
+    _pool_key = None
+    _identity_tables = set()
+
+
+def _hash_value(digest: Any, value: Any) -> None:
+    if value is None:
+        payload = b'n'
+    elif isinstance(value, bool):
+        payload = b'i' + str(int(value)).encode('ascii')
+    elif isinstance(value, int):
+        payload = b'i' + str(value).encode('ascii')
+    elif isinstance(value, float):
+        payload = b'f' + struct.pack('!d', value)
+    elif isinstance(value, (bytes, bytearray, memoryview)):
+        payload = b'b' + bytes(value)
+    else:
+        payload = b's' + str(value).encode('utf-8')
+    digest.update(len(payload).to_bytes(8, 'big'))
+    digest.update(payload)
+
+
+def _rows_digest(rows: Iterator[Sequence[Any]]) -> Tuple[int, str]:
+    digest = hashlib.sha256()
+    count = 0
+    for row in rows:
+        count += 1
+        for value in row:
+            _hash_value(digest, value)
+    return count, digest.hexdigest()
+
+
+def migrate_sqlite_database(
+    sqlite_path: Path,
+    database_url: str,
+    *,
+    schema: str,
+    schema_sql: str,
+    default_tasks: Sequence[Sequence[str]],
+) -> Dict[str, Any]:
+    """Copy a complete SQLite workspace into an otherwise-empty schema."""
+
+    import psycopg
+    from psycopg import sql
+
+    normalized_schema = validate_schema_name(schema)
+    _initialize_schema(database_url, normalized_schema, schema_sql, default_tasks)
+    source = sqlite3.connect(str(sqlite_path))
+    source.row_factory = sqlite3.Row
+    target = psycopg.connect(database_url, autocommit=False)
+    report: Dict[str, Any] = {'schema': normalized_schema, 'tables': {}}
+    try:
+        quick = source.execute('PRAGMA quick_check').fetchone()
+        if quick is None or str(quick[0]) != 'ok':
+            raise RuntimeError('SQLite PRAGMA quick_check 未通过')
+        target.execute(
+            sql.SQL('SET LOCAL search_path TO {}').format(
+                sql.Identifier(normalized_schema)
+            )
+        )
+        source_tables = {
+            str(row['name'])
+            for row in source.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        statements, _identities = ordered_schema_statements(schema_sql)
+        ordered_tables = [
+            match.group(1)
+            for statement in statements
+            if (match := _CREATE_TABLE.match(statement)) is not None
+            and match.group(1) in source_tables
+        ]
+        for table in ordered_tables:
+            if table == 'annotation_tasks':
+                continue
+            count = target.execute(
+                sql.SQL('SELECT COUNT(*) FROM {}').format(sql.Identifier(table))
+            ).fetchone()
+            if count is not None and int(count[0]) > 0:
+                raise RuntimeError(
+                    f'目标 schema 已有数据（{table}={int(count[0])}），拒绝覆盖'
+                )
+        target.execute('DELETE FROM annotation_tasks')
+        for table in ordered_tables:
+            info = source.execute(f'PRAGMA table_info("{table}")').fetchall()
+            columns = [str(row['name']) for row in info]
+            primary = [
+                str(row['name'])
+                for row in sorted(info, key=lambda value: int(value['pk'] or 0))
+                if int(row['pk'] or 0) > 0
+            ]
+            order_columns = primary or columns
+            source_sql = 'SELECT {} FROM "{}" ORDER BY {}'.format(
+                ', '.join(f'"{name}"' for name in columns),
+                table,
+                ', '.join(f'"{name}"' for name in order_columns),
+            )
+            source_rows = source.execute(source_sql)
+            source_digest = hashlib.sha256()
+            source_count = 0
+            copy_sql = sql.SQL('COPY {} ({}) FROM STDIN').format(
+                sql.Identifier(table),
+                sql.SQL(', ').join(sql.Identifier(name) for name in columns),
+            )
+            with target.cursor().copy(copy_sql) as copy:
+                for row in source_rows:
+                    values = tuple(row[name] for name in columns)
+                    copy.write_row(values)
+                    source_count += 1
+                    for value in values:
+                        _hash_value(source_digest, value)
+            target_rows = target.execute(
+                sql.SQL('SELECT {} FROM {} ORDER BY {}').format(
+                    sql.SQL(', ').join(sql.Identifier(name) for name in columns),
+                    sql.Identifier(table),
+                    sql.SQL(', ').join(sql.Identifier(name) for name in order_columns),
+                )
+            )
+            target_count, target_hash = _rows_digest(iter(target_rows))
+            source_hash = source_digest.hexdigest()
+            if target_count != source_count or target_hash != source_hash:
+                raise RuntimeError(
+                    f'{table} 迁移校验失败：'
+                    f'SQLite {source_count}/{source_hash[:12]}，'
+                    f'PostgreSQL {target_count}/{target_hash[:12]}'
+                )
+            report['tables'][table] = {'rows': source_count, 'sha256': source_hash}
+            if 'id' in columns:
+                sequence = target.execute(
+                    'SELECT pg_get_serial_sequence(%s, %s)',
+                    (f'{normalized_schema}.{table}', 'id'),
+                ).fetchone()
+                if sequence is not None and sequence[0]:
+                    maximum = target.execute(
+                        sql.SQL('SELECT MAX(id) FROM {}').format(sql.Identifier(table))
+                    ).fetchone()
+                    value = None if maximum is None else maximum[0]
+                    target.execute(
+                        'SELECT setval(%s, %s, %s)',
+                        (str(sequence[0]), int(value or 1), value is not None),
+                    )
+        target.commit()
+        target.autocommit = True
+        for table in ordered_tables:
+            target.execute(
+                sql.SQL('ANALYZE {}.{}').format(
+                    sql.Identifier(normalized_schema), sql.Identifier(table)
+                )
+            )
+        report['verified'] = True
+        report['table_count'] = len(report['tables'])
+        report['row_count'] = sum(
+            int(value['rows']) for value in report['tables'].values()
+        )
+        return report
+    except BaseException:
+        target.rollback()
+        raise
+    finally:
+        target.close()
+        source.close()

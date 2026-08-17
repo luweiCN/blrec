@@ -324,6 +324,103 @@ tr:hover td { background: var(--panel2); }
 .candidate-data-filters label { font-size: 10px; }
 .candidate-data-filters select,
 .candidate-data-filters input { max-width: 145px; }
+
+.candidate-filter-picker {
+  position: relative;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.candidate-filter-picker > summary {
+  min-width: 92px;
+  padding: 6px 24px 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+
+.candidate-filter-picker > summary::-webkit-details-marker { display: none; }
+
+.candidate-filter-picker > summary::after {
+  content: '▾';
+  position: absolute;
+  right: 8px;
+  color: var(--muted);
+}
+
+.candidate-filter-popover {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  right: 0;
+  width: min(430px, calc(100vw - 48px));
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #101620;
+  box-shadow: 0 16px 40px rgb(0 0 0 / 38%);
+}
+
+#candidate-hero-filter-search {
+  width: 100%;
+  max-width: none;
+  margin-bottom: 8px;
+}
+
+.candidate-filter-hero-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  max-height: 330px;
+  overflow-y: auto;
+}
+
+.candidate-filter-hero-option {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px;
+  text-align: left;
+}
+
+.candidate-filter-hero-option.selected {
+  border-color: var(--accent);
+  background: rgb(70 132 255 / 18%);
+}
+
+.candidate-filter-hero-option img {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.candidate-filter-hero-option span {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .candidate-filter-popover {
+    position: fixed;
+    top: 76px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
+
+  .candidate-filter-hero-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
 .training-task-group {
   padding: 12px; background: rgb(18 24 33 / 62%);
   border: 1px solid var(--border); border-radius: 9px;

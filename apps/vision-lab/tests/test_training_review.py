@@ -597,6 +597,68 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
         self.assertEqual([item['frame_id'] for item in items], [correction])
         self.assertEqual(count, 1)
 
+    def test_review_queue_filters_any_selected_hero(self):
+        adagio = self.frame(20)
+        vox = self.frame(21)
+        for frame_id, label in ((adagio, 'Adagio'), (vox, 'Vox')):
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id=f'worker-{frame_id}',
+            )
+            slots = [
+                {
+                    'side': side,
+                    'slot': slot,
+                    'crop': {
+                        'x': 0.05 * slot,
+                        'y': 0.1 if side == 'left' else 0.3,
+                        'w': 0.04,
+                        'h': 0.07,
+                    },
+                    'suggested_label': label,
+                    'suggestion_confidence': 0.9,
+                }
+                for side in ('left', 'right')
+                for slot in range(1, 4)
+            ]
+            db.replace_training_review_hero_suggestions(
+                self.conn,
+                frame_id=frame_id,
+                screen_type='gameplay_hud',
+                team_size=3,
+                method='test-model',
+                slots=slots,
+            )
+
+        one = db.list_training_review_items(
+            self.conn, status='needs_review', source_scope='new', hero=['Adagio']
+        )
+        either = db.list_training_review_items(
+            self.conn, status='needs_review', source_scope='new', hero=['Adagio', 'Vox']
+        )
+
+        self.assertEqual([item['frame_id'] for item in one], [adagio])
+        self.assertEqual({item['frame_id'] for item in either}, {adagio, vox})
+
+    def test_review_filter_options_are_scoped_and_counted(self):
+        legacy = self.frame(30)
+        fresh = self.frame(31)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=legacy,
+            source_type='legacy_annotation',
+            source_id='legacy-30',
+        )
+        db.add_training_review_source(
+            self.conn, frame_id=fresh, source_type='worker', source_id='worker-31'
+        )
+
+        options = db.training_review_filter_options(self.conn, source_scope='new')
+
+        self.assertEqual(options['streamers'], [{'name': '测试主播', 'frame_count': 1}])
+
     def test_review_queue_prioritizes_aram_evidence(self):
         normal = self.frame(1)
         inferred_aram = self.frame(2)

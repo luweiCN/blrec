@@ -18,7 +18,7 @@
       <button class="nav-item active" data-view="source">数据源</button>
       <button class="nav-item" data-view="candidates"
               data-candidate-source="new"
-              data-candidate-status="needs_review">新同步数据</button>
+              data-candidate-status="needs_review">Worker 待复核</button>
       <button class="nav-item" data-view="candidates"
               data-candidate-source="legacy"
               data-candidate-status="migration_review">历史人工数据</button>
@@ -494,12 +494,11 @@
     <!-- ============ 新模型统一复核视图 ============ -->
     <section class="view" id="view-candidates">
       <header class="view-header">
-        <h2 id="candidate-page-title">新同步数据</h2>
+        <h2 id="candidate-page-title">Worker 待复核</h2>
         <div id="candidate-scope-summary" class="candidate-scope-summary muted"
              role="status" aria-live="polite">读取中…</div>
         <div class="toolbar">
-          <button id="btn-candidate-sync" class="primary">同步 NAS（Worker＋历史结算图）</button>
-          <span id="candidate-sync-state" class="muted"></span>
+          <span id="candidate-index-state" class="muted">候选素材会自动发现</span>
           <span class="spacer"></span>
           <label>工作队列
             <select id="candidate-status-filter">
@@ -569,10 +568,21 @@
               <option value="high">85% 以上</option>
             </select>
           </label>
-          <label>主播 <input id="candidate-streamer-filter" size="10"
-            placeholder="精确名称"></label>
-          <label>英雄 <input id="candidate-hero-filter" size="9"
-            placeholder="英雄标签"></label>
+          <label>主播
+            <select id="candidate-streamer-filter">
+              <option value="">全部主播</option>
+            </select>
+          </label>
+          <details id="candidate-hero-filter" class="candidate-filter-picker">
+            <summary id="candidate-hero-filter-summary">全部英雄</summary>
+            <div class="candidate-filter-popover">
+              <input id="candidate-hero-filter-search" type="search"
+                     placeholder="搜索英雄" autocomplete="off">
+              <div id="candidate-hero-filter-options"
+                   class="candidate-filter-hero-grid"
+                   role="group" aria-label="按英雄筛选"></div>
+            </div>
+          </details>
           <button id="btn-candidate-clear-filters" type="button">清空筛选</button>
         </div>
         <p id="candidate-page-hint" class="hint small">这里只显示 Worker 新采样和 NAS 结算归档。新模型会先填写分类、结算框及可判断的英雄信息，你只需核对和修正；未经人工确认的图片不会进入训练集。</p>
@@ -582,6 +592,8 @@
           <div id="candidate-model-banner" class="candidate-model-banner">
             <div class="candidate-model-title">模型建议</div>
             <div id="candidate-suggestion"></div>
+            <div id="candidate-prefill-status" class="muted small"
+                 role="status" aria-live="polite"></div>
             <p id="candidate-reason" class="hint small"></p>
           </div>
           <div id="candidate-image-wrap">

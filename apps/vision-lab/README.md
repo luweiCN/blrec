@@ -30,7 +30,8 @@
 apps/vision-lab/
 ├── labeler/
 │   ├── config.py       # 分层标签体系、抽帧配方、NAS/路径常量
-│   ├── db.py           # SQLite:视频/帧/事件/标注/框/配对/预测/任务/版本/审计
+│   ├── db.py           # 通用视频/帧/标注/训练/审计数据操作
+│   ├── postgres.py     # 生产 PostgreSQL 兼容层、连接池与 SQLite 迁移
 │   ├── nas.py          # NAS SSH(SSH_ASKPASS + sudo stdin)+ 容器 ffmpeg 真实 PTS 抽帧
 │   ├── extract.py      # 6 种抽帧配方、sha256/phash、模型预打分
 │   ├── events.py       # 事件自动聚类(phash+时间)
@@ -72,7 +73,9 @@ export VISION_LAB_WORKER_SSH_USER=luwei
 ## NAS 控制面与 Vision Worker
 
 生产容器设置 `VISION_LAB_CONTROL_PLANE_ONLY=1`，只运行页面、标注 API、任务队列、
-元数据索引和按需图片读取。需要另外启动至少一台 `blrec-vision-worker`，并配置：
+元数据索引和按需图片读取。生产元数据使用正式 PostgreSQL 中独立的
+`vision_lab` schema，NAS 上的 `lab.db` 只作为迁移前快照和回滚备份。需要另外启动
+至少一台 `blrec-vision-worker`，并配置：
 
 ```bash
 export VISION_LAB_SERVER_URL=http://NAS地址:8800
@@ -80,6 +83,11 @@ export VISION_LAB_WORKER_TOKEN=与NAS一致的专用Token
 export VISION_WORKER_ID=唯一Worker名称
 blrec-vision-worker
 ```
+
+常驻服务建议使用权限为 `600` 的 token 文件，并用
+`VISION_LAB_WORKER_TOKEN_FILE` 代替明文环境变量。可用
+`VISION_WORKER_CAPABILITIES=model_prefill` 把节点限定为只做打标预填，
+避免它在正常视频分析期间误领训练任务。
 
 Worker 可以在页面中随时暂停领取任务。打开页面不会自动在访问者电脑上执行训练
 或推理。生产镜像只由 `release-vision-lab.yml` 构建，NAS 直接从 GHCR 拉取。
@@ -100,12 +108,17 @@ MacBook Pro 上的 Analysis Worker 只复用正常分析已经解码的帧，不
 `/volume1/docker/blrec-next/vision-data/candidates`；Server 只存文件，
 不运行 ONNX。
 
-打开“新模型统一打标”页点“刷新 NAS 素材”会：
+生产环境会自动发现 NAS 候选目录中的新文件，不再需要手动“同步 NAS”。
+自动索引会：
 
 1. 扫描 NAS 候选 JSON 并建立索引，不复制候选图片；
 2. 导入 BLREC 已识别对局保存的历史结算截图；
 3. 拉取 NAS 上已有的人工复核结果，便于换电脑审查；
-4. 回传本机已确认或已跳过的结果。
+4. 回传已确认或已跳过的结果。
+
+打开一张待复核图时，控制面会自动排队核心分类预填；如果画面适用，
+再继续排队头像位置、英雄身份和主播本人位置。页面会显示使用的模型运行版本和
+未产出的字段；没有 Vision Worker 在线时，任务会保留在队列中。
 
 每张图一次确认对局流程、对局模式、英雄选择和结算面板四项。只有真正结算正样本
 需要画一个完整大框；积分板、商店和黄色光栅旧框会保留，但不要求继续绘制。

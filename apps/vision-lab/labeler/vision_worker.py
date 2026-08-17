@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from PIL import Image
 
@@ -95,8 +95,6 @@ class VisionLabClient:
 
 
 class VisionWorker:
-    capabilities = ['model_prefill', 'train_model', 'validate_model', 'package_models']
-
     def __init__(
         self,
         *,
@@ -106,6 +104,7 @@ class VisionWorker:
         work_dir: Path,
         base_models_dir: Path,
         poll_seconds: float = 5.0,
+        capabilities: Optional[List[str]] = None,
     ) -> None:
         self.client = client
         self.worker_id = worker_id
@@ -113,6 +112,12 @@ class VisionWorker:
         self.work_dir = work_dir
         self.base_models_dir = base_models_dir
         self.poll_seconds = max(1.0, poll_seconds)
+        self.capabilities = capabilities or [
+            'model_prefill',
+            'train_model',
+            'validate_model',
+            'package_models',
+        ]
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     def register(self) -> Dict[str, Any]:
@@ -665,8 +670,11 @@ def main() -> None:
     args = parser.parse_args()
     server_url = os.environ.get('VISION_LAB_SERVER_URL', '').strip()
     token = os.environ.get('VISION_LAB_WORKER_TOKEN', '').strip()
+    token_file = os.environ.get('VISION_LAB_WORKER_TOKEN_FILE', '').strip()
+    if not token and token_file:
+        token = Path(token_file).expanduser().read_text(encoding='utf-8').strip()
     if not server_url or not token:
-        raise RuntimeError('必须配置 VISION_LAB_SERVER_URL 和 VISION_LAB_WORKER_TOKEN')
+        raise RuntimeError('必须配置 VISION_LAB_SERVER_URL 和 Vision Worker token')
     worker_id = os.environ.get('VISION_WORKER_ID', socket.gethostname()).strip()
     display_name = os.environ.get('VISION_WORKER_NAME', worker_id).strip()
     work_dir = Path(
@@ -678,6 +686,15 @@ def main() -> None:
             str(Path(__file__).resolve().parent.parent / 'data' / 'models' / 'base'),
         )
     ).expanduser()
+    supported = {'model_prefill', 'train_model', 'validate_model', 'package_models'}
+    configured = os.environ.get('VISION_WORKER_CAPABILITIES', '').strip()
+    capabilities = (
+        [value.strip() for value in configured.split(',') if value.strip() in supported]
+        if configured
+        else sorted(supported)
+    )
+    if not capabilities:
+        raise RuntimeError('VISION_WORKER_CAPABILITIES 没有有效任务类型')
     VisionWorker(
         client=VisionLabClient(server_url, token),
         worker_id=worker_id,
@@ -685,6 +702,7 @@ def main() -> None:
         work_dir=work_dir,
         base_models_dir=base_models_dir,
         poll_seconds=float(os.environ.get('VISION_WORKER_POLL_SECONDS', '5')),
+        capabilities=capabilities,
     ).run(once=args.once)
 
 
