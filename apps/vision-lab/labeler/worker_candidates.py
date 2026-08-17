@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from PIL import Image
@@ -203,6 +204,20 @@ def _store_image(content: bytes, sha256: str) -> Dict[str, Any]:
     }
 
 
+def _reference_image(
+    path: Path, sha256: str, *, width: int = 0, height: int = 0
+) -> Dict[str, Any]:
+    if path.stem.lower() != sha256:
+        raise ValueError('worker 候选对象路径与说明中的 SHA-256 不一致')
+    return {
+        'width': max(0, int(width)),
+        'height': max(0, int(height)),
+        'phash': '',
+        'frame_path': str(path),
+        'thumb_path': '',
+    }
+
+
 def sync_worker_candidates(
     conn: Any,
     nas: NasClient,
@@ -258,8 +273,23 @@ def sync_worker_candidates(
                     (video_id, item['at_ms']),
                 ).fetchone()
                 if frame is None:
-                    image = nas.read_training_candidate(str(item['image_path']))
-                    image_info = _store_image(image, item['image_sha256'])
+                    local_resolver = getattr(nas, 'training_candidate_local_path', None)
+                    local_path = (
+                        local_resolver(str(item['image_path']))
+                        if callable(local_resolver)
+                        else None
+                    )
+                    if local_path is None:
+                        image = nas.read_training_candidate(str(item['image_path']))
+                        image_info = _store_image(image, item['image_sha256'])
+                        result['downloaded'] += 1
+                    else:
+                        image_info = _reference_image(
+                            local_path,
+                            item['image_sha256'],
+                            width=int(item.get('image_width', 0)),
+                            height=int(item.get('image_height', 0)),
+                        )
                     ids = db.add_frames(
                         conn,
                         video_id,
@@ -286,7 +316,6 @@ def sync_worker_candidates(
                     if not ids:
                         raise RuntimeError('worker 候选帧未能写入本地数据库')
                     frame_id = ids[0]
-                    result['downloaded'] += 1
                 else:
                     frame_id = int(frame['id'])
             else:

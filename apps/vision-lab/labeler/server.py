@@ -981,7 +981,9 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
         nas = _nas()
         items = nas.list_training_candidates()
         reviews = nas.list_training_candidate_reviews()
-        archive_items = nas.list_result_frame_candidates()
+        archive_items = (
+            nas.list_result_frame_candidates() if config.SYNC_RESULT_ARCHIVE else []
+        )
         _set_worker_candidate_sync_state(
             total=min(len(items), maximum),
             archive_total=min(len(archive_items), maximum),
@@ -3010,7 +3012,7 @@ app.mount('/', NoCacheStaticFiles(directory=str(_static_dir), html=True), name='
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(app, host='127.0.0.1', port=8800, log_level='info')
+    uvicorn.run(app, host=config.SERVER_HOST, port=config.SERVER_PORT, log_level='info')
 
 
 if __name__ == '__main__':

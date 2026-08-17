@@ -19,12 +19,14 @@ import re
 import shlex
 import struct
 import subprocess
+import tempfile
 import threading
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from .config import (
+    CANDIDATE_LOCAL_DIR,
     NAS_HOST,
     NAS_REC_DIR,
     NAS_RESULT_FRAME_DIR,
@@ -89,13 +91,30 @@ def _jpeg_stream(chunks: Iterator[bytes]) -> Iterator[bytes]:
 
 
 class NasClient:
-    def __init__(self) -> None:
-        self._user = _require_env('SYNO_ADMIN_USERNAME')
-        self._password = _require_env('SYNO_ADMIN_PASSWORD')
-        self._askpass = ensure_askpass_script()
+    def __init__(self, *, candidate_local_root: Optional[Path] = None) -> None:
+        self._user = os.environ.get('SYNO_ADMIN_USERNAME', '')
+        self._password = os.environ.get('SYNO_ADMIN_PASSWORD', '')
+        self._askpass: Optional[Path] = None
+        self._candidate_local_root = (
+            candidate_local_root.resolve()
+            if candidate_local_root is not None
+            else (
+                None if CANDIDATE_LOCAL_DIR is None else CANDIDATE_LOCAL_DIR.resolve()
+            )
+        )
         self._result_frame_root = NAS_RESULT_FRAME_DIR
 
+    def _require_remote_credentials(self) -> None:
+        if not self._user:
+            self._user = _require_env('SYNO_ADMIN_USERNAME')
+        if not self._password:
+            self._password = _require_env('SYNO_ADMIN_PASSWORD')
+        if self._askpass is None:
+            self._askpass = ensure_askpass_script()
+
     def _env(self) -> Dict[str, str]:
+        self._require_remote_credentials()
+        assert self._askpass is not None
         env = dict(os.environ)
         env.update(
             {
@@ -107,6 +126,7 @@ class NasClient:
         return env
 
     def _ssh_cmd(self, remote_cmd: str) -> List[str]:
+        self._require_remote_credentials()
         return [
             'ssh',
             '-o',
@@ -125,6 +145,7 @@ class NasClient:
         check: bool = True,
         sudo: bool = False,
     ) -> bytes:
+        self._require_remote_credentials()
         stdin_data = (self._password + '\n').encode() if sudo else None
         kwargs: Dict[str, Any] = {
             'stdout': subprocess.PIPE,
@@ -149,6 +170,7 @@ class NasClient:
         self, remote_cmd: str, content: bytes, *, timeout: int = 60, sudo: bool = False
     ) -> bytes:
         """把内容经 stdin 送入远程命令；用于原子写入小型复核 JSON。"""
+        self._require_remote_credentials()
         stdin_data = (self._password + '\n').encode() + content if sudo else content
         proc = subprocess.run(
             self._ssh_cmd(remote_cmd),
@@ -171,6 +193,7 @@ class NasClient:
         self, remote_cmd: str, *, timeout: int = 3600, sudo: bool = False
     ) -> Iterator[bytes]:
         """流式执行远程命令,逐块产出 stdout。"""
+        self._require_remote_credentials()
         stdin_data = (self._password + '\n').encode() if sudo else None
         proc = subprocess.Popen(
             self._ssh_cmd(remote_cmd),
@@ -238,6 +261,8 @@ class NasClient:
 
     def list_training_candidates(self) -> List[Dict[str, Any]]:
         """读取 worker 落在 NAS 上的候选帧说明，不下载图片。"""
+        if self._candidate_local_root is not None:
+            return self._list_local_candidate_json(review=False)
         root = shlex.quote(NAS_TRAINING_CANDIDATE_DIR)
         shell = (
             f'if [ -d {root} ]; then '
@@ -260,6 +285,8 @@ class NasClient:
 
     def list_training_candidate_reviews(self) -> List[Dict[str, Any]]:
         """读取其他 Vision Lab 已回传的人工复核，不下载候选图片。"""
+        if self._candidate_local_root is not None:
+            return self._list_local_candidate_json(review=True)
         root = shlex.quote(NAS_TRAINING_CANDIDATE_DIR)
         shell = (
             f'if [ -d {root} ]; then '
@@ -281,6 +308,9 @@ class NasClient:
 
     def read_training_candidate(self, relative_path: str) -> bytes:
         """下载一张 worker 候选图；路径只能位于候选目录内部。"""
+        local_path = self.training_candidate_local_path(relative_path)
+        if local_path is not None:
+            return local_path.read_bytes()
         safe_path = self._candidate_relative_path(relative_path)
         absolute = '{}/{}'.format(NAS_TRAINING_CANDIDATE_DIR.rstrip('/'), safe_path)
         return self.run(f'sudo -S cat {shlex.quote(absolute)}', timeout=60, sudo=True)
@@ -289,6 +319,9 @@ class NasClient:
         self, relative_image_path: str, review: Dict[str, Any]
     ) -> None:
         """在候选图旁原子写入 `.review.json`；不覆盖候选图或模型预标。"""
+        if self._candidate_local_root is not None:
+            self._write_local_candidate_review(relative_image_path, review)
+            return
         safe_image = PurePosixPath(self._candidate_relative_path(relative_image_path))
         relative_review = safe_image.with_suffix('.review.json')
         absolute = PurePosixPath(NAS_TRAINING_CANDIDATE_DIR) / relative_review
@@ -307,6 +340,74 @@ class NasClient:
             review, ensure_ascii=False, separators=(',', ':'), sort_keys=True
         ).encode('utf-8')
         self.run_with_input(command, payload, timeout=60, sudo=True)
+
+    def training_candidate_local_path(self, relative_path: str) -> Optional[Path]:
+        """返回容器已挂载候选图的安全路径；远程 SSH 模式返回 ``None``。"""
+        if self._candidate_local_root is None:
+            return None
+        safe_path = self._candidate_relative_path(relative_path)
+        resolved = (self._candidate_local_root / safe_path).resolve()
+        try:
+            resolved.relative_to(self._candidate_local_root)
+        except ValueError as error:
+            raise ValueError('worker 候选图片路径越出候选目录') from error
+        if not resolved.is_file():
+            raise FileNotFoundError(resolved)
+        return resolved
+
+    def _list_local_candidate_json(self, *, review: bool) -> List[Dict[str, Any]]:
+        root = self._candidate_local_root
+        assert root is not None
+        if not root.is_dir():
+            return []
+        suffix = '.review.json'
+        paths = sorted(root.rglob('*.json'))
+        result: List[Dict[str, Any]] = []
+        for path in paths:
+            is_review = path.name.endswith(suffix)
+            if is_review != review:
+                continue
+            value = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(value, dict):
+                raise ValueError('NAS worker 候选说明不是 JSON 对象')
+            self._candidate_relative_path(value.get('image_path'))
+            result.append(value)
+        return result
+
+    def _write_local_candidate_review(
+        self, relative_image_path: str, review: Dict[str, Any]
+    ) -> None:
+        root = self._candidate_local_root
+        assert root is not None
+        safe_image = PurePosixPath(self._candidate_relative_path(relative_image_path))
+        relative_review = safe_image.with_suffix('.review.json')
+        destination = (root / relative_review.as_posix()).resolve()
+        try:
+            destination.relative_to(root)
+        except ValueError as error:
+            raise ValueError('worker 候选复核路径越出候选目录') from error
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            review, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+        ).encode('utf-8')
+        temporary_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='wb',
+                prefix='.review-',
+                suffix='.tmp',
+                dir=str(destination.parent),
+                delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary_path, destination)
+            destination.chmod(0o600)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     # ---------- 已识别结算截图 ----------
 

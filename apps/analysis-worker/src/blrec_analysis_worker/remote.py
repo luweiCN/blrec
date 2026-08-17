@@ -612,6 +612,8 @@ class RemoteAnalysisWorker:
                         'matchModeConfidence': result.match_mode_confidence,
                         'resultConfidence': result.result_confidence,
                         'heroLineup': list(result.hero_lineup),
+                        'imageWidth': result.image_width,
+                        'imageHeight': result.image_height,
                     },
                     'imageJpeg': base64.b64encode(result.image_jpeg).decode('ascii'),
                     'modelVersion': result.model_version,

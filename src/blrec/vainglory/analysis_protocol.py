@@ -49,6 +49,8 @@ def encode_training_candidate(candidate: TrainingCandidate) -> Dict[str, Any]:
         'at_ms': candidate.at_ms,
         'segment_start_ms': candidate.segment_start_ms,
         'image_jpeg': _encode_bytes(candidate.image_jpeg),
+        'image_width': candidate.image_width,
+        'image_height': candidate.image_height,
         'model_version': candidate.model_version,
         'suggested_label': candidate.suggested_label,
         'suggestion_confidence': candidate.suggestion_confidence,
@@ -112,6 +114,8 @@ def decode_training_candidate(payload: Mapping[str, Any]) -> TrainingCandidate:
         mode_class=str(payload['mode_class'])[:80],
         mode_confidence=confidence('mode_confidence'),
         selection_reason=str(payload['selection_reason'])[:500],
+        image_width=max(0, int(payload.get('image_width', 0))),
+        image_height=max(0, int(payload.get('image_height', 0))),
         task=cast(TrainingCandidateTask, task),
         suggested_boxes=tuple(boxes),
     )

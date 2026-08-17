@@ -35,6 +35,13 @@ NAS_TRAINING_CANDIDATE_DIR = os.environ.get(
         '/volume1/docker/blrec-next/vision-data/candidates',
     ),
 )
+_candidate_local_dir = os.environ.get('VISION_LAB_CANDIDATE_LOCAL_DIR', '').strip()
+CANDIDATE_LOCAL_DIR = (
+    None if not _candidate_local_dir else Path(_candidate_local_dir).expanduser()
+)
+SYNC_RESULT_ARCHIVE = os.environ.get(
+    'VISION_LAB_SYNC_RESULT_ARCHIVE', '1'
+).strip().lower() not in {'0', 'false', 'no', 'off'}
 NAS_RESULT_FRAME_DIR = os.environ.get(
     'VISION_LAB_NAS_RESULT_FRAME_DIR', '/cfg/vainglory-result-frames'
 ).rstrip('/')
@@ -60,6 +67,9 @@ WORKER_LAUNCHD_PLIST = os.environ.get(
     'VISION_LAB_WORKER_LAUNCHD_PLIST',
     '~/Library/LaunchAgents/com.luwei.blrec-analysis-worker.plist',
 ).strip()
+
+SERVER_HOST = os.environ.get('VISION_LAB_HOST', '127.0.0.1').strip()
+SERVER_PORT = int(os.environ.get('VISION_LAB_PORT', '8800'))
 
 VIDEO_EXTS = {'.flv', '.mp4', '.ts', '.mkv', '.m4s'}
 

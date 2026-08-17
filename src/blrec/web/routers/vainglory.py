@@ -261,6 +261,8 @@ class LiveAnalysisObservationRequest(ApiModel):
     match_mode_label: str = Field(..., max_length=40)
     match_mode_confidence: float = Field(..., ge=0, le=1)
     result_confidence: float = Field(..., ge=0, le=1)
+    image_width: int = Field(0, ge=0)
+    image_height: int = Field(0, ge=0)
     hero_lineup: List[str] = Field(default_factory=list, max_items=10)
 
 
@@ -1307,6 +1309,8 @@ async def complete_live_analysis_work(
                     match_mode_confidence=observation.match_mode_confidence,
                     result_confidence=observation.result_confidence,
                     hero_lineup=tuple(observation.hero_lineup),
+                    image_width=observation.image_width,
+                    image_height=observation.image_height,
                 ),
                 image_jpeg=image_jpeg,
                 model_version=payload.model_version,

@@ -306,6 +306,8 @@ class TrainingCandidate:
     mode_class: str
     mode_confidence: float
     selection_reason: str
+    image_width: int = 0
+    image_height: int = 0
     task: TrainingCandidateTask = 'bp_review'
     suggested_boxes: Tuple[TrainingCandidateBox, ...] = ()
 
@@ -387,6 +389,8 @@ def _remember_training_candidate(
         mode_class=mode_class,
         mode_confidence=max(0, min(1, float(mode_confidence))),
         selection_reason=selection_reason,
+        image_width=int(frame.width),
+        image_height=int(frame.height),
         task=task,
         suggested_boxes=tuple(suggested_boxes),
     )
@@ -916,6 +920,8 @@ class LiveFrameResult:
     hero_lineup: Tuple[str, ...] = ()
     model_version: str = ''
     image_jpeg: bytes = b''
+    image_width: int = 0
+    image_height: int = 0
 
 
 @dataclass(frozen=True)
@@ -1362,6 +1368,8 @@ class VaingloryVideoAnalyzer:
             hero_lineup=lineup,
             model_version=prediction.model_version,
             image_jpeg=_high_quality_training_jpeg(frame),
+            image_width=int(frame.width),
+            image_height=int(frame.height),
         )
 
     def analyze_live_window(
@@ -2369,6 +2377,8 @@ class VaingloryVideoAnalyzer:
                             if likely_bp
                             else 'worker 开局探测中的非 BP／可能漏检画面'
                         ),
+                        image_width=int(timed.frame.width),
+                        image_height=int(timed.frame.height),
                     )
                 )
             if talent_frames >= 2:

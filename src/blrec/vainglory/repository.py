@@ -364,6 +364,8 @@ class LiveFrameObservation:
     match_mode_confidence: float
     result_confidence: float
     hero_lineup: Tuple[str, ...] = ()
+    image_width: int = 0
+    image_height: int = 0
 
 
 @dataclass(frozen=True)
@@ -2574,6 +2576,8 @@ class VaingloryRepository:
             ],
             'image_path': relative_path,
             'image_sha256': hashlib.sha256(image_jpeg).hexdigest(),
+            'image_width': max(0, int(observation.image_width)),
+            'image_height': max(0, int(observation.image_height)),
             'created_at': created_at,
         }
         self._write_training_candidate(
@@ -4044,6 +4048,8 @@ class VaingloryRepository:
                         ],
                         'image_path': relative_path,
                         'image_sha256': digest,
+                        'image_width': int(primary.image_width),
+                        'image_height': int(primary.image_height),
                         'created_at': now,
                     }
                     self._write_training_candidate(
