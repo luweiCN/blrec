@@ -40,6 +40,7 @@ policy_manager: Optional[RoomUploadPolicyManager] = None
 category_catalog: Optional[UploadCategoryCatalog] = None
 vainglory_service: Optional[VaingloryIndexService] = None
 unavailable_reason: Optional[str] = 'Browser extension actions are not ready'
+MATCH_MARKER_ACCOUNT_UID = 3546823461439884
 
 
 class ApiModel(BaseModel):
@@ -218,7 +219,9 @@ async def video_status(
     _identity: ExtensionIdentity = Depends(security.authenticated_extension),
     index: VaingloryIndexService = Depends(_vainglory),
 ) -> VideoStatusResponse:
-    target = await index.find_video_part(bvid, page)
+    target = await index.find_video_part(
+        bvid, page, account_uid=MATCH_MARKER_ACCOUNT_UID
+    )
     if target is None:
         return VideoStatusResponse(indexed=False)
     return VideoStatusResponse(
@@ -242,7 +245,10 @@ async def mark_video_match(
 ) -> MatchMarkerResponse:
     try:
         marker = await index.mark_video_match(
-            bvid=bvid, page=command.page, at_ms=command.current_time_ms
+            bvid=bvid,
+            page=command.page,
+            at_ms=command.current_time_ms,
+            account_uid=MATCH_MARKER_ACCOUNT_UID,
         )
     except VaingloryNotFound as error:
         raise HTTPException(

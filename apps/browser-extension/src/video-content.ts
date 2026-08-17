@@ -83,9 +83,13 @@ export class MatchMarkerContentController {
       response.data !== null &&
       'indexed' in response.data &&
       response.data.indexed === true;
-    if (this.indexed) {
-      this.ensureRendered(identity);
+    if (!this.indexed) {
+      this.cancelRefresh?.();
+      this.cancelRefresh = null;
+      this.removeActions();
+      return;
     }
+    this.ensureRendered(identity);
   }
 
   private ensureRendered(identity: VideoIdentity | null): void {

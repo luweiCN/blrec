@@ -1760,6 +1760,14 @@ async def test_manual_match_marker_is_included_in_future_scan_claim(
         )
         repository = VaingloryRepository(database, clock=lambda: 100)
 
+        assert (
+            await repository.find_video_part('BV1abcdefgh', 1, account_uid=42)
+            is not None
+        )
+        assert (
+            await repository.find_video_part('BV1abcdefgh', 1, account_uid=99) is None
+        )
+
         marker = await repository.create_manual_match_marker_for_video(
             bvid='BV1abcdefgh', page=1, at_ms=45_600
         )

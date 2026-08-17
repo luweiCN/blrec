@@ -1889,7 +1889,7 @@ class VaingloryRepository:
         return job, remote_part_ids
 
     async def find_video_part(
-        self, bvid: str, page: int
+        self, bvid: str, page: int, *, account_uid: Optional[int] = None
     ) -> Optional[ManualMatchMarkerRecord]:
         normalized_bvid = bvid.strip()
         if not normalized_bvid or page < 1:
@@ -1897,19 +1897,21 @@ class VaingloryRepository:
         row = await self._database.fetchone(
             'SELECT target.session_id,target.part_id,target.part_index '
             'FROM ('
-            'SELECT part.session_id,part.id AS part_id,part.part_index,0 priority '
+            'SELECT part.session_id,part.id AS part_id,part.part_index,'
+            'source.account_id,0 priority '
             'FROM vainglory_video_sources source '
             'JOIN recording_parts part ON part.id=source.part_id '
             'WHERE source.bvid=? AND source.page=? '
             'UNION ALL '
-            'SELECT part.session_id,part.id,part.part_index,1 '
+            'SELECT part.session_id,part.id,part.part_index,'
+            'imported.account_id,1 '
             'FROM vainglory_archive_imports imported '
             'JOIN vainglory_archive_parts archived '
             'ON archived.import_id=imported.id '
             'JOIN recording_parts part ON part.id=archived.recording_part_id '
             'WHERE imported.bvid=? AND archived.page=? '
             'UNION ALL '
-            'SELECT part.session_id,part.id,part.part_index,2 '
+            'SELECT part.session_id,part.id,part.part_index,upload.account_id,2 '
             'FROM upload_jobs upload '
             'JOIN upload_parts remote ON remote.job_id=upload.id '
             'JOIN recording_parts part ON part.session_id=upload.session_id '
@@ -1918,7 +1920,9 @@ class VaingloryRepository:
             'SELECT COUNT(*) FROM upload_parts counted '
             'WHERE counted.job_id=upload.id AND counted.cid IS NOT NULL '
             'AND counted.part_index<=remote.part_index)=?'
-            ') target ORDER BY target.priority LIMIT 1',
+            ') target JOIN bili_accounts account ON account.id=target.account_id '
+            'WHERE (? IS NULL OR account.uid=?) '
+            'ORDER BY target.priority LIMIT 1',
             (
                 normalized_bvid,
                 int(page),
@@ -1926,6 +1930,8 @@ class VaingloryRepository:
                 int(page),
                 normalized_bvid,
                 int(page),
+                account_uid,
+                account_uid,
             ),
         )
         if row is None:

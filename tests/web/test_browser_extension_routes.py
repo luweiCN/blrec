@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from blrec.bili_upload.policies import RoomUploadPolicyCommand, RoomUploadPolicyNotFound
 from blrec.task.models import RunningStatus
+from blrec.vainglory.repository import VaingloryNotFound
 from blrec.web import security
 from blrec.web.auth_store import AdminAuthStore
 from blrec.web.routers import browser_extension, control_operations
@@ -369,9 +370,47 @@ def test_video_page_can_mark_the_current_playback_time(extension_client) -> None
     }
     index = browser_extension.vainglory_service
     assert index is not None
-    index.find_video_part.assert_awaited_once_with('BV1abcdefgh', 2)
+    index.find_video_part.assert_awaited_once_with(
+        'BV1abcdefgh', 2, account_uid=browser_extension.MATCH_MARKER_ACCOUNT_UID
+    )
     index.mark_video_match.assert_awaited_once_with(
-        bvid='BV1abcdefgh', page=2, at_ms=754_000
+        bvid='BV1abcdefgh',
+        page=2,
+        at_ms=754_000,
+        account_uid=browser_extension.MATCH_MARKER_ACCOUNT_UID,
+    )
+
+
+def test_video_marker_rejects_an_indexed_video_from_another_account(
+    extension_client,
+) -> None:
+    client, _application, _policies, _highlights, _store, _clock = extension_client
+    token = pair(client)
+    index = browser_extension.vainglory_service
+    assert index is not None
+    index.find_video_part.return_value = None
+    index.mark_video_match.side_effect = VaingloryNotFound(
+        '这个稿件分 P 不属于允许账号'
+    )
+
+    status_response = client.get(
+        '/api/v1/browser-extension/videos/BV1WogL61E64?page=1',
+        headers=extension_headers(token),
+    )
+    marker_response = client.post(
+        '/api/v1/browser-extension/videos/BV1WogL61E64/matches',
+        headers=extension_headers(token),
+        json={'page': 1, 'currentTimeMs': 1_000},
+    )
+
+    assert status_response.status_code == 200
+    assert status_response.json()['indexed'] is False
+    assert marker_response.status_code == 404
+    index.mark_video_match.assert_awaited_once_with(
+        bvid='BV1WogL61E64',
+        page=1,
+        at_ms=1_000,
+        account_uid=browser_extension.MATCH_MARKER_ACCOUNT_UID,
     )
 
 

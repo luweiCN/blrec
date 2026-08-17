@@ -1079,14 +1079,18 @@ class VaingloryIndexService:
         self._scan_wake.set()
 
     async def find_video_part(
-        self, bvid: str, page: int
+        self, bvid: str, page: int, *, account_uid: Optional[int] = None
     ) -> Optional[ManualMatchMarkerRecord]:
-        return await self._repository.find_video_part(bvid, page)
+        return await self._repository.find_video_part(
+            bvid, page, account_uid=account_uid
+        )
 
     async def mark_video_match(
-        self, *, bvid: str, page: int, at_ms: int
+        self, *, bvid: str, page: int, at_ms: int, account_uid: Optional[int] = None
     ) -> ManualMatchMarkerRecord:
-        target = await self._repository.find_video_part(bvid, page)
+        target = await self._repository.find_video_part(
+            bvid, page, account_uid=account_uid
+        )
         if target is None:
             raise VaingloryNotFound('这个稿件分 P 尚未进入对局索引')
         await self._prepare_manual_marker_media(target.part_id)
