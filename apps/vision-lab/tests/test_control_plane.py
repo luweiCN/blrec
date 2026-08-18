@@ -44,9 +44,33 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
     ).read_text(encoding='utf-8')
-    assert "limit: '20'" in script
+    assert "limit: '200'" in script
     assert "include_stats: 'false'" in script
     assert '/api/training-review/stats?' in script
+    control_plane_branch = script.index('if (CFG.control_plane_only)')
+    assert control_plane_branch < script.index('loadStats();')
+    review_loader = script[
+        script.index('async function loadCandidateReview()') : script.index(
+            'async function refillCandidateReviewQueue'
+        )
+    ]
+    assert 'loadCandidateReviewStats(' not in review_loader
+    material_loader = script[
+        script.index(
+            'async function openCandidateMaterialSuggestions()'
+        ) : script.index('function renderCandidateHeroFilter()')
+    ]
+    assert 'await loadCandidateReviewStats(' in material_loader
+    source_scope_setter = script[
+        script.index('function setCandidateSourceScope(') : script.index(
+            'function candidateSourceText('
+        )
+    ]
+    assert 'loadCandidateFilterOptions();' not in source_scope_setter
+    assert (
+        "$('#candidate-streamer-filter').onfocus = ensureCandidateFilterOptions"
+        in script
+    )
     assert 'const candidatePrefillRequests = new Map();' in script
     assert 'function prefetchCandidateImage(item)' in script
     assert 'function prefetchNextCandidate()' in script
@@ -191,11 +215,9 @@ def test_worker_candidate_state_coalesces_repeated_database_reads(monkeypatch) -
     monkeypatch.setattr(config, 'CANDIDATE_LOCAL_DIR', None)
     connect = mock.Mock(return_value=connection)
     monkeypatch.setattr(server, '_conn', connect)
-    monkeypatch.setattr(
-        server,
-        '_cached_training_review_stats',
-        mock.Mock(return_value={'total': 53_000}),
-    )
+    full_stats = mock.Mock(side_effect=AssertionError('状态轮询不应触发全量统计'))
+    monkeypatch.setattr(server, '_cached_training_review_stats', full_stats)
+    monkeypatch.setitem(server._training_review_cache, 'stats', {'total': 53_000})
     published = mock.Mock(return_value={'running': False, 'processed': 20_000})
     monkeypatch.setattr(server.db, 'load_service_runtime_state', published)
     monkeypatch.setitem(server._worker_candidate_state_response, 'value', None)
@@ -208,6 +230,7 @@ def test_worker_candidate_state_coalesces_repeated_database_reads(monkeypatch) -
     assert first['review']['total'] == 53_000
     connect.assert_called_once()
     published.assert_called_once()
+    full_stats.assert_not_called()
 
 
 def test_saving_one_review_updates_queue_without_immediate_full_refresh(
@@ -224,18 +247,17 @@ def test_saving_one_review_updates_queue_without_immediate_full_refresh(
     server._mark_training_review_saved(2)
 
     assert server._training_review_cache['default_queue'] == (3, 1)
-    assert server._training_review_cache['default_queue_expires_at'] == 160.0
-    assert server._training_review_cache['groups_expires_at'] == 160.0
-    assert server._training_review_cache['stats_expires_at'] == 160.0
+    assert server._training_review_cache['default_queue_expires_at'] == 400.0
+    assert server._training_review_cache['groups_expires_at'] == 400.0
+    assert server._training_review_cache['stats'] is None
+    assert server._training_review_cache['stats_expires_at'] == 0.0
 
 
 def test_review_save_returns_lightweight_ack(monkeypatch) -> None:
     connection = mock.Mock()
     connection.execute.return_value.fetchone.return_value = (1,)
     monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
-    save = mock.Mock(
-        return_value={'frame_id': 7, 'review_status': 'confirmed'}
-    )
+    save = mock.Mock(return_value={'frame_id': 7, 'review_status': 'confirmed'})
     monkeypatch.setattr(server.db, 'save_training_review', save)
     mark_saved = mock.Mock()
     monkeypatch.setattr(server, '_mark_training_review_saved', mark_saved)

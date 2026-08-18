@@ -37,6 +37,8 @@ let candidateDrawStart = null;
 let candidateSyncTimer = null;
 let candidateHeroCatalog = [];
 let candidateHeroCatalogPromise = null;
+let candidateFilterOptionsLoadedScope = '';
+let candidateFilterOptionsPromise = null;
 let candidateHeroFilters = new Set();
 let candidateHeroLineup = null;
 let candidateHeroDraft = new Map();
@@ -110,9 +112,6 @@ async function init() {
   buildSelects();
   buildBoxToolbar();
   buildStrategySelect();
-  loadStats();
-  loadDatasets();
-  loadPairs();
   bindNav();
   bindShortcuts();
   bindBpReview();
@@ -130,6 +129,9 @@ async function init() {
     loadCandidateReview();
     return;
   }
+  loadStats();
+  loadDatasets();
+  loadPairs();
   loadVideos();
   if (isGateTask()) {
     const gateNav = $('.nav-item[data-task="mode_gate"]');
@@ -318,7 +320,7 @@ function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true)
   $('#candidate-scope-summary').textContent = historical
     ? '正在读取历史人工数据…' : '正在读取 Worker 候选…';
   $('#candidate-index-state').classList.toggle('hidden', historical);
-  loadCandidateFilterOptions();
+  candidateFilterOptionsLoadedScope = '';
   if (syncNav) {
     $$('.nav-item').forEach((button) => button.classList.remove('active'));
     const nav = $(`.nav-item[data-view="candidates"]` +
@@ -2305,7 +2307,7 @@ function candidateStatusIsReviewQueue(status) {
 
 function candidateReviewQuery(status, offset = null) {
   const query = new URLSearchParams({
-    status, limit: '20', source_scope: candidateSourceScope,
+    status, limit: '200', source_scope: candidateSourceScope,
     include_stats: 'false',
   });
   if (offset !== null) query.set('offset', String(offset));
@@ -2366,7 +2368,7 @@ function renderCandidateMaterialSuggestionButton() {
   const count = $('#candidate-material-suggestion-count');
   if (!count) return;
   if (!Object.keys(candidateReviewStats).length) {
-    count.textContent = '读取中';
+    count.textContent = '查看';
     return;
   }
   const suggestions = candidateMaterialSuggestions();
@@ -2464,10 +2466,14 @@ function renderCandidateMaterialSuggestions() {
   });
 }
 
-function openCandidateMaterialSuggestions() {
+async function openCandidateMaterialSuggestions() {
   renderCandidateMaterialSuggestions();
   const dialog = $('#candidate-material-dialog');
   if (!dialog.open) dialog.showModal();
+  if (!Object.keys(candidateReviewStats).length) {
+    await loadCandidateReviewStats(
+      $('#candidate-status-filter').value, candidateSourceScope);
+  }
 }
 
 function renderCandidateHeroFilter() {
@@ -2507,6 +2513,22 @@ function renderCandidateHeroFilter() {
     });
 }
 
+function ensureCandidateFilterOptions() {
+  if (candidateFilterOptionsLoadedScope === candidateSourceScope) {
+    return Promise.resolve();
+  }
+  if (candidateFilterOptionsPromise) {
+    return candidateFilterOptionsPromise.then(ensureCandidateFilterOptions);
+  }
+  const promise = loadCandidateFilterOptions().finally(() => {
+    if (candidateFilterOptionsPromise === promise) {
+      candidateFilterOptionsPromise = null;
+    }
+  });
+  candidateFilterOptionsPromise = promise;
+  return promise;
+}
+
 async function loadCandidateFilterOptions() {
   const scope = candidateSourceScope;
   const heroCatalog = ensureCandidateHeroCatalog()
@@ -2526,6 +2548,7 @@ async function loadCandidateFilterOptions() {
     if ([...select.options].some((option) => option.value === selected)) {
       select.value = selected;
     }
+    candidateFilterOptionsLoadedScope = scope;
     const heroError = await heroCatalog;
     if (scope !== candidateSourceScope) return;
     renderCandidateHeroFilter();
@@ -2927,7 +2950,6 @@ async function loadCandidateReview() {
     candidateQueue = data.items || [];
     candidateIndex = 0;
     renderCandidateItem();
-    loadCandidateReviewStats(status, sourceScope);
   } catch (error) {
     $('#candidate-save-state').textContent = '加载失败：' + error.message;
   }
@@ -3200,8 +3222,13 @@ function bindCandidateReview() {
     loadCandidateReview();
   };
   $('#btn-candidate-refresh').onclick = () => {
-    loadCandidateFilterOptions();
+    candidateFilterOptionsLoadedScope = '';
+    ensureCandidateFilterOptions();
     loadCandidateReview();
+  };
+  $('#candidate-streamer-filter').onfocus = ensureCandidateFilterOptions;
+  $('#candidate-hero-filter').ontoggle = () => {
+    if ($('#candidate-hero-filter').open) ensureCandidateFilterOptions();
   };
   $('#candidate-hero-filter-search').oninput = renderCandidateHeroFilter;
   refreshCandidateIndexState();

@@ -464,6 +464,80 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
         self.assertEqual(len(items), 20)
         self.assertLessEqual(len(statements), 6)
 
+    def test_default_new_review_queue_uses_one_aggregated_query(self):
+        normal = self.frame(31)
+        inferred_aram = self.frame(32)
+        aram_select = self.frame(33)
+        legacy = self.frame(34)
+        for frame_id, source_type, suggestions, source_created_at in (
+            (normal, 'worker', {}, 400),
+            (
+                inferred_aram,
+                'result_archive',
+                {'match_mode': {'label': 'aram', 'confidence': 0.8}},
+                300,
+            ),
+            (
+                aram_select,
+                'manual_correction',
+                {'hero_select': {'label': 'select_aram', 'confidence': 0.8}},
+                200,
+            ),
+            (legacy, 'legacy_annotation', {}, 500),
+        ):
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type=source_type,
+                source_id=f'source-{frame_id}',
+                suggestions=suggestions,
+                source_created_at=source_created_at,
+            )
+        statements = []
+        self.conn.set_trace_callback(
+            lambda statement: (
+                statements.append(statement)
+                if statement.lstrip().upper().startswith(('SELECT', 'WITH'))
+                else None
+            )
+        )
+        try:
+            frame_ids = db.training_review_frame_ids(
+                self.conn, status='needs_review', source_scope='new', result_groups={}
+            )
+        finally:
+            self.conn.set_trace_callback(None)
+
+        self.assertEqual(frame_ids, [aram_select, inferred_aram, normal])
+        self.assertEqual(len(statements), 1)
+
+    def test_pending_queue_hydration_skips_confirmed_review_subqueries(self):
+        frame_id = self.frame(35)
+        db.add_training_review_source(
+            self.conn, frame_id=frame_id, source_type='worker', source_id='worker-35'
+        )
+        statements = []
+        self.conn.set_trace_callback(
+            lambda statement: (
+                statements.append(statement)
+                if statement.lstrip().upper().startswith('SELECT')
+                else None
+            )
+        )
+        try:
+            items = db.get_training_review_items(
+                self.conn, [frame_id], result_groups={}, pending_review_queue=True
+            )
+        finally:
+            self.conn.set_trace_callback(None)
+
+        self.assertEqual(items[0]['frame_id'], frame_id)
+        self.assertFalse(items[0]['needs_player_hero_review'])
+        self.assertFalse(items[0]['unified_manual_reviewed'])
+        joined = '\n'.join(statements)
+        self.assertNotIn('audit_log manual_review', joined)
+        self.assertNotIn('training_review_hero_lineups lineup', joined)
+
     def test_save_can_return_current_item_without_rebuilding_all_result_groups(self):
         frame_id = self.frame(1)
         db.add_training_review_source(

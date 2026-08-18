@@ -3814,6 +3814,7 @@ def get_training_review_items(
     frame_ids: Sequence[int],
     *,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
+    pending_review_queue: bool = False,
 ) -> List[Dict[str, Any]]:
     ordered_ids = list(dict.fromkeys(int(frame_id) for frame_id in frame_ids))
     if not ordered_ids:
@@ -3824,15 +3825,22 @@ def get_training_review_items(
     for start in range(0, len(ordered_ids), 400):
         batch = ordered_ids[start : start + 400]
         placeholders = ', '.join('?' for _frame_id in batch)
+        review_columns = (
+            '0 AS needs_player_hero_review, ' '0 AS unified_manual_reviewed'
+            if pending_review_queue
+            else (
+                f'CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW}) '
+                'THEN 1 ELSE 0 END AS needs_player_hero_review, '
+                f'CASE WHEN ({_UNIFIED_MANUAL_REVIEWED}) '
+                'THEN 1 ELSE 0 END AS unified_manual_reviewed'
+            )
+        )
         rows = conn.execute(
             f"""
             SELECT item.*, frame.video_id, frame.timestamp_ms, frame.width,
                    frame.height, frame.frame_path, frame.thumb_path, frame.sha256,
                    video.streamer, video.filename, video.remote_path,
-                   CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW})
-                        THEN 1 ELSE 0 END AS needs_player_hero_review,
-                   CASE WHEN ({_UNIFIED_MANUAL_REVIEWED})
-                        THEN 1 ELSE 0 END AS unified_manual_reviewed
+                   {review_columns}
             FROM training_review_items item
             JOIN frames frame ON frame.id = item.frame_id
             JOIN videos video ON video.id = frame.video_id
@@ -4364,6 +4372,97 @@ def training_review_frame_ids(
     confidence: str = '',
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> List[int]:
+    default_new_queue = (
+        status == 'needs_review'
+        and source_scope == 'new'
+        and not any((streamer, source_type, scene, match_mode, hero, confidence))
+    )
+    if default_new_queue:
+        rows = conn.execute(
+            """
+            WITH source_summary AS (
+                SELECT source.frame_id,
+                       MAX(source.source_created_at) AS source_created_at,
+                       MAX(COALESCE(
+                           CAST(json_extract(
+                               source.metadata_json, '$.at_ms'
+                           ) AS INTEGER),
+                           CAST(json_extract(
+                               source.metadata_json, '$.result_at_ms'
+                           ) AS INTEGER),
+                           0
+                       )) AS source_offset,
+                       MAX(CASE WHEN source.source_type IN (
+                           'worker', 'result_archive', 'manual_correction'
+                       ) THEN 1 ELSE 0 END) AS is_new,
+                       MAX(CASE WHEN json_extract(
+                           source.suggestions_json, '$.hero_select.label'
+                       ) = 'select_aram' THEN 1 ELSE 0 END) AS selects_aram,
+                       MAX(CASE WHEN
+                           json_extract(
+                               source.suggestions_json, '$.match_mode.label'
+                           ) = 'aram'
+                           OR json_extract(
+                               source.metadata_json, '$.game_mode'
+                           ) = 'aram'
+                           OR json_extract(
+                               source.metadata_json, '$.mode_class'
+                           ) = 'aram'
+                           OR json_extract(
+                               source.metadata_json,
+                               '$.model_outputs[0].mode_class'
+                           ) = 'aram'
+                       THEN 1 ELSE 0 END) AS suggests_aram
+                FROM training_review_sources source
+                JOIN training_review_items pending
+                  ON pending.frame_id = source.frame_id
+                 AND pending.review_status IN ('pending', 'partial')
+                GROUP BY source.frame_id
+            ),
+            confirmed_aram_videos AS (
+                SELECT DISTINCT frame.video_id
+                FROM training_review_items known
+                JOIN frames frame ON frame.id = known.frame_id
+                WHERE known.review_status = 'confirmed'
+                  AND (
+                      known.match_mode_label = 'aram'
+                      OR known.hero_select_label = 'select_aram'
+                  )
+            )
+            SELECT item.frame_id
+            FROM training_review_items item
+            JOIN frames frame ON frame.id = item.frame_id
+            JOIN source_summary summary ON summary.frame_id = item.frame_id
+            LEFT JOIN confirmed_aram_videos confirmed_aram
+              ON confirmed_aram.video_id = frame.video_id
+            WHERE item.review_status IN ('pending', 'partial')
+              AND summary.is_new = 1
+            ORDER BY CASE
+                         WHEN summary.selects_aram = 1 THEN 0
+                         WHEN summary.suggests_aram = 1 THEN 1
+                         WHEN confirmed_aram.video_id IS NOT NULL THEN 2
+                         ELSE 3
+                     END,
+                     CASE WHEN item.review_status = 'pending' THEN 0 ELSE 1 END,
+                     COALESCE(summary.source_created_at, 0) DESC,
+                     COALESCE(summary.source_offset, 0) DESC,
+                     item.updated_at DESC,
+                     item.frame_id DESC
+            """
+        ).fetchall()
+        groups = (
+            training_review_result_groups(conn)
+            if result_groups is None
+            else result_groups
+        )
+        return [
+            int(row['frame_id'])
+            for row in rows
+            if groups.get(int(row['frame_id']), {}).get(
+                'result_group_representative_frame_id', int(row['frame_id'])
+            )
+            == int(row['frame_id'])
+        ]
     visible, _groups = _training_review_visible_frame_ids(
         conn,
         status=status,

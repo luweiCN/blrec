@@ -107,7 +107,6 @@ async def lifespan(_app: FastAPI):
                     name='vision-candidate-index',
                 )
                 candidate_index_thread.start()
-            _start_training_review_cache_refresh()
     except Exception:
         db.close_connections()
         raise
@@ -169,10 +168,8 @@ _training_review_cache: Dict[str, Any] = {
     'stats_expires_at': 0.0,
     'default_queue': None,
     'default_queue_expires_at': 0.0,
-    'refreshing': False,
 }
 _TRAINING_REVIEW_CACHE_SECONDS = 300.0
-_TRAINING_REVIEW_WRITE_REFRESH_SECONDS = 60.0
 _worker_candidate_state_response_lock = threading.Lock()
 _worker_candidate_state_response: Dict[str, Any] = {
     'value': None,
@@ -208,9 +205,7 @@ def _cached_training_review_groups(conn: Any) -> Dict[int, Dict[str, Any]]:
     now = time.monotonic()
     with _training_review_cache_lock:
         value = _training_review_cache['groups']
-        if value is not None:
-            if now >= _training_review_cache['groups_expires_at']:
-                _start_training_review_cache_refresh()
+        if value is not None and now < _training_review_cache['groups_expires_at']:
             return value
     value = db.training_review_result_groups(conn)
     with _training_review_cache_lock:
@@ -225,9 +220,7 @@ def _cached_training_review_stats(conn: Any) -> Dict[str, Any]:
     now = time.monotonic()
     with _training_review_cache_lock:
         value = _training_review_cache['stats']
-        if value is not None:
-            if now >= _training_review_cache['stats_expires_at']:
-                _start_training_review_cache_refresh()
+        if value is not None and now < _training_review_cache['stats_expires_at']:
             return value
     groups = _cached_training_review_groups(conn)
     value = db.training_review_stats(conn, result_groups=groups)
@@ -245,9 +238,10 @@ def _cached_default_training_review_queue(
     now = time.monotonic()
     with _training_review_cache_lock:
         value = _training_review_cache['default_queue']
-        if value is not None:
-            if now >= _training_review_cache['default_queue_expires_at']:
-                _start_training_review_cache_refresh()
+        if (
+            value is not None
+            and now < _training_review_cache['default_queue_expires_at']
+        ):
             return value
     value = tuple(
         db.training_review_frame_ids(
@@ -265,81 +259,25 @@ def _cached_default_training_review_queue(
         return value
 
 
-def _start_training_review_cache_refresh() -> None:
-    with _training_review_cache_lock:
-        if _training_review_cache['refreshing']:
-            return
-        _training_review_cache['refreshing'] = True
-    threading.Thread(
-        target=_refresh_training_review_cache,
-        daemon=True,
-        name='vision-review-cache-refresh',
-    ).start()
-
-
 def _invalidate_training_review_cache() -> None:
     with _training_review_cache_lock:
+        _training_review_cache['groups'] = None
+        _training_review_cache['stats'] = None
+        _training_review_cache['default_queue'] = None
         _training_review_cache['groups_expires_at'] = 0.0
         _training_review_cache['stats_expires_at'] = 0.0
         _training_review_cache['default_queue_expires_at'] = 0.0
 
 
 def _mark_training_review_saved(frame_id: int) -> None:
-    now = time.monotonic()
-    refresh_at = now + _TRAINING_REVIEW_WRITE_REFRESH_SECONDS
     with _training_review_cache_lock:
         queue = _training_review_cache['default_queue']
         if queue is not None:
             _training_review_cache['default_queue'] = tuple(
                 value for value in queue if value != int(frame_id)
             )
-        for key in (
-            'groups_expires_at',
-            'stats_expires_at',
-            'default_queue_expires_at',
-        ):
-            current = float(_training_review_cache[key] or 0.0)
-            _training_review_cache[key] = (
-                refresh_at if current <= now else min(current, refresh_at)
-            )
-
-
-def _refresh_training_review_cache() -> None:
-    conn = None
-    try:
-        conn = _conn()
-        groups = db.training_review_result_groups(conn)
-        default_queue = tuple(
-            db.training_review_frame_ids(
-                conn,
-                status='needs_review',
-                source_scope='new',
-                result_groups=groups,
-            )
-        )
-        expires_at = time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
-        with _training_review_cache_lock:
-            _training_review_cache.update(
-                {
-                    'groups': groups,
-                    'groups_expires_at': expires_at,
-                    'default_queue': default_queue,
-                    'default_queue_expires_at': expires_at,
-                }
-            )
-        stats = db.training_review_stats(conn, result_groups=groups)
-        expires_at = time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
-        with _training_review_cache_lock:
-            _training_review_cache.update(
-                {'stats': stats, 'stats_expires_at': expires_at}
-            )
-    except Exception:  # noqa: BLE001 - stale cache remains available
-        pass
-    finally:
-        if conn is not None:
-            conn.close()
-        with _training_review_cache_lock:
-            _training_review_cache['refreshing'] = False
+        _training_review_cache['stats'] = None
+        _training_review_cache['stats_expires_at'] = 0.0
 
 
 def _nas() -> NasClient:
@@ -1412,18 +1350,20 @@ def api_worker_candidate_state() -> Dict[str, Any]:
             return cached
         with _worker_candidate_sync_lock:
             sync = dict(_worker_candidate_sync_state)
-        with _db_lock:
-            conn = _conn()
-            try:
-                review = _cached_training_review_stats(conn)
-                if config.CANDIDATE_LOCAL_DIR is None:
+        with _training_review_cache_lock:
+            cached_review = _training_review_cache['stats']
+            review = dict(cached_review) if isinstance(cached_review, dict) else {}
+        if config.CANDIDATE_LOCAL_DIR is None:
+            with _training_review_read_guard():
+                conn = _conn()
+                try:
                     published = db.load_service_runtime_state(
                         conn, 'candidate_index'
                     )
                     if published:
                         sync = published
-            finally:
-                conn.close()
+                finally:
+                    conn.close()
         result = {'sync': sync, 'review': review}
         _worker_candidate_state_response.update(
             {
@@ -1456,7 +1396,6 @@ def api_training_review_items(
         conn = _conn()
         try:
             try:
-                result_groups = _cached_training_review_groups(conn)
                 default_queue = (
                     status == 'needs_review'
                     and source_scope == 'new'
@@ -1473,6 +1412,11 @@ def api_training_review_items(
                     )
                 )
                 if default_queue:
+                    with _training_review_cache_lock:
+                        cached_groups = _training_review_cache['groups']
+                    result_groups = (
+                        cached_groups if isinstance(cached_groups, dict) else {}
+                    )
                     frame_ids = _cached_default_training_review_queue(
                         conn, result_groups
                     )
@@ -1480,9 +1424,11 @@ def api_training_review_items(
                         conn,
                         frame_ids[offset : offset + limit],
                         result_groups=result_groups,
+                        pending_review_queue=True,
                     )
                     filtered_total = len(frame_ids)
                 else:
+                    result_groups = _cached_training_review_groups(conn)
                     items, filtered_total = db.training_review_page(
                         conn,
                         status=status,
@@ -1558,7 +1504,7 @@ def api_training_review_stats(
 
 @app.get('/api/training-review/filter-options')
 def api_training_review_filter_options(source_scope: str = 'all') -> Dict[str, Any]:
-    with _db_lock:
+    with _training_review_read_guard():
         conn = _conn()
         try:
             return db.training_review_filter_options(conn, source_scope=source_scope)

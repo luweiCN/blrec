@@ -54,7 +54,13 @@ def stats(conn: Any) -> Dict[str, Any]:
     flag_counts: Dict[str, int] = {}
     for (flags_json,) in conn.execute(
             'SELECT quality_flags FROM annotations WHERE quality_flags != ?', ('[]',)):
-        for flag in json.loads(flags_json or '[]'):
+        try:
+            flags = json.loads(flags_json or '[]')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(flags, list):
+            continue
+        for flag in flags:
             flag_counts[flag] = flag_counts.get(flag, 0) + 1
     s['quality_flags'] = flag_counts
     s['black_bars'] = dict(conn.execute(

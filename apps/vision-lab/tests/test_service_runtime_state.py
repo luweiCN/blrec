@@ -74,7 +74,7 @@ def test_worker_candidate_state_reads_nas_published_progress(
         conn.close()
     monkeypatch.setattr(config, 'CANDIDATE_LOCAL_DIR', None)
     monkeypatch.setattr(server, '_conn', lambda: db.connect(database))
-    monkeypatch.setattr(server, '_cached_training_review_stats', lambda _conn: {})
+    monkeypatch.setitem(server._training_review_cache, 'stats', None)
 
     response = server.api_worker_candidate_state()
 
