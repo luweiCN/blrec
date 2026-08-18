@@ -196,6 +196,30 @@ class PostgresCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(len(cursor.calls), 1)
 
+    def test_version_one_schema_migrates_service_runtime_state_table(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.calls: List[Tuple[Any, Sequence[Any]]] = []
+
+            def execute(
+                self, statement: Any, parameters: Sequence[Any] = ()
+            ) -> 'Cursor':
+                self.calls.append((statement, parameters))
+                return self
+
+        cursor = Cursor()
+
+        postgres._apply_incremental_schema_migrations(cursor, 1)
+
+        statements = [str(statement) for statement, _ in cursor.calls]
+        self.assertTrue(
+            any(
+                'CREATE TABLE IF NOT EXISTS service_runtime_states' in value
+                for value in statements
+            )
+        )
+        self.assertEqual(cursor.calls[-1][1], (2,))
+
 
 if __name__ == '__main__':
     unittest.main()

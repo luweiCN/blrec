@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-POSTGRES_SCHEMA_VERSION = 1
+POSTGRES_SCHEMA_VERSION = 2
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
 _INSERT_TABLE = re.compile(
     r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
@@ -52,6 +52,18 @@ AS $$
     FROM jsonb_each(COALESCE(document, '{}')::jsonb) AS item
 $$;
 """
+
+POSTGRES_SCHEMA_MIGRATIONS = {
+    2: (
+        """
+        CREATE TABLE IF NOT EXISTS service_runtime_states (
+            service_key TEXT PRIMARY KEY,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        )
+        """,
+    )
+}
 
 
 class PostgresRow(Mapping[str, Any]):
@@ -367,6 +379,22 @@ def ordered_schema_statements(script: str) -> Tuple[List[str], Set[str]]:
     return ordered + trailing, identities
 
 
+def _apply_incremental_schema_migrations(cursor: Any, version: int) -> None:
+    if not 1 <= version <= POSTGRES_SCHEMA_VERSION:
+        raise RuntimeError(f'Vision Lab PostgreSQL schema 版本 {version} 不受支持')
+    for target_version in range(version + 1, POSTGRES_SCHEMA_VERSION + 1):
+        statements = POSTGRES_SCHEMA_MIGRATIONS.get(target_version)
+        if not statements:
+            raise RuntimeError(f'缺少 PostgreSQL schema v{target_version} 迁移')
+        for statement in statements:
+            cursor.execute(statement)
+        cursor.execute(
+            'INSERT INTO vision_schema_migrations (version, applied_at) '
+            "VALUES (%s, to_char(clock_timestamp(), 'YYYY-MM-DD\"T\"HH24:MI:SS'))",
+            (target_version,),
+        )
+
+
 def _initialize_schema(
     database_url: str,
     schema: str,
@@ -396,7 +424,7 @@ def _initialize_schema(
             'SELECT COALESCE(MAX(version), 0) FROM vision_schema_migrations'
         ).fetchone()
         version = 0 if row is None else int(row[0])
-        if version not in (0, POSTGRES_SCHEMA_VERSION):
+        if not 0 <= version <= POSTGRES_SCHEMA_VERSION:
             raise RuntimeError(f'Vision Lab PostgreSQL schema 版本 {version} 不受支持')
         if version == 0:
             for statement in statements:
@@ -411,6 +439,8 @@ def _initialize_schema(
                 "VALUES (%s, to_char(clock_timestamp(), 'YYYY-MM-DD\"T\"HH24:MI:SS'))",
                 (POSTGRES_SCHEMA_VERSION,),
             )
+        elif version < POSTGRES_SCHEMA_VERSION:
+            _apply_incremental_schema_migrations(cursor, version)
         connection.commit()
         return identities
     except BaseException:
