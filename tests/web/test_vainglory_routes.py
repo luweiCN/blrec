@@ -7,7 +7,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from blrec.bili_upload.remote_media import RemoteMediaQueueStatus
+from blrec.bili_upload.remote_media import (
+    RemoteMediaQueueItem,
+    RemoteMediaQueuePage,
+    RemoteMediaQueueStatus,
+)
 from blrec.vainglory.analyzer import VideoPart
 from blrec.vainglory.archive_backfill import (
     ArchiveBackfillItem,
@@ -1043,11 +1047,13 @@ def test_reads_and_updates_remote_media_download_queue() -> None:
             pending_download_count=2_385,
             active_download_count=6,
             downloaded_waiting_analysis_count=243,
+            downloaded_waiting_analysis_archive_count=172,
             active_analysis_count=3,
             failed_download_count=86,
             downloads_per_interface=3,
             interface_count=2,
             total_concurrency=6,
+            latest_activity_at=1_000,
         )
     )
     cache.update_downloads_per_interface = AsyncMock(
@@ -1055,11 +1061,13 @@ def test_reads_and_updates_remote_media_download_queue() -> None:
             pending_download_count=2_385,
             active_download_count=6,
             downloaded_waiting_analysis_count=243,
+            downloaded_waiting_analysis_archive_count=172,
             active_analysis_count=3,
             failed_download_count=86,
             downloads_per_interface=4,
             interface_count=2,
             total_concurrency=8,
+            latest_activity_at=1_001,
         )
     )
     application = FastAPI()
@@ -1081,17 +1089,83 @@ def test_reads_and_updates_remote_media_download_queue() -> None:
         'pendingDownloadCount': 2_385,
         'activeDownloadCount': 6,
         'downloadedWaitingAnalysisCount': 243,
+        'downloadedWaitingAnalysisArchiveCount': 172,
         'activeAnalysisCount': 3,
         'failedDownloadCount': 86,
         'downloadsPerInterface': 3,
         'interfaceCount': 2,
         'totalConcurrency': 6,
+        'latestActivityAt': 1_000,
     }
     assert updated.status_code == 200
     assert updated.json()['downloadsPerInterface'] == 4
     assert updated.json()['totalConcurrency'] == 8
     cache.queue_status.assert_awaited_once_with()
     cache.update_downloads_per_interface.assert_awaited_once_with(4)
+
+
+def test_lists_and_retries_remote_media_download_items(monkeypatch) -> None:
+    item = RemoteMediaQueueItem(
+        part_id=9,
+        archive_import_id=4,
+        account_id=2,
+        account_name='历史账号',
+        bvid='BV1abcdefgh',
+        archive_title='直播回放',
+        page=2,
+        page_count=3,
+        part_title='P2',
+        queue_state='failed',
+        source_state='failed',
+        analysis_state=None,
+        progress=0,
+        downloaded_bytes=128,
+        total_bytes=1_024,
+        speed_bytes_per_second=None,
+        error='下载中断',
+        updated_at=1_000,
+    )
+    status = RemoteMediaQueueStatus(
+        pending_download_count=1,
+        active_download_count=0,
+        downloaded_waiting_analysis_count=0,
+        downloaded_waiting_analysis_archive_count=0,
+        active_analysis_count=0,
+        failed_download_count=0,
+        downloads_per_interface=1,
+        interface_count=1,
+        total_concurrency=1,
+        latest_activity_at=1_000,
+    )
+    cache = SimpleNamespace(
+        queue_items=AsyncMock(
+            return_value=RemoteMediaQueuePage(total=1, archive_count=1, items=(item,))
+        ),
+        request=AsyncMock(),
+        queue_status=AsyncMock(return_value=status),
+    )
+    backfill = SimpleNamespace(retry_download_part=AsyncMock(return_value=True))
+    monkeypatch.setattr(vainglory, 'archive_backfill', backfill)
+    application = FastAPI()
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[vainglory.authenticated_manager_subject] = (
+        lambda: 'manager'
+    )
+    application.dependency_overrides[vainglory.get_remote_media_cache] = lambda: cache
+
+    with TestClient(application) as client:
+        listed = client.get(
+            '/api/v1/vainglory/archive-download-queue/items',
+            params={'queue_state': 'failed', 'limit': 30, 'offset': 0},
+        )
+        retried = client.post('/api/v1/vainglory/archive-download-queue/items/9/retry')
+
+    assert listed.status_code == 200
+    assert listed.json()['archiveCount'] == 1
+    assert listed.json()['items'][0]['error'] == '下载中断'
+    assert retried.status_code == 200
+    backfill.retry_download_part.assert_awaited_once_with(9)
+    cache.request.assert_awaited_once_with(9, force_remote=True)
 
 
 def test_lists_the_paginated_analysis_queue() -> None:

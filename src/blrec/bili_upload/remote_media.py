@@ -18,6 +18,8 @@ __all__ = (
     'RemoteMediaCache',
     'RemoteMediaDownloader',
     'RemoteMediaNotFound',
+    'RemoteMediaQueueItem',
+    'RemoteMediaQueuePage',
     'RemoteMediaQueueStatus',
     'RemoteMediaStatus',
     'RemoteMediaUnavailable',
@@ -73,11 +75,42 @@ class RemoteMediaQueueStatus:
     pending_download_count: int
     active_download_count: int
     downloaded_waiting_analysis_count: int
+    downloaded_waiting_analysis_archive_count: int
     active_analysis_count: int
     failed_download_count: int
     downloads_per_interface: int
     interface_count: int
     total_concurrency: int
+    latest_activity_at: Optional[int]
+
+
+@dataclass(frozen=True)
+class RemoteMediaQueueItem:
+    part_id: int
+    archive_import_id: Optional[int]
+    account_id: int
+    account_name: str
+    bvid: str
+    archive_title: str
+    page: int
+    page_count: int
+    part_title: str
+    queue_state: str
+    source_state: str
+    analysis_state: Optional[str]
+    progress: float
+    downloaded_bytes: int
+    total_bytes: Optional[int]
+    speed_bytes_per_second: Optional[int]
+    error: Optional[str]
+    updated_at: int
+
+
+@dataclass(frozen=True)
+class RemoteMediaQueuePage:
+    total: int
+    archive_count: int
+    items: Tuple[RemoteMediaQueueItem, ...]
 
 
 class RemoteMediaCache:
@@ -105,6 +138,7 @@ class RemoteMediaCache:
         self._wake = asyncio.Event()
         self._claim_lock = asyncio.Lock()
         self._paused_part_interfaces: Dict[int, str] = {}
+        self._download_speeds: Dict[int, Tuple[float, int, int]] = {}
         self._downloads_per_interface = _DEFAULT_DOWNLOADS_PER_INTERFACE
         self._task: Optional[asyncio.Task[None]] = None
 
@@ -145,12 +179,18 @@ class RemoteMediaCache:
             'COALESCE(SUM(CASE WHEN source.state=\'ready\' '
             "AND (analysis.state IS NULL OR analysis.state='pending') "
             'THEN 1 ELSE 0 END),0) AS downloaded_waiting_analysis_count,'
+            'COUNT(DISTINCT CASE WHEN source.state=\'ready\' '
+            "AND (analysis.state IS NULL OR analysis.state='pending') "
+            'THEN COALESCE(archive.import_id,-source.part_id) END) '
+            'AS downloaded_waiting_analysis_archive_count,'
             'COALESCE(SUM(CASE WHEN source.state=\'ready\' '
             "AND analysis.state='analyzing' THEN 1 ELSE 0 END),0) "
             'AS active_analysis_count,'
             "COALESCE(SUM(CASE WHEN source.state='failed' THEN 1 ELSE 0 END),0) "
-            'AS failed_download_count '
+            'AS failed_download_count,MAX(source.updated_at) AS latest_activity_at '
             'FROM vainglory_video_sources source '
+            'LEFT JOIN vainglory_archive_parts archive '
+            'ON archive.recording_part_id=source.part_id '
             'LEFT JOIN vainglory_part_jobs analysis ON analysis.part_id=source.part_id'
         )
         downloads_per_interface = await self._load_downloads_per_interface()
@@ -163,11 +203,75 @@ class RemoteMediaCache:
             downloaded_waiting_analysis_count=int(
                 counts['downloaded_waiting_analysis_count']
             ),
+            downloaded_waiting_analysis_archive_count=int(
+                counts['downloaded_waiting_analysis_archive_count']
+            ),
             active_analysis_count=int(counts['active_analysis_count']),
             failed_download_count=int(counts['failed_download_count']),
             downloads_per_interface=downloads_per_interface,
             interface_count=interface_count,
             total_concurrency=downloads_per_interface * interface_count,
+            latest_activity_at=(
+                None
+                if counts['latest_activity_at'] is None
+                else int(counts['latest_activity_at'])
+            ),
+        )
+
+    async def queue_items(
+        self, queue_state: str, *, limit: int = 50, offset: int = 0
+    ) -> RemoteMediaQueuePage:
+        conditions = {
+            'pending': "source.state='pending'",
+            'downloading': "source.state='downloading'",
+            'downloaded_waiting_analysis': (
+                "source.state='ready' AND "
+                "(analysis.state IS NULL OR analysis.state='pending')"
+            ),
+            'analyzing': ("source.state='ready' AND analysis.state='analyzing'"),
+            'failed': "source.state='failed'",
+        }
+        condition = conditions.get(queue_state)
+        if condition is None:
+            raise ValueError('下载队列状态无效')
+        if not 1 <= int(limit) <= 200 or int(offset) < 0:
+            raise ValueError('下载队列分页参数无效')
+        joins = (
+            ' FROM vainglory_video_sources source '
+            'LEFT JOIN vainglory_archive_parts archive '
+            'ON archive.recording_part_id=source.part_id '
+            'LEFT JOIN vainglory_archive_imports imported '
+            'ON imported.id=archive.import_id '
+            'LEFT JOIN vainglory_part_jobs analysis '
+            'ON analysis.part_id=source.part_id '
+            'LEFT JOIN recording_parts part ON part.id=source.part_id '
+            'LEFT JOIN recording_sessions session ON session.id=part.session_id '
+            'JOIN bili_accounts account ON account.id=source.account_id '
+        )
+        counts = await self._database.fetchone(
+            'SELECT COUNT(*) AS total,'
+            'COUNT(DISTINCT COALESCE(archive.import_id,-source.part_id)) '
+            'AS archive_count' + joins + 'WHERE ' + condition
+        )
+        rows = await self._database.fetchall(
+            'SELECT source.part_id,archive.import_id AS archive_import_id,'
+            'source.account_id,account.display_name AS account_name,'
+            'source.bvid,COALESCE(imported.title,session.title,source.bvid) '
+            'AS archive_title,source.page,COALESCE(imported.page_count,1) '
+            'AS page_count,COALESCE(archive.title,\'P\' || source.page) '
+            'AS part_title,source.state AS source_state,'
+            'analysis.state AS analysis_state,source.progress,'
+            'source.downloaded_bytes,source.total_bytes,source.error,'
+            'source.updated_at' + joins + 'WHERE ' + condition + ' '
+            'ORDER BY CASE WHEN source.state=\'downloading\' THEN 0 ELSE 1 END,'
+            'source.updated_at DESC,source.part_id DESC LIMIT ? OFFSET ?',
+            (int(limit), int(offset)),
+        )
+        assert counts is not None
+        return RemoteMediaQueuePage(
+            total=int(counts['total']),
+            archive_count=int(counts['archive_count']),
+            items=tuple(self._queue_item(row, queue_state=queue_state) for row in rows),
         )
 
     async def update_downloads_per_interface(
@@ -244,6 +348,7 @@ class RemoteMediaCache:
         if claim is None:
             return False
         part_id = int(claim['part_id'])
+        self._download_speeds[part_id] = (time.monotonic(), 0, 0)
         target = self._target_path(
             int(claim['account_id']), str(claim['bvid']), int(claim['page'])
         )
@@ -297,6 +402,8 @@ class RemoteMediaCache:
             await self._mark_failed(
                 part_id, '{}: {}'.format(type(error).__name__, error)
             )
+        finally:
+            self._download_speeds.pop(part_id, None)
         return True
 
     async def cleanup_expired(self) -> int:
@@ -497,7 +604,8 @@ class RemoteMediaCache:
                     'JOIN vainglory_video_sources active_source '
                     'ON active_source.part_id=active_archive.recording_part_id '
                     'WHERE active_archive.import_id=archive.import_id '
-                    "AND active_source.state='downloading') THEN 0 ELSE 1 END,"
+                    "AND active_source.state IN ('downloading','ready')) "
+                    'THEN 0 ELSE 1 END,'
                     'COALESCE(imported.recording_started_at,'
                     'imported.published_at,imported.created_at,'
                     'source.updated_at) DESC,archive.import_id,archive.page,'
@@ -529,12 +637,55 @@ class RemoteMediaCache:
         total = None if total_bytes is None else max(1, int(total_bytes))
         if total is not None:
             downloaded = min(downloaded, total)
+        current_at = time.monotonic()
+        previous = self._download_speeds.get(int(part_id))
+        speed = 0
+        if previous is not None and current_at > previous[0]:
+            speed = max(0, int((downloaded - previous[1]) / (current_at - previous[0])))
+            if speed == 0:
+                speed = previous[2]
+        self._download_speeds[int(part_id)] = (current_at, downloaded, speed)
         progress = 0.0 if total is None else min(0.99, float(downloaded) / float(total))
         await self._database.execute(
             'UPDATE vainglory_video_sources SET progress=?,downloaded_bytes=?,'
             'total_bytes=?,updated_at=? '
             "WHERE part_id=? AND state='downloading'",
             (progress, downloaded, total, self._now(), int(part_id)),
+        )
+
+    def _queue_item(
+        self, row: sqlite3.Row, *, queue_state: str
+    ) -> RemoteMediaQueueItem:
+        speed_sample = self._download_speeds.get(int(row['part_id']))
+        return RemoteMediaQueueItem(
+            part_id=int(row['part_id']),
+            archive_import_id=(
+                None
+                if row['archive_import_id'] is None
+                else int(row['archive_import_id'])
+            ),
+            account_id=int(row['account_id']),
+            account_name=str(row['account_name']),
+            bvid=str(row['bvid']),
+            archive_title=str(row['archive_title']),
+            page=int(row['page']),
+            page_count=max(1, int(row['page_count'])),
+            part_title=str(row['part_title']),
+            queue_state=queue_state,
+            source_state=str(row['source_state']),
+            analysis_state=(
+                None if row['analysis_state'] is None else str(row['analysis_state'])
+            ),
+            progress=float(row['progress']),
+            downloaded_bytes=int(row['downloaded_bytes']),
+            total_bytes=(
+                None if row['total_bytes'] is None else int(row['total_bytes'])
+            ),
+            speed_bytes_per_second=(
+                None if speed_sample is None else int(speed_sample[2])
+            ),
+            error=None if row['error'] is None else str(row['error']),
+            updated_at=int(row['updated_at']),
         )
 
     async def _complete(self, part_id: int, target: Path, size: int) -> None:

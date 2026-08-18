@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
+from loguru import logger
+
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.errors import BiliApiError
 from blrec.compat import ZoneInfo
@@ -305,6 +307,66 @@ class ArchiveBackfillService:
         if session_id is None:
             self._wake.set()
         return session_id
+
+    async def retry_download_part(self, part_id: int) -> bool:
+        """Reset one failed archive part without restarting the whole import."""
+        now = self._now()
+
+        def retry(connection: sqlite3.Connection) -> bool:
+            row = connection.execute(
+                'SELECT archive.id AS archive_part_id,archive.import_id,'
+                'imported.account_id,imported.page_count '
+                'FROM vainglory_archive_parts archive '
+                'JOIN vainglory_archive_imports imported '
+                'ON imported.id=archive.import_id '
+                'WHERE archive.recording_part_id=?',
+                (int(part_id),),
+            ).fetchone()
+            if row is None:
+                return False
+            connection.execute(
+                'DELETE FROM vainglory_ocr_jobs WHERE part_id=?', (int(part_id),)
+            )
+            connection.execute(
+                "DELETE FROM vainglory_part_jobs WHERE part_id=? AND state='failed'",
+                (int(part_id),),
+            )
+            connection.execute(
+                "UPDATE vainglory_archive_parts SET state='downloading',"
+                'progress=0,error=NULL,updated_at=? WHERE id=?',
+                (now, int(row['archive_part_id'])),
+            )
+            completed = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM vainglory_archive_parts "
+                    "WHERE import_id=? AND state='ready'",
+                    (int(row['import_id']),),
+                ).fetchone()[0]
+            )
+            page_count = max(1, int(row['page_count']))
+            connection.execute(
+                "UPDATE vainglory_archive_imports SET state='analyzing',"
+                'progress=?,completed_page_count=?,error=NULL,retryable=0,'
+                "next_retry_at=NULL,content_classification='unknown',"
+                'classification_reason=NULL,updated_at=? WHERE id=?',
+                (
+                    float(completed) / float(page_count),
+                    completed,
+                    now,
+                    int(row['import_id']),
+                ),
+            )
+            connection.execute(
+                "UPDATE vainglory_archive_syncs SET state='running',"
+                'error=NULL,completed_at=NULL,updated_at=? WHERE account_id=?',
+                (now, int(row['account_id'])),
+            )
+            return True
+
+        retried = await self._database.write(retry)
+        if retried:
+            self._wake.set()
+        return retried
 
     async def status(self, account_id: int) -> ArchiveSync:
         row = await self._database.fetchone(
@@ -2117,8 +2179,33 @@ class ArchiveBackfillService:
         return bool(value)
 
     async def _run(self) -> None:
+        consecutive_failures = 0
         while True:
-            processed = await self.run_once()
+            try:
+                processed = await self.run_once()
+                consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                consecutive_failures += 1
+                retry_seconds = min(
+                    60.0,
+                    max(
+                        self._idle_poll_seconds,
+                        self._idle_poll_seconds
+                        * (2 ** min(consecutive_failures - 1, 6)),
+                    ),
+                )
+                logger.exception(
+                    'Vainglory archive backfill iteration failed; retrying in {}s',
+                    retry_seconds,
+                )
+                self._wake.clear()
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=retry_seconds)
+                except asyncio.TimeoutError:
+                    pass
+                continue
             if processed:
                 continue
             self._wake.clear()

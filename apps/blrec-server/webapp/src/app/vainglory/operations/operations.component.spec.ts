@@ -85,11 +85,13 @@ function downloadQueue(): VaingloryArchiveDownloadQueue {
     pendingDownloadCount: 2_385,
     activeDownloadCount: 6,
     downloadedWaitingAnalysisCount: 243,
+    downloadedWaitingAnalysisArchiveCount: 172,
     activeAnalysisCount: 3,
     failedDownloadCount: 86,
     downloadsPerInterface: 3,
     interfaceCount: 2,
     totalConcurrency: 6,
+    latestActivityAt: 1_000,
   };
 }
 
@@ -196,6 +198,7 @@ describe('OperationsComponent', () => {
           },
         ],
         items: { '7': [] },
+        downloadQueue: { ...downloadQueue(), pendingDownloadCount: 11 },
       },
     });
 
@@ -203,7 +206,7 @@ describe('OperationsComponent', () => {
     expect(component.pendingTaskCount).toBe(7);
     expect(component.activeHistoryCount).toBe(1);
     expect(component.publicationAudit?.verifiedCount).toBe(24);
-    expect(component.archiveDownloadQueue?.pendingDownloadCount).toBe(2_385);
+    expect(component.archiveDownloadQueue?.pendingDownloadCount).toBe(11);
 
     component.queuePublicationAudit();
 

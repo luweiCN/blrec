@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Any, Mapping, Tuple
 
@@ -1926,6 +1927,33 @@ async def test_logically_deleted_local_residue_forces_archive_download(
         )
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_background_loop_retries_after_transient_database_failure() -> None:
+    service = object.__new__(ArchiveBackfillService)
+    service._idle_poll_seconds = 0.01
+    service._wake = asyncio.Event()
+    completed = asyncio.Event()
+    calls = 0
+
+    async def run_once() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError('database tunnel unavailable')
+        completed.set()
+        return False
+
+    service.run_once = run_once
+    task = asyncio.create_task(service._run())
+    try:
+        await asyncio.wait_for(completed.wait(), timeout=0.5)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert calls >= 2
 
 
 async def async_value(value: object) -> object:

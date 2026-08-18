@@ -10,6 +10,8 @@ import {
   VaingloryArchiveBackfillItem,
   VaingloryArchiveBackfillItemPage,
   VaingloryArchiveDownloadQueue,
+  VaingloryArchiveDownloadQueuePage,
+  VaingloryArchiveDownloadQueueState,
   VaingloryHero,
   VaingloryHeroStats,
   VaingloryArchiveSync,
@@ -550,6 +552,33 @@ export class VaingloryService {
     return this.http.patch<VaingloryArchiveDownloadQueue>(
       this.url.makeApiUrl('/api/v1/vainglory/archive-download-queue'),
       { downloadsPerInterface },
+    );
+  }
+
+  listArchiveDownloadQueueItems(
+    queueState: VaingloryArchiveDownloadQueueState,
+    limit = 50,
+    offset = 0,
+  ): Observable<VaingloryArchiveDownloadQueuePage> {
+    return this.http.get<VaingloryArchiveDownloadQueuePage>(
+      this.url.makeApiUrl('/api/v1/vainglory/archive-download-queue/items'),
+      {
+        params: new HttpParams()
+          .set('queue_state', queueState)
+          .set('limit', limit)
+          .set('offset', offset),
+      },
+    );
+  }
+
+  retryArchiveDownload(
+    partId: number,
+  ): Observable<VaingloryArchiveDownloadQueue> {
+    return this.http.post<VaingloryArchiveDownloadQueue>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/archive-download-queue/items/${partId}/retry`,
+      ),
+      {},
     );
   }
 

@@ -193,32 +193,87 @@
         </header>
         <div *ngIf="archiveDownloadQueue as downloadQueue; else downloadQueueLoading">
           <div class="download-queue-stats">
-            <article>
+            <article
+              class="download-queue-action"
+              role="button"
+              tabindex="0"
+              (click)="openArchiveDownloadQueue('pending')"
+              (keydown.enter)="openArchiveDownloadQueue('pending')"
+              (keydown.space)="
+                openArchiveDownloadQueue('pending'); $event.preventDefault()
+              "
+            >
               <span>等待下载</span>
               <strong>{{ downloadQueue.pendingDownloadCount }}</strong>
               <small>分 P</small>
             </article>
-            <article>
+            <article
+              class="download-queue-action"
+              role="button"
+              tabindex="0"
+              (click)="openArchiveDownloadQueue('downloading')"
+              (keydown.enter)="openArchiveDownloadQueue('downloading')"
+              (keydown.space)="
+                openArchiveDownloadQueue('downloading'); $event.preventDefault()
+              "
+            >
               <span>正在下载</span>
               <strong>
-                {{ downloadQueue.activeDownloadCount }}<small>/{{ downloadQueue.totalConcurrency }}</small>
+                {{ downloadQueue.activeDownloadCount
+                }}<small>/{{ downloadQueue.totalConcurrency }}</small>
               </strong>
               <small>实际占用 / 总并发</small>
             </article>
-            <article>
+            <article
+              class="download-queue-action"
+              role="button"
+              tabindex="0"
+              (click)="openArchiveDownloadQueue('downloaded_waiting_analysis')"
+              (keydown.enter)="
+                openArchiveDownloadQueue('downloaded_waiting_analysis')
+              "
+              (keydown.space)="
+                openArchiveDownloadQueue('downloaded_waiting_analysis');
+                $event.preventDefault()
+              "
+            >
               <span>已下载待分析</span>
-              <strong>{{ downloadQueue.downloadedWaitingAnalysisCount }}</strong>
-              <small>分 P</small>
+              <strong>{{
+                downloadQueue.downloadedWaitingAnalysisCount
+              }}</strong>
+              <small>
+                分 P · 涉及
+                {{ downloadQueue.downloadedWaitingAnalysisArchiveCount }} 个稿件
+              </small>
             </article>
-            <article>
+            <article
+              class="download-queue-action"
+              role="button"
+              tabindex="0"
+              (click)="openArchiveDownloadQueue('analyzing')"
+              (keydown.enter)="openArchiveDownloadQueue('analyzing')"
+              (keydown.space)="
+                openArchiveDownloadQueue('analyzing'); $event.preventDefault()
+              "
+            >
               <span>正在分析</span>
               <strong>{{ downloadQueue.activeAnalysisCount }}</strong>
               <small>远程视频分 P</small>
             </article>
-            <article [class.has-error]="downloadQueue.failedDownloadCount > 0">
+            <article
+              class="download-queue-action"
+              [class.has-error]="downloadQueue.failedDownloadCount > 0"
+              role="button"
+              tabindex="0"
+              (click)="openArchiveDownloadQueue('failed')"
+              (keydown.enter)="openArchiveDownloadQueue('failed')"
+              (keydown.space)="
+                openArchiveDownloadQueue('failed'); $event.preventDefault()
+              "
+            >
               <span>下载失败</span>
               <strong>{{ downloadQueue.failedDownloadCount }}</strong>
-              <small>可在任务列表处理</small>
+              <small>点击查看并重试</small>
             </article>
           </div>
           <div class="download-concurrency-control">
@@ -761,6 +816,87 @@
         [nzTotal]="processingQueueTotal"
         [nzShowSizeChanger]="false"
         (nzPageIndexChange)="changeProcessingQueuePage($event)"
+      ></nz-pagination>
+    </footer>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="archiveDownloadQueueDialogVisible"
+  [nzTitle]="archiveDownloadQueueStateLabel(archiveDownloadQueueDialogState)"
+  [nzWidth]="920"
+  [nzFooter]="null"
+>
+  <ng-container *nzModalContent>
+    <p class="download-dialog-summary">
+      共 {{ archiveDownloadQueueDialogTotal }} 个分 P，涉及
+      {{ archiveDownloadQueueDialogArchiveCount }} 个稿件。状态变化会实时刷新。
+    </p>
+    <div *ngIf="archiveDownloadQueueDialogLoading" class="loading-block large">
+      <nz-spin nzSimple></nz-spin><span>正在读取下载明细…</span>
+    </div>
+    <ol *ngIf="!archiveDownloadQueueDialogLoading" class="download-dialog-list">
+      <li
+        *ngFor="
+          let item of archiveDownloadQueueDialogItems;
+          trackBy: trackArchiveDownloadQueueItem
+        "
+      >
+        <nz-tag>{{ archiveDownloadQueueStateLabel(item.queueState) }}</nz-tag>
+        <div class="download-dialog-main">
+          <strong>{{ item.archiveTitle }}</strong>
+          <span>
+            {{ item.accountName }} · {{ item.bvid }} · P{{ item.page }}/{{
+              item.pageCount
+            }}
+            · {{ item.partTitle }}
+          </span>
+          <small *ngIf="item.error" class="download-dialog-error">
+            {{ item.error }}
+          </small>
+        </div>
+        <div class="download-dialog-progress">
+          <nz-progress
+            [nzPercent]="item.progress * 100"
+            [nzShowInfo]="false"
+            [nzStatus]="item.queueState === 'failed' ? 'exception' : 'active'"
+          ></nz-progress>
+          <span>
+            {{ archiveDownloadProgress(item) }}
+            <ng-container *ngIf="archiveDownloadRate(item) as rate">
+              · {{ rate }}
+            </ng-container>
+          </span>
+        </div>
+        <button
+          *ngIf="item.queueState === 'failed'"
+          nz-button
+          nzSize="small"
+          type="button"
+          [nzLoading]="retryingDownloadPartIds.has(item.partId)"
+          [disabled]="retryingDownloadPartIds.has(item.partId)"
+          (click)="retryArchiveDownload(item)"
+        >
+          重新下载
+        </button>
+      </li>
+      <li
+        *ngIf="archiveDownloadQueueDialogItems.length === 0"
+        class="empty-row"
+      >
+        当前状态下没有分 P
+      </li>
+    </ol>
+    <footer
+      *ngIf="archiveDownloadQueueDialogTotal > archiveDownloadQueuePageSize"
+      class="queue-dialog-footer"
+    >
+      <nz-pagination
+        [nzPageIndex]="archiveDownloadQueueDialogPage"
+        [nzPageSize]="archiveDownloadQueuePageSize"
+        [nzTotal]="archiveDownloadQueueDialogTotal"
+        [nzShowSizeChanger]="false"
+        (nzPageIndexChange)="changeArchiveDownloadQueuePage($event)"
       ></nz-pagination>
     </footer>
   </ng-container>

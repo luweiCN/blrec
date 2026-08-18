@@ -11,7 +11,14 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from blrec.bili_upload.remote_media import RemoteMediaCache, RemoteMediaQueueStatus
+from blrec.bili_upload.remote_media import (
+    RemoteMediaCache,
+    RemoteMediaNotFound,
+    RemoteMediaQueueItem,
+    RemoteMediaQueuePage,
+    RemoteMediaQueueStatus,
+    RemoteMediaUnavailable,
+)
 from blrec.logging.audit import audit
 from blrec.utils.string import camel_case
 from blrec.vainglory.analysis_protocol import (
@@ -660,11 +667,40 @@ class ArchiveDownloadQueueResponse(ApiModel):
     pending_download_count: int
     active_download_count: int
     downloaded_waiting_analysis_count: int
+    downloaded_waiting_analysis_archive_count: int
     active_analysis_count: int
     failed_download_count: int
     downloads_per_interface: int
     interface_count: int
     total_concurrency: int
+    latest_activity_at: Optional[int]
+
+
+class ArchiveDownloadQueueItemResponse(ApiModel):
+    part_id: int
+    archive_import_id: Optional[int]
+    account_id: int
+    account_name: str
+    bvid: str
+    archive_title: str
+    page: int
+    page_count: int
+    part_title: str
+    queue_state: str
+    source_state: str
+    analysis_state: Optional[str]
+    progress: float
+    downloaded_bytes: int
+    total_bytes: Optional[int]
+    speed_bytes_per_second: Optional[int]
+    error: Optional[str]
+    updated_at: int
+
+
+class ArchiveDownloadQueuePageResponse(ApiModel):
+    total: int
+    archive_count: int
+    items: List[ArchiveDownloadQueueItemResponse]
 
 
 class ArchiveDownloadQueueControlRequest(ApiModel):
@@ -973,6 +1009,22 @@ def _archive_download_queue(
     value: RemoteMediaQueueStatus,
 ) -> ArchiveDownloadQueueResponse:
     return ArchiveDownloadQueueResponse(**value.__dict__)
+
+
+def _archive_download_queue_item(
+    value: RemoteMediaQueueItem,
+) -> ArchiveDownloadQueueItemResponse:
+    return ArchiveDownloadQueueItemResponse(**value.__dict__)
+
+
+def _archive_download_queue_page(
+    value: RemoteMediaQueuePage,
+) -> ArchiveDownloadQueuePageResponse:
+    return ArchiveDownloadQueuePageResponse(
+        total=value.total,
+        archive_count=value.archive_count,
+        items=[_archive_download_queue_item(item) for item in value.items],
+    )
 
 
 def _archive_content_review(
@@ -1479,6 +1531,46 @@ async def get_archive_download_queue(
     _subject: str = Depends(authenticated_manager_subject),
     cache: RemoteMediaCache = Depends(get_remote_media_cache),
 ) -> ArchiveDownloadQueueResponse:
+    return _archive_download_queue(await cache.queue_status())
+
+
+@router.get(
+    '/archive-download-queue/items', response_model=ArchiveDownloadQueuePageResponse
+)
+async def list_archive_download_queue_items(
+    queue_state: Literal[
+        'pending', 'downloading', 'downloaded_waiting_analysis', 'analyzing', 'failed'
+    ] = Query(...),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    cache: RemoteMediaCache = Depends(get_remote_media_cache),
+) -> ArchiveDownloadQueuePageResponse:
+    try:
+        page = await cache.queue_items(queue_state, limit=limit, offset=offset)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error))
+    return _archive_download_queue_page(page)
+
+
+@router.post(
+    '/archive-download-queue/items/{part_id}/retry',
+    response_model=ArchiveDownloadQueueResponse,
+)
+async def retry_archive_download_queue_item(
+    part_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    cache: RemoteMediaCache = Depends(get_remote_media_cache),
+) -> ArchiveDownloadQueueResponse:
+    try:
+        if archive_backfill is not None:
+            await archive_backfill.retry_download_part(part_id)
+        await cache.request(part_id, force_remote=True)
+    except RemoteMediaNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    except RemoteMediaUnavailable as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    audit('vainglory_archive_download_retried', part_id=part_id)
     return _archive_download_queue(await cache.queue_status())
 
 

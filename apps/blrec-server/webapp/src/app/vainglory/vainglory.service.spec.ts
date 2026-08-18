@@ -314,6 +314,20 @@ describe('VaingloryService', () => {
     expect(updated.request.method).toBe('PATCH');
     expect(updated.request.body).toEqual({ downloadsPerInterface: 4 });
     updated.flush({ downloadsPerInterface: 4, totalConcurrency: 8 });
+
+    service.listArchiveDownloadQueueItems('failed', 30, 60).subscribe();
+    const items = http.expectOne(
+      '/api/v1/vainglory/archive-download-queue/items?queue_state=failed&limit=30&offset=60',
+    );
+    expect(items.request.method).toBe('GET');
+    items.flush({ total: 0, archiveCount: 0, items: [] });
+
+    service.retryArchiveDownload(9).subscribe();
+    const retried = http.expectOne(
+      '/api/v1/vainglory/archive-download-queue/items/9/retry',
+    );
+    expect(retried.request.method).toBe('POST');
+    retried.flush({ downloadsPerInterface: 4, totalConcurrency: 8 });
   });
 
   it('loads one page of waiting analysis tasks', () => {

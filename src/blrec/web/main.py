@@ -581,8 +581,26 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
 
 async def _realtime_archive_backfill_snapshot() -> Mapping[str, object]:
     service = _bili_account_runtime.archive_backfill
+    remote_media_cache = _bili_account_runtime.remote_media_cache
+    download_queue: Optional[Dict[str, object]] = None
+    if remote_media_cache is not None:
+        queue = await remote_media_cache.queue_status()
+        download_queue = {
+            'pendingDownloadCount': queue.pending_download_count,
+            'activeDownloadCount': queue.active_download_count,
+            'downloadedWaitingAnalysisCount': (queue.downloaded_waiting_analysis_count),
+            'downloadedWaitingAnalysisArchiveCount': (
+                queue.downloaded_waiting_analysis_archive_count
+            ),
+            'activeAnalysisCount': queue.active_analysis_count,
+            'failedDownloadCount': queue.failed_download_count,
+            'downloadsPerInterface': queue.downloads_per_interface,
+            'interfaceCount': queue.interface_count,
+            'totalConcurrency': queue.total_concurrency,
+            'latestActivityAt': queue.latest_activity_at,
+        }
     if service is None:
-        return {'syncs': [], 'items': {}}
+        return {'syncs': [], 'items': {}, 'downloadQueue': download_queue}
     statuses = await service.list_statuses()
     syncs: List[Dict[str, object]] = []
     items: Dict[str, object] = {}
@@ -643,7 +661,7 @@ async def _realtime_archive_backfill_snapshot() -> Mapping[str, object]:
             }
             for item in item_values
         ]
-    return {'syncs': syncs, 'items': items}
+    return {'syncs': syncs, 'items': items, 'downloadQueue': download_queue}
 
 
 _realtime_sampler = RealtimeSampler(

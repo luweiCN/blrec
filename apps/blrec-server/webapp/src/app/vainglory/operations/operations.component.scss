@@ -278,6 +278,24 @@
     &.has-error strong {
       color: #cf1322;
     }
+
+    &.download-queue-action {
+      cursor: pointer;
+      transition:
+        background 160ms ease,
+        box-shadow 160ms ease;
+
+      &:hover {
+        background: #f6faff;
+      }
+
+      &:focus-visible {
+        position: relative;
+        z-index: 1;
+        outline: 2px solid #1677ff;
+        outline-offset: -2px;
+      }
+    }
   }
 }
 
@@ -778,6 +796,83 @@
   padding-top: 14px;
 }
 
+.download-dialog-summary {
+  margin: 0 0 12px;
+  color: #595959;
+  font-size: 13px;
+}
+
+.download-dialog-list {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  border: 1px solid #edf0f4;
+  border-radius: 8px;
+
+  li {
+    display: grid;
+    grid-template-columns: 104px minmax(0, 1fr) 180px auto;
+    align-items: center;
+    min-width: 0;
+    padding: 12px 14px;
+    gap: 12px;
+    border-top: 1px solid #f0f0f0;
+
+    &:first-child {
+      border-top: 0;
+    }
+
+    &.empty-row {
+      display: block;
+      padding: 36px 16px;
+      color: #8c8c8c;
+      text-align: center;
+    }
+  }
+}
+
+.download-dialog-main,
+.download-dialog-progress {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+
+  strong,
+  span,
+  small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: #262626;
+    font-size: 14px;
+  }
+
+  span,
+  small {
+    color: #8c8c8c;
+    font-size: 12px;
+  }
+
+  .download-dialog-error {
+    color: #cf1322;
+  }
+}
+
+.download-dialog-progress {
+  nz-progress {
+    width: 100%;
+  }
+
+  span {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
 @media (max-width: 1080px) {
   .operations-summary,
   .evidence-grid {
@@ -959,6 +1054,23 @@
     > .queue-progress {
       grid-column: 2;
       text-align: left;
+    }
+  }
+
+  .download-dialog-list li {
+    grid-template-columns: 88px minmax(0, 1fr);
+
+    .download-dialog-progress,
+    > button {
+      grid-column: 2;
+    }
+
+    .download-dialog-progress span {
+      text-align: left;
+    }
+
+    > button {
+      justify-self: start;
     }
   }
 

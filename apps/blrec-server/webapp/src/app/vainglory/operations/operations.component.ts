@@ -27,6 +27,8 @@ import {
   VaingloryArchiveBackfillItem,
   VaingloryArchiveBackfillRealtimeSnapshot,
   VaingloryArchiveDownloadQueue,
+  VaingloryArchiveDownloadQueueItem,
+  VaingloryArchiveDownloadQueueState,
   VaingloryArchiveSync,
   VaingloryIndexRealtimeSnapshot,
   VaingloryPublicationAudit,
@@ -64,6 +66,17 @@ export class OperationsComponent implements OnInit, OnDestroy {
   archiveDownloadQueueLoading = true;
   archiveDownloadQueueSaving = false;
   archiveDownloadConcurrencyDraft: number | null = null;
+  archiveDownloadQueueDialogVisible = false;
+  archiveDownloadQueueDialogState: VaingloryArchiveDownloadQueueState =
+    'pending';
+  archiveDownloadQueueDialogItems: readonly VaingloryArchiveDownloadQueueItem[] =
+    [];
+  archiveDownloadQueueDialogTotal = 0;
+  archiveDownloadQueueDialogArchiveCount = 0;
+  archiveDownloadQueueDialogPage = 1;
+  archiveDownloadQueueDialogLoading = false;
+  readonly archiveDownloadQueuePageSize = 30;
+  readonly retryingDownloadPartIds = new Set<number>();
   archiveItemsByAccountId: ReadonlyMap<
     number,
     readonly VaingloryArchiveBackfillItem[]
@@ -396,6 +409,73 @@ export class OperationsComponent implements OnInit, OnDestroy {
 
   refreshArchiveDownloadQueue(): void {
     this.loadArchiveDownloadQueue();
+  }
+
+  openArchiveDownloadQueue(state: VaingloryArchiveDownloadQueueState): void {
+    this.archiveDownloadQueueDialogState = state;
+    this.archiveDownloadQueueDialogPage = 1;
+    this.archiveDownloadQueueDialogVisible = true;
+    this.loadArchiveDownloadQueueItems();
+  }
+
+  changeArchiveDownloadQueuePage(page: number): void {
+    this.archiveDownloadQueueDialogPage = page;
+    this.loadArchiveDownloadQueueItems();
+  }
+
+  archiveDownloadQueueStateLabel(
+    state: VaingloryArchiveDownloadQueueState,
+  ): string {
+    return {
+      pending: '等待下载',
+      downloading: '正在下载',
+      downloaded_waiting_analysis: '已下载待分析',
+      analyzing: '正在分析',
+      failed: '下载失败',
+    }[state];
+  }
+
+  retryArchiveDownload(item: VaingloryArchiveDownloadQueueItem): void {
+    if (this.retryingDownloadPartIds.has(item.partId)) {
+      return;
+    }
+    this.retryingDownloadPartIds.add(item.partId);
+    this.vainglory
+      .retryArchiveDownload(item.partId)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.retryingDownloadPartIds.delete(item.partId);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (queue) => {
+          this.archiveDownloadQueue = queue;
+          this.actionMessage = `${item.archiveTitle} · P${item.page} 已重新加入下载队列`;
+          this.loadArchiveDownloadQueueItems();
+        },
+        error: (error: unknown) => {
+          this.pageError = this.errorMessage(error, '下载任务重试失败');
+        },
+      });
+  }
+
+  archiveDownloadProgress(item: VaingloryArchiveDownloadQueueItem): string {
+    if (item.totalBytes === null) {
+      return item.downloadedBytes > 0
+        ? this.formatBytes(item.downloadedBytes)
+        : `${Math.round(item.progress * 100)}%`;
+    }
+    return `${this.formatBytes(item.downloadedBytes)} / ${this.formatBytes(
+      item.totalBytes,
+    )}`;
+  }
+
+  archiveDownloadRate(item: VaingloryArchiveDownloadQueueItem): string {
+    return item.speedBytesPerSecond === null
+      ? ''
+      : `${this.formatBytes(item.speedBytesPerSecond)}/s`;
   }
 
   saveArchiveDownloadConcurrency(): void {
@@ -861,6 +941,13 @@ export class OperationsComponent implements OnInit, OnDestroy {
     return item.id;
   }
 
+  trackArchiveDownloadQueueItem(
+    _index: number,
+    item: VaingloryArchiveDownloadQueueItem,
+  ): number {
+    return item.partId;
+  }
+
   private loadAccounts(showLoading = true): void {
     if (showLoading) {
       this.accountsLoading = true;
@@ -983,6 +1070,40 @@ export class OperationsComponent implements OnInit, OnDestroy {
       });
   }
 
+  private loadArchiveDownloadQueueItems(): void {
+    if (
+      !this.archiveDownloadQueueDialogVisible ||
+      this.archiveDownloadQueueDialogLoading
+    ) {
+      return;
+    }
+    this.archiveDownloadQueueDialogLoading = true;
+    const offset =
+      (this.archiveDownloadQueueDialogPage - 1) *
+      this.archiveDownloadQueuePageSize;
+    this.vainglory
+      .listArchiveDownloadQueueItems(
+        this.archiveDownloadQueueDialogState,
+        this.archiveDownloadQueuePageSize,
+        offset,
+      )
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (page) => {
+          this.archiveDownloadQueueDialogItems = page.items;
+          this.archiveDownloadQueueDialogTotal = page.total;
+          this.archiveDownloadQueueDialogArchiveCount = page.archiveCount;
+          this.archiveDownloadQueueDialogLoading = false;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.archiveDownloadQueueDialogLoading = false;
+          this.pageError = this.errorMessage(error, '下载队列明细读取失败');
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
   private loadPublicationAudit(showLoading = true): void {
     if (showLoading) {
       this.auditLoading = true;
@@ -1054,6 +1175,15 @@ export class OperationsComponent implements OnInit, OnDestroy {
         snapshot.items[String(sync.accountId)] ?? [],
       ]),
     );
+    if (snapshot.downloadQueue) {
+      this.archiveDownloadQueue = snapshot.downloadQueue;
+      this.archiveDownloadConcurrencyDraft =
+        snapshot.downloadQueue.downloadsPerInterface;
+      this.archiveDownloadQueueLoading = false;
+    }
+    if (this.archiveDownloadQueueDialogVisible) {
+      this.loadArchiveDownloadQueueItems();
+    }
     this.changeDetector.markForCheck();
   }
 
@@ -1224,5 +1354,20 @@ export class OperationsComponent implements OnInit, OnDestroy {
       return typeof detail === 'string' && detail ? detail : fallback;
     }
     return error instanceof Error && error.message ? error.message : fallback;
+  }
+
+  private formatBytes(bytes: number): string {
+    const value = Math.max(0, bytes);
+    if (value < 1024) {
+      return `${Math.round(value)} B`;
+    }
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let scaled = value / 1024;
+    let unit = units[0];
+    for (let index = 1; index < units.length && scaled >= 1024; index += 1) {
+      scaled /= 1024;
+      unit = units[index];
+    }
+    return `${scaled >= 100 ? scaled.toFixed(0) : scaled.toFixed(1)} ${unit}`;
   }
 }

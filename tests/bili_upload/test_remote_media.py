@@ -299,6 +299,100 @@ async def test_manual_reanalysis_downloads_before_regular_remote_media(
 
 
 @pytest.mark.asyncio
+async def test_finishes_started_archive_before_downloading_newer_archive(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first_path = tmp_path / 'archive-1-p1.mp4'
+        first_path.write_bytes(b'ready')
+        await seed_remote_part(database, first_path)
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,final_path,'
+            'record_start_time,artifact_state,video_deleted_at,file_size_bytes,'
+            'created_at,updated_at) '
+            "VALUES(2,1,'run:1',2,?,NULL,2,'missing',50,0,2,2)",
+            (str(tmp_path / 'archive-1-p2.mp4'),),
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(2,200,'session:2','closed',2,'更新但未开始的稿件')"
+        )
+        await database.execute(
+            "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+            "VALUES('run:2',2,'finished',2,3)"
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,final_path,'
+            'record_start_time,artifact_state,video_deleted_at,file_size_bytes,'
+            'created_at,updated_at) '
+            "VALUES(3,2,'run:2',1,?,NULL,2,'missing',50,0,3,3)",
+            (str(tmp_path / 'archive-2-p1.mp4'),),
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,published_at,session_id,state,progress,'
+            'page_count,completed_page_count,created_at,updated_at,'
+            'recording_started_at) '
+            "VALUES(1,1,101,'BV1abcdefgh','已开始稿件',1,1,'analyzing',0.5,"
+            "2,0,1,1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,published_at,session_id,state,progress,'
+            'page_count,completed_page_count,created_at,updated_at,'
+            'recording_started_at) '
+            "VALUES(2,1,102,'BV1ijklmnop','更新稿件',2,2,'analyzing',0,"
+            "1,0,2,2,2)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_parts('
+            'id,import_id,page,cid,title,duration_seconds,recording_part_id,'
+            'state,progress,created_at,updated_at) VALUES'
+            "(1,1,1,101,'P1',60,1,'analyzing',0.5,1,1),"
+            "(2,1,2,102,'P2',60,2,'downloading',0,1,1),"
+            "(3,2,1,201,'P1',60,3,'downloading',0,2,2)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_video_sources('
+            'part_id,account_id,bvid,cid,page,origin,state,retention_kind,'
+            'progress,downloaded_bytes,total_bytes,cache_path,'
+            'original_artifact_state,cached_at,expires_at,created_at,updated_at) '
+            "VALUES(1,1,'BV1abcdefgh',101,1,'archive','ready','analysis',"
+            "1,5,5,?,'missing',1,9999,1,1),"
+            "(2,1,'BV1abcdefgh',102,2,'archive','pending','analysis',"
+            "0,0,NULL,NULL,'missing',NULL,NULL,1,1),"
+            "(3,1,'BV1ijklmnop',201,1,'archive','pending','analysis',"
+            "0,0,NULL,NULL,'missing',NULL,NULL,2,2)",
+            (str(first_path),),
+        )
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=FakeDownloader(),
+            clock=lambda: 1_000,
+        )
+
+        claim = await cache._claim(None)
+
+        assert claim is not None
+        assert int(claim['part_id']) == 2
+        assert (
+            await database.scalar(
+                'SELECT state FROM vainglory_video_sources WHERE part_id=3'
+            )
+            == 'pending'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_user_download_promotes_analysis_cache_to_ten_days(
     tmp_path: Path,
 ) -> None:
@@ -399,11 +493,18 @@ async def test_reports_and_persists_remote_download_queue_concurrency(
         assert initial.pending_download_count == 1
         assert initial.active_download_count == 0
         assert initial.downloaded_waiting_analysis_count == 0
+        assert initial.downloaded_waiting_analysis_archive_count == 0
         assert initial.active_analysis_count == 0
         assert initial.failed_download_count == 0
         assert initial.downloads_per_interface == 3
         assert initial.interface_count == 2
         assert initial.total_concurrency == 6
+
+        page = await cache.queue_items('pending')
+        assert page.total == 1
+        assert page.archive_count == 1
+        assert page.items[0].part_id == 1
+        assert page.items[0].archive_title == '已投稿录像'
 
         updated = await cache.update_downloads_per_interface(5)
 

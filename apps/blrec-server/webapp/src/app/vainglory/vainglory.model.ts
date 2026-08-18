@@ -89,11 +89,47 @@ export interface VaingloryArchiveDownloadQueue {
   readonly pendingDownloadCount: number;
   readonly activeDownloadCount: number;
   readonly downloadedWaitingAnalysisCount: number;
+  readonly downloadedWaitingAnalysisArchiveCount: number;
   readonly activeAnalysisCount: number;
   readonly failedDownloadCount: number;
   readonly downloadsPerInterface: number;
   readonly interfaceCount: number;
   readonly totalConcurrency: number;
+  readonly latestActivityAt: number | null;
+}
+
+export type VaingloryArchiveDownloadQueueState =
+  | 'pending'
+  | 'downloading'
+  | 'downloaded_waiting_analysis'
+  | 'analyzing'
+  | 'failed';
+
+export interface VaingloryArchiveDownloadQueueItem {
+  readonly partId: number;
+  readonly archiveImportId: number | null;
+  readonly accountId: number;
+  readonly accountName: string;
+  readonly bvid: string;
+  readonly archiveTitle: string;
+  readonly page: number;
+  readonly pageCount: number;
+  readonly partTitle: string;
+  readonly queueState: VaingloryArchiveDownloadQueueState;
+  readonly sourceState: string;
+  readonly analysisState: string | null;
+  readonly progress: number;
+  readonly downloadedBytes: number;
+  readonly totalBytes: number | null;
+  readonly speedBytesPerSecond: number | null;
+  readonly error: string | null;
+  readonly updatedAt: number;
+}
+
+export interface VaingloryArchiveDownloadQueuePage {
+  readonly total: number;
+  readonly archiveCount: number;
+  readonly items: readonly VaingloryArchiveDownloadQueueItem[];
 }
 
 export type ArchiveBackfillStage =
@@ -404,6 +440,7 @@ export interface VaingloryArchiveBackfillRealtimeSnapshot {
   readonly items: Readonly<
     Record<string, readonly VaingloryArchiveBackfillItem[]>
   >;
+  readonly downloadQueue?: VaingloryArchiveDownloadQueue | null;
 }
 
 export interface VaingloryPublicationAudit {
