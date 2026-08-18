@@ -179,7 +179,7 @@
           <div>
             <h3 id="download-queue-title">远程视频下载队列</h3>
             <p>
-              这里显示真实分 P 数量；“今日入队”是稿件加入流水线的数量，不代表已经下载完成。
+              主数字显示涉及的直播场次，分 P 数用于核对实际下载与分析工作量。
             </p>
           </div>
           <button
@@ -204,8 +204,10 @@
               "
             >
               <span>等待下载</span>
-              <strong>{{ downloadQueue.pendingDownloadCount }}</strong>
-              <small>分 P</small>
+              <strong>{{ downloadQueue.pendingDownloadArchiveCount }}</strong>
+              <small>
+                场直播 · {{ downloadQueue.pendingDownloadCount }} 个分 P
+              </small>
             </article>
             <article
               class="download-queue-action"
@@ -218,11 +220,11 @@
               "
             >
               <span>正在下载</span>
-              <strong>
-                {{ downloadQueue.activeDownloadCount
-                }}<small>/{{ downloadQueue.totalConcurrency }}</small>
-              </strong>
-              <small>实际占用 / 总并发</small>
+              <strong>{{ downloadQueue.activeDownloadArchiveCount }}</strong>
+              <small>
+                场直播 · {{ downloadQueue.activeDownloadCount }} 个分 P ·
+                {{ downloadQueue.totalConcurrency }} 路总并发
+              </small>
             </article>
             <article
               class="download-queue-action"
@@ -239,11 +241,11 @@
             >
               <span>已下载待分析</span>
               <strong>{{
-                downloadQueue.downloadedWaitingAnalysisCount
+                downloadQueue.downloadedWaitingAnalysisArchiveCount
               }}</strong>
               <small>
-                分 P · 涉及
-                {{ downloadQueue.downloadedWaitingAnalysisArchiveCount }} 个稿件
+                场直播 ·
+                {{ downloadQueue.downloadedWaitingAnalysisCount }} 个分 P
               </small>
             </article>
             <article
@@ -257,8 +259,10 @@
               "
             >
               <span>正在分析</span>
-              <strong>{{ downloadQueue.activeAnalysisCount }}</strong>
-              <small>远程视频分 P</small>
+              <strong>{{ downloadQueue.activeAnalysisArchiveCount }}</strong>
+              <small>
+                场直播 · {{ downloadQueue.activeAnalysisCount }} 个分 P
+              </small>
             </article>
             <article
               class="download-queue-action"
@@ -272,8 +276,11 @@
               "
             >
               <span>下载失败</span>
-              <strong>{{ downloadQueue.failedDownloadCount }}</strong>
-              <small>点击查看并重试</small>
+              <strong>{{ downloadQueue.failedDownloadArchiveCount }}</strong>
+              <small>
+                场直播 · {{ downloadQueue.failedDownloadCount }} 个分 P ·
+                点击处理
+              </small>
             </article>
           </div>
           <div class="download-concurrency-control">
@@ -824,18 +831,44 @@
 <nz-modal
   [(nzVisible)]="archiveDownloadQueueDialogVisible"
   [nzTitle]="archiveDownloadQueueStateLabel(archiveDownloadQueueDialogState)"
-  [nzWidth]="920"
+  [nzWidth]="'min(920px, calc(100vw - 32px))'"
   [nzFooter]="null"
+  (nzOnCancel)="closeArchiveDownloadQueue()"
 >
   <ng-container *nzModalContent>
-    <p class="download-dialog-summary">
-      共 {{ archiveDownloadQueueDialogTotal }} 个分 P，涉及
-      {{ archiveDownloadQueueDialogArchiveCount }} 个稿件。状态变化会实时刷新。
-    </p>
-    <div *ngIf="archiveDownloadQueueDialogLoading" class="loading-block large">
-      <nz-spin nzSimple></nz-spin><span>正在读取下载明细…</span>
-    </div>
-    <ol *ngIf="!archiveDownloadQueueDialogLoading" class="download-dialog-list">
+    <section class="download-dialog-shell">
+      <header class="download-dialog-toolbar">
+        <p class="download-dialog-summary">
+          共 {{ archiveDownloadQueueDialogTotal }} 个分 P，涉及
+          {{ archiveDownloadQueueDialogArchiveCount }} 场直播。
+          <span *ngIf="archiveDownloadQueueDialogRefreshing">正在更新…</span>
+        </p>
+        <button
+          *ngIf="
+            archiveDownloadQueueDialogState === 'failed' &&
+            archiveDownloadQueueDialogTotal > 0
+          "
+          nz-button
+          nzType="primary"
+          nzSize="small"
+          type="button"
+          [nzLoading]="archiveDownloadRetryAllLoading"
+          [disabled]="archiveDownloadRetryAllLoading"
+          (click)="retryAllFailedArchiveDownloads()"
+        >
+          全部重试
+        </button>
+      </header>
+      <div
+        *ngIf="archiveDownloadQueueDialogLoading"
+        class="loading-block large"
+      >
+        <nz-spin nzSimple></nz-spin><span>正在读取下载明细…</span>
+      </div>
+      <ol
+        *ngIf="!archiveDownloadQueueDialogLoading"
+        class="download-dialog-list"
+      >
       <li
         *ngFor="
           let item of archiveDownloadQueueDialogItems;
@@ -886,19 +919,20 @@
       >
         当前状态下没有分 P
       </li>
-    </ol>
-    <footer
-      *ngIf="archiveDownloadQueueDialogTotal > archiveDownloadQueuePageSize"
-      class="queue-dialog-footer"
-    >
-      <nz-pagination
-        [nzPageIndex]="archiveDownloadQueueDialogPage"
-        [nzPageSize]="archiveDownloadQueuePageSize"
-        [nzTotal]="archiveDownloadQueueDialogTotal"
-        [nzShowSizeChanger]="false"
-        (nzPageIndexChange)="changeArchiveDownloadQueuePage($event)"
-      ></nz-pagination>
-    </footer>
+      </ol>
+      <footer
+        *ngIf="archiveDownloadQueueDialogTotal > archiveDownloadQueuePageSize"
+        class="queue-dialog-footer"
+      >
+        <nz-pagination
+          [nzPageIndex]="archiveDownloadQueueDialogPage"
+          [nzPageSize]="archiveDownloadQueuePageSize"
+          [nzTotal]="archiveDownloadQueueDialogTotal"
+          [nzShowSizeChanger]="false"
+          (nzPageIndexChange)="changeArchiveDownloadQueuePage($event)"
+        ></nz-pagination>
+      </footer>
+    </section>
   </ng-container>
 </nz-modal>
 

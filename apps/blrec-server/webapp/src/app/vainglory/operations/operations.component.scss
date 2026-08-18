@@ -734,6 +734,9 @@
 .queue-dialog-list {
   margin: 0;
   padding: 0;
+  max-height: min(64vh, 680px);
+  overflow-x: hidden;
+  overflow-y: auto;
   list-style: none;
   border: 1px solid #edf0f4;
   border-radius: 8px;
@@ -796,16 +799,40 @@
   padding-top: 14px;
 }
 
+.download-dialog-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: min(720px, calc(100vh - 180px));
+  min-height: min(420px, calc(100vh - 180px));
+  overflow: hidden;
+}
+
+.download-dialog-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  gap: 12px;
+}
+
 .download-dialog-summary {
-  margin: 0 0 12px;
+  min-width: 0;
+  margin: 0;
   color: #595959;
   font-size: 13px;
+
+  span {
+    margin-left: 6px;
+    color: #1677ff;
+  }
 }
 
 .download-dialog-list {
+  min-height: 0;
   margin: 0;
   padding: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   list-style: none;
   border: 1px solid #edf0f4;
   border-radius: 8px;
@@ -1081,6 +1108,15 @@
 }
 
 @media (max-width: 430px) {
+  .download-dialog-shell {
+    max-height: calc(100vh - 144px);
+    min-height: min(360px, calc(100vh - 144px));
+  }
+
+  .download-dialog-toolbar {
+    align-items: flex-start;
+  }
+
   .operations-header {
     display: grid;
   }

@@ -73,11 +73,15 @@ class RemoteMediaStatus:
 @dataclass(frozen=True)
 class RemoteMediaQueueStatus:
     pending_download_count: int
+    pending_download_archive_count: int
     active_download_count: int
+    active_download_archive_count: int
     downloaded_waiting_analysis_count: int
     downloaded_waiting_analysis_archive_count: int
     active_analysis_count: int
+    active_analysis_archive_count: int
     failed_download_count: int
+    failed_download_archive_count: int
     downloads_per_interface: int
     interface_count: int
     total_concurrency: int
@@ -174,8 +178,14 @@ class RemoteMediaCache:
             'SELECT '
             "COALESCE(SUM(CASE WHEN source.state='pending' THEN 1 ELSE 0 END),0) "
             'AS pending_download_count,'
+            "COUNT(DISTINCT CASE WHEN source.state='pending' "
+            'THEN COALESCE(archive.import_id,-source.part_id) END) '
+            'AS pending_download_archive_count,'
             "COALESCE(SUM(CASE WHEN source.state='downloading' THEN 1 ELSE 0 END),0) "
             'AS active_download_count,'
+            "COUNT(DISTINCT CASE WHEN source.state='downloading' "
+            'THEN COALESCE(archive.import_id,-source.part_id) END) '
+            'AS active_download_archive_count,'
             'COALESCE(SUM(CASE WHEN source.state=\'ready\' '
             "AND (analysis.state IS NULL OR analysis.state='pending') "
             'THEN 1 ELSE 0 END),0) AS downloaded_waiting_analysis_count,'
@@ -186,8 +196,16 @@ class RemoteMediaCache:
             'COALESCE(SUM(CASE WHEN source.state=\'ready\' '
             "AND analysis.state='analyzing' THEN 1 ELSE 0 END),0) "
             'AS active_analysis_count,'
+            'COUNT(DISTINCT CASE WHEN source.state=\'ready\' '
+            "AND analysis.state='analyzing' "
+            'THEN COALESCE(archive.import_id,-source.part_id) END) '
+            'AS active_analysis_archive_count,'
             "COALESCE(SUM(CASE WHEN source.state='failed' THEN 1 ELSE 0 END),0) "
-            'AS failed_download_count,MAX(source.updated_at) AS latest_activity_at '
+            'AS failed_download_count,'
+            "COUNT(DISTINCT CASE WHEN source.state='failed' "
+            'THEN COALESCE(archive.import_id,-source.part_id) END) '
+            'AS failed_download_archive_count,'
+            'MAX(source.updated_at) AS latest_activity_at '
             'FROM vainglory_video_sources source '
             'LEFT JOIN vainglory_archive_parts archive '
             'ON archive.recording_part_id=source.part_id '
@@ -199,7 +217,11 @@ class RemoteMediaCache:
         assert counts is not None
         return RemoteMediaQueueStatus(
             pending_download_count=int(counts['pending_download_count']),
+            pending_download_archive_count=int(
+                counts['pending_download_archive_count']
+            ),
             active_download_count=int(counts['active_download_count']),
+            active_download_archive_count=int(counts['active_download_archive_count']),
             downloaded_waiting_analysis_count=int(
                 counts['downloaded_waiting_analysis_count']
             ),
@@ -207,7 +229,9 @@ class RemoteMediaCache:
                 counts['downloaded_waiting_analysis_archive_count']
             ),
             active_analysis_count=int(counts['active_analysis_count']),
+            active_analysis_archive_count=int(counts['active_analysis_archive_count']),
             failed_download_count=int(counts['failed_download_count']),
+            failed_download_archive_count=int(counts['failed_download_archive_count']),
             downloads_per_interface=downloads_per_interface,
             interface_count=interface_count,
             total_concurrency=downloads_per_interface * interface_count,
@@ -262,9 +286,17 @@ class RemoteMediaCache:
             'AS part_title,source.state AS source_state,'
             'analysis.state AS analysis_state,source.progress,'
             'source.downloaded_bytes,source.total_bytes,source.error,'
-            'source.updated_at' + joins + 'WHERE ' + condition + ' '
-            'ORDER BY CASE WHEN source.state=\'downloading\' THEN 0 ELSE 1 END,'
-            'source.updated_at DESC,source.part_id DESC LIMIT ? OFFSET ?',
+            'source.updated_at'
+            + joins
+            + 'WHERE '
+            + condition
+            + ' '
+            + (
+                'ORDER BY source.part_id ASC '
+                if queue_state == 'downloading'
+                else 'ORDER BY source.updated_at DESC,source.part_id DESC '
+            )
+            + 'LIMIT ? OFFSET ?',
             (int(limit), int(offset)),
         )
         assert counts is not None
@@ -273,6 +305,13 @@ class RemoteMediaCache:
             archive_count=int(counts['archive_count']),
             items=tuple(self._queue_item(row, queue_state=queue_state) for row in rows),
         )
+
+    async def failed_part_ids(self) -> Tuple[int, ...]:
+        rows = await self._database.fetchall(
+            'SELECT part_id FROM vainglory_video_sources '
+            "WHERE state='failed' ORDER BY part_id"
+        )
+        return tuple(int(row['part_id']) for row in rows)
 
     async def update_downloads_per_interface(
         self, downloads_per_interface: int

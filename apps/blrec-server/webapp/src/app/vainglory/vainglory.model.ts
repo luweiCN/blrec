@@ -87,11 +87,15 @@ export interface VaingloryArchiveSyncControl {
 
 export interface VaingloryArchiveDownloadQueue {
   readonly pendingDownloadCount: number;
+  readonly pendingDownloadArchiveCount: number;
   readonly activeDownloadCount: number;
+  readonly activeDownloadArchiveCount: number;
   readonly downloadedWaitingAnalysisCount: number;
   readonly downloadedWaitingAnalysisArchiveCount: number;
   readonly activeAnalysisCount: number;
+  readonly activeAnalysisArchiveCount: number;
   readonly failedDownloadCount: number;
+  readonly failedDownloadArchiveCount: number;
   readonly downloadsPerInterface: number;
   readonly interfaceCount: number;
   readonly totalConcurrency: number;
@@ -130,6 +134,12 @@ export interface VaingloryArchiveDownloadQueuePage {
   readonly total: number;
   readonly archiveCount: number;
   readonly items: readonly VaingloryArchiveDownloadQueueItem[];
+}
+
+export interface VaingloryArchiveDownloadRetryFailedResult {
+  readonly retriedCount: number;
+  readonly failedCount: number;
+  readonly queue: VaingloryArchiveDownloadQueue;
 }
 
 export type ArchiveBackfillStage =

@@ -11,6 +11,7 @@ import { BiliAccountService } from '../../uploads/shared/bili-account.service';
 import {
   VaingloryAnalysisQueue,
   VaingloryArchiveDownloadQueue,
+  VaingloryArchiveDownloadQueueItem,
   VaingloryPublicationAudit,
 } from '../vainglory.model';
 import { VaingloryService } from '../vainglory.service';
@@ -83,15 +84,45 @@ function audit(staleCount = 2): VaingloryPublicationAudit {
 function downloadQueue(): VaingloryArchiveDownloadQueue {
   return {
     pendingDownloadCount: 2_385,
+    pendingDownloadArchiveCount: 1_420,
     activeDownloadCount: 6,
+    activeDownloadArchiveCount: 3,
     downloadedWaitingAnalysisCount: 243,
     downloadedWaitingAnalysisArchiveCount: 172,
     activeAnalysisCount: 3,
+    activeAnalysisArchiveCount: 2,
     failedDownloadCount: 86,
+    failedDownloadArchiveCount: 61,
     downloadsPerInterface: 3,
     interfaceCount: 2,
     totalConcurrency: 6,
     latestActivityAt: 1_000,
+  };
+}
+
+function downloadItem(
+  partId: number,
+  progress = 0.25,
+): VaingloryArchiveDownloadQueueItem {
+  return {
+    partId,
+    archiveImportId: 4,
+    accountId: 2,
+    accountName: '历史账号',
+    bvid: 'BV1abcdefgh',
+    archiveTitle: '直播回放',
+    page: partId,
+    pageCount: 3,
+    partTitle: `P${partId}`,
+    queueState: 'downloading',
+    sourceState: 'downloading',
+    analysisState: null,
+    progress,
+    downloadedBytes: 128,
+    totalBytes: 1_024,
+    speedBytesPerSecond: 64,
+    error: null,
+    updatedAt: 1_000,
   };
 }
 
@@ -366,5 +397,100 @@ describe('OperationsComponent', () => {
       [7, 20, 20],
     ]);
     component.ngOnDestroy();
+  });
+
+  it('keeps download rows visible while realtime refreshes silently', () => {
+    const events = new Subject<RealtimeEvent>();
+    const refresh = new Subject<{
+      total: number;
+      archiveCount: number;
+      items: readonly VaingloryArchiveDownloadQueueItem[];
+    }>();
+    const vainglory = jasmine.createSpyObj<VaingloryService>(
+      'VaingloryService',
+      [
+        'getPublicationAudit',
+        'listPublicationRecords',
+        'getArchiveDownloadQueue',
+        'listArchiveDownloadQueueItems',
+      ],
+    );
+    vainglory.getPublicationAudit.and.returnValue(of(audit()));
+    vainglory.listPublicationRecords.and.returnValue(
+      of({ total: 0, items: [] }),
+    );
+    vainglory.getArchiveDownloadQueue.and.returnValue(of(downloadQueue()));
+    vainglory.listArchiveDownloadQueueItems.and.returnValues(
+      of({ total: 1, archiveCount: 1, items: [downloadItem(1)] }),
+      refresh,
+    );
+    const accounts = jasmine.createSpyObj<BiliAccountService>(
+      'BiliAccountService',
+      ['listAccounts', 'listArchiveMigrations'],
+    );
+    accounts.listAccounts.and.returnValue(of([]));
+    accounts.listArchiveMigrations.and.returnValue(of([]));
+    const component = new OperationsComponent(
+      jasmine.createSpyObj<ChangeDetectorRef>('ChangeDetectorRef', [
+        'markForCheck',
+      ]),
+      { events$: events.asObservable() } as RealtimeService,
+      vainglory,
+      accounts,
+      jasmine.createSpyObj<Router>('Router', ['navigate']),
+    );
+    component.ngOnInit();
+    component.openArchiveDownloadQueue('downloading');
+
+    events.next({
+      type: 'archive_backfill',
+      data: { syncs: [], items: {}, downloadQueue: downloadQueue() },
+    });
+
+    expect(component.archiveDownloadQueueDialogLoading).toBeFalse();
+    expect(component.archiveDownloadQueueDialogRefreshing).toBeTrue();
+    expect(component.archiveDownloadQueueDialogItems[0].partId).toBe(1);
+
+    refresh.next({
+      total: 1,
+      archiveCount: 1,
+      items: [downloadItem(1, 0.75)],
+    });
+    expect(component.archiveDownloadQueueDialogRefreshing).toBeFalse();
+    expect(component.archiveDownloadQueueDialogItems[0].progress).toBe(0.75);
+
+    component.closeArchiveDownloadQueue();
+    expect(component.archiveDownloadQueueDialogVisible).toBeFalse();
+    component.ngOnDestroy();
+  });
+
+  it('retries every failed download through one server operation', () => {
+    const vainglory = jasmine.createSpyObj<VaingloryService>(
+      'VaingloryService',
+      ['retryFailedArchiveDownloads', 'listArchiveDownloadQueueItems'],
+    );
+    vainglory.retryFailedArchiveDownloads.and.returnValue(
+      of({ retriedCount: 8, failedCount: 0, queue: downloadQueue() }),
+    );
+    vainglory.listArchiveDownloadQueueItems.and.returnValue(
+      of({ total: 0, archiveCount: 0, items: [] }),
+    );
+    const component = new OperationsComponent(
+      jasmine.createSpyObj<ChangeDetectorRef>('ChangeDetectorRef', [
+        'markForCheck',
+      ]),
+      { events$: NEVER } as unknown as RealtimeService,
+      vainglory,
+      {} as BiliAccountService,
+      jasmine.createSpyObj<Router>('Router', ['navigate']),
+    );
+    component.archiveDownloadQueueDialogVisible = true;
+    component.archiveDownloadQueueDialogState = 'failed';
+
+    component.retryAllFailedArchiveDownloads();
+
+    expect(vainglory.retryFailedArchiveDownloads).toHaveBeenCalledTimes(1);
+    expect(component.actionMessage).toContain('8 个失败分 P');
+    expect(component.archiveDownloadRetryAllLoading).toBeFalse();
   });
 });

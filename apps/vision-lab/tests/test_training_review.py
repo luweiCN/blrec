@@ -663,6 +663,103 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
         self.assertEqual([item['frame_id'] for item in page], [correction])
         self.assertEqual(page_total, 1)
 
+    def test_material_suggestions_count_confirmed_and_actionable_candidates(self):
+        confirmed = self.frame(12)
+        pending_select = self.frame(13)
+        pending_hud = self.frame(14)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=confirmed,
+            source_type='worker',
+            source_id='confirmed-select',
+        )
+        db.save_training_review(
+            self.conn,
+            frame_id=confirmed,
+            match_flow_label='not_match_flow',
+            match_mode_label=None,
+            hero_select_label='select_3v3',
+            hero_select_variant='bp',
+            result_panel_label='no_result_panel',
+            hero_layout_label='none',
+            status='confirmed',
+            result_groups={},
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=pending_select,
+            source_type='worker',
+            source_id='pending-select',
+            suggestions={'hero_select': {'label': 'select_5v5', 'confidence': 0.91}},
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=pending_hud,
+            source_type='worker',
+            source_id='pending-hud',
+            suggestions={'match_mode': {'label': 'aram', 'confidence': 0.88}},
+            metadata={
+                'hero_context_suggestion': {
+                    'screen_type': 'gameplay_hud',
+                    'confidence': 0.9,
+                }
+            },
+        )
+
+        suggestions = db.training_review_stats(self.conn)['material_suggestions']
+        select_5v5 = next(
+            item
+            for item in suggestions
+            if item['scene'] == 'hero_select' and item['match_mode'] == '5v5'
+        )
+        hud_aram = next(
+            item
+            for item in suggestions
+            if item['scene'] == 'gameplay_hud' and item['match_mode'] == 'aram'
+        )
+
+        self.assertEqual(select_5v5['confirmed_count'], 0)
+        self.assertEqual(select_5v5['candidate_count'], 1)
+        self.assertEqual(select_5v5['source_scope'], 'new')
+        self.assertEqual(
+            select_5v5['filters'],
+            {'status': 'needs_review', 'scene': 'hero_select', 'match_mode': '5v5'},
+        )
+        self.assertEqual(hud_aram['candidate_count'], 1)
+        self.assertEqual(
+            [
+                item['frame_id']
+                for item in db.list_training_review_items(
+                    self.conn,
+                    status='needs_review',
+                    source_scope='new',
+                    scene='gameplay_hud',
+                    match_mode='aram',
+                )
+            ],
+            [pending_hud],
+        )
+
+    def test_hero_select_mode_filter_uses_select_model_suggestion(self):
+        frame_id = self.frame(15)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='select-only-mode',
+            suggestions={'hero_select': {'label': 'select_5v5', 'confidence': 0.92}},
+        )
+
+        items = db.list_training_review_items(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            scene='hero_select',
+            match_mode='5v5',
+        )
+
+        self.assertEqual([item['frame_id'] for item in items], [frame_id])
+
     def test_review_queue_filters_any_selected_hero(self):
         adagio = self.frame(20)
         vox = self.frame(21)

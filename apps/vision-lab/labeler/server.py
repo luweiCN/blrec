@@ -11,7 +11,7 @@ import json
 import secrets
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -170,6 +170,25 @@ _TRAINING_REVIEW_CACHE_SECONDS = 300.0
 
 def _conn():
     return db.connect(config.DB_PATH)
+
+
+@contextmanager
+def _training_review_read_guard():
+    if config.DATABASE_URL:
+        yield
+        return
+    with _db_lock:
+        yield
+
+
+def _single_training_review_item(conn: Any, frame_id: int) -> Optional[Dict[str, Any]]:
+    with _training_review_cache_lock:
+        cached_groups = _training_review_cache['groups']
+    return db.get_training_review_item(
+        conn,
+        frame_id,
+        result_groups=cached_groups if isinstance(cached_groups, dict) else {},
+    )
 
 
 def _cached_training_review_groups(conn: Any) -> Dict[int, Dict[str, Any]]:
@@ -1287,7 +1306,7 @@ def api_training_review_items(
     confidence: str = '',
     include_stats: bool = True,
 ) -> Dict[str, Any]:
-    with _db_lock:
+    with _training_review_read_guard():
         conn = _conn()
         try:
             try:
@@ -1383,7 +1402,7 @@ def api_training_review_prefill(frame_id: int, body: Dict[str, Any]) -> Dict[str
         with _db_lock:
             conn = _conn()
             try:
-                item = db.get_training_review_item(conn, frame_id)
+                item = _single_training_review_item(conn, frame_id)
                 if item is None:
                     raise HTTPException(404, '训练复核图片不存在')
                 models = model_prefill.latest_model_specs(
@@ -1439,7 +1458,7 @@ def api_training_review_prefill(frame_id: int, body: Dict[str, Any]) -> Dict[str
         try:
             try:
                 return model_prefill.prefill_training_review_item(
-                    conn, frame_id, force=bool(body.get('force'))
+                    conn, frame_id, force=bool(body.get('force')), result_groups={}
                 )
             except KeyError as exc:
                 raise HTTPException(404, str(exc)) from exc
@@ -1573,7 +1592,7 @@ def _remote_training_review_hero_lineup(
     with _db_lock:
         conn = _conn()
         try:
-            item = db.get_training_review_item(conn, frame_id)
+            item = _single_training_review_item(conn, frame_id)
             if item is None:
                 raise HTTPException(404, '训练复核图片不存在')
             existing = db.get_training_review_hero_lineup(conn, frame_id)
@@ -1748,7 +1767,7 @@ def api_training_review_hero_lineup(
     with _db_lock:
         conn = _conn()
         try:
-            item = db.get_training_review_item(conn, frame_id)
+            item = _single_training_review_item(conn, frame_id)
             if item is None:
                 raise HTTPException(404, '训练复核图片不存在')
             existing = db.get_training_review_hero_lineup(conn, frame_id)
@@ -1819,7 +1838,7 @@ def api_training_review_hero_lineup(
                         team_size=inferred_size,
                         result=model_result,
                     )
-                    item = db.get_training_review_item(conn, frame_id) or item
+                    item = _single_training_review_item(conn, frame_id) or item
                 finally:
                     conn.close()
             return _hero_lineup_payload(lineup, item=item)
@@ -1894,7 +1913,7 @@ def api_training_review_hero_lineup(
                     team_size=inferred_size,
                     result=model_result,
                 )
-                item = db.get_training_review_item(conn, frame_id) or item
+                item = _single_training_review_item(conn, frame_id) or item
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
@@ -1929,7 +1948,7 @@ def api_save_training_review_hero_layout(
     with _db_lock:
         conn = _conn()
         try:
-            item = db.get_training_review_item(conn, frame_id)
+            item = _single_training_review_item(conn, frame_id)
             existing = db.get_training_review_hero_lineup(conn, frame_id)
         finally:
             conn.close()
@@ -2003,7 +2022,7 @@ def api_save_training_review_hero_layout(
                         team_size=team_size,
                         result=model_result,
                     )
-                    item = db.get_training_review_item(conn, frame_id) or item
+                    item = _single_training_review_item(conn, frame_id) or item
                 if save_template and template_streamer:
                     db.save_training_review_hero_template(
                         conn,
@@ -2054,7 +2073,7 @@ def api_training_review_hero_crop(frame_id: int, side: str, slot: int) -> Respon
     with _db_lock:
         conn = _conn()
         try:
-            item = db.get_training_review_item(conn, frame_id)
+            item = _single_training_review_item(conn, frame_id)
             lineup = db.get_training_review_hero_lineup(conn, frame_id)
         finally:
             conn.close()
@@ -3741,9 +3760,11 @@ def _apply_remote_model_prefill(
     if frame_id <= 0:
         raise ValueError('预填任务缺少 frame_id')
     if operation == 'core':
-        item = model_prefill.apply_core_prefill(conn, frame_id, result)
+        item = model_prefill.apply_core_prefill(
+            conn, frame_id, result, result_groups={}
+        )
         return {'applied': True, 'frame_id': frame_id, 'item': item}
-    item = db.get_training_review_item(conn, frame_id)
+    item = _single_training_review_item(conn, frame_id)
     if item is None:
         raise KeyError(f'训练复核图片不存在: {frame_id}')
     existing = db.get_training_review_hero_lineup(conn, frame_id)

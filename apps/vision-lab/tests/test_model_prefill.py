@@ -113,6 +113,28 @@ class TestModelPrefill(unittest.TestCase):
         self.conn.close()
         self.tmp.cleanup()
 
+    def test_apply_core_prefill_can_skip_global_result_group_scan(self):
+        with mock.patch.object(
+            db,
+            'training_review_result_groups',
+            side_effect=AssertionError('不应执行全量结算图分组'),
+        ):
+            item = model_prefill.apply_core_prefill(
+                self.conn,
+                self.frame_id,
+                {
+                    'suggestions': {},
+                    'model_outputs': [],
+                    'suggested_boxes': [],
+                    'hero_context_suggestion': None,
+                    'errors': {},
+                    'model_runs': {},
+                },
+                result_groups={},
+            )
+
+        self.assertEqual(item['frame_id'], self.frame_id)
+
     def test_prefill_uses_latest_runs_and_keeps_human_fields_empty(self):
         def prediction(_artifact, metadata, _image, conf_thr=0.25):
             task_id = metadata['task_id']

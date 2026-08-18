@@ -665,11 +665,15 @@ class ArchiveBackfillItemPageResponse(ApiModel):
 
 class ArchiveDownloadQueueResponse(ApiModel):
     pending_download_count: int
+    pending_download_archive_count: int
     active_download_count: int
+    active_download_archive_count: int
     downloaded_waiting_analysis_count: int
     downloaded_waiting_analysis_archive_count: int
     active_analysis_count: int
+    active_analysis_archive_count: int
     failed_download_count: int
+    failed_download_archive_count: int
     downloads_per_interface: int
     interface_count: int
     total_concurrency: int
@@ -701,6 +705,12 @@ class ArchiveDownloadQueuePageResponse(ApiModel):
     total: int
     archive_count: int
     items: List[ArchiveDownloadQueueItemResponse]
+
+
+class ArchiveDownloadRetryFailedResponse(ApiModel):
+    retried_count: int
+    failed_count: int
+    queue: ArchiveDownloadQueueResponse
 
 
 class ArchiveDownloadQueueControlRequest(ApiModel):
@@ -1572,6 +1582,38 @@ async def retry_archive_download_queue_item(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
     audit('vainglory_archive_download_retried', part_id=part_id)
     return _archive_download_queue(await cache.queue_status())
+
+
+@router.post(
+    '/archive-download-queue/retry-failed',
+    response_model=ArchiveDownloadRetryFailedResponse,
+)
+async def retry_failed_archive_downloads(
+    _subject: str = Depends(authenticated_manager_subject),
+    cache: RemoteMediaCache = Depends(get_remote_media_cache),
+) -> ArchiveDownloadRetryFailedResponse:
+    part_ids = await cache.failed_part_ids()
+    retried_count = 0
+    failed_count = 0
+    for part_id in part_ids:
+        try:
+            if archive_backfill is not None:
+                await archive_backfill.retry_download_part(part_id)
+            await cache.request(part_id, force_remote=True)
+        except (RemoteMediaNotFound, RemoteMediaUnavailable):
+            failed_count += 1
+        else:
+            retried_count += 1
+    queue = _archive_download_queue(await cache.queue_status())
+    audit(
+        'vainglory_archive_downloads_retried',
+        requested_count=len(part_ids),
+        retried_count=retried_count,
+        failed_count=failed_count,
+    )
+    return ArchiveDownloadRetryFailedResponse(
+        retried_count=retried_count, failed_count=failed_count, queue=queue
+    )
 
 
 @router.patch('/archive-download-queue', response_model=ArchiveDownloadQueueResponse)

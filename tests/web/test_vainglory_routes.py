@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Iterator, List, Optional, Tuple
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 from fastapi import FastAPI
@@ -1045,11 +1045,15 @@ def test_reads_and_updates_remote_media_download_queue() -> None:
     cache.queue_status = AsyncMock(
         return_value=RemoteMediaQueueStatus(
             pending_download_count=2_385,
+            pending_download_archive_count=1_420,
             active_download_count=6,
+            active_download_archive_count=3,
             downloaded_waiting_analysis_count=243,
             downloaded_waiting_analysis_archive_count=172,
             active_analysis_count=3,
+            active_analysis_archive_count=2,
             failed_download_count=86,
+            failed_download_archive_count=61,
             downloads_per_interface=3,
             interface_count=2,
             total_concurrency=6,
@@ -1059,11 +1063,15 @@ def test_reads_and_updates_remote_media_download_queue() -> None:
     cache.update_downloads_per_interface = AsyncMock(
         return_value=RemoteMediaQueueStatus(
             pending_download_count=2_385,
+            pending_download_archive_count=1_420,
             active_download_count=6,
+            active_download_archive_count=3,
             downloaded_waiting_analysis_count=243,
             downloaded_waiting_analysis_archive_count=172,
             active_analysis_count=3,
+            active_analysis_archive_count=2,
             failed_download_count=86,
+            failed_download_archive_count=61,
             downloads_per_interface=4,
             interface_count=2,
             total_concurrency=8,
@@ -1087,11 +1095,15 @@ def test_reads_and_updates_remote_media_download_queue() -> None:
     assert current.status_code == 200
     assert current.json() == {
         'pendingDownloadCount': 2_385,
+        'pendingDownloadArchiveCount': 1_420,
         'activeDownloadCount': 6,
+        'activeDownloadArchiveCount': 3,
         'downloadedWaitingAnalysisCount': 243,
         'downloadedWaitingAnalysisArchiveCount': 172,
         'activeAnalysisCount': 3,
+        'activeAnalysisArchiveCount': 2,
         'failedDownloadCount': 86,
+        'failedDownloadArchiveCount': 61,
         'downloadsPerInterface': 3,
         'interfaceCount': 2,
         'totalConcurrency': 6,
@@ -1127,11 +1139,15 @@ def test_lists_and_retries_remote_media_download_items(monkeypatch) -> None:
     )
     status = RemoteMediaQueueStatus(
         pending_download_count=1,
+        pending_download_archive_count=1,
         active_download_count=0,
+        active_download_archive_count=0,
         downloaded_waiting_analysis_count=0,
         downloaded_waiting_analysis_archive_count=0,
         active_analysis_count=0,
+        active_analysis_archive_count=0,
         failed_download_count=0,
+        failed_download_archive_count=0,
         downloads_per_interface=1,
         interface_count=1,
         total_concurrency=1,
@@ -1141,6 +1157,7 @@ def test_lists_and_retries_remote_media_download_items(monkeypatch) -> None:
         queue_items=AsyncMock(
             return_value=RemoteMediaQueuePage(total=1, archive_count=1, items=(item,))
         ),
+        failed_part_ids=AsyncMock(return_value=(9, 10)),
         request=AsyncMock(),
         queue_status=AsyncMock(return_value=status),
     )
@@ -1159,13 +1176,24 @@ def test_lists_and_retries_remote_media_download_items(monkeypatch) -> None:
             params={'queue_state': 'failed', 'limit': 30, 'offset': 0},
         )
         retried = client.post('/api/v1/vainglory/archive-download-queue/items/9/retry')
+        retried_all = client.post(
+            '/api/v1/vainglory/archive-download-queue/retry-failed'
+        )
 
     assert listed.status_code == 200
     assert listed.json()['archiveCount'] == 1
     assert listed.json()['items'][0]['error'] == '下载中断'
     assert retried.status_code == 200
-    backfill.retry_download_part.assert_awaited_once_with(9)
-    cache.request.assert_awaited_once_with(9, force_remote=True)
+    assert retried_all.status_code == 200
+    assert retried_all.json()['retriedCount'] == 2
+    assert retried_all.json()['failedCount'] == 0
+    assert retried_all.json()['queue']['totalConcurrency'] == 1
+    assert backfill.retry_download_part.await_args_list == [call(9), call(9), call(10)]
+    assert cache.request.await_args_list == [
+        call(9, force_remote=True),
+        call(9, force_remote=True),
+        call(10, force_remote=True),
+    ]
 
 
 def test_lists_the_paginated_analysis_queue() -> None:

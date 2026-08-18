@@ -491,11 +491,15 @@ async def test_reports_and_persists_remote_download_queue_concurrency(
         initial = await cache.queue_status()
 
         assert initial.pending_download_count == 1
+        assert initial.pending_download_archive_count == 1
         assert initial.active_download_count == 0
+        assert initial.active_download_archive_count == 0
         assert initial.downloaded_waiting_analysis_count == 0
         assert initial.downloaded_waiting_analysis_archive_count == 0
         assert initial.active_analysis_count == 0
+        assert initial.active_analysis_archive_count == 0
         assert initial.failed_download_count == 0
+        assert initial.failed_download_archive_count == 0
         assert initial.downloads_per_interface == 3
         assert initial.interface_count == 2
         assert initial.total_concurrency == 6
@@ -519,6 +523,109 @@ async def test_reports_and_persists_remote_download_queue_concurrency(
             clock=lambda: 1_001,
         )
         assert (await restarted.queue_status()).downloads_per_interface == 5
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_status_reports_distinct_livestreams_and_parts(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        missing = tmp_path / 'deleted.mp4'
+        await seed_remote_part(database, missing)
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,final_path,'
+            'record_start_time,artifact_state,video_deleted_at,file_size_bytes,'
+            'created_at,updated_at) '
+            "VALUES(2,1,'run:1',2,?,NULL,2,'missing',50,0,2,2)",
+            (str(tmp_path / 'deleted-2.mp4'),),
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,published_at,session_id,state,progress,'
+            'page_count,completed_page_count,created_at,updated_at) '
+            "VALUES(1,1,101,'BV1abcdefgh','两分批直播',1,1,'queued',0,2,0,1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_parts('
+            'id,import_id,page,cid,title,duration_seconds,recording_part_id,state,'
+            'progress,created_at,updated_at) VALUES'
+            "(1,1,1,123,'P1',60,1,'queued',0,1,1),"
+            "(2,1,2,124,'P2',60,2,'queued',0,1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_video_sources('
+            'part_id,account_id,bvid,cid,page,origin,state,retention_kind,'
+            'progress,downloaded_bytes,original_artifact_state,created_at,'
+            'updated_at) VALUES'
+            "(1,1,'BV1abcdefgh',123,1,'archive','pending','analysis',"
+            "0,0,'missing',1,1),"
+            "(2,1,'BV1abcdefgh',124,2,'archive','pending','analysis',"
+            "0,0,'missing',1,1)"
+        )
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=FakeDownloader(),
+            clock=lambda: 1_000,
+        )
+
+        status = await cache.queue_status()
+
+        assert status.pending_download_count == 2
+        assert status.pending_download_archive_count == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_keeps_active_download_order_stable_while_progress_changes(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        missing = tmp_path / 'deleted.mp4'
+        await seed_remote_part(database, missing)
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,final_path,'
+            'record_start_time,artifact_state,video_deleted_at,file_size_bytes,'
+            'created_at,updated_at) '
+            "VALUES(2,1,'run:1',2,?,NULL,2,'missing',50,0,2,2)",
+            (str(tmp_path / 'deleted-2.mp4'),),
+        )
+        await database.execute(
+            'INSERT INTO vainglory_video_sources('
+            'part_id,account_id,bvid,cid,page,origin,state,retention_kind,'
+            'progress,downloaded_bytes,original_artifact_state,created_at,'
+            'updated_at) VALUES'
+            "(1,1,'BV1abcdefgh',123,1,'archive','downloading','analysis',"
+            "0.2,20,'missing',1,20),"
+            "(2,1,'BV1abcdefgh',124,2,'archive','downloading','analysis',"
+            "0.1,10,'missing',2,10)"
+        )
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=FakeDownloader(),
+            clock=lambda: 1_000,
+        )
+
+        before = await cache.queue_items('downloading')
+        await database.execute(
+            'UPDATE vainglory_video_sources SET updated_at=30 WHERE part_id=2'
+        )
+        after = await cache.queue_items('downloading')
+
+        assert [item.part_id for item in before.items] == [1, 2]
+        assert [item.part_id for item in after.items] == [1, 2]
     finally:
         await database.close()
 

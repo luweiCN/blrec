@@ -222,10 +222,14 @@ def run_core_prefill(
 
 
 def apply_core_prefill(
-    conn: Any, frame_id: int, result: Dict[str, Any]
+    conn: Any,
+    frame_id: int,
+    result: Dict[str, Any],
+    *,
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """把 Worker 推理结果保存为建议；永远不覆盖人工真值。"""
-    item = db.get_training_review_item(conn, int(frame_id))
+    item = db.get_training_review_item(conn, int(frame_id), result_groups=result_groups)
     if item is None:
         raise KeyError(f'训练复核图片不存在: {frame_id}')
     db.add_training_review_source(
@@ -243,7 +247,10 @@ def apply_core_prefill(
         },
         image_path=str(item['frame_path']),
     )
-    return db.get_training_review_item(conn, int(frame_id)) or item
+    return (
+        db.get_training_review_item(conn, int(frame_id), result_groups=result_groups)
+        or item
+    )
 
 
 def prefill_training_review_item(
@@ -252,8 +259,9 @@ def prefill_training_review_item(
     *,
     task_ids: Iterable[str] = CORE_PREFILL_TASKS,
     force: bool = False,
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    item = db.get_training_review_item(conn, int(frame_id))
+    item = db.get_training_review_item(conn, int(frame_id), result_groups=result_groups)
     if item is None:
         raise KeyError(f'训练复核图片不存在: {frame_id}')
     frame_path = Path(str(item['frame_path']))
@@ -281,7 +289,7 @@ def prefill_training_review_item(
             }
 
     result = run_core_prefill(frame_path, contexts)
-    item = apply_core_prefill(conn, int(frame_id), result)
+    item = apply_core_prefill(conn, int(frame_id), result, result_groups=result_groups)
     return {
         'applied': bool(result['suggestions']),
         'cached': False,

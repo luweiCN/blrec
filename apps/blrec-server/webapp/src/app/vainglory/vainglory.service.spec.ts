@@ -328,6 +328,17 @@ describe('VaingloryService', () => {
     );
     expect(retried.request.method).toBe('POST');
     retried.flush({ downloadsPerInterface: 4, totalConcurrency: 8 });
+
+    service.retryFailedArchiveDownloads().subscribe();
+    const retriedAll = http.expectOne(
+      '/api/v1/vainglory/archive-download-queue/retry-failed',
+    );
+    expect(retriedAll.request.method).toBe('POST');
+    retriedAll.flush({
+      retriedCount: 3,
+      failedCount: 0,
+      queue: { downloadsPerInterface: 4, totalConcurrency: 8 },
+    });
   });
 
   it('loads one page of waiting analysis tasks', () => {

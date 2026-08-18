@@ -11,6 +11,7 @@ import {
   VaingloryArchiveBackfillItemPage,
   VaingloryArchiveDownloadQueue,
   VaingloryArchiveDownloadQueuePage,
+  VaingloryArchiveDownloadRetryFailedResult,
   VaingloryArchiveDownloadQueueState,
   VaingloryHero,
   VaingloryHeroStats,
@@ -577,6 +578,15 @@ export class VaingloryService {
     return this.http.post<VaingloryArchiveDownloadQueue>(
       this.url.makeApiUrl(
         `/api/v1/vainglory/archive-download-queue/items/${partId}/retry`,
+      ),
+      {},
+    );
+  }
+
+  retryFailedArchiveDownloads(): Observable<VaingloryArchiveDownloadRetryFailedResult> {
+    return this.http.post<VaingloryArchiveDownloadRetryFailedResult>(
+      this.url.makeApiUrl(
+        '/api/v1/vainglory/archive-download-queue/retry-failed',
       ),
       {},
     );

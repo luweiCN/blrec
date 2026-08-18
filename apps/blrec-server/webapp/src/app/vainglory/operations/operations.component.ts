@@ -75,6 +75,8 @@ export class OperationsComponent implements OnInit, OnDestroy {
   archiveDownloadQueueDialogArchiveCount = 0;
   archiveDownloadQueueDialogPage = 1;
   archiveDownloadQueueDialogLoading = false;
+  archiveDownloadQueueDialogRefreshing = false;
+  archiveDownloadRetryAllLoading = false;
   readonly archiveDownloadQueuePageSize = 30;
   readonly retryingDownloadPartIds = new Set<number>();
   archiveItemsByAccountId: ReadonlyMap<
@@ -135,6 +137,7 @@ export class OperationsComponent implements OnInit, OnDestroy {
   historyQueuePage = 1;
 
   private readonly destroy$ = new Subject<void>();
+  private archiveDownloadQueueDialogRequestId = 0;
 
   constructor(
     private changeDetector: ChangeDetectorRef,
@@ -414,13 +417,24 @@ export class OperationsComponent implements OnInit, OnDestroy {
   openArchiveDownloadQueue(state: VaingloryArchiveDownloadQueueState): void {
     this.archiveDownloadQueueDialogState = state;
     this.archiveDownloadQueueDialogPage = 1;
+    this.archiveDownloadQueueDialogItems = [];
+    this.archiveDownloadQueueDialogTotal = 0;
+    this.archiveDownloadQueueDialogArchiveCount = 0;
     this.archiveDownloadQueueDialogVisible = true;
-    this.loadArchiveDownloadQueueItems();
+    this.loadArchiveDownloadQueueItems(true, true);
+  }
+
+  closeArchiveDownloadQueue(): void {
+    this.archiveDownloadQueueDialogVisible = false;
+    this.archiveDownloadQueueDialogRequestId += 1;
+    this.archiveDownloadQueueDialogLoading = false;
+    this.archiveDownloadQueueDialogRefreshing = false;
   }
 
   changeArchiveDownloadQueuePage(page: number): void {
     this.archiveDownloadQueueDialogPage = page;
-    this.loadArchiveDownloadQueueItems();
+    this.archiveDownloadQueueDialogItems = [];
+    this.loadArchiveDownloadQueueItems(true, true);
   }
 
   archiveDownloadQueueStateLabel(
@@ -453,10 +467,39 @@ export class OperationsComponent implements OnInit, OnDestroy {
         next: (queue) => {
           this.archiveDownloadQueue = queue;
           this.actionMessage = `${item.archiveTitle} · P${item.page} 已重新加入下载队列`;
-          this.loadArchiveDownloadQueueItems();
+          this.loadArchiveDownloadQueueItems(false, true);
         },
         error: (error: unknown) => {
           this.pageError = this.errorMessage(error, '下载任务重试失败');
+        },
+      });
+  }
+
+  retryAllFailedArchiveDownloads(): void {
+    if (this.archiveDownloadRetryAllLoading) {
+      return;
+    }
+    this.archiveDownloadRetryAllLoading = true;
+    this.vainglory
+      .retryFailedArchiveDownloads()
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.archiveDownloadRetryAllLoading = false;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (result) => {
+          this.archiveDownloadQueue = result.queue;
+          this.actionMessage = `已将 ${result.retriedCount} 个失败分 P 重新加入下载队列`;
+          if (result.failedCount > 0) {
+            this.pageError = `${result.failedCount} 个分 P 暂时无法重试，请查看失败原因`;
+          }
+          this.loadArchiveDownloadQueueItems(false, true);
+        },
+        error: (error: unknown) => {
+          this.pageError = this.errorMessage(error, '批量重试下载任务失败');
         },
       });
   }
@@ -1070,14 +1113,26 @@ export class OperationsComponent implements OnInit, OnDestroy {
       });
   }
 
-  private loadArchiveDownloadQueueItems(): void {
+  private loadArchiveDownloadQueueItems(
+    showLoading = true,
+    force = false,
+  ): void {
+    if (!this.archiveDownloadQueueDialogVisible) {
+      return;
+    }
     if (
-      !this.archiveDownloadQueueDialogVisible ||
-      this.archiveDownloadQueueDialogLoading
+      !force &&
+      (this.archiveDownloadQueueDialogLoading ||
+        this.archiveDownloadQueueDialogRefreshing)
     ) {
       return;
     }
-    this.archiveDownloadQueueDialogLoading = true;
+    const requestId = ++this.archiveDownloadQueueDialogRequestId;
+    if (showLoading) {
+      this.archiveDownloadQueueDialogLoading = true;
+    } else {
+      this.archiveDownloadQueueDialogRefreshing = true;
+    }
     const offset =
       (this.archiveDownloadQueueDialogPage - 1) *
       this.archiveDownloadQueuePageSize;
@@ -1090,14 +1145,22 @@ export class OperationsComponent implements OnInit, OnDestroy {
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (page) => {
+          if (requestId !== this.archiveDownloadQueueDialogRequestId) {
+            return;
+          }
           this.archiveDownloadQueueDialogItems = page.items;
           this.archiveDownloadQueueDialogTotal = page.total;
           this.archiveDownloadQueueDialogArchiveCount = page.archiveCount;
           this.archiveDownloadQueueDialogLoading = false;
+          this.archiveDownloadQueueDialogRefreshing = false;
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
+          if (requestId !== this.archiveDownloadQueueDialogRequestId) {
+            return;
+          }
           this.archiveDownloadQueueDialogLoading = false;
+          this.archiveDownloadQueueDialogRefreshing = false;
           this.pageError = this.errorMessage(error, '下载队列明细读取失败');
           this.changeDetector.markForCheck();
         },
@@ -1182,7 +1245,7 @@ export class OperationsComponent implements OnInit, OnDestroy {
       this.archiveDownloadQueueLoading = false;
     }
     if (this.archiveDownloadQueueDialogVisible) {
-      this.loadArchiveDownloadQueueItems();
+      this.loadArchiveDownloadQueueItems(false);
     }
     this.changeDetector.markForCheck();
   }
