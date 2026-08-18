@@ -81,8 +81,13 @@ export VISION_LAB_WORKER_SSH_USER=luwei
 export VISION_LAB_SERVER_URL=http://NAS地址:8800
 export VISION_LAB_WORKER_TOKEN=与NAS一致的专用Token
 export VISION_WORKER_ID=唯一Worker名称
+export VISION_WORKER_UI_PORT=8801
 blrec-vision-worker
 ```
+
+配置 `VISION_WORKER_UI_PORT` 后，可以直接打开 Worker 的该端口使用标注页。
+页面静态资源由 Worker 提供，图片和标注 API 按需代理到 NAS；不会把候选素材或
+标注数据库复制回本机。模型预填、训练和验收仍由 Worker 任务队列执行。
 
 常驻服务建议使用权限为 `600` 的 token 文件，并用
 `VISION_LAB_WORKER_TOKEN_FILE` 代替明文环境变量。可用

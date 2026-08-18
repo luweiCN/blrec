@@ -2147,7 +2147,13 @@ def api_save_training_review_item(
     with _db_lock:
         conn = _conn()
         try:
-            if db.get_training_review_item(conn, frame_id) is None:
+            if (
+                conn.execute(
+                    'SELECT 1 FROM training_review_items WHERE frame_id = ?',
+                    (int(frame_id),),
+                ).fetchone()
+                is None
+            ):
                 raise HTTPException(404, '训练复核图片不存在')
             if result_label == 'result_panel':
                 if result_box is None and 'result_panel' not in db.get_boxes(
@@ -2181,6 +2187,7 @@ def api_save_training_review_item(
                     occluder_types=body.get('occluder_types') or [],
                     status=status,
                     notes=str(body.get('notes') or ''),
+                    result_groups={},
                 )
                 _invalidate_training_review_cache()
                 return saved

@@ -325,6 +325,11 @@ tr:hover td { background: var(--panel2); }
 .candidate-data-filters select,
 .candidate-data-filters input { max-width: 145px; }
 
+#candidate-streamer-filter {
+  width: 190px;
+  max-width: min(240px, 34vw);
+}
+
 .candidate-filter-picker {
   position: relative;
   color: var(--muted);
@@ -357,7 +362,7 @@ tr:hover td { background: var(--panel2); }
   z-index: 40;
   top: calc(100% + 6px);
   right: 0;
-  width: min(430px, calc(100vw - 48px));
+  width: min(560px, calc(100vw - 48px));
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -373,19 +378,19 @@ tr:hover td { background: var(--panel2); }
 
 .candidate-filter-hero-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 5px;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 7px;
   max-height: 330px;
   overflow-y: auto;
 }
 
 .candidate-filter-hero-option {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
+  grid-template-columns: 40px minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   min-width: 0;
-  padding: 4px;
+  padding: 6px;
   text-align: left;
 }
 
@@ -395,15 +400,15 @@ tr:hover td { background: var(--panel2); }
 }
 
 .candidate-filter-hero-option img {
-  width: 30px;
-  height: 30px;
-  border-radius: 6px;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
   object-fit: cover;
 }
 
 .candidate-filter-hero-option span {
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -647,7 +652,10 @@ tr:hover td { background: var(--panel2); }
 .candidate-model-banner {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
   gap: 2px 10px;
+  max-height: 86px;
+  overflow: hidden;
   padding: 6px 10px;
   border: 1px solid #315889;
   border-radius: 8px;
@@ -656,7 +664,7 @@ tr:hover td { background: var(--panel2); }
 }
 
 .candidate-model-title {
-  grid-row: 1 / span 2;
+  grid-row: 1 / -1;
   margin: 0;
   color: #bcd7ff;
   font-size: 12px;
@@ -664,10 +672,21 @@ tr:hover td { background: var(--panel2); }
 }
 
 #candidate-suggestion {
+  grid-column: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 2px 12px;
   min-width: 0;
+  overflow: hidden;
+}
+
+#candidate-prefill-status,
+#candidate-reason {
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #candidate-reason {
@@ -972,8 +991,11 @@ tr:hover td { background: var(--panel2); }
 }
 
 .candidate-suggestion-line {
+  max-width: 100%;
+  overflow: hidden;
   color: #c8d7ec;
   font-size: 11px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

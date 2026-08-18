@@ -3186,7 +3186,11 @@ def add_training_review_source(
 
 
 def _training_review_item_dict(
-    conn: sqlite3.Connection, row: sqlite3.Row
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    source_rows: Optional[Sequence[sqlite3.Row]] = None,
+    boxes: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Dict[str, Any]:
     item = dict(row)
     try:
@@ -3198,13 +3202,14 @@ def _training_review_item_dict(
         if isinstance(occluder_types, list)
         else []
     )
-    source_rows = conn.execute(
-        'SELECT id, source_type, source_id, image_path, suggestions_json, '
-        'metadata_json, source_created_at, sync_state, remote_reviewed_at '
-        'FROM training_review_sources WHERE frame_id = ? '
-        'ORDER BY source_created_at DESC, id DESC',
-        (int(row['frame_id']),),
-    ).fetchall()
+    if source_rows is None:
+        source_rows = conn.execute(
+            'SELECT id, source_type, source_id, image_path, suggestions_json, '
+            'metadata_json, source_created_at, sync_state, remote_reviewed_at '
+            'FROM training_review_sources WHERE frame_id = ? '
+            'ORDER BY source_created_at DESC, id DESC',
+            (int(row['frame_id']),),
+        ).fetchall()
     suggestions: Dict[str, Dict[str, Any]] = {}
     suggestion_ranks: Dict[str, tuple[int, float]] = {}
     sources = []
@@ -3234,7 +3239,7 @@ def _training_review_item_dict(
     item['source_categories'] = sorted(
         {_training_review_source_category(source['source_type']) for source in sources}
     )
-    item['boxes'] = get_boxes(conn, int(row['frame_id']))
+    item['boxes'] = get_boxes(conn, int(row['frame_id'])) if boxes is None else boxes
     item['needs_player_hero_review'] = bool(item['needs_player_hero_review'])
     item['unified_manual_reviewed'] = bool(item['unified_manual_reviewed'])
     item['legacy_migration_needs_review'] = bool(
@@ -3558,6 +3563,88 @@ def get_training_review_item(
         )
     )
     return item
+
+
+def get_training_review_items(
+    conn: sqlite3.Connection,
+    frame_ids: Sequence[int],
+    *,
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    ordered_ids = list(dict.fromkeys(int(frame_id) for frame_id in frame_ids))
+    if not ordered_ids:
+        return []
+    rows_by_id: Dict[int, sqlite3.Row] = {}
+    sources_by_id: Dict[int, List[sqlite3.Row]] = {}
+    boxes_by_id: Dict[int, Dict[str, Dict[str, float]]] = {}
+    for start in range(0, len(ordered_ids), 400):
+        batch = ordered_ids[start : start + 400]
+        placeholders = ', '.join('?' for _frame_id in batch)
+        rows = conn.execute(
+            f"""
+            SELECT item.*, frame.video_id, frame.timestamp_ms, frame.width,
+                   frame.height, frame.frame_path, frame.thumb_path, frame.sha256,
+                   video.streamer, video.filename, video.remote_path,
+                   CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW})
+                        THEN 1 ELSE 0 END AS needs_player_hero_review,
+                   CASE WHEN ({_UNIFIED_MANUAL_REVIEWED})
+                        THEN 1 ELSE 0 END AS unified_manual_reviewed
+            FROM training_review_items item
+            JOIN frames frame ON frame.id = item.frame_id
+            JOIN videos video ON video.id = frame.video_id
+            WHERE item.frame_id IN ({placeholders})
+            """,
+            batch,
+        ).fetchall()
+        rows_by_id.update((int(row['frame_id']), row) for row in rows)
+        source_rows = conn.execute(
+            'SELECT frame_id, id, source_type, source_id, image_path, '
+            'suggestions_json, metadata_json, source_created_at, sync_state, '
+            'remote_reviewed_at FROM training_review_sources '
+            f'WHERE frame_id IN ({placeholders}) '
+            'ORDER BY frame_id, source_created_at DESC, id DESC',
+            batch,
+        ).fetchall()
+        for source in source_rows:
+            sources_by_id.setdefault(int(source['frame_id']), []).append(source)
+        box_rows = conn.execute(
+            'SELECT frame_id, box_type, x, y, w, h FROM boxes '
+            f'WHERE frame_id IN ({placeholders})',
+            batch,
+        ).fetchall()
+        for box in box_rows:
+            boxes_by_id.setdefault(int(box['frame_id']), {})[str(box['box_type'])] = {
+                'box_type': str(box['box_type']),
+                'x': float(box['x']),
+                'y': float(box['y']),
+                'w': float(box['w']),
+                'h': float(box['h']),
+            }
+    groups = (
+        training_review_result_groups(conn) if result_groups is None else result_groups
+    )
+    result: List[Dict[str, Any]] = []
+    for frame_id in ordered_ids:
+        row = rows_by_id.get(frame_id)
+        if row is None:
+            continue
+        item = _training_review_item_dict(
+            conn,
+            row,
+            source_rows=sources_by_id.get(frame_id, ()),
+            boxes=boxes_by_id.get(frame_id, {}),
+        )
+        item.update(
+            groups.get(
+                frame_id,
+                {
+                    'result_group_size': 1,
+                    'result_group_representative_frame_id': frame_id,
+                },
+            )
+        )
+        result.append(item)
+    return result
 
 
 _LEGACY_HERO_SCREEN_TYPES = {
@@ -4081,11 +4168,9 @@ def training_review_page(
         confidence=confidence,
         result_groups=result_groups,
     )
-    result = []
-    for frame_id in visible[offset : offset + limit]:
-        item = get_training_review_item(conn, frame_id, result_groups=result_groups)
-        if item is not None:
-            result.append(item)
+    result = get_training_review_items(
+        conn, visible[offset : offset + limit], result_groups=result_groups
+    )
     return result, len(visible)
 
 
@@ -4141,6 +4226,7 @@ def save_training_review(
     occluder_types: Sequence[str] = (),
     status: str = 'confirmed',
     notes: str = '',
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     labels = {
         'match_flow': match_flow_label,
@@ -4337,7 +4423,7 @@ def save_training_review(
             sort_keys=True,
         ),
     )
-    item = get_training_review_item(conn, int(frame_id))
+    item = get_training_review_item(conn, int(frame_id), result_groups=result_groups)
     if item is None:
         raise KeyError(frame_id)
     return item

@@ -38,7 +38,6 @@ let candidateSyncTimer = null;
 let candidateHeroCatalog = [];
 let candidateHeroCatalogPromise = null;
 let candidateHeroFilters = new Set();
-let candidateFilterOptionsScope = '';
 let candidateHeroLineup = null;
 let candidateHeroDraft = new Map();
 let candidateHeroCachedSlots = new Set();
@@ -2310,14 +2309,13 @@ function renderCandidateHeroFilter() {
 
 async function loadCandidateFilterOptions() {
   const scope = candidateSourceScope;
-  if (candidateFilterOptionsScope === scope && candidateHeroCatalog.length) return;
+  const heroCatalog = ensureCandidateHeroCatalog()
+    .then(() => null)
+    .catch((error) => error);
   try {
-    const [filters] = await Promise.all([
-      api(`/api/training-review/filter-options?source_scope=${encodeURIComponent(scope)}`),
-      ensureCandidateHeroCatalog(),
-    ]);
+    const filters = await api(
+      `/api/training-review/filter-options?source_scope=${encodeURIComponent(scope)}`);
     if (scope !== candidateSourceScope) return;
-    candidateFilterOptionsScope = scope;
     const select = $('#candidate-streamer-filter');
     const selected = select.value;
     select.replaceChildren(
@@ -2328,7 +2326,13 @@ async function loadCandidateFilterOptions() {
     if ([...select.options].some((option) => option.value === selected)) {
       select.value = selected;
     }
+    const heroError = await heroCatalog;
+    if (scope !== candidateSourceScope) return;
     renderCandidateHeroFilter();
+    if (heroError) {
+      $('#candidate-hero-filter-options').textContent =
+        '英雄头像暂时加载失败，不影响其他筛选。';
+    }
   } catch (error) {
     $('#candidate-index-state').textContent = '筛选项加载失败：' + error.message;
   }
@@ -2787,7 +2791,7 @@ async function refreshCandidateIndexState() {
     const value = await api('/api/worker-candidates/state');
     const sync = value.sync || {};
     $('#candidate-index-state').textContent = sync.running
-      ? `正在自动发现候选素材：${sync.processed || 0}/${sync.total || 0}`
+      ? `正在自动发现候选素材：本轮已扫描 ${sync.processed || 0} 张`
       : sync.error ? `候选素材自动索引失败：${sync.error}`
       : sync.archive_failed ?
         `历史结算图失败 ${sync.archive_failed} 张：${sync.archive_last_error || '未知错误'}`
@@ -2828,7 +2832,10 @@ function bindCandidateReview() {
     renderCandidateHeroFilter();
     loadCandidateReview();
   };
-  $('#btn-candidate-refresh').onclick = loadCandidateReview;
+  $('#btn-candidate-refresh').onclick = () => {
+    loadCandidateFilterOptions();
+    loadCandidateReview();
+  };
   $('#candidate-hero-filter-search').oninput = renderCandidateHeroFilter;
   refreshCandidateIndexState();
   if (!candidateSyncTimer) {

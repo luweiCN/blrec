@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
@@ -435,6 +436,58 @@ class TestLegacyMigration(TrainingReviewTestCase):
 
 
 class TestTrainingReviewStorage(TrainingReviewTestCase):
+    def test_review_page_batches_item_sources_and_boxes(self):
+        for index in range(1, 21):
+            frame_id = self.frame(index)
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id=f'worker-{index}',
+            )
+        statements = []
+        self.conn.set_trace_callback(
+            lambda statement: (
+                statements.append(statement)
+                if statement.lstrip().upper().startswith('SELECT')
+                else None
+            )
+        )
+        try:
+            items, total = db.training_review_page(
+                self.conn, status='pending', limit=20, result_groups={}
+            )
+        finally:
+            self.conn.set_trace_callback(None)
+
+        self.assertEqual(total, 20)
+        self.assertEqual(len(items), 20)
+        self.assertLessEqual(len(statements), 6)
+
+    def test_save_can_return_current_item_without_rebuilding_all_result_groups(self):
+        frame_id = self.frame(1)
+        db.add_training_review_source(
+            self.conn, frame_id=frame_id, source_type='worker', source_id='worker-1'
+        )
+        with mock.patch.object(
+            db,
+            'training_review_result_groups',
+            side_effect=AssertionError('不应执行全量结算图分组'),
+        ):
+            reviewed = db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='not_match_flow',
+                match_mode_label=None,
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+                hero_layout_label='none',
+                status='confirmed',
+                result_groups={},
+            )
+
+        self.assertEqual(reviewed['frame_id'], frame_id)
+
     def test_migrated_legacy_label_needs_unified_manual_confirmation(self):
         frame_id = self.frame(1)
         db.save_annotation(

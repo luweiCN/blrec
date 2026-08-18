@@ -24,6 +24,7 @@ from PIL import Image
 from . import __version__, inference, model_prefill, model_testing
 from .remote_dataset import materialize_dataset
 from .training import PROGRESS_PREFIX, RESULT_PREFIX
+from .worker_ui import create_worker_ui_app
 
 
 class VisionLabClient:
@@ -695,6 +696,20 @@ def main() -> None:
     )
     if not capabilities:
         raise RuntimeError('VISION_WORKER_CAPABILITIES 没有有效任务类型')
+    ui_port = int(os.environ.get('VISION_WORKER_UI_PORT', '0'))
+    if not 0 <= ui_port <= 65_535:
+        raise RuntimeError('VISION_WORKER_UI_PORT 必须在 0 到 65535 之间')
+    if ui_port:
+        import uvicorn
+
+        ui_host = os.environ.get('VISION_WORKER_UI_HOST', '0.0.0.0').strip()
+        threading.Thread(
+            target=uvicorn.run,
+            args=(create_worker_ui_app(server_url),),
+            kwargs={'host': ui_host, 'port': ui_port, 'log_level': 'info'},
+            daemon=True,
+            name='vision-worker-ui',
+        ).start()
     VisionWorker(
         client=VisionLabClient(server_url, token),
         worker_id=worker_id,
