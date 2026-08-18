@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from . import classification_preprocessing, config, db, export
+from . import classification_preprocessing, config, db, export, managed_assets
 
 PROGRESS_PREFIX = '@@BLREC_TRAIN_PROGRESS@@'
 RESULT_PREFIX = '@@BLREC_TRAIN_RESULT@@'
@@ -165,7 +165,7 @@ def _existing_bp_labels(conn: Any) -> Dict[int, str]:
         "'hero_select_aram', 'match_confirm')"
     ).fetchall()
     for row in rows:
-        if not Path(row['frame_path']).is_file():
+        if not managed_assets.frame_available(row['frame_path']):
             continue
         label = (
             'not_bp'
@@ -185,7 +185,7 @@ def _existing_bp_labels(conn: Any) -> Dict[int, str]:
         frame_id = int(row['frame_id'])
         if (
             row['visual_condition'] == 'unreadable'
-            or not Path(row['frame_path']).is_file()
+            or not managed_assets.frame_available(row['frame_path'])
         ):
             labels.pop(frame_id, None)
         else:
@@ -201,7 +201,7 @@ def _existing_key_screen_labels(conn: Any) -> Dict[int, str]:
         "WHERE a.annotation_status = 'complete'"
     ).fetchall()
     for row in rows:
-        if not Path(row['frame_path']).is_file():
+        if not managed_assets.frame_available(row['frame_path']):
             continue
         screen_type = row['screen_type']
         if screen_type == 'result_page':
@@ -220,7 +220,7 @@ def _existing_key_screen_labels(conn: Any) -> Dict[int, str]:
         frame_id = int(row['frame_id'])
         if (
             row['visual_condition'] == 'unreadable'
-            or not Path(row['frame_path']).is_file()
+            or not managed_assets.frame_available(row['frame_path'])
         ):
             labels.pop(frame_id, None)
         else:
@@ -236,7 +236,7 @@ def _existing_screen_state_labels(conn: Any) -> Dict[int, str]:
         "WHERE a.annotation_status = 'complete'"
     ).fetchall()
     for row in rows:
-        if not Path(row['frame_path']).is_file():
+        if not managed_assets.frame_available(row['frame_path']):
             continue
         label = export._screen_state_label(dict(row))
         if label is not None:
@@ -251,7 +251,7 @@ def _existing_screen_state_labels(conn: Any) -> Dict[int, str]:
         frame_id = int(row['frame_id'])
         if (
             row['visual_condition'] == 'unreadable'
-            or not Path(row['frame_path']).is_file()
+            or not managed_assets.frame_available(row['frame_path'])
         ):
             labels.pop(frame_id, None)
         else:
@@ -326,7 +326,7 @@ def _training_review_labels(
         if int(row['frame_id']) in duplicate_results:
             continue
         label = str(row['label'])
-        if label in accepted and Path(row['frame_path']).is_file():
+        if label in accepted and managed_assets.frame_available(row['frame_path']):
             labels[int(row['frame_id'])] = label
     return labels
 
@@ -344,7 +344,7 @@ def _result_detector_member_samples(
     ).fetchall()
     for raw_row in rows:
         row = dict(raw_row)
-        if not Path(row['frame_path']).is_file():
+        if not managed_assets.frame_available(row['frame_path']):
             continue
         frame_id = int(row['frame_id'])
         box = db.get_boxes(conn, frame_id).get('result_panel')
@@ -377,7 +377,7 @@ def _result_detector_member_samples(
     ).fetchall()
     for raw_row in candidate_rows:
         row = dict(raw_row)
-        if not Path(row['frame_path']).is_file():
+        if not managed_assets.frame_available(row['frame_path']):
             continue
         label = str(row['confirmed_label'])
         if label not in {'result_panel', 'no_result_panel'}:
@@ -418,7 +418,9 @@ def _result_detector_member_samples(
         row = dict(raw_row)
         frame_id = int(row['frame_id'])
         label = str(row['result_panel_label'])
-        if label == 'unreadable' or not Path(row['frame_path']).is_file():
+        if label == 'unreadable' or not managed_assets.frame_available(
+            row['frame_path']
+        ):
             members.pop(frame_id, None)
             continue
         box = db.get_boxes(conn, frame_id).get('result_panel')
@@ -582,8 +584,11 @@ def _latest_dataset_delta(conn: Any, task_id: str) -> Optional[Dict[str, Any]]:
     ).fetchone()
     if run is None:
         return None
-    manifest = Path(str(run['manifest_path']))
-    if not manifest.is_file():
+    try:
+        manifest = managed_assets.resolve_dataset_manifest(
+            str(run['dataset_version_id']), Path(str(run['manifest_path']))
+        )
+    except (FileNotFoundError, RuntimeError, ValueError):
         return None
     baseline: Dict[str, Dict[str, Any]] = {}
     with manifest.open(encoding='utf-8') as handle:
@@ -673,7 +678,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
                 "WHERE mga.evidence IN ('blocked_gate', 'open_entrance') "
                 "AND f.frame_path != ''"
             ).fetchall()
-            if Path(row['frame_path']).is_file()
+            if managed_assets.frame_available(row['frame_path'])
         }
         for row in conn.execute(
             'SELECT c.frame_id, c.confirmed_label, f.frame_path '
@@ -682,7 +687,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             "AND c.confirmed_label IN ('blocked_gate', 'open_entrance') "
             "AND c.visual_condition != 'unreadable'"
         ).fetchall():
-            if Path(row['frame_path']).is_file():
+            if managed_assets.frame_available(row['frame_path']):
                 evidence_by_frame[int(row['frame_id'])] = str(row['confirmed_label'])
         by_evidence = {
             label: sum(1 for value in evidence_by_frame.values() if value == label)
@@ -713,7 +718,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
                 WHERE a.annotation_status = 'complete'
                 """
             ).fetchall()
-            if row['label'] and Path(row['frame_path']).is_file()
+            if row['label'] and managed_assets.frame_available(row['frame_path'])
         }
         for row in conn.execute(
             'SELECT c.frame_id, c.confirmed_label, f.frame_path '
@@ -723,7 +728,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             'AND c.confirmed_label IS NOT NULL '
             "AND c.visual_condition != 'unreadable'"
         ).fetchall():
-            if Path(row['frame_path']).is_file():
+            if managed_assets.frame_available(row['frame_path']):
                 detector_labels[int(row['frame_id'])] = str(row['confirmed_label'])
         for row in conn.execute(
             'SELECT r.frame_id, r.result_panel_label, f.frame_path '
@@ -734,7 +739,9 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
         ).fetchall():
             frame_id = int(row['frame_id'])
             label = str(row['result_panel_label'])
-            if label == 'unreadable' or not Path(row['frame_path']).is_file():
+            if label == 'unreadable' or not managed_assets.frame_available(
+                row['frame_path']
+            ):
                 detector_labels.pop(frame_id, None)
             elif (
                 label == 'result_panel'
@@ -786,7 +793,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
                 'GROUP BY lineup.frame_id '
                 'HAVING COUNT(slot.slot) = lineup.team_size * 2'
             ).fetchall()
-            if Path(row['frame_path']).is_file()
+            if managed_assets.frame_available(row['frame_path'])
         ]
         counts = {
             'total': len(rows),
@@ -815,7 +822,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
                 "WHERE lineup.review_status = 'confirmed' "
                 "AND COALESCE(slot.confirmed_label, '') NOT IN ('', 'unreadable')"
             ).fetchall()
-            if Path(row['frame_path']).is_file()
+            if managed_assets.frame_available(row['frame_path'])
         ]
         labels = sorted({str(row['confirmed_label']) for row in rows})
         counts = {
@@ -1372,9 +1379,9 @@ def publish_local_model(conn: Any, run_id: str) -> Dict[str, str]:
         raise KeyError(f'训练记录不存在: {run_id}')
     if run['status'] != 'succeeded':
         raise ValueError('只有训练成功的模型才能发布到本机测试区')
-    source = Path(run['artifact_path'])
-    if not source.is_file():
-        raise FileNotFoundError(source)
+    source, metadata_source = managed_assets.resolve_model_run(
+        run_id, Path(run['artifact_path'])
+    )
     definition = TRAINING_TASKS[run['task_id']]
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     destination = config.MODELS_DIR / definition['publish_name']
@@ -1391,7 +1398,6 @@ def publish_local_model(conn: Any, run_id: str) -> Dict[str, str]:
                 current_metadata, backup_dir / f'{destination.stem}-{stamp}.json'
             )
     shutil.copy2(source, destination)
-    metadata_source = source.with_suffix('.json')
     if metadata_source.is_file():
         shutil.copy2(metadata_source, destination.with_suffix('.json'))
     db.update_training_run(conn, run_id, published_path=str(destination))

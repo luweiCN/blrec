@@ -11,12 +11,13 @@ import json
 import secrets
 import threading
 import time
+import urllib.request
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import (
@@ -33,6 +34,7 @@ from . import (
 from . import inference as inference_mod
 from . import (
     local,
+    managed_assets,
     model_prefill,
     model_testing,
     result_archive,
@@ -133,6 +135,7 @@ _bp_collect_state: Dict[str, Any] = {
     'error': None,
 }
 _worker_candidate_sync_lock = threading.RLock()
+_worker_candidate_state_last_persisted_at = 0.0
 _worker_candidate_sync_state: Dict[str, Any] = {
     'running': False,
     'total': 0,
@@ -562,7 +565,11 @@ def api_frame(frame_id: int) -> Dict[str, Any]:
 
 
 @app.get('/api/frames/{frame_id}/image')
-def api_frame_image(frame_id: int) -> FileResponse:
+def api_frame_image(frame_id: int) -> Response:
+    if config.MEDIA_SERVER_URL:
+        return RedirectResponse(
+            f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/image'
+        )
     with _db_lock:
         conn = _conn()
         try:
@@ -577,7 +584,11 @@ def api_frame_image(frame_id: int) -> FileResponse:
 
 
 @app.get('/api/frames/{frame_id}/thumb')
-def api_frame_thumb(frame_id: int) -> FileResponse:
+def api_frame_thumb(frame_id: int) -> Response:
+    if config.MEDIA_SERVER_URL:
+        return RedirectResponse(
+            f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/thumb'
+        )
     with _db_lock:
         conn = _conn()
         try:
@@ -594,6 +605,16 @@ def api_frame_thumb(frame_id: int) -> FileResponse:
         else row['frame_path']
     )
     return FileResponse(path, media_type='image/jpeg')
+
+
+def _fetch_frame_image_bytes(frame_id: int) -> bytes:
+    if not config.MEDIA_SERVER_URL:
+        raise RuntimeError('尚未配置 NAS 图片服务')
+    url = (
+        f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/image'
+    )
+    with urllib.request.urlopen(url, timeout=60) as response:
+        return response.read()
 
 
 @app.post('/api/frames/{frame_id}/representative')
@@ -1122,9 +1143,35 @@ def api_clear_annotation(frame_id: int) -> Dict[str, Any]:
 # ---------- BP 主动学习复核 ----------
 
 
-def _set_worker_candidate_sync_state(**values: Any) -> None:
+def _set_worker_candidate_sync_state(
+    *, force_persist: bool = False, **values: Any
+) -> None:
+    global _worker_candidate_state_last_persisted_at
     with _worker_candidate_sync_lock:
         _worker_candidate_sync_state.update(values)
+        snapshot = dict(_worker_candidate_sync_state)
+        current = time.monotonic()
+        should_persist = (
+            config.CONTROL_PLANE_ONLY
+            and config.CANDIDATE_LOCAL_DIR is not None
+            and (
+                force_persist
+                or current - _worker_candidate_state_last_persisted_at >= 2.0
+            )
+        )
+        if should_persist:
+            _worker_candidate_state_last_persisted_at = current
+    if not should_persist:
+        return
+    conn = None
+    try:
+        conn = _conn()
+        db.save_service_runtime_state(conn, 'candidate_index', snapshot)
+    except Exception:  # noqa: BLE001 - 索引主流程不因状态展示失败而中断
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _sync_worker_candidate_queue(*, maximum: int) -> None:
@@ -1234,10 +1281,15 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
         ):
             _invalidate_training_review_cache()
         _set_worker_candidate_sync_state(
-            **result, running=False, last_completed_at=db.now()
+            **result,
+            running=False,
+            last_completed_at=db.now(),
+            force_persist=True,
         )
     except Exception as exc:  # noqa: BLE001
-        _set_worker_candidate_sync_state(running=False, error=str(exc))
+        _set_worker_candidate_sync_state(
+            running=False, error=str(exc), force_persist=True
+        )
     finally:
         if conn is not None:
             conn.close()
@@ -1286,6 +1338,10 @@ def api_worker_candidate_state() -> Dict[str, Any]:
         conn = _conn()
         try:
             review = _cached_training_review_stats(conn)
+            if config.CANDIDATE_LOCAL_DIR is None:
+                published = db.load_service_runtime_state(conn, 'candidate_index')
+                if published:
+                    sync = published
         finally:
             conn.close()
     return {'sync': sync, 'review': review}
@@ -1633,15 +1689,17 @@ def _remote_training_review_hero_lineup(
                     for value in existing['slots']
                 ]
             if not source_slots:
-                template = db.get_training_review_hero_template(
-                    conn,
-                    streamer=str(item['streamer'] or ''),
-                    screen_type=inferred_screen,
-                    team_size=inferred_size,
-                    layout_key=db.hero_layout_key(
-                        int(item['width']), int(item['height'])
-                    ),
-                )
+                width = int(item['width'] or 0)
+                height = int(item['height'] or 0)
+                template = None
+                if width > 0 and height > 0:
+                    template = db.get_training_review_hero_template(
+                        conn,
+                        streamer=str(item['streamer'] or ''),
+                        screen_type=inferred_screen,
+                        team_size=inferred_size,
+                        layout_key=db.hero_layout_key(width, height),
+                    )
                 if template is not None:
                     source_slots = [
                         {
@@ -2090,9 +2148,14 @@ def api_training_review_hero_crop(frame_id: int, side: str, slot: int) -> Respon
     if selected is None:
         raise HTTPException(404, '英雄位置不存在')
     try:
-        content = hero_review.crop_image_bytes(
-            Path(str(item['frame_path'])), selected['crop']
-        )
+        if config.MEDIA_SERVER_URL:
+            content = hero_review.crop_image_content(
+                _fetch_frame_image_bytes(frame_id), selected['crop']
+            )
+        else:
+            content = hero_review.crop_image_bytes(
+                Path(str(item['frame_path'])), selected['crop']
+            )
     except (OSError, ValueError) as exc:
         raise HTTPException(422, f'英雄头像裁剪失败：{exc}') from exc
     return Response(
@@ -2731,20 +2794,34 @@ def api_model_test_run_batch(run_id: str, body: Dict[str, Any]) -> Dict[str, Any
 @app.get('/api/model-tests/runs/{run_id}/samples/{sample_id}/image')
 def api_model_test_sample_image(
     run_id: str, sample_id: str, split: str
-) -> FileResponse:
+) -> Response:
     with _db_lock:
         conn = _conn()
         try:
             try:
-                path = model_testing.run_sample_image_path(
-                    conn, run_id, sample_id=sample_id, split=split
-                )
+                if config.MEDIA_SERVER_URL:
+                    reference = model_testing.run_sample_image_reference(
+                        conn, run_id, sample_id=sample_id, split=split
+                    )
+                    path = None
+                else:
+                    path = model_testing.run_sample_image_path(
+                        conn, run_id, sample_id=sample_id, split=split
+                    )
+                    reference = None
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
             except (FileNotFoundError, ValueError) as exc:
                 raise HTTPException(400, str(exc))
         finally:
             conn.close()
+    if reference is not None:
+        content = _fetch_frame_image_bytes(int(reference['frame_id']))
+        crop = reference.get('crop')
+        if isinstance(crop, dict):
+            content = hero_review.crop_image_content(content, crop)
+        return Response(content=content, media_type='image/jpeg')
+    assert path is not None
     return FileResponse(path, media_type='image/jpeg')
 
 
@@ -2835,7 +2912,12 @@ def api_model_package_archive(package_id: str) -> FileResponse:
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
             except (FileNotFoundError, ValueError) as exc:
-                raise HTTPException(400, str(exc))
+                if not config.MEDIA_SERVER_URL:
+                    raise HTTPException(400, str(exc))
+                try:
+                    archive = managed_assets.resolve_model_package_archive(package_id)
+                except (FileNotFoundError, RuntimeError, ValueError) as error:
+                    raise HTTPException(400, str(error)) from error
         finally:
             conn.close()
     return FileResponse(archive, media_type='application/zip', filename=archive.name)
@@ -2851,7 +2933,12 @@ def _deploy_model_package_to_worker(deployment_id: int, package_id: str) -> None
                     db.update_model_deployment(
                         conn, deployment_id=deployment_id, status='running'
                     )
-                    archive = model_testing.model_package_archive(conn, package_id)
+                    try:
+                        archive = model_testing.model_package_archive(conn, package_id)
+                    except (FileNotFoundError, ValueError):
+                        archive = managed_assets.resolve_model_package_archive(
+                            package_id
+                        )
                 finally:
                     conn.close()
             result = worker_deployment.WorkerDeploymentClient(target).deploy(
@@ -3638,8 +3725,11 @@ def api_vision_worker_dataset_manifest(
             conn.close()
     if row is None:
         raise HTTPException(404, '数据集版本不存在')
-    manifest = Path(str(row['manifest_path']))
-    if not manifest.is_file():
+    try:
+        manifest = managed_assets.resolve_dataset_manifest(
+            version_id, Path(str(row['manifest_path']))
+        )
+    except (FileNotFoundError, RuntimeError, ValueError):
         raise HTTPException(404, '数据集清单不存在')
     return FileResponse(manifest, media_type='application/x-ndjson')
 
@@ -3661,11 +3751,36 @@ def api_vision_worker_model_artifact(run_id: str, request: Request) -> FileRespo
             conn.close()
     if run is None or run['status'] != 'succeeded':
         raise HTTPException(404, '训练产物不存在')
-    artifact = Path(str(run['artifact_path']))
-    if not artifact.is_file() or artifact.stat().st_size <= 0:
+    try:
+        artifact, _ = managed_assets.resolve_model_run(
+            run_id, Path(str(run['artifact_path']))
+        )
+    except (FileNotFoundError, RuntimeError, ValueError):
         raise HTTPException(404, '训练模型文件不存在')
     return FileResponse(
         artifact, media_type='application/octet-stream', filename=f'{run_id}.onnx'
+    )
+
+
+@app.get('/api/vision-workers/model-runs/{run_id}/metadata')
+def api_vision_worker_model_metadata(run_id: str, request: Request) -> FileResponse:
+    _require_vision_worker(request)
+    with _db_lock:
+        conn = _conn()
+        try:
+            run = db.get_training_run(conn, run_id)
+        finally:
+            conn.close()
+    if run is None or run['status'] != 'succeeded':
+        raise HTTPException(404, '训练产物不存在')
+    try:
+        _, metadata = managed_assets.resolve_model_run(
+            run_id, Path(str(run['artifact_path']))
+        )
+    except (FileNotFoundError, RuntimeError, ValueError):
+        raise HTTPException(404, '训练模型元数据不存在')
+    return FileResponse(
+        metadata, media_type='application/json', filename=f'{run_id}.json'
     )
 
 

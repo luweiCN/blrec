@@ -24,7 +24,33 @@ from PIL import Image
 from . import __version__, inference, model_prefill, model_testing
 from .remote_dataset import materialize_dataset
 from .training import PROGRESS_PREFIX, RESULT_PREFIX
-from .worker_ui import create_worker_ui_app
+from .worker_ui import create_worker_control_plane_app
+
+
+def validate_local_control_plane_url(server_url: str, ui_port: int) -> None:
+    parsed = urllib.parse.urlsplit(server_url)
+    if parsed.scheme != 'http' or parsed.hostname not in {'127.0.0.1', 'localhost'}:
+        raise RuntimeError('启用 Worker 本地控制面时，任务 Server 必须使用本地地址')
+    if parsed.port != ui_port:
+        raise RuntimeError('Worker 本地控制面端口与 VISION_LAB_SERVER_URL 不一致')
+
+
+def wait_for_local_control_plane(
+    server_url: str, *, timeout_seconds: float = 30
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    request = urllib.request.Request(
+        server_url.rstrip('/') + '/api/config', method='GET'
+    )
+    last_error: Optional[BaseException] = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(request, timeout=1):
+                return
+        except (OSError, urllib.error.URLError) as error:
+            last_error = error
+            time.sleep(0.2)
+    raise RuntimeError('Worker 本地标注控制面启动超时') from last_error
 
 
 class VisionLabClient:
@@ -702,14 +728,16 @@ def main() -> None:
     if ui_port:
         import uvicorn
 
+        validate_local_control_plane_url(server_url, ui_port)
         ui_host = os.environ.get('VISION_WORKER_UI_HOST', '0.0.0.0').strip()
         threading.Thread(
             target=uvicorn.run,
-            args=(create_worker_ui_app(server_url),),
+            args=(create_worker_control_plane_app(),),
             kwargs={'host': ui_host, 'port': ui_port, 'log_level': 'info'},
             daemon=True,
             name='vision-worker-ui',
         ).start()
+        wait_for_local_control_plane(server_url)
     VisionWorker(
         client=VisionLabClient(server_url, token),
         worker_id=worker_id,

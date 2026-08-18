@@ -1,9 +1,10 @@
 services:
   vision-lab:
-    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.12}
+    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.13}
     container_name: blrec-vision-lab
     network_mode: host
     restart: unless-stopped
+    command: ['blrec-vision-media']
     env_file:
       - ${VISION_LAB_ENV_FILE:-/volume1/docker/blrec-next/vision-lab/workspace/.env}
     environment:
@@ -14,6 +15,7 @@ services:
       VISION_LAB_CANDIDATE_LOCAL_DIR: /candidates
       VISION_LAB_SYNC_RESULT_ARCHIVE: '0'
       VISION_LAB_CONTROL_PLANE_ONLY: '1'
+      VISION_LAB_MEDIA_SERVER_URL: ''
       VISION_LAB_DATABASE_SCHEMA: ${VISION_LAB_DATABASE_SCHEMA:-vision_lab}
       VISION_LAB_DATABASE_POOL_SIZE: ${VISION_LAB_DATABASE_POOL_SIZE:-8}
       VISION_LAB_CANDIDATE_INDEX_INTERVAL_SECONDS: ${VISION_LAB_CANDIDATE_INDEX_INTERVAL_SECONDS:-900}

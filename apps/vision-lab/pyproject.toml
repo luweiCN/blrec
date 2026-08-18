@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blrec-vision-lab"
-version = "0.3.12"
+version = "0.3.13"
 description = "Local data collection, labeling, dataset and model training workbench for BLREC"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,7 @@ test = ["pytest>=8.0"]
 
 [project.scripts]
 blrec-vision-lab = "labeler.server:main"
+blrec-vision-media = "labeler.media_server:main"
 blrec-vision-worker = "labeler.vision_worker:main"
 
 [tool.setuptools.packages.find]

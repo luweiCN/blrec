@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 
-from . import config, db
+from . import config, db, managed_assets
 
 PLAYER_POSITION_LABELS = (
     'left1',
@@ -89,8 +89,7 @@ def next_version_id(conn: Any, task_id: str) -> str:
 
 def _frame_sample(conn: Any, f: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """组装单帧的 JSONL 样本;缺原始文件返回 None。"""
-    path = Path(f['frame_path'])
-    if not path.exists():
+    if not managed_assets.frame_available(f['frame_path']):
         return None
     ann = db.get_annotation(conn, f['id']) or {}
     boxes = db.get_boxes(conn, f['id'])

@@ -1,7 +1,27 @@
 """虚荣视觉标注工作台 —— 常量与配置。"""
 
 import os
+import stat
 from pathlib import Path
+
+
+def read_environment_secret(name: str) -> str:
+    """读取环境变量或对应的 mode-600 文件，不把凭据放入普通配置。"""
+
+    value = os.environ.get(name, '').strip()
+    if value:
+        return value
+    secret_file = os.environ.get(f'{name}_FILE', '').strip()
+    if not secret_file:
+        return ''
+    path = Path(secret_file).expanduser()
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        raise RuntimeError(f'{name}_FILE 权限必须为 600')
+    value = path.read_text(encoding='utf-8').strip()
+    if not value:
+        raise RuntimeError(f'{name}_FILE 不能为空')
+    return value
 
 
 def _default_work_dir() -> Path:
@@ -19,9 +39,10 @@ FRAME_DIR = WORK_DIR / 'frames'
 THUMB_DIR = WORK_DIR / 'thumbs'
 EXPORT_DIR = WORK_DIR / 'datasets'
 DB_PATH = WORK_DIR / 'lab.db'
-DATABASE_URL = os.environ.get('VISION_LAB_DATABASE_URL', '').strip()
+DATABASE_URL = read_environment_secret('VISION_LAB_DATABASE_URL')
 DATABASE_SCHEMA = os.environ.get('VISION_LAB_DATABASE_SCHEMA', 'vision_lab').strip()
 DATABASE_POOL_SIZE = max(1, int(os.environ.get('VISION_LAB_DATABASE_POOL_SIZE', '8')))
+MEDIA_SERVER_URL = os.environ.get('VISION_LAB_MEDIA_SERVER_URL', '').strip().rstrip('/')
 LOCAL_VIDEO_DIR = WORK_DIR / 'videos'  # 打标时下载到本地的视频(mp4)
 MODELS_DIR = WORK_DIR / 'models'  # 训练好的模型(onnx)
 THUMB_WIDTH = 960  # 网页显示缩略图宽度(原始帧永久保留)
@@ -76,7 +97,7 @@ SERVER_PORT = int(os.environ.get('VISION_LAB_PORT', '8800'))
 CONTROL_PLANE_ONLY = os.environ.get(
     'VISION_LAB_CONTROL_PLANE_ONLY', '0'
 ).strip().lower() in {'1', 'true', 'yes', 'on'}
-VISION_WORKER_TOKEN = os.environ.get('VISION_LAB_WORKER_TOKEN', '').strip()
+VISION_WORKER_TOKEN = read_environment_secret('VISION_LAB_WORKER_TOKEN')
 VISION_WORKER_LEASE_SECONDS = max(
     60, int(os.environ.get('VISION_LAB_WORKER_LEASE_SECONDS', '300'))
 )

@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from . import config, db, inference
+from . import config, db, inference, managed_assets
 
 TASK_ROLES = {
     'match_flow': 'match_flow',
@@ -72,14 +72,18 @@ def _run_context(conn: Any, run_id: str) -> Dict[str, Any]:
     ).fetchone()
     if dataset is None:
         raise KeyError(f'数据集版本不存在: {run["dataset_version_id"]}')
-    artifact = Path(run['artifact_path'])
-    metadata_path = artifact.with_suffix('.json')
-    if not artifact.is_file() or not metadata_path.is_file():
-        raise FileNotFoundError('训练产物或元数据不存在')
+    artifact, metadata_path = managed_assets.resolve_model_run(
+        str(run['id']), Path(run['artifact_path'])
+    )
+    manifest = managed_assets.resolve_dataset_manifest(
+        str(dataset['id']), Path(dataset['manifest_path'])
+    )
     metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+    dataset_value = dict(dataset)
+    dataset_value['manifest_path'] = str(manifest)
     return {
         'run': run,
-        'dataset': dict(dataset),
+        'dataset': dataset_value,
         'artifact': artifact,
         'metadata': metadata,
     }
@@ -105,22 +109,25 @@ def list_testable_runs(conn: Any) -> List[Dict[str, Any]]:
         item['config_json'] = json.loads(item['config_json'] or '{}')
         item['counts_json'] = json.loads(item['counts_json'] or '{}')
         item['validation_status'] = item['validation_status'] or 'pending'
-        metadata_path = Path(item['artifact_path']).with_suffix('.json')
         try:
-            metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            context = _run_context(conn, str(item['id']))
+            metadata = context['metadata']
+            item['evaluation_gaps'] = _evaluation_gaps(context)
+        except (
+            FileNotFoundError,
+            json.JSONDecodeError,
+            KeyError,
+            OSError,
+            RuntimeError,
+            ValueError,
+        ):
             metadata = {}
+            item['evaluation_gaps'] = ['无法读取固定测试集覆盖情况']
         item['artifact_metadata'] = {
             key: metadata[key]
             for key in ('task_id', 'kind', 'imgsz', 'input', 'preprocessing', 'classes')
             if key in metadata
         }
-        try:
-            item['evaluation_gaps'] = _evaluation_gaps(
-                _run_context(conn, str(item['id']))
-            )
-        except (FileNotFoundError, KeyError, ValueError):
-            item['evaluation_gaps'] = ['无法读取固定测试集覆盖情况']
         result.append(item)
     return result
 
@@ -228,7 +235,7 @@ def _scoreboard_challenge_sample(row: Dict[str, Any]) -> Dict[str, Any]:
         'sample_id': f'f{int(row["frame_id"]):08d}',
         'frame_id': int(row['frame_id']),
         'split': SCOREBOARD_CHALLENGE_SPLIT,
-        'has_snapshot_image': path.is_file(),
+        'has_snapshot_image': managed_assets.frame_available(path),
         'expected': {'found': False, 'label': 'no_result_panel', 'boxes': []},
         'streamer': row.get('streamer') or '',
         'timestamp_ms': int(row.get('timestamp_ms') or 0),
@@ -259,7 +266,7 @@ def _challenge_base(
         'frame_id': int(row['frame_id']),
         'video_id': int(row['video_id']),
         'split': POST_RUN_CHALLENGE_SPLIT,
-        'has_snapshot_image': path.is_file(),
+        'has_snapshot_image': managed_assets.frame_available(path),
         'expected': expected,
         'streamer': row.get('streamer') or '',
         'timestamp_ms': int(row.get('timestamp_ms') or 0),
@@ -641,6 +648,70 @@ def run_sample_image_path(
         return _challenge_image_path(context, fallback)
 
 
+def run_sample_image_reference(
+    conn: Any, run_id: str, *, sample_id: str, split: str
+) -> Dict[str, Any]:
+    """解析测试图的原始 frame_id 与可选裁剪，不要求控制面挂载原图。"""
+
+    context = _run_context(conn, run_id)
+    if split == POST_RUN_CHALLENGE_SPLIT:
+        sample = next(
+            (
+                value
+                for value in _post_run_challenge_samples(conn, context)
+                if value['sample_id'] == sample_id
+            ),
+            None,
+        )
+        if sample is None:
+            raise KeyError(f'当前训练后挑战集中不存在样本: {sample_id}')
+        return {
+            'frame_id': int(sample['frame_id']),
+            'crop': sample.get('_crop'),
+        }
+    if split == SCOREBOARD_CHALLENGE_SPLIT:
+        if str(context['run']['task_id']) != 'result_detector':
+            raise ValueError('只有结算面板检测模型可以使用计分板难例库')
+        if not sample_id.startswith('f') or not sample_id[1:].isdigit():
+            raise ValueError('计分板难例样本标识无效')
+        frame_id = int(sample_id[1:])
+        if not _scoreboard_challenge_rows(conn, frame_id=frame_id):
+            raise KeyError(f'当前计分板难例中不存在样本: {sample_id}')
+        return {'frame_id': frame_id, 'crop': None}
+    if split not in FIXED_DATASET_SPLITS:
+        raise ValueError('数据来源无效')
+    sample = next(
+        (
+            value
+            for value in _manifest_samples(
+                Path(context['dataset']['manifest_path'])
+            )
+            if str(value.get('sample_id') or '') == sample_id
+            and str(value.get('split') or '') == split
+        ),
+        None,
+    )
+    if sample is None:
+        raise KeyError(f'训练快照中不存在样本: {sample_id}')
+    frame_id = sample.get('frame_id')
+    if frame_id is None and sample_id.startswith('f'):
+        digits = sample_id[1:].split('-', 1)[0]
+        if digits.isdigit():
+            frame_id = int(digits)
+    if frame_id is None and sample.get('sha256'):
+        row = conn.execute(
+            'SELECT id FROM frames WHERE sha256 = ?', (str(sample['sha256']),)
+        ).fetchone()
+        frame_id = int(row['id']) if row else None
+    if frame_id is None:
+        raise KeyError(f'训练快照样本无法追溯原图: {sample_id}')
+    crop = sample.get('_crop') or sample.get('crop')
+    return {
+        'frame_id': int(frame_id),
+        'crop': crop if isinstance(crop, dict) else None,
+    }
+
+
 def list_run_samples(
     conn: Any, run_id: str, *, split: str = 'test', limit: int = 500
 ) -> Dict[str, Any]:
@@ -764,7 +835,8 @@ def list_run_samples(
                 else None
             )
             has_snapshot_image = bool(
-                row is not None and Path(str(row['frame_path'])).is_file()
+                row is not None
+                and managed_assets.frame_available(str(row['frame_path']))
             )
         if isinstance(expected, dict):
             evaluation_scenario = sample.get('evaluation_scenario') or (

@@ -1,9 +1,10 @@
 # 虚荣视觉标注工作台(Vainglory Vision Lab)
 
-《虚荣》(Vainglory)所有视觉模型共用的数据工作台。生产环境的页面与轻量 API
-部署在 NAS；候选图片从 NAS 挂载目录按需读取，不再全量同步到浏览器所在电脑。
-数据集物化、模型预填、训练、批量验收和模型组包均由可暂停的 Vision Worker
-领取，NAS Web 进程不执行这些重任务。
+《虚荣》(Vainglory)所有视觉模型共用的数据工作台。生产环境的页面、标注 API、
+PostgreSQL 连接和任务控制面都运行在 Vision Worker；候选图片从 NAS 按需读取，
+不再全量同步到浏览器所在电脑。数据集物化、模型预填、训练、批量验收和模型组包
+也由可暂停的 Vision Worker 领取。NAS 只提供图片、旧版不可变模型资产的字节，
+并扫描本地候选目录；不执行任何标注、筛选、统计或模型任务控制逻辑。
 当前统一训练七个目标：四个核心任务（是否处于对局流程、英雄选择及其模式、
 对局画面模式、结算面板检测）和三个按需运行的英雄增强任务（英雄头像位置、
 英雄头像身份、主播本人位置）。旧 BP、光栅、关键界面和通用分层标注完整保留
@@ -62,7 +63,7 @@ export SYNO_ADMIN_PASSWORD=你的群晖密码
 export VISION_LAB_WORKER_SSH_HOST=MacBook-Pro-14.local
 export VISION_LAB_WORKER_SSH_USER=luwei
 ./start.sh
-# 仅用于源码开发；生产页面部署在 NAS
+# 仅用于源码开发；生产页面部署在 Vision Worker
 # 打开 http://127.0.0.1:8800
 ```
 
@@ -70,27 +71,31 @@ export VISION_LAB_WORKER_SSH_USER=luwei
 `~/.local/share/blrec-vision-lab`。也可以用 `VISION_LAB_DATA_DIR` 明确指定，
 因此数据、权重和训练产物不会进入发布包。
 
-## NAS 控制面与 Vision Worker
+## Worker 本地控制面与 NAS 图片服务
 
-生产容器设置 `VISION_LAB_CONTROL_PLANE_ONLY=1`，只运行页面、标注 API、任务队列、
-元数据索引和按需图片读取。生产元数据使用正式 PostgreSQL 中独立的
-`vision_lab` schema，NAS 上的 `lab.db` 只作为迁移前快照和回滚备份。需要另外启动
-至少一台 `blrec-vision-worker`，并配置：
+生产元数据使用正式 PostgreSQL 中独立的 `vision_lab` schema。Worker 通过自己的
+SSH 隧道直连远程 PostgreSQL，并设置 `VISION_LAB_CONTROL_PLANE_ONLY=1`，让模型
+任务进入本机 Worker 队列而不是阻塞 Web 请求。Worker 配置：
 
 ```bash
-export VISION_LAB_SERVER_URL=http://NAS地址:8800
-export VISION_LAB_WORKER_TOKEN=与NAS一致的专用Token
+export VISION_LAB_SERVER_URL=http://127.0.0.1:8801
+export VISION_LAB_MEDIA_SERVER_URL=http://NAS地址:8800
+export VISION_LAB_DATABASE_URL_FILE="$HOME/Library/Application Support/BLRECVisionWorker/database.url"
+export VISION_LAB_DATABASE_SCHEMA=vision_lab
+export VISION_LAB_CONTROL_PLANE_ONLY=1
+export VISION_LAB_WORKER_TOKEN_FILE="$HOME/Library/Application Support/BLRECVisionWorker/worker.token"
 export VISION_WORKER_ID=唯一Worker名称
 export VISION_WORKER_UI_PORT=8801
 blrec-vision-worker
 ```
 
-配置 `VISION_WORKER_UI_PORT` 后，可以直接打开 Worker 的该端口使用标注页。
-页面静态资源由 Worker 提供，图片和标注 API 按需代理到 NAS；不会把候选素材或
-标注数据库复制回本机。模型预填、训练和验收仍由 Worker 任务队列执行。
+打开 Worker 的 8801 端口使用标注页。页面、标注 API 和数据库读写都在 Worker
+本机；普通打标只有 `/api/frames/*/image`、缩略图和英雄裁剪所需的原图会访问
+NAS。首次查看 NAS 时代生成的旧数据集或模型时，Worker 还会按需缓存其不可变
+manifest、artifact、metadata 或模型包；不会同步完整训练图片目录。NAS 使用
+`blrec-vision-media` 入口，不暴露保存、筛选或统计 API。
 
-常驻服务建议使用权限为 `600` 的 token 文件，并用
-`VISION_LAB_WORKER_TOKEN_FILE` 代替明文环境变量。可用
+数据库 URL 与 token 文件都必须是权限 `600`。可用
 `VISION_WORKER_CAPABILITIES=model_prefill` 把节点限定为只做打标预填，
 避免它在正常视频分析期间误领训练任务。
 

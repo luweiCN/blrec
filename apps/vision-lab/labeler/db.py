@@ -516,6 +516,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_model_deployments_active_target
     ON model_deployments (target)
     WHERE status IN ('queued', 'running');
 
+-- 拆分部署角色之间共享的轻量运行状态。每个服务只保留最新快照，
+-- 不记录历史事件，避免高频进度更新无限增长。
+CREATE TABLE IF NOT EXISTS service_runtime_states (
+    service_key TEXT PRIMARY KEY,
+    state_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
+
 -- NAS 上的 Vision Lab 只负责轻量调度。数据集生成、批量预填、训练、验收和
 -- 打包等重任务由可暂停的 Vision Worker 领取。
 CREATE TABLE IF NOT EXISTS vision_workers (
@@ -1864,6 +1872,40 @@ def audit_recent(conn: sqlite3.Connection, limit: int = 50) -> List[Dict[str, An
 
 
 # ---------- 实时打标进度 ----------
+
+
+def save_service_runtime_state(
+    conn: sqlite3.Connection, service_key: str, state: Dict[str, Any]
+) -> None:
+    key = str(service_key).strip()
+    if not key:
+        raise ValueError('服务运行状态 key 不能为空')
+    conn.execute(
+        """
+        INSERT INTO service_runtime_states (service_key, state_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(service_key) DO UPDATE SET
+            state_json=excluded.state_json, updated_at=excluded.updated_at
+        """,
+        (key, json.dumps(state, ensure_ascii=False, sort_keys=True), now()),
+    )
+    conn.commit()
+
+
+def load_service_runtime_state(
+    conn: sqlite3.Connection, service_key: str
+) -> Dict[str, Any]:
+    row = conn.execute(
+        'SELECT state_json FROM service_runtime_states WHERE service_key = ?',
+        (str(service_key).strip(),),
+    ).fetchone()
+    if row is None:
+        return {}
+    try:
+        value = json.loads(row['state_json'] or '{}')
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def save_live_state(

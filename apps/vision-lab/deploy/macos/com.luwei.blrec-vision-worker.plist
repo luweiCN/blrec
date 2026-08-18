@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.luwei.blrec-vision-worker</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/bin/caffeinate</string>
+      <string>-ims</string>
+      <string>__VISION_RELEASE_DIR__/.venv/bin/blrec-vision-worker</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>VISION_LAB_SERVER_URL</key>
+      <string>http://127.0.0.1:8801</string>
+      <key>VISION_LAB_MEDIA_SERVER_URL</key>
+      <string>http://192.168.50.24:8800</string>
+      <key>VISION_LAB_DATABASE_URL_FILE</key>
+      <string>/Users/__VISION_USER__/Library/Application Support/BLRECVisionWorker/database.url</string>
+      <key>VISION_LAB_DATABASE_SCHEMA</key>
+      <string>vision_lab</string>
+      <key>VISION_LAB_DATABASE_POOL_SIZE</key>
+      <string>8</string>
+      <key>VISION_LAB_CONTROL_PLANE_ONLY</key>
+      <string>1</string>
+      <key>VISION_LAB_DATA_DIR</key>
+      <string>/Users/__VISION_USER__/Library/Application Support/BLRECVisionWorker/control-plane</string>
+      <key>VISION_LAB_WORKER_TOKEN_FILE</key>
+      <string>/Users/__VISION_USER__/Library/Application Support/BLRECVisionWorker/worker.token</string>
+      <key>VISION_WORKER_ID</key>
+      <string>macbook-pro-vision</string>
+      <key>VISION_WORKER_NAME</key>
+      <string>MacBook Pro 模型预填</string>
+      <key>VISION_WORKER_CAPABILITIES</key>
+      <string>model_prefill</string>
+      <key>VISION_WORKER_POLL_SECONDS</key>
+      <string>2</string>
+      <key>VISION_WORKER_DATA_DIR</key>
+      <string>/Users/__VISION_USER__/Library/Application Support/BLRECVisionWorker/data</string>
+      <key>VISION_WORKER_UI_HOST</key>
+      <string>0.0.0.0</string>
+      <key>VISION_WORKER_UI_PORT</key>
+      <string>8801</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__VISION_LOG_DIR__/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__VISION_LOG_DIR__/stderr.log</string>
+  </dict>
+</plist>

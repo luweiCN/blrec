@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from PIL import Image
 
-from . import db, inference
+from . import db, inference, managed_assets
 
 CORE_PREFILL_TASKS = ('match_flow', 'hero_select', 'match_mode', 'result_detector')
 HERO_PREFILL_TASKS = ('hero_avatar_detector', 'hero_identity', 'player_position')
@@ -43,16 +43,22 @@ def _latest_model_contexts(
                 published = Path(str(run.get('published_path') or ''))
                 if published.is_file() and published.with_suffix('.json').is_file():
                     run_priority = 0
-                    artifact = published
                 elif run.get('validation_status') == 'passed':
                     run_priority = 1
-                    artifact = Path(str(run['artifact_path']))
                 else:
                     run_priority = 2
-                    artifact = Path(str(run['artifact_path']))
                 if run_priority != priority:
                     continue
-                metadata_path = artifact.with_suffix('.json')
+                if run_priority == 0:
+                    artifact = published
+                    metadata_path = artifact.with_suffix('.json')
+                else:
+                    try:
+                        artifact, metadata_path = managed_assets.resolve_model_run(
+                            str(run['id']), Path(str(run['artifact_path']))
+                        )
+                    except (FileNotFoundError, RuntimeError, ValueError):
+                        continue
                 if not artifact.is_file() or not metadata_path.is_file():
                     continue
                 try:

@@ -205,6 +205,44 @@ class TestModelTesting(unittest.TestCase):
             self.image.resolve(),
         )
 
+    def test_remote_test_image_reference_uses_manifest_frame_id(self):
+        reference = model_testing.run_sample_image_reference(
+            self.conn,
+            'screen-state-run-1',
+            sample_id=f'f{self.frame_id:08d}',
+            split='test',
+        )
+
+        self.assertEqual(reference, {'frame_id': self.frame_id, 'crop': None})
+
+    def test_worker_plan_resolves_managed_manifest_and_model_assets(self):
+        remote_manifest = self.root / 'remote-manifest.jsonl'
+        remote_manifest.write_bytes(self.manifest.read_bytes())
+        remote_artifact = self.root / 'remote-model.onnx'
+        remote_artifact.write_bytes(self.artifact.read_bytes())
+        remote_metadata = remote_artifact.with_suffix('.json')
+        remote_metadata.write_bytes(self.artifact.with_suffix('.json').read_bytes())
+        self.manifest.unlink()
+        self.artifact.unlink()
+        self.artifact.with_suffix('.json').unlink()
+
+        with mock.patch.object(
+            model_testing.managed_assets,
+            'resolve_dataset_manifest',
+            return_value=remote_manifest,
+        ) as resolve_manifest, mock.patch.object(
+            model_testing.managed_assets,
+            'resolve_model_run',
+            return_value=(remote_artifact, remote_metadata),
+        ) as resolve_model:
+            plan = model_testing.worker_evaluation_plan(
+                self.conn, 'screen-state-run-1', split='test'
+            )
+
+        self.assertEqual(plan['total'], 1)
+        resolve_manifest.assert_called_with('screen-state-v1', self.manifest)
+        resolve_model.assert_called_with('screen-state-run-1', self.artifact)
+
     def test_testable_run_exposes_recorded_input_contract(self):
         metadata = json.loads(
             self.artifact.with_suffix('.json').read_text(encoding='utf-8')

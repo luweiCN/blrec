@@ -375,6 +375,14 @@ def crop_image_bytes(frame_path: Path, box: Mapping[str, float]) -> bytes:
     return output.getvalue()
 
 
+def crop_image_content(content: bytes, box: Mapping[str, float]) -> bytes:
+    with Image.open(BytesIO(content)) as source:
+        crop = _crop_image(source.convert('RGB'), box)
+    output = BytesIO()
+    crop.save(output, format='JPEG', quality=90)
+    return output.getvalue()
+
+
 def _current_sift_recognize(image: Image.Image) -> Dict[str, Any]:
     shared = _shared()
     rgb = image.convert('RGB')

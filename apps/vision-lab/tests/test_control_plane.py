@@ -4,7 +4,8 @@ from pathlib import Path
 from unittest import mock
 
 from fastapi import HTTPException
-from labeler import config, server
+from fastapi.responses import RedirectResponse
+from labeler import config, hero_review, server
 
 
 def test_control_plane_rejects_local_heavy_operations(monkeypatch) -> None:
@@ -120,3 +121,122 @@ def test_postgres_review_list_does_not_hold_the_process_database_lock(
     result = server.api_training_review_items(include_stats=False)
 
     assert result == {'items': [], 'stats': {}, 'filtered_total': 0}
+
+
+def test_worker_control_plane_redirects_only_frame_media_to_nas(monkeypatch) -> None:
+    monkeypatch.setattr(config, 'MEDIA_SERVER_URL', 'http://nas:8800/')
+    local_database = mock.Mock(side_effect=AssertionError('图片回源不应查询本地数据库'))
+    monkeypatch.setattr(server, '_conn', local_database)
+
+    image = server.api_frame_image(17)
+    thumb = server.api_frame_thumb(17)
+
+    assert isinstance(image, RedirectResponse)
+    assert image.headers['location'] == 'http://nas:8800/api/frames/17/image'
+    assert isinstance(thumb, RedirectResponse)
+    assert thumb.headers['location'] == 'http://nas:8800/api/frames/17/thumb'
+    local_database.assert_not_called()
+
+
+def test_worker_control_plane_crops_remote_frame_bytes_locally(monkeypatch) -> None:
+    connection = mock.Mock()
+    connection.close = mock.Mock()
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(
+        server,
+        '_single_training_review_item',
+        mock.Mock(return_value={'frame_id': 17, 'frame_path': '/nas/frame.jpg'}),
+    )
+    monkeypatch.setattr(
+        server.db,
+        'get_training_review_hero_lineup',
+        mock.Mock(
+            return_value={
+                'slots': [
+                    {
+                        'side': 'left',
+                        'slot': 1,
+                        'crop': {'x': 0.1, 'y': 0.2, 'w': 0.1, 'h': 0.1},
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(config, 'MEDIA_SERVER_URL', 'http://nas:8800')
+    fetch = mock.Mock(return_value=b'full-frame')
+    crop = mock.Mock(return_value=b'hero-crop')
+    monkeypatch.setattr(server, '_fetch_frame_image_bytes', fetch)
+    monkeypatch.setattr(hero_review, 'crop_image_content', crop)
+
+    response = server.api_training_review_hero_crop(17, 'left', 1)
+
+    assert response.body == b'hero-crop'
+    fetch.assert_called_once_with(17)
+    crop.assert_called_once_with(
+        b'full-frame', {'x': 0.1, 'y': 0.2, 'w': 0.1, 'h': 0.1}
+    )
+
+
+def test_worker_control_plane_serves_remote_model_test_crop(monkeypatch) -> None:
+    connection = mock.Mock()
+    connection.close = mock.Mock()
+    crop_box = {'x': 0.1, 'y': 0.2, 'w': 0.3, 'h': 0.4}
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(config, 'MEDIA_SERVER_URL', 'http://nas:8800')
+    monkeypatch.setattr(
+        server.model_testing,
+        'run_sample_image_reference',
+        mock.Mock(return_value={'frame_id': 19, 'crop': crop_box}),
+    )
+    fetch = mock.Mock(return_value=b'full-frame')
+    crop = mock.Mock(return_value=b'model-test-crop')
+    monkeypatch.setattr(server, '_fetch_frame_image_bytes', fetch)
+    monkeypatch.setattr(hero_review, 'crop_image_content', crop)
+
+    response = server.api_model_test_sample_image(
+        'hero-run-1', 'f00000019-left-1', 'test'
+    )
+
+    assert response.body == b'model-test-crop'
+    fetch.assert_called_once_with(19)
+    crop.assert_called_once_with(b'full-frame', crop_box)
+
+
+def test_zero_sized_historical_frame_skips_layout_template_without_500(
+    monkeypatch,
+) -> None:
+    connection = mock.Mock()
+    item = {
+        'frame_id': 18,
+        'width': 0,
+        'height': 0,
+        'streamer': 'legacy-streamer',
+        'sources': [],
+    }
+    monkeypatch.setattr(config, 'CONTROL_PLANE_ONLY', True)
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(
+        server, '_single_training_review_item', mock.Mock(return_value=item)
+    )
+    monkeypatch.setattr(
+        server.db, 'get_training_review_hero_lineup', mock.Mock(return_value=None)
+    )
+    template = mock.Mock()
+    monkeypatch.setattr(server.db, 'get_training_review_hero_template', template)
+    monkeypatch.setattr(
+        server.hero_review,
+        'infer_lineup_context',
+        mock.Mock(return_value=('scoreboard', 5)),
+    )
+    monkeypatch.setattr(
+        server.model_prefill, 'latest_model_specs', mock.Mock(return_value={})
+    )
+
+    result = server.api_training_review_hero_lineup(
+        18, screen_type='scoreboard', team_size=5
+    )
+
+    assert result['applicable'] is True
+    assert result['team_size'] == 5
+    assert result['template_found'] is False
+    template.assert_not_called()
