@@ -52,6 +52,7 @@ let candidateHeroTeamSizeOverride = null;
 let candidateHeroDrawMode = false;
 let candidateHeroEdit = null;
 let candidateFormTouched = false;
+let candidateHeroContextTouched = false;
 const candidatePrefillRequests = new Map();
 const candidateHeroPrefetchRequests = new Map();
 const candidateImagePrefetches = new Map();
@@ -1547,8 +1548,8 @@ function completeCandidateHeroLineupPrefetch(item, context, entry) {
   return entry.finalPromise;
 }
 
-async function loadCandidateHeroLineup(item) {
-  const context = candidateHeroContext(item);
+async function loadCandidateHeroLineup(item, contextOverride = null) {
+  const context = contextOverride || candidateHeroContext(item);
   if (!context) {
     resetCandidateHeroReview();
     renderCandidateHeroContextControls();
@@ -1630,11 +1631,20 @@ async function refreshCandidateHeroAfterWorker(item, context, entry, token) {
       item, context, entry);
     if (!completed.refreshed) return;
     if (token !== candidateHeroLoadToken || currentCandidate() !== item ||
-        candidateHeroDirty || candidateFormTouched) return;
-    await loadCandidateHeroLineup(item);
+        candidateHeroDirty) return;
+    await loadCandidateHeroLineup(item, context);
   } catch (_error) {
     // Worker 暂停或暂时离线时保留人工标注能力，不打断当前图片。
   }
+}
+
+function refreshCandidateHeroFromUpdatedModelItem(item) {
+  if (!item || currentCandidate() !== item ||
+      candidateHeroDirty || candidateHeroContextTouched) return;
+  const suggestedDraft = candidateDefaultDraft(item);
+  const context = candidateHeroContext(item, suggestedDraft, false);
+  if (!context) return;
+  loadCandidateHeroLineup(item, context);
 }
 
 function refreshCandidateHeroReview() {
@@ -1860,6 +1870,7 @@ function renderCandidateHeroContextControls() {
       button.classList.toggle(
         'selected', context && context.teamSize === teamSize);
       button.onclick = () => {
+        candidateHeroContextTouched = true;
         candidateHeroTeamSizeExplicit = true;
         candidateHeroTeamSizeOverride = teamSize;
         candidateHeroDrawMode = false;
@@ -2134,6 +2145,9 @@ function renderCandidateChoices() {
 
 function selectCandidateHeroLayout(value) {
   if (!candidateDraft || !CANDIDATE_HERO_LAYOUTS[value]) return;
+  if (candidateDraft.hero_layout_label !== value) {
+    candidateHeroContextTouched = true;
+  }
   candidateDraft.hero_layout_label = value;
   candidateHeroDrawMode = false;
   if (CANDIDATE_HERO_SCREEN_TYPES.has(value)) {
@@ -2160,6 +2174,12 @@ function selectCandidateHeroLayout(value) {
 
 function selectCandidateReviewLabel(field, value) {
   if (!candidateDraft) return;
+  if (candidateDraft[field] !== value && [
+    'match_flow_label', 'match_mode_label', 'hero_select_label',
+    'result_panel_label',
+  ].includes(field)) {
+    candidateHeroContextTouched = true;
+  }
   candidateDraft[field] = value;
   if (field === 'match_flow_label') {
     candidateHeroTeamSizeExplicit = false;
@@ -2780,6 +2800,7 @@ function renderCandidateItem() {
   $('#candidate-image-wrap').classList.remove('hidden');
   const frameId = item.frame_id;
   candidateFormTouched = false;
+  candidateHeroContextTouched = false;
   image.onload = () => {
     if (currentCandidate() && currentCandidate().frame_id === frameId) {
       renderCandidateBoxes();
@@ -2845,8 +2866,13 @@ async function requestCandidateModelPrefill(item) {
       $('#candidate-prefill-status').textContent = result.message;
     }
     if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&
-        currentCandidate() !== item && !candidateFormTouched) {
-      renderCandidateItem();
+        currentCandidate() !== item) {
+      if (!candidateFormTouched) {
+        renderCandidateItem();
+      } else {
+        renderCandidateSuggestions(currentCandidate());
+        refreshCandidateHeroFromUpdatedModelItem(currentCandidate());
+      }
     }
   } catch (error) {
     if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&

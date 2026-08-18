@@ -20,7 +20,7 @@ Worker 本机，直接连接共享 PostgreSQL。普通标注 API 不经过 NAS�
 
 ```dotenv
 VISION_LAB_WORKER_TOKEN=独立随机令牌
-VISION_LAB_IMAGE_TAG=vision-lab-v0.3.15
+VISION_LAB_IMAGE_TAG=vision-lab-v0.3.16
 VISION_LAB_DATABASE_URL=postgresql://...
 VISION_LAB_DATABASE_SCHEMA=vision_lab
 ```

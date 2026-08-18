@@ -56,6 +56,18 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'renderCandidateMaterialSuggestions();' in script
 
 
+def test_late_model_prefill_refreshes_heroes_after_unrelated_form_click() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+
+    assert 'let candidateHeroContextTouched = false;' in script
+    assert 'function refreshCandidateHeroFromUpdatedModelItem(item)' in script
+    assert 'candidateHeroDirty || candidateHeroContextTouched' in script
+    assert 'candidateHeroDirty || candidateFormTouched' not in script
+    assert 'refreshCandidateHeroFromUpdatedModelItem(currentCandidate());' in script
+
+
 def test_single_item_prefill_does_not_rebuild_all_result_groups(monkeypatch) -> None:
     connection = mock.Mock()
     item = {'frame_id': 7, 'sources': []}
