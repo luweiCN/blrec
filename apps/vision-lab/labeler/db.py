@@ -3528,16 +3528,36 @@ def _training_review_material_signals(
         signal = signals.setdefault(
             frame_id, {'suggestions': {}, 'suggestion_ranks': {}, 'metadata': []}
         )
-        suggestions = _training_review_json_object(row['suggestions_json'])
-        for task, suggestion in suggestions.items():
-            if not isinstance(suggestion, dict):
+        for task in ('hero_select', 'match_mode', 'result_panel'):
+            label = row['{}_suggestion_label'.format(task)]
+            if label is None:
                 continue
-            confidence = _training_review_float(suggestion.get('confidence'))
+            confidence = _training_review_float(
+                row['{}_suggestion_confidence'.format(task)]
+            )
             if confidence <= signal['suggestion_ranks'].get(task, -1.0):
                 continue
-            signal['suggestions'][task] = suggestion
+            signal['suggestions'][task] = {
+                'label': str(label),
+                'confidence': confidence,
+            }
             signal['suggestion_ranks'][task] = confidence
-        metadata = _training_review_json_object(row['metadata_json'])
+        metadata: Dict[str, Any] = {}
+        screen_type = row['hero_context_screen_type']
+        if screen_type is not None:
+            metadata['hero_context_suggestion'] = {
+                'screen_type': str(screen_type),
+                'confidence': _training_review_float(row['hero_context_confidence']),
+            }
+        for key in ('game_mode', 'mode_class'):
+            value = row[key]
+            if value is not None:
+                metadata[key] = str(value)
+        corrected_mode = row['manual_game_mode']
+        if corrected_mode is not None:
+            metadata['manual_correction'] = {
+                'after': {'game_mode': str(corrected_mode)}
+            }
         if metadata:
             signal['metadata'].append(metadata)
     return signals
@@ -5467,8 +5487,27 @@ def training_review_stats(
     missing_player_hero = len(missing_player_ids)
     categories_by_frame: Dict[int, set[str]] = {}
     source_rows = conn.execute(
-        'SELECT frame_id, source_type, suggestions_json, metadata_json '
-        'FROM training_review_sources'
+        'SELECT frame_id,source_type,'
+        "json_extract(suggestions_json,'$.hero_select.label') "
+        'AS hero_select_suggestion_label,'
+        "json_extract(suggestions_json,'$.hero_select.confidence') "
+        'AS hero_select_suggestion_confidence,'
+        "json_extract(suggestions_json,'$.match_mode.label') "
+        'AS match_mode_suggestion_label,'
+        "json_extract(suggestions_json,'$.match_mode.confidence') "
+        'AS match_mode_suggestion_confidence,'
+        "json_extract(suggestions_json,'$.result_panel.label') "
+        'AS result_panel_suggestion_label,'
+        "json_extract(suggestions_json,'$.result_panel.confidence') "
+        'AS result_panel_suggestion_confidence,'
+        "json_extract(metadata_json,'$.hero_context_suggestion.screen_type') "
+        'AS hero_context_screen_type,'
+        "json_extract(metadata_json,'$.hero_context_suggestion.confidence') "
+        'AS hero_context_confidence,'
+        "json_extract(metadata_json,'$.game_mode') AS game_mode,"
+        "json_extract(metadata_json,'$.mode_class') AS mode_class,"
+        "json_extract(metadata_json,'$.manual_correction.after.game_mode') "
+        'AS manual_game_mode FROM training_review_sources'
     ).fetchall()
     for row in source_rows:
         frame_id = int(row['frame_id'])

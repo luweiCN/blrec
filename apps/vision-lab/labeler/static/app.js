@@ -1216,6 +1216,36 @@ function candidateHeroAutofillSlots(slots, screenType, teamSize) {
   return result;
 }
 
+function candidateCurrentImageUrl() {
+  const image = $('#candidate-image');
+  if (image && image.src) return image.src;
+  const item = currentCandidate();
+  return item ? candidateImageUrl(item) : '';
+}
+
+function candidateHeroCropPreview(box, alt) {
+  const crop = document.createElement('div');
+  crop.className = 'candidate-hero-crop';
+  crop.title = '截图中圈出的原始头像';
+  crop.setAttribute('role', 'img');
+  crop.setAttribute('aria-label', alt);
+  const width = Math.max(0.0001, Number(box && box.w) || 0);
+  const height = Math.max(0.0001, Number(box && box.h) || 0);
+  const x = Number(box && box.x) || 0;
+  const y = Number(box && box.y) || 0;
+  const source = document.createElement('img');
+  source.className = 'candidate-hero-crop-source';
+  source.src = candidateCurrentImageUrl();
+  source.alt = '';
+  source.draggable = false;
+  source.style.width = `${100 / width}%`;
+  source.style.height = `${100 / height}%`;
+  source.style.left = `${(-100 * x) / width}%`;
+  source.style.top = `${(-100 * y) / height}%`;
+  crop.appendChild(source);
+  return crop;
+}
+
 function renderCandidateHeroLineup() {
   const review = $('#candidate-hero-review');
   const teams = $('#candidate-hero-teams');
@@ -1333,12 +1363,10 @@ function renderCandidateHeroLineup() {
       const comparison = document.createElement('div');
       comparison.className = 'candidate-hero-comparison';
       comparison.setAttribute('aria-label', '截图头像与当前标注头像对照');
-      const crop = document.createElement('img');
-      crop.className = 'candidate-hero-crop';
-      crop.src = `${slot.crop_url}?t=${encodeURIComponent(slot.updated_at || '')}`;
-      crop.alt = `${side === 'left' ? '左队' : '右队'}第 ${slot.slot} 个截图头像`;
-      crop.title = '截图中圈出的原始头像';
-      crop.draggable = false;
+      const crop = candidateHeroCropPreview(
+        slot.crop,
+        `${side === 'left' ? '左队' : '右队'}第 ${slot.slot} 个截图头像`,
+      );
       comparison.appendChild(crop);
       if (hero && hero.image_url) {
         const reference = document.createElement('img');

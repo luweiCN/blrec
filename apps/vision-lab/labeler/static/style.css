@@ -1367,7 +1367,19 @@ tr:hover td { background: var(--panel2); }
 }
 
 .candidate-hero-crop {
+  position: relative;
+  overflow: hidden;
   border: 1px solid #46546a;
+}
+
+.candidate-hero-crop-source {
+  position: absolute;
+  display: block;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  object-fit: fill;
+  pointer-events: none;
 }
 
 .candidate-hero-reference {

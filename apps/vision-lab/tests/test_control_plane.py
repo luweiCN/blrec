@@ -94,6 +94,30 @@ def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
     assert 'setInterval(refreshCandidateIndexState, 30000)' in script
 
 
+def test_hero_comparison_reuses_prefetched_full_frame_in_browser() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+
+    assert 'function candidateHeroCropPreview(' in script
+    assert "source.src = candidateCurrentImageUrl();" in script
+    assert "source.style.width = `${100 / width}%`;" in script
+    assert "source.style.height = `${100 / height}%`;" in script
+    assert "crop.src = `${slot.crop_url}" not in script
+
+
+def test_training_review_stats_does_not_transfer_unused_source_json() -> None:
+    source = (Path(__file__).resolve().parent.parent / 'labeler/db.py').read_text(
+        encoding='utf-8'
+    )
+    stats = source[source.index('def training_review_stats(') :]
+
+    assert "'AS manual_game_mode FROM training_review_sources'" in stats
+    assert (
+        "'SELECT frame_id, source_type, suggestions_json, metadata_json '" not in stats
+    )
+
+
 def test_late_model_prefill_refreshes_heroes_after_unrelated_form_click() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
