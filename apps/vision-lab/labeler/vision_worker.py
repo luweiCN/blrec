@@ -165,13 +165,28 @@ class VisionWorker:
         )
 
     def run(self, *, once: bool = False) -> None:
-        self.register()
+        registered = False
         while True:
-            response = self.client.json(
-                'POST',
-                '/api/vision-workers/claim',
-                {'worker_id': self.worker_id, 'capabilities': self.capabilities},
-            )
+            try:
+                if not registered:
+                    self.register()
+                    registered = True
+                response = self.client.json(
+                    'POST',
+                    '/api/vision-workers/claim',
+                    {'worker_id': self.worker_id, 'capabilities': self.capabilities},
+                )
+            except Exception as error:  # noqa: BLE001 - 常驻 Worker 必须自动恢复
+                if once:
+                    raise
+                registered = False
+                print(
+                    f'Vision Worker 连接控制面失败，稍后重试: {error}',
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(self.poll_seconds)
+                continue
             job = response.get('job')
             if not isinstance(job, dict):
                 if once:
@@ -725,20 +740,7 @@ def main() -> None:
     ui_port = int(os.environ.get('VISION_WORKER_UI_PORT', '0'))
     if not 0 <= ui_port <= 65_535:
         raise RuntimeError('VISION_WORKER_UI_PORT 必须在 0 到 65535 之间')
-    if ui_port:
-        import uvicorn
-
-        validate_local_control_plane_url(server_url, ui_port)
-        ui_host = os.environ.get('VISION_WORKER_UI_HOST', '0.0.0.0').strip()
-        threading.Thread(
-            target=uvicorn.run,
-            args=(create_worker_control_plane_app(),),
-            kwargs={'host': ui_host, 'port': ui_port, 'log_level': 'info'},
-            daemon=True,
-            name='vision-worker-ui',
-        ).start()
-        wait_for_local_control_plane(server_url)
-    VisionWorker(
+    worker = VisionWorker(
         client=VisionLabClient(server_url, token),
         worker_id=worker_id,
         display_name=display_name,
@@ -746,7 +748,43 @@ def main() -> None:
         base_models_dir=base_models_dir,
         poll_seconds=float(os.environ.get('VISION_WORKER_POLL_SECONDS', '5')),
         capabilities=capabilities,
-    ).run(once=args.once)
+    )
+    if not ui_port:
+        worker.run(once=args.once)
+        return
+
+    import uvicorn
+
+    validate_local_control_plane_url(server_url, ui_port)
+    app = create_worker_control_plane_app()
+    ui_host = os.environ.get('VISION_WORKER_UI_HOST', '0.0.0.0').strip()
+    if args.once:
+        threading.Thread(
+            target=uvicorn.run,
+            args=(app,),
+            kwargs={'host': ui_host, 'port': ui_port, 'log_level': 'info'},
+            daemon=True,
+            name='vision-worker-ui',
+        ).start()
+        wait_for_local_control_plane(server_url)
+        worker.run(once=True)
+        return
+
+    def run_worker() -> None:
+        while True:
+            try:
+                wait_for_local_control_plane(server_url)
+                worker.run()
+            except Exception as error:  # noqa: BLE001 - Server 不能被任务轮询带停
+                print(
+                    f'Vision Worker 后台线程异常，稍后重试: {error}',
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(worker.poll_seconds)
+
+    threading.Thread(target=run_worker, daemon=True, name='vision-worker-jobs').start()
+    uvicorn.run(app, host=ui_host, port=ui_port, log_level='info')
 
 
 if __name__ == '__main__':

@@ -40,3 +40,46 @@ def test_worker_waits_until_local_control_plane_is_ready(monkeypatch) -> None:
     )
 
     assert opened == [('http://127.0.0.1:8801/api/config', 1)]
+
+
+def test_worker_retries_control_plane_failure_without_exiting(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+
+    class Client:
+        def json(self, method, path, payload=None):
+            calls.append((method, path, payload))
+            if len(calls) == 1:
+                raise TimeoutError('temporary timeout')
+            if path.endswith('/claim'):
+                return {'job': None}
+            return {}
+
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(vision_worker.time, 'sleep', sleep)
+    worker = vision_worker.VisionWorker(
+        client=Client(),
+        worker_id='worker-1',
+        display_name='Worker 1',
+        work_dir=tmp_path / 'work',
+        base_models_dir=tmp_path / 'models',
+        poll_seconds=1,
+        capabilities=['model_prefill'],
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        worker.run()
+
+    assert [path for _, path, _ in calls] == [
+        '/api/vision-workers/register',
+        '/api/vision-workers/register',
+        '/api/vision-workers/claim',
+    ]
+    assert sleeps == [1.0, 1.0]
