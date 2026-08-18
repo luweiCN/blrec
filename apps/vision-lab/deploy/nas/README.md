@@ -25,8 +25,9 @@ VISION_LAB_DATABASE_URL=postgresql://...
 VISION_LAB_DATABASE_SCHEMA=vision_lab
 ```
 
-容器入口固定为 `blrec-vision-media`。不要改回 `blrec-vision-lab`，否则 NAS
-会重新暴露完整标注 Server，保存请求又可能被错误地接回 NAS。
+Compose 必须用 `entrypoint` 把镜像入口覆盖为 `blrec-vision-media`，不能只写
+`command`。否则镜像默认的 `blrec-vision-lab` 仍会启动，NAS 会重新暴露完整
+标注 Server，保存请求又可能被错误地接回 NAS。
 
 数据库 URL 继续使用 NAS 自己的固定 PostgreSQL 隧道。Mac Worker 有独立 SSH
 隧道，两者不会互相转发流量。
