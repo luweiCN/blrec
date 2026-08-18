@@ -62,7 +62,7 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
             'async function openCandidateMaterialSuggestions()'
         ) : script.index('function renderCandidateHeroFilter()')
     ]
-    assert 'await loadCandidateReviewStats(' in material_loader
+    assert "api('/api/training-review/material-suggestions')" in material_loader
     source_scope_setter = script[
         script.index('function setCandidateSourceScope(') : script.index(
             'function candidateSourceText('
@@ -112,10 +112,38 @@ def test_training_review_stats_does_not_transfer_unused_source_json() -> None:
     )
     stats = source[source.index('def training_review_stats(') :]
 
-    assert "'AS manual_game_mode FROM training_review_sources'" in stats
+    assert "'SELECT frame_id,source_type FROM training_review_sources'" in stats
+    assert (
+        "'JOIN training_review_items item ON item.frame_id=source.frame_id '" in stats
+    )
+    assert "\"WHERE item.review_status IN ('pending','partial') AND ((\"" in stats
     assert (
         "'SELECT frame_id, source_type, suggestions_json, metadata_json '" not in stats
     )
+
+
+def test_training_review_stats_coalesces_concurrent_cold_requests() -> None:
+    source = (Path(__file__).resolve().parent.parent / 'labeler/server.py').read_text(
+        encoding='utf-8'
+    )
+
+    assert '_training_review_stats_compute_lock = threading.Lock()' in source
+    cached = source[
+        source.index('def _cached_training_review_stats(') : source.index(
+            'def _cached_default_training_review_queue('
+        )
+    ]
+    assert 'with _training_review_stats_compute_lock:' in cached
+
+
+def test_material_suggestions_are_loaded_only_when_dialog_opens() -> None:
+    root = Path(__file__).resolve().parent.parent
+    server = (root / 'labeler/server.py').read_text(encoding='utf-8')
+    script = (root / 'labeler/static/app.js').read_text(encoding='utf-8')
+
+    assert 'include_material_suggestions=False' in server
+    assert "@app.get('/api/training-review/material-suggestions')" in server
+    assert "api('/api/training-review/material-suggestions')" in script
 
 
 def test_late_model_prefill_refreshes_heroes_after_unrelated_form_click() -> None:

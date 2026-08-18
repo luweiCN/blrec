@@ -5438,11 +5438,16 @@ def training_review_stats(
     conn: sqlite3.Connection,
     *,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
+    include_material_suggestions: bool = True,
 ) -> Dict[str, Any]:
     duplicates = training_review_duplicate_result_frame_ids(
         conn, result_groups=result_groups
     )
-    item_rows = conn.execute('SELECT * FROM training_review_items').fetchall()
+    item_rows = conn.execute(
+        'SELECT frame_id,review_status,match_flow_label,match_mode_label,'
+        'hero_select_label,hero_select_variant,result_panel_label,'
+        'hero_layout_label FROM training_review_items'
+    ).fetchall()
     visible_rows = [row for row in item_rows if int(row['frame_id']) not in duplicates]
     visible_ids = {int(row['frame_id']) for row in visible_rows}
     statuses: Dict[str, int] = {}
@@ -5486,36 +5491,51 @@ def training_review_stats(
     }
     missing_player_hero = len(missing_player_ids)
     categories_by_frame: Dict[int, set[str]] = {}
-    source_rows = conn.execute(
-        'SELECT frame_id,source_type,'
-        "json_extract(suggestions_json,'$.hero_select.label') "
-        'AS hero_select_suggestion_label,'
-        "json_extract(suggestions_json,'$.hero_select.confidence') "
-        'AS hero_select_suggestion_confidence,'
-        "json_extract(suggestions_json,'$.match_mode.label') "
-        'AS match_mode_suggestion_label,'
-        "json_extract(suggestions_json,'$.match_mode.confidence') "
-        'AS match_mode_suggestion_confidence,'
-        "json_extract(suggestions_json,'$.result_panel.label') "
-        'AS result_panel_suggestion_label,'
-        "json_extract(suggestions_json,'$.result_panel.confidence') "
-        'AS result_panel_suggestion_confidence,'
-        "json_extract(metadata_json,'$.hero_context_suggestion.screen_type') "
-        'AS hero_context_screen_type,'
-        "json_extract(metadata_json,'$.hero_context_suggestion.confidence') "
-        'AS hero_context_confidence,'
-        "json_extract(metadata_json,'$.game_mode') AS game_mode,"
-        "json_extract(metadata_json,'$.mode_class') AS mode_class,"
-        "json_extract(metadata_json,'$.manual_correction.after.game_mode') "
-        'AS manual_game_mode FROM training_review_sources'
+    category_source_rows = conn.execute(
+        'SELECT frame_id,source_type FROM training_review_sources'
     ).fetchall()
-    for row in source_rows:
+    for row in category_source_rows:
         frame_id = int(row['frame_id'])
         if frame_id not in visible_ids:
             continue
         categories_by_frame.setdefault(frame_id, set()).add(
             _training_review_source_category(row['source_type'])
         )
+    source_rows = []
+    if include_material_suggestions:
+        source_rows = conn.execute(
+            'SELECT source.frame_id,source.source_type,'
+            "json_extract(source.suggestions_json,'$.hero_select.label') "
+            'AS hero_select_suggestion_label,'
+            "json_extract(source.suggestions_json,'$.hero_select.confidence') "
+            'AS hero_select_suggestion_confidence,'
+            "json_extract(source.suggestions_json,'$.match_mode.label') "
+            'AS match_mode_suggestion_label,'
+            "json_extract(source.suggestions_json,'$.match_mode.confidence') "
+            'AS match_mode_suggestion_confidence,'
+            "json_extract(source.suggestions_json,'$.result_panel.label') "
+            'AS result_panel_suggestion_label,'
+            "json_extract(source.suggestions_json,'$.result_panel.confidence') "
+            'AS result_panel_suggestion_confidence,'
+            "json_extract(source.metadata_json,'$.hero_context_suggestion.screen_type') "
+            'AS hero_context_screen_type,'
+            "json_extract(source.metadata_json,'$.hero_context_suggestion.confidence') "
+            'AS hero_context_confidence,'
+            "json_extract(source.metadata_json,'$.game_mode') AS game_mode,"
+            "json_extract(source.metadata_json,'$.mode_class') AS mode_class,"
+            "json_extract(source.metadata_json,'$.manual_correction.after.game_mode') "
+            'AS manual_game_mode FROM training_review_sources source '
+            'JOIN training_review_items item ON item.frame_id=source.frame_id '
+            "WHERE item.review_status IN ('pending','partial') AND (("
+            "COALESCE(item.hero_select_label,'') NOT IN "
+            "('select_3v3','select_aram','select_5v5') AND "
+            "COALESCE(item.hero_layout_label,'') NOT IN "
+            "('gameplay_hud','scoreboard','result_page') AND "
+            "COALESCE(item.result_panel_label,'')!='result_panel') OR ("
+            "COALESCE(item.match_mode_label,'') NOT IN ('3v3','aram','5v5') AND "
+            "COALESCE(item.hero_select_label,'') NOT IN "
+            "('select_3v3','select_aram','select_5v5')))"
+        ).fetchall()
     source_frames = {'legacy': 0, 'worker': 0, 'result_archive': 0, 'other': 0}
     origin_categories = {'legacy', 'worker', 'result_archive'}
     for frame_id in visible_ids:
@@ -5631,7 +5651,11 @@ def training_review_stats(
         'source_frames': source_frames,
         'source_scopes': source_scopes,
         'legacy_data': legacy_data,
-        'material_suggestions': _training_review_material_suggestions(
-            visible_rows, source_rows, categories_by_frame
+        'material_suggestions': (
+            _training_review_material_suggestions(
+                visible_rows, source_rows, categories_by_frame
+            )
+            if include_material_suggestions
+            else None
         ),
     }

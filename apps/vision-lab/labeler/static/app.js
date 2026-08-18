@@ -2401,6 +2401,10 @@ function renderCandidateMaterialSuggestionButton() {
     count.textContent = '查看';
     return;
   }
+  if (!Array.isArray(candidateReviewStats.material_suggestions)) {
+    count.textContent = '查看';
+    return;
+  }
   const suggestions = candidateMaterialSuggestions();
   count.textContent = suggestions.length ? String(suggestions.length) : '充足';
 }
@@ -2436,7 +2440,7 @@ function renderCandidateMaterialSuggestions() {
   const summary = $('#candidate-material-summary');
   const suggestions = candidateMaterialSuggestions();
   list.replaceChildren();
-  if (!Object.keys(candidateReviewStats).length) {
+  if (!Array.isArray(candidateReviewStats.material_suggestions)) {
     summary.textContent = '正在统计训练素材分布…';
     const loading = document.createElement('div');
     loading.className = 'candidate-material-empty';
@@ -2500,9 +2504,16 @@ async function openCandidateMaterialSuggestions() {
   renderCandidateMaterialSuggestions();
   const dialog = $('#candidate-material-dialog');
   if (!dialog.open) dialog.showModal();
-  if (!Object.keys(candidateReviewStats).length) {
-    await loadCandidateReviewStats(
-      $('#candidate-status-filter').value, candidateSourceScope);
+  if (!Array.isArray(candidateReviewStats.material_suggestions)) {
+    try {
+      const data = await api('/api/training-review/material-suggestions');
+      candidateReviewStats.material_suggestions = data.material_suggestions || [];
+      renderCandidateMaterialSuggestions();
+      renderCandidateMaterialSuggestionButton();
+    } catch (error) {
+      $('#candidate-material-summary').textContent =
+        '素材建议加载失败：' + error.message;
+    }
   }
 }
 

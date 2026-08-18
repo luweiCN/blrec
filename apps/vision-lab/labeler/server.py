@@ -20,25 +20,11 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import (
-    __version__,
-    bp_review,
-    config,
-    db,
-    events,
-)
+from . import __version__, bp_review, config, db, events
 from . import export as export_mod
-from . import (
-    hero_review,
-)
+from . import hero_review
 from . import inference as inference_mod
-from . import (
-    local,
-    managed_assets,
-    model_prefill,
-    model_testing,
-    result_archive,
-)
+from . import local, managed_assets, model_prefill, model_testing, result_archive
 from . import stats as stats_mod
 from . import (
     training,
@@ -161,20 +147,20 @@ _worker_candidate_sync_state: Dict[str, Any] = {
 _training_start_lock = threading.RLock()
 _worker_deployment_lock = threading.RLock()
 _training_review_cache_lock = threading.RLock()
+_training_review_stats_compute_lock = threading.Lock()
 _training_review_cache: Dict[str, Any] = {
     'groups': None,
     'groups_expires_at': 0.0,
     'stats': None,
     'stats_expires_at': 0.0,
+    'material_suggestions': None,
+    'material_suggestions_expires_at': 0.0,
     'default_queue': None,
     'default_queue_expires_at': 0.0,
 }
 _TRAINING_REVIEW_CACHE_SECONDS = 300.0
 _worker_candidate_state_response_lock = threading.Lock()
-_worker_candidate_state_response: Dict[str, Any] = {
-    'value': None,
-    'expires_at': 0.0,
-}
+_worker_candidate_state_response: Dict[str, Any] = {'value': None, 'expires_at': 0.0}
 _WORKER_CANDIDATE_STATE_CACHE_SECONDS = 10.0
 
 
@@ -222,14 +208,52 @@ def _cached_training_review_stats(conn: Any) -> Dict[str, Any]:
         value = _training_review_cache['stats']
         if value is not None and now < _training_review_cache['stats_expires_at']:
             return value
-    groups = _cached_training_review_groups(conn)
-    value = db.training_review_stats(conn, result_groups=groups)
-    with _training_review_cache_lock:
-        _training_review_cache['stats'] = value
-        _training_review_cache['stats_expires_at'] = (
-            time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
+    with _training_review_stats_compute_lock:
+        now = time.monotonic()
+        with _training_review_cache_lock:
+            value = _training_review_cache['stats']
+            if value is not None and now < _training_review_cache['stats_expires_at']:
+                return value
+        groups = _cached_training_review_groups(conn)
+        value = db.training_review_stats(
+            conn, result_groups=groups, include_material_suggestions=False
         )
-        return value
+        with _training_review_cache_lock:
+            _training_review_cache['stats'] = value
+            _training_review_cache['stats_expires_at'] = (
+                time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
+            )
+            return value
+
+
+def _cached_training_review_material_suggestions(conn: Any) -> List[Dict[str, Any]]:
+    now = time.monotonic()
+    with _training_review_cache_lock:
+        value = _training_review_cache['material_suggestions']
+        if (
+            value is not None
+            and now < _training_review_cache['material_suggestions_expires_at']
+        ):
+            return value
+    with _training_review_stats_compute_lock:
+        now = time.monotonic()
+        with _training_review_cache_lock:
+            value = _training_review_cache['material_suggestions']
+            if (
+                value is not None
+                and now < _training_review_cache['material_suggestions_expires_at']
+            ):
+                return value
+        groups = _cached_training_review_groups(conn)
+        value = db.training_review_stats(
+            conn, result_groups=groups, include_material_suggestions=True
+        )['material_suggestions']
+        with _training_review_cache_lock:
+            _training_review_cache['material_suggestions'] = value
+            _training_review_cache['material_suggestions_expires_at'] = (
+                time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
+            )
+            return value
 
 
 def _cached_default_training_review_queue(
@@ -245,10 +269,7 @@ def _cached_default_training_review_queue(
             return value
     value = tuple(
         db.training_review_frame_ids(
-            conn,
-            status='needs_review',
-            source_scope='new',
-            result_groups=result_groups,
+            conn, status='needs_review', source_scope='new', result_groups=result_groups
         )
     )
     with _training_review_cache_lock:
@@ -263,9 +284,11 @@ def _invalidate_training_review_cache() -> None:
     with _training_review_cache_lock:
         _training_review_cache['groups'] = None
         _training_review_cache['stats'] = None
+        _training_review_cache['material_suggestions'] = None
         _training_review_cache['default_queue'] = None
         _training_review_cache['groups_expires_at'] = 0.0
         _training_review_cache['stats_expires_at'] = 0.0
+        _training_review_cache['material_suggestions_expires_at'] = 0.0
         _training_review_cache['default_queue_expires_at'] = 0.0
 
 
@@ -278,6 +301,8 @@ def _mark_training_review_saved(frame_id: int) -> None:
             )
         _training_review_cache['stats'] = None
         _training_review_cache['stats_expires_at'] = 0.0
+        _training_review_cache['material_suggestions'] = None
+        _training_review_cache['material_suggestions_expires_at'] = 0.0
 
 
 def _nas() -> NasClient:
@@ -618,9 +643,7 @@ def api_frame_thumb(frame_id: int) -> Response:
 def _fetch_frame_image_bytes(frame_id: int) -> bytes:
     if not config.MEDIA_SERVER_URL:
         raise RuntimeError('尚未配置 NAS 图片服务')
-    url = (
-        f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/image'
-    )
+    url = f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/image'
     with urllib.request.urlopen(url, timeout=60) as response:
         return response.read()
 
@@ -1289,10 +1312,7 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
         ):
             _invalidate_training_review_cache()
         _set_worker_candidate_sync_state(
-            **result,
-            running=False,
-            last_completed_at=db.now(),
-            force_persist=True,
+            **result, running=False, last_completed_at=db.now(), force_persist=True
         )
     except Exception as exc:  # noqa: BLE001
         _set_worker_candidate_sync_state(
@@ -1343,10 +1363,7 @@ def api_worker_candidate_state() -> Dict[str, Any]:
     now = time.monotonic()
     with _worker_candidate_state_response_lock:
         cached = _worker_candidate_state_response['value']
-        if (
-            cached is not None
-            and now < _worker_candidate_state_response['expires_at']
-        ):
+        if cached is not None and now < _worker_candidate_state_response['expires_at']:
             return cached
         with _worker_candidate_sync_lock:
             sync = dict(_worker_candidate_sync_state)
@@ -1357,9 +1374,7 @@ def api_worker_candidate_state() -> Dict[str, Any]:
             with _training_review_read_guard():
                 conn = _conn()
                 try:
-                    published = db.load_service_runtime_state(
-                        conn, 'candidate_index'
-                    )
+                    published = db.load_service_runtime_state(conn, 'candidate_index')
                     if published:
                         sync = published
                 finally:
@@ -1497,6 +1512,17 @@ def api_training_review_stats(
                 streamer=streamer,
                 hero_screen_type=hero_screen_type,
             )
+        }
+    finally:
+        conn.close()
+
+
+@app.get('/api/training-review/material-suggestions')
+def api_training_review_material_suggestions() -> Dict[str, Any]:
+    conn = _conn()
+    try:
+        return {
+            'material_suggestions': _cached_training_review_material_suggestions(conn)
         }
     finally:
         conn.close()
@@ -2855,9 +2881,7 @@ def api_model_test_run_batch(run_id: str, body: Dict[str, Any]) -> Dict[str, Any
 
 
 @app.get('/api/model-tests/runs/{run_id}/samples/{sample_id}/image')
-def api_model_test_sample_image(
-    run_id: str, sample_id: str, split: str
-) -> Response:
+def api_model_test_sample_image(run_id: str, sample_id: str, split: str) -> Response:
     with _db_lock:
         conn = _conn()
         try:
