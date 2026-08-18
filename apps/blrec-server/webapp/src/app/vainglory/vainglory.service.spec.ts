@@ -282,9 +282,14 @@ describe('VaingloryService', () => {
   it('starts and reads an account archive backfill', () => {
     service.requestArchiveSync(7).subscribe();
     const request = http.expectOne('/api/v1/vainglory/archive-syncs/7');
+    expect(request.request.body).toEqual({ rescan: false });
     expect(request.request.method).toBe('POST');
-    expect(request.request.body).toBeNull();
     request.flush({ accountId: 7, state: 'discovering' });
+
+    service.requestArchiveSync(7, true).subscribe();
+    const rescan = http.expectOne('/api/v1/vainglory/archive-syncs/7');
+    expect(rescan.request.body).toEqual({ rescan: true });
+    rescan.flush({ accountId: 7, state: 'discovering' });
 
     service.getArchiveSync(7).subscribe();
     const status = http.expectOne('/api/v1/vainglory/archive-syncs/7');

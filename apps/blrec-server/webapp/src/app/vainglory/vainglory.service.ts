@@ -491,10 +491,13 @@ export class VaingloryService {
     );
   }
 
-  requestArchiveSync(accountId: number): Observable<VaingloryArchiveSync> {
+  requestArchiveSync(
+    accountId: number,
+    rescan = false,
+  ): Observable<VaingloryArchiveSync> {
     return this.http.post<VaingloryArchiveSync>(
       this.url.makeApiUrl(`/api/v1/vainglory/archive-syncs/${accountId}`),
-      null,
+      { rescan },
     );
   }
 

@@ -504,6 +504,45 @@ async def test_discovers_materializes_and_queues_each_archive_page(
 
 
 @pytest.mark.asyncio
+async def test_existing_archive_sync_resumes_without_rescanning_unless_requested(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        await database.execute(
+            'INSERT INTO vainglory_archive_syncs('
+            'account_id,state,progress,discovered_count,completed_count,error,'
+            'requested_at,started_at,completed_at,updated_at,operator_paused,'
+            'next_page,discovery_complete) '
+            "VALUES(1,'failed',0.5,8120,2717,'temporary',1,2,3,4,1,202,1)"
+        )
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+
+        resumed = await service.request(1)
+        assert resumed.discovered_count == 8120
+        assert resumed.completed_count == 2717
+        assert resumed.next_page == 202
+        assert resumed.discovery_complete is True
+        assert resumed.operator_paused is False
+
+        rescanned = await service.request(1, rescan=True)
+        assert rescanned.discovered_count == 0
+        assert rescanned.completed_count == 0
+        assert rescanned.next_page == 1
+        assert rescanned.discovery_complete is False
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_reconcile_refreshes_only_changed_archive_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1284,7 +1323,7 @@ async def test_discovers_and_materializes_pages_missing_from_an_existing_import(
             )
 
         reader.page_count = 3
-        await service.request(1)
+        await service.request(1, rescan=True)
         assert await service.run_once() is True
 
         stale = await database.fetchone(

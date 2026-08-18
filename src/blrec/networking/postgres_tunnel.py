@@ -156,6 +156,7 @@ def run(environment: Mapping[str, str] = os.environ) -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     process: Optional[subprocess.Popen[bytes]] = None
+    process_command: Optional[Tuple[str, ...]] = None
     settings_mtime_ns = 0
     try:
         while not stopped.is_set():
@@ -169,7 +170,8 @@ def run(environment: Mapping[str, str] = os.environ) -> int:
                     selection.role,
                     settings.local_port,
                 )
-                process = subprocess.Popen(settings.command(selection))
+                process_command = settings.command(selection)
+                process = subprocess.Popen(process_command)
             if stopped.wait(5):
                 break
             changed = (
@@ -179,11 +181,17 @@ def run(environment: Mapping[str, str] = os.environ) -> int:
             if not changed and not exited:
                 continue
             if changed:
-                logger.info('网络设置已变化，重建 PostgreSQL 隧道')
+                settings_mtime_ns = settings.network_settings_file.stat().st_mtime_ns
+                next_command = settings.command(_selection(settings))
+                if not exited and next_command == process_command:
+                    logger.debug('设置文件已更新，数据库线路未变化，保持现有隧道')
+                    continue
+                logger.info('数据库线路已变化，重建 PostgreSQL 隧道')
             else:
                 logger.warning('PostgreSQL 隧道已退出，5 秒后重试')
             _terminate(process)
             process = None
+            process_command = None
     finally:
         if process is not None:
             _terminate(process)

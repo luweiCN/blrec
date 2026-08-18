@@ -628,6 +628,10 @@ class ArchiveSyncControlRequest(ApiModel):
     daily_limit: Optional[int] = Field(None, ge=1)
 
 
+class ArchiveSyncRequest(ApiModel):
+    rescan: bool = False
+
+
 class ArchiveBackfillItemResponse(ApiModel):
     id: int
     account_id: int
@@ -1521,11 +1525,16 @@ async def fail_analysis_work(
 )
 async def request_archive_sync(
     account_id: int,
+    payload: Optional[ArchiveSyncRequest] = None,
     _subject: str = Depends(authenticated_manager_subject),
     backfill: ArchiveBackfillService = Depends(get_archive_backfill),
 ) -> ArchiveSyncResponse:
     try:
-        return _archive_sync(await backfill.request(account_id))
+        return _archive_sync(
+            await backfill.request(
+                account_id, rescan=False if payload is None else payload.rescan
+            )
+        )
     except ArchiveBackfillNotFound as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(error)

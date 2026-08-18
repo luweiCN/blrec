@@ -1143,6 +1143,16 @@ class VaingloryPublicationService:
                     EXCLUDED_TITLE_MARKER,
                 ),
             )
+            connection.execute(
+                "UPDATE vainglory_publications SET state='prepared',"
+                "plan_state='waiting_analysis',error=NULL,needs_refresh=1,"
+                'remote_verified_at=NULL,priority=1,updated_at=? '
+                "WHERE error LIKE '%识别结果缺少%' AND EXISTS("
+                'SELECT 1 FROM vainglory_part_jobs part_job '
+                'WHERE part_job.session_id=vainglory_publications.session_id '
+                "AND part_job.state IN ('pending','analyzing'))",
+                (now,),
+            )
             return connection.total_changes - before
 
         created = await self._database.write(ensure)
@@ -1356,7 +1366,7 @@ class VaingloryPublicationService:
                     return True
                 reason = (
                     'initial'
-                    if str(current['plan_state']) == 'waiting_analysis'
+                    if current['active_revision_id'] is None
                     else (
                         'forced'
                         if bool(current['force_republish']) or same_payload

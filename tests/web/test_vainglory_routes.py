@@ -367,8 +367,8 @@ class FakeArchiveBackfill:
         self.item_requests = []
         self.control_updates = []
 
-    async def request(self, account_id: int) -> ArchiveSync:
-        self.requested_accounts.append(account_id)
+    async def request(self, account_id: int, *, rescan: bool = False) -> ArchiveSync:
+        self.requested_accounts.append((account_id, rescan))
         return ArchiveSync(
             account_id=account_id,
             state='discovering',
@@ -1016,6 +1016,9 @@ def test_requests_and_reads_account_archive_backfill() -> None:
 
     with TestClient(application) as client:
         requested = client.post('/api/v1/vainglory/archive-syncs/7')
+        rescanned = client.post(
+            '/api/v1/vainglory/archive-syncs/7', json={'rescan': True}
+        )
         status_response = client.get('/api/v1/vainglory/archive-syncs/7')
         updated = client.patch(
             '/api/v1/vainglory/archive-syncs/7', json={'dailyLimit': 50_000}
@@ -1027,7 +1030,8 @@ def test_requests_and_reads_account_archive_backfill() -> None:
 
     assert requested.status_code == 202
     assert requested.json()['state'] == 'discovering'
-    assert fake.requested_accounts == [7]
+    assert fake.requested_accounts == [(7, False), (7, True)]
+    assert rescanned.status_code == 202
     assert status_response.status_code == 200
     assert status_response.json()['progress'] == 0.25
     assert status_response.json()['discoveredCount'] == 20

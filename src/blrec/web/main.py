@@ -587,13 +587,17 @@ async def _realtime_archive_backfill_snapshot() -> Mapping[str, object]:
         queue = await remote_media_cache.queue_status()
         download_queue = {
             'pendingDownloadCount': queue.pending_download_count,
+            'pendingDownloadArchiveCount': queue.pending_download_archive_count,
             'activeDownloadCount': queue.active_download_count,
+            'activeDownloadArchiveCount': queue.active_download_archive_count,
             'downloadedWaitingAnalysisCount': (queue.downloaded_waiting_analysis_count),
             'downloadedWaitingAnalysisArchiveCount': (
                 queue.downloaded_waiting_analysis_archive_count
             ),
             'activeAnalysisCount': queue.active_analysis_count,
+            'activeAnalysisArchiveCount': queue.active_analysis_archive_count,
             'failedDownloadCount': queue.failed_download_count,
+            'failedDownloadArchiveCount': queue.failed_download_archive_count,
             'downloadsPerInterface': queue.downloads_per_interface,
             'interfaceCount': queue.interface_count,
             'totalConcurrency': queue.total_concurrency,

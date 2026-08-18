@@ -2665,13 +2665,13 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.changeDetector.markForCheck();
   }
 
-  requestArchiveSync(account: BiliAccount): void {
+  requestArchiveSync(account: BiliAccount, rescan = false): void {
     if (this.requestingArchiveAccountIds.has(account.id)) {
       return;
     }
     this.requestingArchiveAccountIds.add(account.id);
     this.vainglory
-      .requestArchiveSync(account.id)
+      .requestArchiveSync(account.id, rescan)
       .pipe(
         takeUntil(this.destroy$),
         finalize(() => {
@@ -2682,7 +2682,11 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (sync) => {
           this.archiveSyncs.set(account.id, sync);
-          this.messages.info(`已开始回填 ${account.displayName} 的历史稿件`);
+          this.messages.info(
+            rescan
+              ? `已从第一页重新扫描 ${account.displayName} 的历史稿件`
+              : `已恢复 ${account.displayName} 的历史稿件接入`,
+          );
           this.refreshArchiveItems(account.id);
           this.changeDetector.markForCheck();
         },

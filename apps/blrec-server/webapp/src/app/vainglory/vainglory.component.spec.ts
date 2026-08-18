@@ -556,7 +556,7 @@ describe('VaingloryComponent remote media', () => {
 
     expect(component.archiveManagerVisible).toBeTrue();
     expect(component.archiveAccounts).toEqual([account]);
-    expect(vainglory.requestArchiveSync).toHaveBeenCalledOnceWith(7);
+    expect(vainglory.requestArchiveSync).toHaveBeenCalledOnceWith(7, false);
     expect(component.archiveSyncs.get(7)?.state).toBe('discovering');
   });
 

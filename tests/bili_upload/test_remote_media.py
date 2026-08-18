@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -162,6 +163,45 @@ async def test_downloads_missing_submitted_part_and_expires_after_ten_days(
         assert int(restored['file_size_bytes']) == 99
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_background_downloader_survives_transient_database_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = RemoteMediaCache(
+        object(),  # type: ignore[arg-type]
+        tmp_path,
+        bundle_loader=lambda _account_id: async_value('credential'),
+        downloader=FakeDownloader(),
+    )
+    attempts = 0
+    recoveries = 0
+
+    async def run_once(**_kwargs: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError('database tunnel restarted')
+        raise asyncio.CancelledError
+
+    async def recover_orphans() -> int:
+        nonlocal recoveries
+        recoveries += 1
+        return 0
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(cache, 'run_once', run_once)
+    monkeypatch.setattr(cache, '_recover_orphaned_downloads', recover_orphans)
+    monkeypatch.setattr('blrec.bili_upload.remote_media.asyncio.sleep', no_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await cache._run_worker(None, 0, 0)
+
+    assert attempts == 2
+    assert recoveries == 1
 
 
 @pytest.mark.asyncio

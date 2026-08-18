@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Protocol, Tuple
 
+from loguru import logger
+
 from blrec.networking.manager import NetworkRouteManager
 
 from .bili_download import BiliDownloadRoutePaused
@@ -171,6 +173,18 @@ class RemoteMediaCache:
             "downloaded_bytes=0,total_bytes=NULL,error=NULL,updated_at=? "
             "WHERE state='downloading'",
             (self._now(),),
+        )
+
+    async def _recover_orphaned_downloads(self) -> int:
+        active_part_ids = tuple(sorted(self._download_speeds))
+        if not active_part_ids:
+            return await self.recover_interrupted()
+        placeholders = ','.join('?' for _part_id in active_part_ids)
+        return await self._database.execute(
+            "UPDATE vainglory_video_sources SET state='pending',progress=0,"
+            'downloaded_bytes=0,total_bytes=NULL,error=NULL,updated_at=? '
+            "WHERE state='downloading' AND part_id NOT IN ({})".format(placeholders),
+            (self._now(), *active_part_ids),
         )
 
     async def queue_status(self) -> RemoteMediaQueueStatus:
@@ -845,9 +859,25 @@ class RemoteMediaCache:
             ):
                 await asyncio.sleep(1)
                 continue
-            processed = await self.run_once(
-                network_interface=interface_name, worker_index=worker_index
-            )
+            try:
+                processed = await self.run_once(
+                    network_interface=interface_name, worker_index=worker_index
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    'remote media download worker failed; recovering orphaned '
+                    'downloads and retrying'
+                )
+                try:
+                    await self._recover_orphaned_downloads()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception('remote media orphan recovery failed')
+                await asyncio.sleep(5)
+                continue
             if processed:
                 continue
             self._wake.clear()

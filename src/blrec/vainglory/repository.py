@@ -1911,6 +1911,13 @@ class VaingloryRepository:
                     for part in part_rows
                 ),
             )
+            connection.execute(
+                "UPDATE vainglory_publications SET state='prepared',"
+                "plan_state='waiting_analysis',error=NULL,needs_refresh=1,"
+                'remote_verified_at=NULL,priority=1,updated_at=? '
+                'WHERE session_id=?',
+                (now, int(session_id)),
+            )
             for part in part_rows:
                 if int(part['id']) in remote_part_ids:
                     continue

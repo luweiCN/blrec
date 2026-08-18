@@ -1256,6 +1256,49 @@ async def test_publication_status_distinguishes_retry_from_bad_analysis_data(
 
 
 @pytest.mark.asyncio
+async def test_pending_reanalysis_clears_stale_publication_error(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+        assert await service.ensure_publication_tasks() >= 1
+        await database.execute(
+            "UPDATE vainglory_publications SET state='failed',plan_state='ready',"
+            "needs_refresh=0,priority=0,error='1 局识别结果缺少结算画面时间，"
+            "请重新分析这场直播'"
+        )
+        await database.execute(
+            "UPDATE vainglory_part_jobs SET state='pending',progress=0"
+        )
+
+        assert await service.ensure_publication_tasks() == 1
+
+        publication = await database.fetchone(
+            'SELECT state,plan_state,error,needs_refresh,priority '
+            'FROM vainglory_publications'
+        )
+        assert publication is not None and dict(publication) == {
+            'state': 'prepared',
+            'plan_state': 'waiting_analysis',
+            'error': None,
+            'needs_refresh': 1,
+            'priority': 1,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_zero_match_reanalysis_clears_old_generated_content_and_keeps_history(
     tmp_path: Path,
 ) -> None:
@@ -1302,6 +1345,17 @@ async def test_zero_match_reanalysis_clears_old_generated_content_and_keeps_hist
         }
 
         await repository.request_scan(1)
+        waiting = await database.fetchone(
+            'SELECT state,plan_state,error,needs_refresh,force_republish '
+            'FROM vainglory_publications WHERE session_id=1'
+        )
+        assert dict(waiting) == {
+            'state': 'prepared',
+            'plan_state': 'waiting_analysis',
+            'error': None,
+            'needs_refresh': 1,
+            'force_republish': 0,
+        }
         claim = await repository.claim_next()
         assert claim is not None and claim.part.id == 1
         await repository.complete_part(1, ())

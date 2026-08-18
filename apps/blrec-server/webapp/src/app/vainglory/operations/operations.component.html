@@ -390,6 +390,18 @@
             >
               {{ sync.operatorPaused ? "恢复" : "安全暂停" }}
             </button>
+            <button
+              nz-button
+              nzSize="small"
+              nzDanger
+              nz-popconfirm
+              nzPopconfirmTitle="确认从第一页重新读取 B 站稿件列表？已发现的稿件不会删除。"
+              [disabled]="archiveControlIds.has(sync.accountId)"
+              [nzLoading]="archiveControlIds.has(sync.accountId)"
+              (nzOnConfirm)="rescanArchiveSync(sync)"
+            >
+              重新扫描
+            </button>
           </div>
           <nz-alert
             *ngIf="sync.error"

@@ -206,7 +206,7 @@ class ArchiveBackfillService:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    async def request(self, account_id: int) -> ArchiveSync:
+    async def request(self, account_id: int, *, rescan: bool = False) -> ArchiveSync:
         account = await self._database.fetchone(
             'SELECT state FROM bili_accounts WHERE id=?', (int(account_id),)
         )
@@ -216,20 +216,31 @@ class ArchiveBackfillService:
             raise ArchiveBackfillUnavailable('只能回填当前可用的 B 站账号')
         now = self._now()
         season_start, season_end = current_season_window(now)
-        await self._database.execute(
-            'INSERT INTO vainglory_archive_syncs('
-            'account_id,state,progress,discovered_count,completed_count,error,'
-            'requested_at,started_at,completed_at,updated_at,'
-            'season_started_at,season_ended_at) '
-            "VALUES(?,'discovering',0,0,0,NULL,?,NULL,NULL,?,?,?) "
-            'ON CONFLICT(account_id) DO UPDATE SET '
+        conflict_update = (
             "state='discovering',progress=0,discovered_count=0,"
             'completed_count=0,error=NULL,requested_at=excluded.requested_at,'
             'started_at=NULL,completed_at=NULL,updated_at=excluded.updated_at,'
             'operator_paused=0,next_page=1,discovery_complete=0,'
             'last_page_identity=NULL,'
             'season_started_at=excluded.season_started_at,'
-            'season_ended_at=excluded.season_ended_at',
+            'season_ended_at=excluded.season_ended_at'
+            if rescan
+            else (
+                "state=CASE WHEN vainglory_archive_syncs.discovery_complete=1 "
+                "THEN 'running' ELSE 'discovering' END,error=NULL,"
+                'requested_at=excluded.requested_at,'
+                'started_at=COALESCE(vainglory_archive_syncs.started_at,'
+                'excluded.requested_at),completed_at=NULL,'
+                'updated_at=excluded.updated_at,operator_paused=0'
+            )
+        )
+        await self._database.execute(
+            'INSERT INTO vainglory_archive_syncs('
+            'account_id,state,progress,discovered_count,completed_count,error,'
+            'requested_at,started_at,completed_at,updated_at,'
+            'season_started_at,season_ended_at) '
+            "VALUES(?,'discovering',0,0,0,NULL,?,NULL,NULL,?,?,?) "
+            'ON CONFLICT(account_id) DO UPDATE SET ' + conflict_update,
             (int(account_id), now, now, season_start, season_end),
         )
         self._next_discovery_at = 0

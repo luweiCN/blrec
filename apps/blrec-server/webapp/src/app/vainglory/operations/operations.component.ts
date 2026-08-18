@@ -555,13 +555,13 @@ export class OperationsComponent implements OnInit, OnDestroy {
       });
   }
 
-  requestArchiveSync(account: BiliAccount): void {
+  requestArchiveSync(account: BiliAccount, rescan = false): void {
     if (this.archiveControlIds.has(account.id)) {
       return;
     }
     this.archiveControlIds.add(account.id);
     this.vainglory
-      .requestArchiveSync(account.id)
+      .requestArchiveSync(account.id, rescan)
       .pipe(
         takeUntil(this.destroy$),
         finalize(() => {
@@ -572,12 +572,21 @@ export class OperationsComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (sync) => {
           this.upsertArchiveSync(sync);
-          this.actionMessage = `${account.displayName} 已加入历史接入流水线`;
+          this.actionMessage = rescan
+            ? `${account.displayName} 已从第一页重新扫描`
+            : `${account.displayName} 已恢复历史接入流水线`;
         },
         error: (error: unknown) => {
           this.pageError = this.errorMessage(error, '历史接入启动失败');
         },
       });
+  }
+
+  rescanArchiveSync(sync: VaingloryArchiveSync): void {
+    const account = this.accounts.find((value) => value.id === sync.accountId);
+    if (account) {
+      this.requestArchiveSync(account, true);
+    }
   }
 
   migrationItems(

@@ -41,6 +41,55 @@ async def test_realtime_highlight_snapshot_uses_runtime_worker(monkeypatch) -> N
     progress.assert_awaited_once_with()
 
 
+@pytest.mark.asyncio
+async def test_archive_realtime_snapshot_keeps_all_archive_counts(monkeypatch) -> None:
+    queue_status = AsyncMock(
+        return_value=SimpleNamespace(
+            pending_download_count=12,
+            pending_download_archive_count=5,
+            active_download_count=4,
+            active_download_archive_count=2,
+            downloaded_waiting_analysis_count=9,
+            downloaded_waiting_analysis_archive_count=3,
+            active_analysis_count=6,
+            active_analysis_archive_count=2,
+            failed_download_count=7,
+            failed_download_archive_count=4,
+            downloads_per_interface=1,
+            interface_count=2,
+            total_concurrency=2,
+            latest_activity_at=1_000,
+        )
+    )
+    monkeypatch.setattr(
+        web_main,
+        '_bili_account_runtime',
+        SimpleNamespace(
+            archive_backfill=None,
+            remote_media_cache=SimpleNamespace(queue_status=queue_status),
+        ),
+    )
+
+    snapshot = await web_main._realtime_archive_backfill_snapshot()
+
+    assert snapshot['downloadQueue'] == {
+        'pendingDownloadCount': 12,
+        'pendingDownloadArchiveCount': 5,
+        'activeDownloadCount': 4,
+        'activeDownloadArchiveCount': 2,
+        'downloadedWaitingAnalysisCount': 9,
+        'downloadedWaitingAnalysisArchiveCount': 3,
+        'activeAnalysisCount': 6,
+        'activeAnalysisArchiveCount': 2,
+        'failedDownloadCount': 7,
+        'failedDownloadArchiveCount': 4,
+        'downloadsPerInterface': 1,
+        'interfaceCount': 2,
+        'totalConcurrency': 2,
+        'latestActivityAt': 1_000,
+    }
+
+
 class PasswordWorkProbe:
     def __init__(self, events) -> None:
         self.events = events

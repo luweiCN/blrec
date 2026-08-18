@@ -1512,12 +1512,23 @@
             "
             (click)="requestArchiveSync(account)"
           >
-            {{
-              archiveSyncs.get(account.id)?.state === "ready" ||
-              archiveSyncs.get(account.id)?.state === "failed"
-                ? "重新扫描"
-                : "开始接入"
-            }}
+            {{ archiveSyncs.get(account.id) ? "继续接入" : "开始接入" }}
+          </button>
+          <button
+            *ngIf="archiveSyncs.get(account.id)"
+            nz-button
+            nzDanger
+            type="button"
+            nz-popconfirm
+            nzPopconfirmTitle="确认从第一页重新读取 B 站稿件列表？已发现的稿件不会删除。"
+            [nzLoading]="requestingArchiveAccountIds.has(account.id)"
+            [disabled]="
+              archiveSyncs.get(account.id)?.state === 'discovering' ||
+              archiveSyncs.get(account.id)?.state === 'running'
+            "
+            (nzOnConfirm)="requestArchiveSync(account, true)"
+          >
+            重新扫描
           </button>
           <section
             *ngIf="archiveDownloadQueueItems(account.id).length > 0"
