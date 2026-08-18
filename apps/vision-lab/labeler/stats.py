@@ -53,7 +53,7 @@ def stats(conn: Any) -> Dict[str, Any]:
     # 质量覆盖
     flag_counts: Dict[str, int] = {}
     for (flags_json,) in conn.execute(
-            'SELECT quality_flags FROM annotations WHERE quality_flags != "[]"'):
+            'SELECT quality_flags FROM annotations WHERE quality_flags != ?', ('[]',)):
         for flag in json.loads(flags_json or '[]'):
             flag_counts[flag] = flag_counts.get(flag, 0) + 1
     s['quality_flags'] = flag_counts

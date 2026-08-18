@@ -98,14 +98,15 @@ async def lifespan(_app: FastAPI):
         db.fail_interrupted_model_deployments(conn)
         conn.commit()
         conn.close()
-        if config.CONTROL_PLANE_ONLY and config.CANDIDATE_LOCAL_DIR is not None:
-            candidate_index_thread = threading.Thread(
-                target=_candidate_index_loop,
-                args=(candidate_index_stop,),
-                daemon=True,
-                name='vision-candidate-index',
-            )
-            candidate_index_thread.start()
+        if config.CONTROL_PLANE_ONLY:
+            if config.CANDIDATE_LOCAL_DIR is not None:
+                candidate_index_thread = threading.Thread(
+                    target=_candidate_index_loop,
+                    args=(candidate_index_stop,),
+                    daemon=True,
+                    name='vision-candidate-index',
+                )
+                candidate_index_thread.start()
             _start_training_review_cache_refresh()
     except Exception:
         db.close_connections()
@@ -166,9 +167,18 @@ _training_review_cache: Dict[str, Any] = {
     'groups_expires_at': 0.0,
     'stats': None,
     'stats_expires_at': 0.0,
+    'default_queue': None,
+    'default_queue_expires_at': 0.0,
     'refreshing': False,
 }
 _TRAINING_REVIEW_CACHE_SECONDS = 300.0
+_TRAINING_REVIEW_WRITE_REFRESH_SECONDS = 60.0
+_worker_candidate_state_response_lock = threading.Lock()
+_worker_candidate_state_response: Dict[str, Any] = {
+    'value': None,
+    'expires_at': 0.0,
+}
+_WORKER_CANDIDATE_STATE_CACHE_SECONDS = 10.0
 
 
 def _conn():
@@ -229,6 +239,32 @@ def _cached_training_review_stats(conn: Any) -> Dict[str, Any]:
         return value
 
 
+def _cached_default_training_review_queue(
+    conn: Any, result_groups: Dict[int, Dict[str, Any]]
+) -> tuple[int, ...]:
+    now = time.monotonic()
+    with _training_review_cache_lock:
+        value = _training_review_cache['default_queue']
+        if value is not None:
+            if now >= _training_review_cache['default_queue_expires_at']:
+                _start_training_review_cache_refresh()
+            return value
+    value = tuple(
+        db.training_review_frame_ids(
+            conn,
+            status='needs_review',
+            source_scope='new',
+            result_groups=result_groups,
+        )
+    )
+    with _training_review_cache_lock:
+        _training_review_cache['default_queue'] = value
+        _training_review_cache['default_queue_expires_at'] = (
+            time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
+        )
+        return value
+
+
 def _start_training_review_cache_refresh() -> None:
     with _training_review_cache_lock:
         if _training_review_cache['refreshing']:
@@ -245,6 +281,27 @@ def _invalidate_training_review_cache() -> None:
     with _training_review_cache_lock:
         _training_review_cache['groups_expires_at'] = 0.0
         _training_review_cache['stats_expires_at'] = 0.0
+        _training_review_cache['default_queue_expires_at'] = 0.0
+
+
+def _mark_training_review_saved(frame_id: int) -> None:
+    now = time.monotonic()
+    refresh_at = now + _TRAINING_REVIEW_WRITE_REFRESH_SECONDS
+    with _training_review_cache_lock:
+        queue = _training_review_cache['default_queue']
+        if queue is not None:
+            _training_review_cache['default_queue'] = tuple(
+                value for value in queue if value != int(frame_id)
+            )
+        for key in (
+            'groups_expires_at',
+            'stats_expires_at',
+            'default_queue_expires_at',
+        ):
+            current = float(_training_review_cache[key] or 0.0)
+            _training_review_cache[key] = (
+                refresh_at if current <= now else min(current, refresh_at)
+            )
 
 
 def _refresh_training_review_cache() -> None:
@@ -252,16 +309,29 @@ def _refresh_training_review_cache() -> None:
     try:
         conn = _conn()
         groups = db.training_review_result_groups(conn)
-        stats = db.training_review_stats(conn, result_groups=groups)
+        default_queue = tuple(
+            db.training_review_frame_ids(
+                conn,
+                status='needs_review',
+                source_scope='new',
+                result_groups=groups,
+            )
+        )
         expires_at = time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
         with _training_review_cache_lock:
             _training_review_cache.update(
                 {
                     'groups': groups,
                     'groups_expires_at': expires_at,
-                    'stats': stats,
-                    'stats_expires_at': expires_at,
+                    'default_queue': default_queue,
+                    'default_queue_expires_at': expires_at,
                 }
+            )
+        stats = db.training_review_stats(conn, result_groups=groups)
+        expires_at = time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
+        with _training_review_cache_lock:
+            _training_review_cache.update(
+                {'stats': stats, 'stats_expires_at': expires_at}
             )
     except Exception:  # noqa: BLE001 - stale cache remains available
         pass
@@ -1332,19 +1402,38 @@ def api_sync_all_worker_candidates(body: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get('/api/worker-candidates/state')
 def api_worker_candidate_state() -> Dict[str, Any]:
-    with _worker_candidate_sync_lock:
-        sync = dict(_worker_candidate_sync_state)
-    with _db_lock:
-        conn = _conn()
-        try:
-            review = _cached_training_review_stats(conn)
-            if config.CANDIDATE_LOCAL_DIR is None:
-                published = db.load_service_runtime_state(conn, 'candidate_index')
-                if published:
-                    sync = published
-        finally:
-            conn.close()
-    return {'sync': sync, 'review': review}
+    now = time.monotonic()
+    with _worker_candidate_state_response_lock:
+        cached = _worker_candidate_state_response['value']
+        if (
+            cached is not None
+            and now < _worker_candidate_state_response['expires_at']
+        ):
+            return cached
+        with _worker_candidate_sync_lock:
+            sync = dict(_worker_candidate_sync_state)
+        with _db_lock:
+            conn = _conn()
+            try:
+                review = _cached_training_review_stats(conn)
+                if config.CANDIDATE_LOCAL_DIR is None:
+                    published = db.load_service_runtime_state(
+                        conn, 'candidate_index'
+                    )
+                    if published:
+                        sync = published
+            finally:
+                conn.close()
+        result = {'sync': sync, 'review': review}
+        _worker_candidate_state_response.update(
+            {
+                'value': result,
+                'expires_at': (
+                    time.monotonic() + _WORKER_CANDIDATE_STATE_CACHE_SECONDS
+                ),
+            }
+        )
+        return result
 
 
 @app.get('/api/training-review/items')
@@ -1362,26 +1451,53 @@ def api_training_review_items(
     confidence: str = '',
     include_stats: bool = True,
 ) -> Dict[str, Any]:
+    hero_values = hero if isinstance(hero, list) else []
     with _training_review_read_guard():
         conn = _conn()
         try:
             try:
                 result_groups = _cached_training_review_groups(conn)
-                items, filtered_total = db.training_review_page(
-                    conn,
-                    status=status,
-                    limit=limit,
-                    offset=offset,
-                    source_scope=source_scope,
-                    streamer=streamer,
-                    hero_screen_type=hero_screen_type,
-                    source_type=source_type,
-                    scene=scene,
-                    match_mode=match_mode,
-                    hero=hero or (),
-                    confidence=confidence,
-                    result_groups=result_groups,
+                default_queue = (
+                    status == 'needs_review'
+                    and source_scope == 'new'
+                    and not any(
+                        (
+                            streamer,
+                            hero_screen_type,
+                            source_type,
+                            scene,
+                            match_mode,
+                            hero_values,
+                            confidence,
+                        )
+                    )
                 )
+                if default_queue:
+                    frame_ids = _cached_default_training_review_queue(
+                        conn, result_groups
+                    )
+                    items = db.get_training_review_items(
+                        conn,
+                        frame_ids[offset : offset + limit],
+                        result_groups=result_groups,
+                    )
+                    filtered_total = len(frame_ids)
+                else:
+                    items, filtered_total = db.training_review_page(
+                        conn,
+                        status=status,
+                        limit=limit,
+                        offset=offset,
+                        source_scope=source_scope,
+                        streamer=streamer,
+                        hero_screen_type=hero_screen_type,
+                        source_type=source_type,
+                        scene=scene,
+                        match_mode=match_mode,
+                        hero=hero_values,
+                        confidence=confidence,
+                        result_groups=result_groups,
+                    )
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
             stats = (
@@ -2270,8 +2386,9 @@ def api_save_training_review_item(
                     status=status,
                     notes=str(body.get('notes') or ''),
                     result_groups={},
+                    hydrate=False,
                 )
-                _invalidate_training_review_cache()
+                _mark_training_review_saved(frame_id)
                 return saved
             except KeyError as exc:
                 raise HTTPException(404, str(exc))

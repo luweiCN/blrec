@@ -4351,6 +4351,34 @@ def _training_review_visible_frame_ids(
     return visible, groups
 
 
+def training_review_frame_ids(
+    conn: sqlite3.Connection,
+    *,
+    status: str,
+    source_scope: str,
+    streamer: str = '',
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: Sequence[str] | str = (),
+    confidence: str = '',
+    result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> List[int]:
+    visible, _groups = _training_review_visible_frame_ids(
+        conn,
+        status=status,
+        source_scope=source_scope,
+        streamer=streamer,
+        source_type=source_type,
+        scene=scene,
+        match_mode=match_mode,
+        hero=hero,
+        confidence=confidence,
+        result_groups=result_groups,
+    )
+    return visible
+
+
 def list_training_review_items(
     conn: sqlite3.Connection,
     *,
@@ -4488,6 +4516,7 @@ def save_training_review(
     status: str = 'confirmed',
     notes: str = '',
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
+    hydrate: bool = True,
 ) -> Dict[str, Any]:
     labels = {
         'match_flow': match_flow_label,
@@ -4662,7 +4691,6 @@ def save_training_review(
         )
     if status == 'confirmed':
         conn.execute('UPDATE frames SET labeled = 1 WHERE id = ?', (int(frame_id),))
-    conn.commit()
     audit(
         conn,
         'training_review',
@@ -4684,6 +4712,25 @@ def save_training_review(
             sort_keys=True,
         ),
     )
+    if not hydrate:
+        return {
+            'frame_id': int(frame_id),
+            'match_flow_label': match_flow_label,
+            'match_mode_label': match_mode_label,
+            'hero_select_label': hero_select_label,
+            'hero_select_variant': hero_select_variant,
+            'hero_select_visibility': normalized_select_visibility,
+            'result_panel_label': result_panel_label,
+            'hero_layout_label': hero_layout_label,
+            'panel_render_state': normalized_render_state,
+            'ocr_usable': normalized_ocr,
+            'result_occlusion': normalized_occlusion,
+            'occluder_types': normalized_occluders,
+            'review_status': status,
+            'notes': notes[:1000],
+            'updated_at': timestamp,
+            'reviewed_at': timestamp if status in ('confirmed', 'skipped') else None,
+        }
     item = get_training_review_item(conn, int(frame_id), result_groups=result_groups)
     if item is None:
         raise KeyError(frame_id)
@@ -5207,29 +5254,28 @@ def save_training_review_hero_lineup(
     elif player_side is not None or player_slot is not None:
         raise ValueError('主播英雄位置状态冲突')
     timestamp = now()
-    with conn:
-        conn.executemany(
-            'UPDATE training_review_hero_slots SET confirmed_label = ?, '
-            'updated_at = ? WHERE frame_id = ? AND side = ? AND slot = ?',
-            [
-                (label, timestamp, int(frame_id), side, slot)
-                for label, side, slot in normalized
-            ],
-        )
-        conn.execute(
-            "UPDATE training_review_hero_lineups SET review_status='confirmed', "
-            'player_status=?, player_side=?, player_slot=?, '
-            'updated_at=?, reviewed_at=? '
-            'WHERE frame_id=?',
-            (
-                normalized_player_status,
-                normalized_player_side,
-                normalized_player_slot,
-                timestamp,
-                timestamp,
-                int(frame_id),
-            ),
-        )
+    conn.executemany(
+        'UPDATE training_review_hero_slots SET confirmed_label = ?, '
+        'updated_at = ? WHERE frame_id = ? AND side = ? AND slot = ?',
+        [
+            (label, timestamp, int(frame_id), side, slot)
+            for label, side, slot in normalized
+        ],
+    )
+    conn.execute(
+        "UPDATE training_review_hero_lineups SET review_status='confirmed', "
+        'player_status=?, player_side=?, player_slot=?, '
+        'updated_at=?, reviewed_at=? '
+        'WHERE frame_id=?',
+        (
+            normalized_player_status,
+            normalized_player_side,
+            normalized_player_slot,
+            timestamp,
+            timestamp,
+            int(frame_id),
+        ),
+    )
     audit(
         conn,
         'training_review_hero_lineup',
@@ -5250,10 +5296,23 @@ def save_training_review_hero_lineup(
             sort_keys=True,
         ),
     )
-    result = get_training_review_hero_lineup(conn, int(frame_id))
-    if result is None:
-        raise KeyError(frame_id)
-    return result
+    labels_by_position = {(side, slot): label for label, side, slot in normalized}
+    for slot in lineup['slots']:
+        slot['confirmed_label'] = labels_by_position[
+            (str(slot['side']), int(slot['slot']))
+        ]
+        slot['updated_at'] = timestamp
+    lineup.update(
+        {
+            'review_status': 'confirmed',
+            'player_status': normalized_player_status,
+            'player_side': normalized_player_side,
+            'player_slot': normalized_player_slot,
+            'updated_at': timestamp,
+            'reviewed_at': timestamp,
+        }
+    )
+    return lineup
 
 
 def training_review_stats(

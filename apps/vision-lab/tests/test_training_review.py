@@ -488,6 +488,33 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
 
         self.assertEqual(reviewed['frame_id'], frame_id)
 
+    def test_save_can_skip_item_hydration_for_fast_api_ack(self):
+        frame_id = self.frame(2)
+        db.add_training_review_source(
+            self.conn, frame_id=frame_id, source_type='worker', source_id='worker-2'
+        )
+        with mock.patch.object(
+            db,
+            'get_training_review_item',
+            side_effect=AssertionError('快速保存不应重新读取完整素材'),
+        ):
+            reviewed = db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='not_match_flow',
+                match_mode_label=None,
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+                hero_layout_label='none',
+                status='confirmed',
+                result_groups={},
+                hydrate=False,
+            )
+
+        self.assertEqual(reviewed['frame_id'], frame_id)
+        self.assertEqual(reviewed['review_status'], 'confirmed')
+        self.assertEqual(reviewed['hero_layout_label'], 'none')
+
     def test_migrated_legacy_label_needs_unified_manual_confirmation(self):
         frame_id = self.frame(1)
         db.save_annotation(

@@ -56,6 +56,17 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'renderCandidateMaterialSuggestions();' in script
 
 
+def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+
+    assert 'const CANDIDATE_PREFETCH_AHEAD = 3;' in script
+    assert 'await image.decode();' in script
+    assert 'candidateImagePrefetches.get(frameId)' in script
+    assert 'setInterval(refreshCandidateIndexState, 30000)' in script
+
+
 def test_late_model_prefill_refreshes_heroes_after_unrelated_form_click() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
@@ -133,6 +144,117 @@ def test_postgres_review_list_does_not_hold_the_process_database_lock(
     result = server.api_training_review_items(include_stats=False)
 
     assert result == {'items': [], 'stats': {}, 'filtered_total': 0}
+
+
+def test_default_review_queue_reuses_cached_frame_ids(monkeypatch) -> None:
+    connection = mock.Mock()
+    monkeypatch.setattr(config, 'DATABASE_URL', 'postgresql://vision')
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(
+        server, '_cached_training_review_groups', mock.Mock(return_value={})
+    )
+    frame_ids = mock.Mock(return_value=[30, 20, 10])
+    monkeypatch.setattr(server.db, 'training_review_frame_ids', frame_ids)
+    monkeypatch.setattr(
+        server.db,
+        'get_training_review_items',
+        lambda _conn, values, **_kwargs: [
+            {'frame_id': frame_id} for frame_id in values
+        ],
+    )
+    monkeypatch.setitem(server._training_review_cache, 'default_queue', None)
+    monkeypatch.setitem(server._training_review_cache, 'default_queue_expires_at', 0.0)
+
+    first = server.api_training_review_items(
+        status='needs_review',
+        source_scope='new',
+        limit=2,
+        offset=0,
+        include_stats=False,
+    )
+    second = server.api_training_review_items(
+        status='needs_review',
+        source_scope='new',
+        limit=2,
+        offset=1,
+        include_stats=False,
+    )
+
+    assert [item['frame_id'] for item in first['items']] == [30, 20]
+    assert [item['frame_id'] for item in second['items']] == [20, 10]
+    assert first['filtered_total'] == second['filtered_total'] == 3
+    frame_ids.assert_called_once()
+
+
+def test_worker_candidate_state_coalesces_repeated_database_reads(monkeypatch) -> None:
+    connection = mock.Mock()
+    monkeypatch.setattr(config, 'CANDIDATE_LOCAL_DIR', None)
+    connect = mock.Mock(return_value=connection)
+    monkeypatch.setattr(server, '_conn', connect)
+    monkeypatch.setattr(
+        server,
+        '_cached_training_review_stats',
+        mock.Mock(return_value={'total': 53_000}),
+    )
+    published = mock.Mock(return_value={'running': False, 'processed': 20_000})
+    monkeypatch.setattr(server.db, 'load_service_runtime_state', published)
+    monkeypatch.setitem(server._worker_candidate_state_response, 'value', None)
+    monkeypatch.setitem(server._worker_candidate_state_response, 'expires_at', 0.0)
+
+    first = server.api_worker_candidate_state()
+    second = server.api_worker_candidate_state()
+
+    assert first == second
+    assert first['review']['total'] == 53_000
+    connect.assert_called_once()
+    published.assert_called_once()
+
+
+def test_saving_one_review_updates_queue_without_immediate_full_refresh(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(server.time, 'monotonic', lambda: 100.0)
+    monkeypatch.setitem(server._training_review_cache, 'default_queue', (3, 2, 1))
+    monkeypatch.setitem(
+        server._training_review_cache, 'default_queue_expires_at', 400.0
+    )
+    monkeypatch.setitem(server._training_review_cache, 'groups_expires_at', 400.0)
+    monkeypatch.setitem(server._training_review_cache, 'stats_expires_at', 400.0)
+
+    server._mark_training_review_saved(2)
+
+    assert server._training_review_cache['default_queue'] == (3, 1)
+    assert server._training_review_cache['default_queue_expires_at'] == 160.0
+    assert server._training_review_cache['groups_expires_at'] == 160.0
+    assert server._training_review_cache['stats_expires_at'] == 160.0
+
+
+def test_review_save_returns_lightweight_ack(monkeypatch) -> None:
+    connection = mock.Mock()
+    connection.execute.return_value.fetchone.return_value = (1,)
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    save = mock.Mock(
+        return_value={'frame_id': 7, 'review_status': 'confirmed'}
+    )
+    monkeypatch.setattr(server.db, 'save_training_review', save)
+    mark_saved = mock.Mock()
+    monkeypatch.setattr(server, '_mark_training_review_saved', mark_saved)
+
+    result = server.api_save_training_review_item(
+        7,
+        {
+            'match_flow_label': 'not_match_flow',
+            'match_mode_label': None,
+            'hero_select_label': 'not_select',
+            'result_panel_label': 'no_result_panel',
+            'hero_layout_label': 'none',
+            'review_status': 'confirmed',
+        },
+    )
+
+    assert result == {'frame_id': 7, 'review_status': 'confirmed'}
+    assert save.call_args.kwargs['hydrate'] is False
+    mark_saved.assert_called_once_with(7)
 
 
 def test_worker_control_plane_redirects_only_frame_media_to_nas(monkeypatch) -> None:

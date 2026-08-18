@@ -179,6 +179,35 @@ class TestHeroReviewStorage(HeroReviewTestCase):
         self.assertEqual(confirmed['slots'][0]['confirmed_label'], 'Alpha')
         self.assertEqual(confirmed['slots'][0]['suggested_label'], 'Adagio')
 
+    def test_saving_lineup_reuses_the_initial_read(self):
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=self.frame_id,
+            screen_type='scoreboard',
+            team_size=3,
+            method='sift-v1',
+            slots=self.slots(),
+        )
+        labels = [
+            {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
+            for slot in self.slots()
+        ]
+
+        with mock.patch.object(
+            db,
+            'get_training_review_hero_lineup',
+            wraps=db.get_training_review_hero_lineup,
+        ) as load_lineup:
+            confirmed = db.save_training_review_hero_lineup(
+                self.conn,
+                frame_id=self.frame_id,
+                labels=labels,
+                allowed_labels={'Adagio'},
+            )
+
+        self.assertEqual(load_lineup.call_count, 1)
+        self.assertEqual(confirmed['review_status'], 'confirmed')
+
     def test_lineup_requires_every_expected_slot(self):
         db.replace_training_review_hero_suggestions(
             self.conn,

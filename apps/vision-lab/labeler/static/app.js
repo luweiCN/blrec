@@ -57,6 +57,7 @@ const candidatePrefillRequests = new Map();
 const candidateHeroPrefetchRequests = new Map();
 const candidateImagePrefetches = new Map();
 const candidatePreparationRequests = new Map();
+const CANDIDATE_PREFETCH_AHEAD = 3;
 let candidateReviewRefillPromise = null;
 let candidateReviewLoadToken = 0;
 let modelTestRuns = [];
@@ -2625,16 +2626,24 @@ function prefetchCandidateImage(item) {
   const frameId = Number(item && item.frame_id);
   if (!frameId) return Promise.resolve(false);
   const existing = candidateImagePrefetches.get(frameId);
-  if (existing) return existing;
-  const promise = new Promise((resolve) => {
-    const image = new Image();
-    image.decoding = 'async';
-    image.onload = () => resolve(true);
+  if (existing) return existing.promise;
+  const image = new Image();
+  image.decoding = 'async';
+  const entry = {image, promise: null};
+  entry.promise = new Promise((resolve) => {
+    image.onload = async () => {
+      try {
+        await image.decode();
+      } catch (_error) {
+        // 部分浏览器不支持显式解码；下载完成仍可复用内存缓存。
+      }
+      resolve(true);
+    };
     image.onerror = () => resolve(false);
     image.src = candidateImageUrl(item);
   });
-  candidateImagePrefetches.set(frameId, promise);
-  return promise;
+  candidateImagePrefetches.set(frameId, entry);
+  return entry.promise;
 }
 
 function candidateCanUseModelPrefill(item) {
@@ -2737,6 +2746,12 @@ function nextMatchingCandidate() {
     candidateItemMatchesStatus(value, candidateLoadedStatus)) || null;
 }
 
+function nextMatchingCandidates(limit = CANDIDATE_PREFETCH_AHEAD) {
+  return candidateQueue.filter((value, index) =>
+    index > candidateIndex &&
+    candidateItemMatchesStatus(value, candidateLoadedStatus)).slice(0, limit);
+}
+
 function ensureCandidateReviewQueueRefill() {
   if (!candidateReviewRefillPromise) {
     const loadToken = candidateReviewLoadToken;
@@ -2752,8 +2767,8 @@ function ensureCandidateReviewQueueRefill() {
 }
 
 async function prefetchNextCandidate() {
-  let next = nextMatchingCandidate();
-  if (!next) {
+  let upcoming = nextMatchingCandidates();
+  if (!upcoming.length) {
     const knownRemaining = candidateQueue.filter(
       (value) => candidateItemMatchesStatus(
         value, candidateLoadedStatus)).length;
@@ -2763,10 +2778,11 @@ async function prefetchNextCandidate() {
       } catch (_error) {
         return;
       }
-      next = nextMatchingCandidate();
+      upcoming = nextMatchingCandidates();
     }
   }
-  if (next) prepareCandidateForReview(next);
+  upcoming.forEach((item) => prefetchCandidateImage(item));
+  if (upcoming[0]) prepareCandidateForReview(upcoming[0]);
 }
 
 function renderCandidateItem() {
@@ -2806,7 +2822,9 @@ function renderCandidateItem() {
       renderCandidateBoxes();
     }
   };
-  image.src = candidateImageUrl(item);
+  const prefetchedImage = candidateImagePrefetches.get(Number(frameId));
+  image.src = prefetchedImage && prefetchedImage.image.src
+    ? prefetchedImage.image.src : candidateImageUrl(item);
   candidateHeroTeamSizeExplicit = false;
   candidateHeroTeamSizeOverride = null;
   candidateHeroDrawMode = false;
@@ -3029,7 +3047,7 @@ async function saveCandidateReview(skip = false) {
       result_panel_label: null,
       hero_layout_label: null,
     } : candidateDraft;
-    const updated = await api(`/api/training-review/items/${item.frame_id}`, {
+    const saved = await api(`/api/training-review/items/${item.frame_id}`, {
       method: 'PUT',
       body: JSON.stringify({
         ...labels,
@@ -3039,6 +3057,7 @@ async function saveCandidateReview(skip = false) {
         notes: $('#candidate-notes').value,
       }),
     });
+    const updated = {...item, ...saved};
     if (!skip) {
       cacheCandidateReviewLabels(candidateDraft);
       if (heroLabels) {
@@ -3187,7 +3206,7 @@ function bindCandidateReview() {
   $('#candidate-hero-filter-search').oninput = renderCandidateHeroFilter;
   refreshCandidateIndexState();
   if (!candidateSyncTimer) {
-    candidateSyncTimer = setInterval(refreshCandidateIndexState, 5000);
+    candidateSyncTimer = setInterval(refreshCandidateIndexState, 30000);
   }
   $('#btn-candidate-prev').onclick = () => moveCandidate(-1);
   $('#btn-candidate-next').onclick = () => moveCandidate(1);
