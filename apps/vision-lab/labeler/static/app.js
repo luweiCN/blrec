@@ -60,6 +60,8 @@ const candidateHeroPrefetchRequests = new Map();
 const candidateImagePrefetches = new Map();
 const candidatePreparationRequests = new Map();
 const CANDIDATE_PREFETCH_AHEAD = 3;
+const CANDIDATE_PAGE_SIZE = 50;
+const CANDIDATE_REFILL_LOW_WATER = 10;
 let candidateReviewRefillPromise = null;
 let candidateReviewLoadToken = 0;
 let modelTestRuns = [];
@@ -2307,7 +2309,7 @@ function candidateStatusIsReviewQueue(status) {
 
 function candidateReviewQuery(status, offset = null) {
   const query = new URLSearchParams({
-    status, limit: '200', source_scope: candidateSourceScope,
+    status, limit: String(CANDIDATE_PAGE_SIZE), source_scope: candidateSourceScope,
     include_stats: 'false',
   });
   if (offset !== null) query.set('offset', String(offset));
@@ -2791,10 +2793,14 @@ function ensureCandidateReviewQueueRefill() {
 
 async function prefetchNextCandidate() {
   let upcoming = nextMatchingCandidates();
+  const knownRemaining = candidateQueue.filter(
+    (value) => candidateItemMatchesStatus(
+      value, candidateLoadedStatus)).length;
+  if (knownRemaining <= CANDIDATE_REFILL_LOW_WATER &&
+      candidateFilteredTotal > knownRemaining) {
+    ensureCandidateReviewQueueRefill().catch(() => undefined);
+  }
   if (!upcoming.length) {
-    const knownRemaining = candidateQueue.filter(
-      (value) => candidateItemMatchesStatus(
-        value, candidateLoadedStatus)).length;
     if (candidateFilteredTotal > knownRemaining) {
       try {
         await ensureCandidateReviewQueueRefill();

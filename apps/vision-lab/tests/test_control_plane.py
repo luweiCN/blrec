@@ -44,7 +44,9 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
     ).read_text(encoding='utf-8')
-    assert "limit: '200'" in script
+    assert 'const CANDIDATE_PAGE_SIZE = 50;' in script
+    assert 'const CANDIDATE_REFILL_LOW_WATER = 10;' in script
+    assert 'limit: String(CANDIDATE_PAGE_SIZE)' in script
     assert "include_stats: 'false'" in script
     assert '/api/training-review/stats?' in script
     control_plane_branch = script.index('if (CFG.control_plane_only)')
@@ -74,6 +76,7 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'const candidatePrefillRequests = new Map();' in script
     assert 'function prefetchCandidateImage(item)' in script
     assert 'function prefetchNextCandidate()' in script
+    assert 'knownRemaining <= CANDIDATE_REFILL_LOW_WATER' in script
     assert 'completeCandidateHeroLineupPrefetch' in script
     assert 'prefetchNextCandidate();' in script
     assert 'function applyCandidateMaterialSuggestion(suggestion)' in script
