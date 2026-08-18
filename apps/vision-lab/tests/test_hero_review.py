@@ -801,6 +801,18 @@ class TestHeroTrainingExport(unittest.TestCase):
 
 
 class TestHeroReviewInference(unittest.TestCase):
+    def test_bundled_hero_catalog_does_not_require_blrec_package(self):
+        with mock.patch.object(
+            hero_review,
+            '_shared',
+            side_effect=RuntimeError('BLREC package unavailable'),
+        ):
+            catalog = hero_review.hero_catalog()
+
+        self.assertEqual(len(catalog), 57)
+        self.assertIn({'label': 'Kestrel', 'name': '凯思卓'}, catalog)
+        self.assertTrue(hero_review.hero_image_bytes('Kestrel'))
+
     def test_worker_scoreboard_metadata_does_not_decide_team_size(self):
         context = hero_review.infer_lineup_context(
             {

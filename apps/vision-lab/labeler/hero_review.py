@@ -20,6 +20,65 @@ from PIL import Image
 _SCREEN_TYPES = {'gameplay_hud', 'scoreboard', 'result_page'}
 _TEAM_SIZES = {3, 5}
 _recognizer_lock = threading.Lock()
+_HERO_CHINESE_NAMES = {
+    'Adagio': '奥达基',
+    'Alpha': '阿尔法',
+    'Amael': '阿玛尔',
+    'Anka': '安卡',
+    'Ardan': '亚丹',
+    'Baptiste': '巴蒂斯特',
+    'Baron': '巴隆',
+    'Blackfeather': '黑羽',
+    'Caine': '凯恩',
+    'Catherine': '凯瑟琳',
+    'Celeste': '星乐斯',
+    'Churnwalker': '沃克尔',
+    'Flicker': '弗利克',
+    'Fortress': '福彻斯',
+    'Glaive': '格雷',
+    'Grace': '格瑞丝',
+    'Grumpjaw': '格兰卓',
+    'Gwen': '格温',
+    'Idris': '伊德瑞',
+    'Inara': '伊娜',
+    'Ishtar': '伊丝塔',
+    'Joule': '朱尔',
+    'Karas': '鸦',
+    'Kensei': '肯赛',
+    'Kestrel': '凯思卓',
+    'Kinetic': '基妮',
+    'Koshka': '柯思卡',
+    'Krul': '骷髅',
+    'Lance': '兰斯',
+    'Leo': '里昂',
+    'Lorelai': '洛姬',
+    'Lyra': '莱拉',
+    'Magnus': '玛格纳斯',
+    'Malene': '梅兰妮',
+    'Miho': '美惠',
+    'Ozo': '奥佐',
+    'Petal': '佩兔',
+    'Phinn': '费恩',
+    'Reim': '莱姆',
+    'Reza': '雷萨',
+    'Ringo': '林戈',
+    'Rona': '罗娜',
+    'Samuel': '萨缪尔',
+    'Sanfeng': '三风',
+    'SAW': '索尔',
+    'Shin': '哪吒',
+    'Silvernail': '西弗尔',
+    'Skaarf': '史卡夫',
+    'Skye': '丝凯伊',
+    'Taka': '塔卡',
+    'Tony': '托尼',
+    'Varya': '瓦妮亚',
+    'Viola': '维奥拉',
+    'Vox': '舞司',
+    'Warhawk': '尼尔',
+    'Yates': '耶茨',
+    'Ylva': '伊娃',
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +96,12 @@ class _Transform:
         return (value - self.top) / self.height
 
 
+@dataclass(frozen=True)
+class _HeroReference:
+    label: str
+    image_jpeg: bytes
+
+
 def _ensure_blrec_source() -> None:
     configured = os.environ.get('VISION_LAB_BLREC_SOURCE_DIR', '').strip()
     source = (
@@ -52,28 +117,27 @@ def _ensure_blrec_source() -> None:
 def _shared() -> Dict[str, Any]:
     _ensure_blrec_source()
     try:
-        from blrec.vainglory.catalog import hero_chinese_name
-        from blrec.vainglory.hero_recognition import (
-            SiftHeroRecognizer,
-            load_hero_references,
-        )
+        from blrec.vainglory.hero_recognition import SiftHeroRecognizer
         from blrec.vainglory.vision import RgbFrame
     except (ImportError, ModuleNotFoundError) as exc:
         raise RuntimeError(
             '无法加载 BLREC 当前英雄识别算法，请检查 '
             'VISION_LAB_BLREC_SOURCE_DIR 和 Vision Lab 依赖'
         ) from exc
-    return {
-        'RgbFrame': RgbFrame,
-        'SiftHeroRecognizer': SiftHeroRecognizer,
-        'hero_chinese_name': hero_chinese_name,
-        'load_hero_references': load_hero_references,
-    }
+    return {'RgbFrame': RgbFrame, 'SiftHeroRecognizer': SiftHeroRecognizer}
 
 
 @lru_cache(maxsize=1)
-def _references() -> Tuple[Any, ...]:
-    return tuple(_shared()['load_hero_references']())
+def _references() -> Tuple[_HeroReference, ...]:
+    root = Path(__file__).resolve().parent / 'resources' / 'heroes'
+    return tuple(
+        _HeroReference(
+            label='SAW' if path.stem.casefold() == 'saw' else path.stem.capitalize(),
+            image_jpeg=path.read_bytes(),
+        )
+        for path in sorted(root.glob('*.jpg'))
+        if path.stat().st_size > 0
+    )
 
 
 @lru_cache(maxsize=1)
@@ -82,11 +146,10 @@ def _recognizer() -> Any:
 
 
 def hero_catalog() -> List[Dict[str, str]]:
-    chinese_name = _shared()['hero_chinese_name']
     return [
         {
             'label': str(reference.label),
-            'name': str(chinese_name(reference.label)),
+            'name': _HERO_CHINESE_NAMES.get(str(reference.label), str(reference.label)),
         }
         for reference in sorted(
             _references(), key=lambda value: str(value.label).casefold()
