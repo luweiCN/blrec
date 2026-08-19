@@ -189,6 +189,9 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
                 'id BIGINT PRIMARY KEY,policy_snapshot_json TEXT)'
             )
             connection.execute(
+                'CREATE TABLE vainglory_matches(id BIGINT PRIMARY KEY)'
+            )
+            connection.execute(
                 'CREATE TABLE vainglory_archive_imports('
                 'id BIGINT PRIMARY KEY,account_id BIGINT,bvid TEXT,'
                 'is_only_self BIGINT)'
@@ -217,7 +220,7 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
 
         assert migrate_postgres_schema(
             schema_url, expected_database=database_name, expected_schema=schema
-        ) == (77, 78)
+        ) == (77, 78, 79, 80)
 
         with psycopg.connect(schema_url, autocommit=True) as connection:
             assert connection.execute(
@@ -245,7 +248,22 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
             ).fetchall() == [('owner', None), ('owner', None)]
             assert connection.execute(
                 'SELECT MAX(version) FROM schema_migrations'
-            ).fetchone() == (78,)
+            ).fetchone() == (80,)
+            columns = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() "
+                    "AND table_name='vainglory_matches'"
+                ).fetchall()
+            }
+            assert {
+                'content_fingerprint',
+                'duplicate_of_match_id',
+                'duplicate_checked_at',
+                'duplicate_review_state',
+                'duplicate_review_fingerprint',
+            } <= columns
     finally:
         with psycopg.connect(database_url, autocommit=True) as connection:
             connection.execute(
