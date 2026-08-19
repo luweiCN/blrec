@@ -246,7 +246,10 @@ def _cached_training_review_material_suggestions(conn: Any) -> List[Dict[str, An
                 return value
         groups = _cached_training_review_groups(conn)
         value = db.training_review_stats(
-            conn, result_groups=groups, include_material_suggestions=True
+            conn,
+            result_groups=groups,
+            include_material_suggestions=True,
+            hero_catalog=hero_review.hero_catalog(),
         )['material_suggestions']
         with _training_review_cache_lock:
             _training_review_cache['material_suggestions'] = value

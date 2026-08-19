@@ -841,6 +841,145 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             [pending_hud],
         )
 
+    def test_schema_v3_model_outputs_are_filterable_as_5v5_hud(self):
+        frame_id = self.frame(16)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='schema-v3-hud',
+            suggestions={
+                'match_flow': {'label': 'match_flow', 'confidence': 0.94},
+                'match_mode': {'label': '5v5', 'confidence': 0.91},
+            },
+            metadata={
+                'schema_version': 3,
+                'model_outputs': [
+                    {
+                        'task': 'match_flow',
+                        'stage_class': 'gameplay',
+                        'mode_class': '5v5',
+                    }
+                ],
+            },
+        )
+
+        items = db.list_training_review_items(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            scene='gameplay_hud',
+            match_mode='5v5',
+        )
+        suggestion = next(
+            item
+            for item in db.training_review_stats(self.conn)['material_suggestions']
+            if item['scene'] == 'gameplay_hud' and item['match_mode'] == '5v5'
+        )
+
+        self.assertEqual([item['frame_id'] for item in items], [frame_id])
+        self.assertEqual(suggestion['candidate_count'], 1)
+
+    def test_material_suggestions_include_sufficient_and_hero_scene_rows(self):
+        frames = []
+        for index in range(100, 150):
+            frame_id = self.frame(index)
+            frames.append(frame_id)
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id=f'sufficient-select-{index}',
+            )
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='not_match_flow',
+                match_mode_label=None,
+                hero_select_label='select_3v3',
+                hero_select_variant='bp',
+                result_panel_label='no_result_panel',
+                hero_layout_label='none',
+                status='confirmed',
+                result_groups={},
+            )
+
+        hero_frame = self.frame(151)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=hero_frame,
+            source_type='worker',
+            source_id='hero-scene-confirmed',
+        )
+        slots = [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.1 + (0.4 if side == 'right' else 0),
+                    'y': 0.1 + slot * 0.1,
+                    'w': 0.05,
+                    'h': 0.08,
+                },
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+        db.replace_training_review_hero_layout(
+            self.conn,
+            frame_id=hero_frame,
+            screen_type='scoreboard',
+            team_size=3,
+            method='manual-circle-v1',
+            slots=slots,
+        )
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=hero_frame,
+            labels=[
+                {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
+                for slot in slots
+            ],
+            allowed_labels={'Adagio', 'Vox'},
+            player_side='left',
+            player_slot=1,
+        )
+
+        suggestions = db.training_review_stats(
+            self.conn,
+            hero_catalog=(
+                {'label': 'Adagio', 'name': '奥达基'},
+                {'label': 'Vox', 'name': '沃克斯'},
+            ),
+        )['material_suggestions']
+        sufficient = next(
+            item
+            for item in suggestions
+            if item.get('kind') == 'scene_mode'
+            and item['scene'] == 'hero_select'
+            and item['match_mode'] == '3v3'
+        )
+        adagio_scoreboard = next(
+            item
+            for item in suggestions
+            if item.get('kind') == 'hero_scene'
+            and item['hero_label'] == 'Adagio'
+            and item['scene'] == 'scoreboard'
+        )
+        vox_hud = next(
+            item
+            for item in suggestions
+            if item.get('kind') == 'hero_scene'
+            and item['hero_label'] == 'Vox'
+            and item['scene'] == 'gameplay_hud'
+        )
+
+        self.assertEqual(sufficient['status'], 'sufficient')
+        self.assertEqual(sufficient['shortage_count'], 0)
+        self.assertEqual(adagio_scoreboard['confirmed_count'], 6)
+        self.assertEqual(vox_hud['confirmed_count'], 0)
+        self.assertEqual(vox_hud['target_count'], 20)
+
     def test_hero_select_mode_filter_uses_select_model_suggestion(self):
         frame_id = self.frame(15)
         db.add_training_review_source(

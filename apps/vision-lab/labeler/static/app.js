@@ -59,10 +59,11 @@ const candidatePrefillRequests = new Map();
 const candidateHeroPrefetchRequests = new Map();
 const candidateImagePrefetches = new Map();
 const candidatePreparationRequests = new Map();
-const CANDIDATE_PREFETCH_AHEAD = 3;
+const CANDIDATE_READY_TARGET = 24;
 const CANDIDATE_PAGE_SIZE = 50;
-const CANDIDATE_REFILL_LOW_WATER = 10;
+const CANDIDATE_REFILL_LOW_WATER = CANDIDATE_READY_TARGET;
 let candidateReviewRefillPromise = null;
+let candidatePreparationRunnerPromise = null;
 let candidateReviewLoadToken = 0;
 let modelTestRuns = [];
 let modelTestSamples = [];
@@ -405,6 +406,15 @@ function candidateHeroContextSuggestion(item) {
   return null;
 }
 
+function candidateSourceScreenTypes(source) {
+  const metadata = source && source.metadata || {};
+  const values = [metadata.screen_type, metadata.stage_class];
+  for (const output of metadata.model_outputs || []) {
+    values.push(output && output.stage_class);
+  }
+  return values.filter((value) => typeof value === 'string' && value);
+}
+
 function candidateDefaultDraft(item) {
   const hasHumanLabels = TRAINING_REVIEW_FIELDS.some(
     (field) => Boolean(item[field.key]));
@@ -480,13 +490,14 @@ function candidateDefaultDraft(item) {
       if (heroContext) draft.hero_layout_label = heroContext.screen_type;
       for (const source of item.sources || []) {
         if (draft.hero_layout_label) break;
-        const metadata = source.metadata || {};
-        const screen = metadata.screen_type || metadata.stage_class || '';
-        if (['scoreboard', 'death_scoreboard'].includes(screen)) {
+        const screens = candidateSourceScreenTypes(source);
+        if (screens.some((screen) =>
+          ['scoreboard', 'death_scoreboard'].includes(screen))) {
           draft.hero_layout_label = 'scoreboard';
           break;
         }
-        if (['gameplay', 'gameplay_hud', 'in_match'].includes(screen)) {
+        if (screens.some((screen) =>
+          ['gameplay', 'gameplay_hud', 'in_match'].includes(screen))) {
           draft.hero_layout_label = 'gameplay_hud';
           break;
         }
@@ -2406,7 +2417,9 @@ function renderCandidateMaterialSuggestionButton() {
     return;
   }
   const suggestions = candidateMaterialSuggestions();
-  count.textContent = suggestions.length ? String(suggestions.length) : '充足';
+  const shortages = suggestions.filter(
+    (suggestion) => suggestion.status !== 'sufficient').length;
+  count.textContent = shortages ? String(shortages) : '充足';
 }
 
 function candidateMaterialSeverity(value) {
@@ -2414,6 +2427,7 @@ function candidateMaterialSeverity(value) {
     urgent: '急需补充',
     scarce: '数量很少',
     low: '相对偏少',
+    sufficient: '已达建议线',
   }[value] || '建议补充';
 }
 
@@ -2426,9 +2440,12 @@ function applyCandidateMaterialSuggestion(suggestion) {
   $('#candidate-mode-filter').value = filters.match_mode || '';
   $('#candidate-confidence-filter').value = '';
   $('#candidate-streamer-filter').value = '';
-  candidateHeroFilters = new Set();
+  candidateHeroFilters = new Set(filters.hero ? [filters.hero] : []);
   $('#candidate-hero-filter-search').value = '';
-  $('#candidate-hero-filter-summary').textContent = '全部英雄';
+  const selectedHero = filters.hero && candidateHeroByLabel(filters.hero);
+  $('#candidate-hero-filter-summary').textContent = filters.hero
+    ? selectedHero ? selectedHero.name : filters.hero
+    : '全部英雄';
   $('#candidate-hero-filter').open = false;
   renderCandidateHeroFilter();
   $('#candidate-material-dialog').close();
@@ -2449,25 +2466,39 @@ function renderCandidateMaterialSuggestions() {
     return;
   }
   if (!suggestions.length) {
-    summary.textContent = '当前各类素材已经达到建议线。';
+    summary.textContent = '当前还没有可以统计的素材类别。';
     const empty = document.createElement('div');
     empty.className = 'candidate-material-empty';
-    empty.textContent = '暂时没有明显的数据短板。';
+    empty.textContent = '暂无素材分布数据。';
     list.appendChild(empty);
     return;
   }
-  const actionable = suggestions.filter(
+  const shortages = suggestions.filter(
+    (suggestion) => suggestion.status !== 'sufficient');
+  const actionable = shortages.filter(
     (suggestion) => Number(suggestion.candidate_count || 0) > 0).length;
-  summary.textContent = `发现 ${suggestions.length} 类素材偏少，` +
-    `其中 ${actionable} 类已有候选可以直接复核。`;
+  summary.textContent = `共 ${suggestions.length} 类素材，` +
+    `${shortages.length} 类未达建议线；其中 ${actionable} 类已有候选可直接复核。`;
   suggestions.forEach((suggestion) => {
     const row = document.createElement('div');
     row.className = 'candidate-material-row';
 
     const name = document.createElement('div');
     name.className = 'candidate-material-name';
+    if (suggestion.kind === 'hero_scene' && suggestion.hero_label) {
+      const heroImage = document.createElement('img');
+      heroImage.className = 'candidate-material-hero-image';
+      heroImage.src = `/api/training-review/heroes/${encodeURIComponent(
+        suggestion.hero_label)}/image`;
+      heroImage.alt = '';
+      heroImage.loading = 'lazy';
+      name.appendChild(heroImage);
+    }
     const title = document.createElement('span');
-    title.textContent = `${suggestion.mode_label} · ${suggestion.scene_label}`;
+    title.textContent = suggestion.kind === 'hero_scene'
+      ? `${suggestion.hero_name || suggestion.hero_label} · ` +
+        `${suggestion.scene_label}头像`
+      : `${suggestion.mode_label} · ${suggestion.scene_label}`;
     const severity = document.createElement('span');
     severity.className = `candidate-material-severity ${suggestion.severity || ''}`;
     severity.textContent = candidateMaterialSeverity(suggestion.severity);
@@ -2480,16 +2511,29 @@ function renderCandidateMaterialSuggestions() {
     const available = Number(suggestion.candidate_count || 0);
     const queueName = suggestion.source_scope === 'legacy'
       ? '历史队列' : 'Worker 队列';
-    counts.append(
-      '已确认 ', confirmed,
-      ` 张 / 建议 ${suggestion.target_count || 0} 张 · `,
-      `${queueName}现有 ${available} 张待复核`,
-    );
+    if (suggestion.kind === 'hero_scene') {
+      counts.append(
+        '已确认 ', confirmed,
+        ` 个头像 / 建议 ${suggestion.target_count || 0} 个 · `,
+        `${queueName}现有 ${available} 张图、` +
+          `${suggestion.candidate_crop_count || 0} 个候选头像`,
+      );
+    } else {
+      counts.append(
+        '已确认 ', confirmed,
+        ` 张 / 建议 ${suggestion.target_count || 0} 张 · `,
+        `${queueName}现有 ${available} 张待复核`,
+      );
+    }
 
     const action = document.createElement('button');
     action.type = 'button';
     action.disabled = available <= 0;
-    action.textContent = available > 0 ? `去打标（${available}）` : '暂无候选';
+    action.textContent = available > 0
+      ? suggestion.status === 'sufficient'
+        ? `继续打标（${available}）`
+        : `去打标（${available}）`
+      : '暂无候选';
     action.title = available > 0
       ? '打开对应待确认素材'
       : '当前候选库没有这类图片，需要等待 Worker 后续采集';
@@ -2810,7 +2854,7 @@ function nextMatchingCandidate() {
     candidateItemMatchesStatus(value, candidateLoadedStatus)) || null;
 }
 
-function nextMatchingCandidates(limit = CANDIDATE_PREFETCH_AHEAD) {
+function nextMatchingCandidates(limit = CANDIDATE_READY_TARGET) {
   return candidateQueue.filter((value, index) =>
     index > candidateIndex &&
     candidateItemMatchesStatus(value, candidateLoadedStatus)).slice(0, limit);
@@ -2828,6 +2872,43 @@ function ensureCandidateReviewQueueRefill() {
     candidateReviewRefillPromise = promise;
   }
   return candidateReviewRefillPromise;
+}
+
+async function warmCandidateReviewQueue(loadToken) {
+  while (loadToken === candidateReviewLoadToken) {
+    let upcoming = nextMatchingCandidates();
+    const knownRemaining = candidateQueue.filter(
+      (value) => candidateItemMatchesStatus(
+        value, candidateLoadedStatus)).length;
+    if (upcoming.length < CANDIDATE_READY_TARGET &&
+        candidateFilteredTotal > knownRemaining) {
+      await ensureCandidateReviewQueueRefill();
+      if (loadToken !== candidateReviewLoadToken) return;
+      upcoming = nextMatchingCandidates();
+    }
+    upcoming.forEach((item) => prefetchCandidateImage(item));
+    const item = upcoming.find((value) =>
+      !candidatePreparationRequests.has(Number(value.frame_id)));
+    if (!item) return;
+    await prepareCandidateForReview(item);
+  }
+}
+
+function ensureCandidateReviewWarm() {
+  if (candidatePreparationRunnerPromise) return candidatePreparationRunnerPromise;
+  const loadToken = candidateReviewLoadToken;
+  const promise = warmCandidateReviewQueue(loadToken)
+    .catch(() => undefined)
+    .finally(() => {
+      if (candidatePreparationRunnerPromise === promise) {
+        candidatePreparationRunnerPromise = null;
+      }
+      if (loadToken !== candidateReviewLoadToken && currentCandidate()) {
+        prefetchNextCandidate();
+      }
+    });
+  candidatePreparationRunnerPromise = promise;
+  return promise;
 }
 
 async function prefetchNextCandidate() {
@@ -2850,7 +2931,7 @@ async function prefetchNextCandidate() {
     }
   }
   upcoming.forEach((item) => prefetchCandidateImage(item));
-  if (upcoming[0]) prepareCandidateForReview(upcoming[0]);
+  if (upcoming.length) ensureCandidateReviewWarm();
 }
 
 function renderCandidateItem() {

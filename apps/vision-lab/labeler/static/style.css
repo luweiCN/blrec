@@ -715,6 +715,20 @@ tr:hover td { background: var(--panel2); }
   background: rgb(229 83 75 / 16%);
 }
 
+.candidate-material-severity.sufficient {
+  color: #8de2b0;
+  background: rgb(55 173 104 / 16%);
+}
+
+.candidate-material-hero-image {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
 .candidate-material-counts {
   min-width: 0;
   color: var(--muted);

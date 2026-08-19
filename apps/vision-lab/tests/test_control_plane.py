@@ -45,7 +45,7 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
     ).read_text(encoding='utf-8')
     assert 'const CANDIDATE_PAGE_SIZE = 50;' in script
-    assert 'const CANDIDATE_REFILL_LOW_WATER = 10;' in script
+    assert 'const CANDIDATE_REFILL_LOW_WATER = CANDIDATE_READY_TARGET;' in script
     assert 'limit: String(CANDIDATE_PAGE_SIZE)' in script
     assert "include_stats: 'false'" in script
     assert '/api/training-review/stats?' in script
@@ -88,10 +88,27 @@ def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
     ).read_text(encoding='utf-8')
 
-    assert 'const CANDIDATE_PREFETCH_AHEAD = 3;' in script
+    assert 'const CANDIDATE_READY_TARGET = 24;' in script
+    assert 'async function warmCandidateReviewQueue(' in script
+    warmer = script[
+        script.index('async function warmCandidateReviewQueue(') : script.index(
+            'async function prefetchNextCandidate()'
+        )
+    ]
+    assert 'await prepareCandidateForReview(item);' in warmer
+    assert 'loadToken !== candidateReviewLoadToken' in warmer
     assert 'await image.decode();' in script
     assert 'candidateImagePrefetches.get(frameId)' in script
     assert 'setInterval(refreshCandidateIndexState, 30000)' in script
+
+
+def test_schema_v3_model_outputs_are_used_for_review_defaults() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+
+    assert 'function candidateSourceScreenTypes(source)' in script
+    assert 'for (const output of metadata.model_outputs || [])' in script
 
 
 def test_hero_comparison_reuses_prefetched_full_frame_in_browser() -> None:

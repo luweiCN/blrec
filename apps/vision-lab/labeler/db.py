@@ -3028,6 +3028,7 @@ _MATERIAL_SUGGESTION_SCENES = (
     ('hero_select', '英雄选择', 50),
 )
 _MATERIAL_SUGGESTION_MODES = (('3v3', '3V3'), ('aram', '大乱斗'), ('5v5', '5V5'))
+_MATERIAL_HERO_SCENE_TARGET = 20
 _MISSING_PLAYER_HERO_REVIEW = """
 item.review_status = 'confirmed'
 AND (
@@ -3553,6 +3554,15 @@ def _training_review_material_signals(
             value = row[key]
             if value is not None:
                 metadata[key] = str(value)
+        for key in (
+            'source_screen_type',
+            'source_stage_class',
+            'model_stage_class',
+            'model_mode_class',
+        ):
+            value = row[key]
+            if value is not None:
+                metadata[key] = str(value)
         corrected_mode = row['manual_game_mode']
         if corrected_mode is not None:
             metadata['manual_correction'] = {
@@ -3594,6 +3604,17 @@ def _training_review_material_scene(
         screen_type = str(context.get('screen_type') or '')
         if screen_type in _HERO_SCREEN_TYPES:
             return screen_type
+    for metadata in signal.get('metadata') or []:
+        values = {
+            str(metadata.get(key) or '')
+            for key in ('source_screen_type', 'source_stage_class', 'model_stage_class')
+        }
+        if values & {'scoreboard', 'death_scoreboard'}:
+            return 'scoreboard'
+        if values & {'gameplay', 'gameplay_hud', 'in_match'}:
+            return 'gameplay_hud'
+        if 'result_page' in values:
+            return 'result_page'
     return None
 
 
@@ -3622,7 +3643,11 @@ def _training_review_material_mode(
     if select_mode is not None:
         return select_mode
     for metadata in signal.get('metadata') or []:
-        for value in (metadata.get('game_mode'), metadata.get('mode_class')):
+        for value in (
+            metadata.get('game_mode'),
+            metadata.get('mode_class'),
+            metadata.get('model_mode_class'),
+        ):
             if str(value or '') in {'3v3', 'aram', '5v5'}:
                 return str(value)
         correction = metadata.get('manual_correction')
@@ -3639,6 +3664,8 @@ def _training_review_material_suggestions(
     visible_rows: Sequence[sqlite3.Row],
     source_rows: Sequence[sqlite3.Row],
     categories_by_frame: Dict[int, set[str]],
+    hero_rows: Sequence[sqlite3.Row] = (),
+    hero_catalog: Sequence[Dict[str, str]] = (),
 ) -> List[Dict[str, Any]]:
     signals = _training_review_material_signals(source_rows)
     confirmed = {
@@ -3675,27 +3702,32 @@ def _training_review_material_suggestions(
         target = max(minimum, math.ceil(strongest * 0.6))
         for mode, mode_label in _MATERIAL_SUGGESTION_MODES:
             count = confirmed[(scene, mode)]
-            if count >= target:
-                continue
             key = (scene, mode)
             new_count = candidates['new'][key]
             legacy_count = candidates['legacy'][key]
             source_scope = 'new' if new_count >= legacy_count else 'legacy'
             available = new_count if source_scope == 'new' else legacy_count
             ratio = count / target if target else 1.0
-            severity = 'urgent' if count == 0 else 'scarce' if ratio < 0.35 else 'low'
+            sufficient = count >= target
+            severity = (
+                'sufficient'
+                if sufficient
+                else 'urgent' if count == 0 else 'scarce' if ratio < 0.35 else 'low'
+            )
             result.append(
                 {
+                    'kind': 'scene_mode',
                     'scene': scene,
                     'scene_label': scene_label,
                     'match_mode': mode,
                     'mode_label': mode_label,
                     'confirmed_count': count,
                     'target_count': target,
-                    'shortage_count': target - count,
+                    'shortage_count': max(0, target - count),
                     'candidate_count': available,
                     'source_scope': source_scope,
                     'severity': severity,
+                    'status': 'sufficient' if sufficient else 'shortage',
                     'filters': {
                         'status': 'needs_review',
                         'scene': scene,
@@ -3703,15 +3735,113 @@ def _training_review_material_suggestions(
                     },
                 }
             )
-    severity_rank = {'urgent': 0, 'scarce': 1, 'low': 2}
+
+    catalog_by_label = {
+        str(hero.get('label') or ''): str(hero.get('name') or hero.get('label') or '')
+        for hero in hero_catalog
+        if str(hero.get('label') or '')
+    }
+    confirmed_heroes: Dict[Tuple[str, str], int] = {}
+    candidate_heroes: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {
+        'new': {},
+        'legacy': {},
+    }
+    visible_ids = {int(row['frame_id']) for row in visible_rows}
+    for row in hero_rows:
+        frame_id = int(row['frame_id'])
+        if frame_id not in visible_ids:
+            continue
+        screen_type = str(row['screen_type'] or '')
+        if screen_type not in _HERO_SCREEN_TYPES:
+            continue
+        lineup_status = str(row['lineup_review_status'] or '')
+        confirmed_label = str(row['confirmed_label'] or '')
+        if lineup_status == 'confirmed' and confirmed_label not in {'', 'unreadable'}:
+            key = (confirmed_label, screen_type)
+            confirmed_heroes[key] = confirmed_heroes.get(key, 0) + 1
+            catalog_by_label.setdefault(confirmed_label, confirmed_label)
+            continue
+        if str(row['item_review_status'] or '') not in {'pending', 'partial'}:
+            continue
+        suggested_label = str(row['suggested_label'] or '')
+        if suggested_label in {'', 'unreadable'}:
+            continue
+        catalog_by_label.setdefault(suggested_label, suggested_label)
+        categories = categories_by_frame.get(frame_id, set())
+        scopes = []
+        if categories & {'worker', 'result_archive', 'manual_correction'}:
+            scopes.append('new')
+        if 'legacy' in categories:
+            scopes.append('legacy')
+        for scope in scopes:
+            key = (suggested_label, screen_type)
+            value = candidate_heroes[scope].setdefault(
+                key, {'frame_ids': set(), 'crop_count': 0}
+            )
+            value['frame_ids'].add(frame_id)
+            value['crop_count'] += 1
+
+    for hero_label, hero_name in sorted(
+        catalog_by_label.items(), key=lambda item: (item[1], item[0])
+    ):
+        for scene, scene_label, _minimum in _MATERIAL_SUGGESTION_SCENES[:3]:
+            key = (hero_label, scene)
+            count = confirmed_heroes.get(key, 0)
+            new_value = candidate_heroes['new'].get(
+                key, {'frame_ids': set(), 'crop_count': 0}
+            )
+            legacy_value = candidate_heroes['legacy'].get(
+                key, {'frame_ids': set(), 'crop_count': 0}
+            )
+            source_scope = (
+                'new'
+                if len(new_value['frame_ids']) >= len(legacy_value['frame_ids'])
+                else 'legacy'
+            )
+            selected = new_value if source_scope == 'new' else legacy_value
+            target = _MATERIAL_HERO_SCENE_TARGET
+            sufficient = count >= target
+            ratio = count / target
+            result.append(
+                {
+                    'kind': 'hero_scene',
+                    'scene': scene,
+                    'scene_label': scene_label,
+                    'hero_label': hero_label,
+                    'hero_name': hero_name,
+                    'confirmed_count': count,
+                    'target_count': target,
+                    'shortage_count': max(0, target - count),
+                    'candidate_count': len(selected['frame_ids']),
+                    'candidate_crop_count': int(selected['crop_count']),
+                    'source_scope': source_scope,
+                    'severity': (
+                        'sufficient'
+                        if sufficient
+                        else (
+                            'urgent'
+                            if count == 0
+                            else 'scarce' if ratio < 0.35 else 'low'
+                        )
+                    ),
+                    'status': 'sufficient' if sufficient else 'shortage',
+                    'filters': {
+                        'status': 'needs_review',
+                        'scene': scene,
+                        'hero': hero_label,
+                    },
+                }
+            )
+    severity_rank = {'urgent': 0, 'scarce': 1, 'low': 2, 'sufficient': 3}
     return sorted(
         result,
         key=lambda value: (
             severity_rank[value['severity']],
             -int(value['candidate_count'] > 0),
             -int(value['shortage_count']),
+            0 if value['kind'] == 'scene_mode' else 1,
             str(value['scene']),
-            str(value['match_mode']),
+            str(value.get('match_mode') or value.get('hero_name') or ''),
         ),
     )
 
@@ -4179,14 +4309,33 @@ def _training_review_attribute_frame_ids(
             'WHERE source.frame_id = item.frame_id AND ('
             "json_extract(source.suggestions_json, '$.match_mode.label') = ? OR "
             "json_extract(source.suggestions_json, '$.hero_select.label') = ? OR "
+            "json_extract(source.metadata_json, '$.game_mode') = ? OR "
+            "json_extract(source.metadata_json, '$.mode_class') = ? OR "
             "json_extract(source.metadata_json, "
-            "'$.manual_correction.after.game_mode') = ?)))"
+            "'$.manual_correction.after.game_mode') = ? OR "
+            "json_extract(source.metadata_json, "
+            "'$.model_outputs[0].mode_class') = ?)))"
         )
         parameters.extend(
-            (match_mode, hero_select_mode, match_mode, hero_select_mode, match_mode)
+            (
+                match_mode,
+                hero_select_mode,
+                match_mode,
+                hero_select_mode,
+                match_mode,
+                match_mode,
+                match_mode,
+                match_mode,
+            )
         )
     if scene:
         if scene in _HERO_SCREEN_TYPES:
+            source_screen_types = {
+                'gameplay_hud': ('gameplay', 'gameplay_hud', 'in_match'),
+                'scoreboard': ('scoreboard', 'death_scoreboard'),
+                'result_page': ('result_page',),
+            }[scene]
+            placeholders = ','.join('?' for _value in source_screen_types)
             model_result_condition = (
                 " OR json_extract(source.suggestions_json, "
                 "'$.result_panel.label') = 'result_panel'"
@@ -4198,10 +4347,25 @@ def _training_review_attribute_frame_ids(
                 'SELECT 1 FROM training_review_sources source '
                 'WHERE source.frame_id = item.frame_id AND ('
                 "json_extract(source.metadata_json, "
-                "'$.hero_context_suggestion.screen_type') = ?"
+                "'$.hero_context_suggestion.screen_type') = ? OR "
+                "json_extract(source.metadata_json, '$.screen_type') "
+                f'IN ({placeholders}) OR '
+                "json_extract(source.metadata_json, '$.stage_class') "
+                f'IN ({placeholders}) OR '
+                "json_extract(source.metadata_json, "
+                "'$.model_outputs[0].stage_class') "
+                f'IN ({placeholders})'
                 f'{model_result_condition})))'
             )
-            parameters.extend((scene, scene))
+            parameters.extend(
+                (
+                    scene,
+                    scene,
+                    *source_screen_types,
+                    *source_screen_types,
+                    *source_screen_types,
+                )
+            )
         elif scene == 'hero_select':
             conditions.append(
                 "(item.hero_select_label LIKE 'select_%' OR EXISTS ("
@@ -4214,7 +4378,26 @@ def _training_review_attribute_frame_ids(
             conditions.append(
                 "COALESCE(item.hero_layout_label, '') NOT IN "
                 "('gameplay_hud', 'scoreboard', 'result_page') AND "
-                "COALESCE(item.hero_select_label, '') NOT LIKE 'select_%'"
+                "COALESCE(item.hero_select_label, '') NOT LIKE 'select_%' AND "
+                'NOT EXISTS (SELECT 1 FROM training_review_sources source '
+                'WHERE source.frame_id = item.frame_id AND ('
+                "json_extract(source.metadata_json, "
+                "'$.hero_context_suggestion.screen_type') IN "
+                "('gameplay_hud','scoreboard','result_page') OR "
+                "json_extract(source.metadata_json, '$.screen_type') IN "
+                "('gameplay','gameplay_hud','in_match','scoreboard',"
+                "'death_scoreboard','result_page') OR "
+                "json_extract(source.metadata_json, '$.stage_class') IN "
+                "('gameplay','gameplay_hud','in_match','scoreboard',"
+                "'death_scoreboard','result_page') OR "
+                "json_extract(source.metadata_json, "
+                "'$.model_outputs[0].stage_class') IN "
+                "('gameplay','gameplay_hud','in_match','scoreboard',"
+                "'death_scoreboard','result_page') OR "
+                "json_extract(source.suggestions_json, '$.hero_select.label') "
+                "LIKE 'select_%' OR "
+                "json_extract(source.suggestions_json, '$.result_panel.label') "
+                "= 'result_panel'))"
             )
         else:
             raise ValueError('画面类型筛选无效')
@@ -5439,6 +5622,7 @@ def training_review_stats(
     *,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
     include_material_suggestions: bool = True,
+    hero_catalog: Sequence[Dict[str, str]] = (),
 ) -> Dict[str, Any]:
     duplicates = training_review_duplicate_result_frame_ids(
         conn, result_groups=result_groups
@@ -5523,6 +5707,14 @@ def training_review_stats(
             'AS hero_context_confidence,'
             "json_extract(source.metadata_json,'$.game_mode') AS game_mode,"
             "json_extract(source.metadata_json,'$.mode_class') AS mode_class,"
+            "json_extract(source.metadata_json,'$.screen_type') "
+            'AS source_screen_type,'
+            "json_extract(source.metadata_json,'$.stage_class') "
+            'AS source_stage_class,'
+            "json_extract(source.metadata_json,'$.model_outputs[0].stage_class') "
+            'AS model_stage_class,'
+            "json_extract(source.metadata_json,'$.model_outputs[0].mode_class') "
+            'AS model_mode_class,'
             "json_extract(source.metadata_json,'$.manual_correction.after.game_mode') "
             'AS manual_game_mode FROM training_review_sources source '
             'JOIN training_review_items item ON item.frame_id=source.frame_id '
@@ -5535,6 +5727,18 @@ def training_review_stats(
             "COALESCE(item.match_mode_label,'') NOT IN ('3v3','aram','5v5') AND "
             "COALESCE(item.hero_select_label,'') NOT IN "
             "('select_3v3','select_aram','select_5v5')))"
+        ).fetchall()
+    hero_rows = []
+    if include_material_suggestions and hero_catalog:
+        hero_rows = conn.execute(
+            'SELECT lineup.frame_id,lineup.screen_type,'
+            'lineup.review_status AS lineup_review_status,'
+            'item.review_status AS item_review_status,'
+            'slot.suggested_label,slot.confirmed_label '
+            'FROM training_review_hero_lineups lineup '
+            'JOIN training_review_hero_slots slot '
+            'ON slot.frame_id=lineup.frame_id '
+            'JOIN training_review_items item ON item.frame_id=lineup.frame_id'
         ).fetchall()
     source_frames = {'legacy': 0, 'worker': 0, 'result_archive': 0, 'other': 0}
     origin_categories = {'legacy', 'worker', 'result_archive'}
@@ -5653,7 +5857,11 @@ def training_review_stats(
         'legacy_data': legacy_data,
         'material_suggestions': (
             _training_review_material_suggestions(
-                visible_rows, source_rows, categories_by_frame
+                visible_rows,
+                source_rows,
+                categories_by_frame,
+                hero_rows=hero_rows,
+                hero_catalog=hero_catalog,
             )
             if include_material_suggestions
             else None
