@@ -303,7 +303,7 @@ async def test_runtime_and_asset_sources_read_the_core_tables_directly(
         await database.execute(
             "UPDATE vainglory_matches SET result_frame_path='2/result.png',"
             "stats_eligible=0,stats_exclusion_reason='duplicate',"
-            'duplicate_of_match_id=1 WHERE id=2'
+            "duplicate_of_match_id=1,duplicate_review_state='pending' WHERE id=2"
         )
         now = datetime(2026, 8, 3, 10, 30, tzinfo=SHANGHAI)
 
@@ -319,6 +319,7 @@ async def test_runtime_and_asset_sources_read_the_core_tables_directly(
         assert runtime['snapshot']['matches'] == []
         assert [match['id'] for match in runtime['matches']] == [2, 1]
         assert runtime['matches'][0]['duplicateOfMatchId'] == 1
+        assert runtime['matches'][0]['duplicateReviewState'] == 'pending'
         assert runtime['matches'][1]['duplicateOfMatchId'] is None
         assert assets['matches'] == [
             {'id': 1, 'resultFramePath': '1/result.png'},

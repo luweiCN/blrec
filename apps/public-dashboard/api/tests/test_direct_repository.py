@@ -37,6 +37,7 @@ def _runtime_source(
     replay_access: str = 'public',
     stats_eligible: bool = True,
     duplicate_of_match_id: Optional[int] = None,
+    duplicate_review_state: str = 'none',
 ) -> Mapping[str, Any]:
     played_at = 1780272000
     lineups = {
@@ -156,6 +157,7 @@ def _runtime_source(
                 'streamTitle': '主播深夜排位',
                 'analysisProvisional': False,
                 'duplicateOfMatchId': duplicate_of_match_id,
+                'duplicateReviewState': duplicate_review_state,
                 'ally': teams[0],
                 'enemy': teams[1],
                 'replay': {

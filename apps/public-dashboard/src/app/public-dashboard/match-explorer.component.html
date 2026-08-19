@@ -115,7 +115,15 @@
               <small
                 *ngIf="match.duplicateOfMatchId"
                 class="match-provisional match-duplicate"
-              >与对局 #{{ match.duplicateOfMatchId }} 重复 · 不计分</small>
+              >{{
+                  match.duplicateReviewState === "pending"
+                    ? "疑似与"
+                    : "与"
+                }}对局 #{{ match.duplicateOfMatchId }} 重复 · {{
+                  match.duplicateReviewState === "pending"
+                    ? "待复核 · "
+                    : ""
+                }}不计分</small>
             </span>
             <small>
               <a

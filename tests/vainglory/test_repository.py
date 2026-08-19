@@ -844,6 +844,32 @@ def analyzed_match() -> AnalyzedMatch:
     )
 
 
+def distinct_hero_match(*, recorded_side: str, recorded_slot: int) -> AnalyzedMatch:
+    match = analyzed_match()
+    return replace(
+        match,
+        heroes=tuple(
+            replace(hero, label='Hero-{}-{}'.format(hero.side, hero.slot))
+            for hero in match.heroes
+        ),
+        recorded_player=RecordedPlayer(
+            side=recorded_side, slot=recorded_slot, confidence=0.99
+        ),
+    )
+
+
+def distinct_hero_references() -> tuple[HeroReference, ...]:
+    return tuple(
+        HeroReference(
+            'Hero-{}-{}'.format(side, slot),
+            '{:064x}'.format(side_index * 3 + slot),
+            b'hero',
+        )
+        for side_index, side in enumerate(('left', 'right'))
+        for slot in range(1, 4)
+    )
+
+
 @pytest.mark.asyncio
 async def test_complete_part_links_a_global_duplicate_without_counting_it(
     tmp_path: Path,
@@ -882,6 +908,7 @@ async def test_complete_part_links_a_global_duplicate_without_counting_it(
         assert duplicate.stats_eligible is False
         assert duplicate.stats_exclusion_reason == 'duplicate'
         assert duplicate.duplicate_of_match_id == original.id
+        assert duplicate.duplicate_review_state == 'pending'
 
         await database.execute(
             'UPDATE vainglory_matches SET content_fingerprint=NULL,'
@@ -912,6 +939,80 @@ async def test_complete_part_links_a_global_duplicate_without_counting_it(
 
 
 @pytest.mark.asyncio
+async def test_duplicate_review_survives_reconciliation_and_rescan(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first.mp4'
+        replay = tmp_path / 'replay.mp4'
+        first.write_bytes(b'first')
+        replay.write_bytes(b'replay')
+        await seed_session(database, first, session_id=1)
+        await seed_session(database, replay, session_id=2)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=200,anchor_name='解说主播' "
+            'WHERE id=2'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.sync_hero_references(distinct_hero_references())
+        recorded = distinct_hero_match(recorded_side='left', recorded_slot=1)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (recorded,))
+        assert await repository.claim_next() is not None
+        await repository.complete_part(2, (replace(recorded, part_id=2),))
+        duplicate = next(
+            match
+            for match in (await repository.list_matches()).items
+            if match.session_id == 2
+        )
+        assert (await repository.list_duplicate_reviews()).total == 1
+
+        confirmed = await repository.review_match_duplicate(
+            duplicate.id, confirmed=True
+        )
+        assert confirmed.duplicate_review_state == 'confirmed'
+        assert confirmed.duplicate_of_match_id is not None
+        assert confirmed.stats_eligible is False
+        assert (await repository.list_duplicate_reviews()).total == 0
+
+        await repository.request_scan(2)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(2, (replace(recorded, part_id=2),))
+        rescanned = next(
+            match
+            for match in (await repository.list_matches()).items
+            if match.session_id == 2
+        )
+        assert rescanned.duplicate_review_state == 'confirmed'
+        assert rescanned.duplicate_of_match_id is not None
+
+        dismissed = await repository.review_match_duplicate(
+            rescanned.id, confirmed=False
+        )
+        assert dismissed.duplicate_review_state == 'dismissed'
+        assert dismissed.duplicate_of_match_id is None
+        assert dismissed.stats_eligible is True
+
+        await repository.request_scan(2)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(2, (replace(recorded, part_id=2),))
+        await repository.reconcile_global_duplicates()
+        final = next(
+            match
+            for match in (await repository.list_matches()).items
+            if match.session_id == 2
+        )
+        assert final.duplicate_review_state == 'dismissed'
+        assert final.duplicate_of_match_id is None
+        assert final.stats_eligible is True
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_same_result_for_different_tracked_players_counts_for_each_player(
     tmp_path: Path,
 ) -> None:
@@ -929,21 +1030,67 @@ async def test_same_result_for_different_tracked_players_counts_for_each_player(
             'WHERE id=2'
         )
         repository = VaingloryRepository(database, clock=lambda: 100)
-        await repository.sync_hero_references(
-            (HeroReference('Caine', 'a' * 64, b'hero'),)
-        )
+        await repository.sync_hero_references(distinct_hero_references())
 
         assert await repository.claim_next() is not None
-        await repository.complete_part(1, (analyzed_match(),))
+        await repository.complete_part(
+            1, (distinct_hero_match(recorded_side='left', recorded_slot=1),)
+        )
         assert await repository.claim_next() is not None
         await repository.complete_part(
-            2, (replace(analyzed_match(), part_id=2, part_index=1),)
+            2,
+            (
+                replace(
+                    distinct_hero_match(recorded_side='left', recorded_slot=2),
+                    part_id=2,
+                    part_index=1,
+                ),
+            ),
         )
 
         matches = (await repository.list_matches()).items
         assert len(matches) == 2
         assert all(match.stats_eligible for match in matches)
         assert all(match.duplicate_of_match_id is None for match in matches)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_same_recorded_hero_replay_is_global_across_tracked_players(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first.mp4'
+        replay = tmp_path / 'replay.mp4'
+        first.write_bytes(b'first')
+        replay.write_bytes(b'replay')
+        await seed_session(database, first, session_id=1)
+        await seed_session(database, replay, session_id=2)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=200,anchor_name='另一位主播' "
+            'WHERE id=2'
+        )
+        await database.execute(
+            'UPDATE recording_parts SET record_start_time=id*1000 WHERE id IN (1,2)'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.sync_hero_references(distinct_hero_references())
+        recorded = distinct_hero_match(recorded_side='left', recorded_slot=1)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (recorded,))
+        assert await repository.claim_next() is not None
+        await repository.complete_part(2, (replace(recorded, part_id=2, part_index=1),))
+
+        matches = {
+            match.session_id: match for match in (await repository.list_matches()).items
+        }
+        assert matches[1].stats_eligible is True
+        assert matches[2].stats_eligible is False
+        assert matches[2].duplicate_of_match_id == matches[1].id
     finally:
         await database.close()
 

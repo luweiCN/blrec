@@ -14,6 +14,7 @@ def exact_match_fingerprint(
     winner_side: str,
     recorded_player_side: str,
     teams: Sequence[Mapping[str, Any]],
+    recorded_hero_name: str = '',
 ) -> Optional[str]:
     """Return a conservative identity for one completely recognized result."""
 
@@ -91,6 +92,7 @@ def exact_match_fingerprint(
             if recorded_player_side in {'left', 'right'}
             else None
         ),
+        str(recorded_hero_name or '').strip().casefold() or None,
         tuple(sorted(team_values)),
     )
     serialized = json.dumps(

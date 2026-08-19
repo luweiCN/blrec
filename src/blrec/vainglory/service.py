@@ -1131,6 +1131,11 @@ class VaingloryIndexService:
             limit=limit, offset=offset
         )
 
+    async def list_duplicate_reviews(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> MatchPage:
+        return await self._repository.list_duplicate_reviews(limit=limit, offset=offset)
+
     async def list_hero_reviews(self, *, limit: int = 50, offset: int = 0) -> MatchPage:
         return await self._repository.list_hero_reviews(limit=limit, offset=offset)
 
@@ -1190,6 +1195,13 @@ class VaingloryIndexService:
             before=before, after=updated, changed_fields=tuple(changes)
         )
         return updated
+
+    async def review_match_duplicate(
+        self, match_id: int, *, confirmed: bool
+    ) -> MatchRecord:
+        return await self._repository.review_match_duplicate(
+            match_id, confirmed=confirmed
+        )
 
     async def request_match_rerun(self, match_id: int) -> None:
         match = await self._repository.get_match(match_id)

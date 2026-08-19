@@ -17,6 +17,13 @@
         （{{ recordedPlayerReviewTotal }}）
       </ng-container>
     </button>
+    <button nz-button type="button" (click)="openDuplicateReviews()">
+      <i nz-icon nzType="copy"></i>
+      疑似重复待确认
+      <ng-container *ngIf="duplicateReviewTotal > 0">
+        （{{ duplicateReviewTotal }}）
+      </ng-container>
+    </button>
     <button nz-button type="button" (click)="openZeroMatchReviews()">
       <i nz-icon nzType="warning"></i>
       0 局待核对
@@ -622,7 +629,20 @@
                                 *ngIf="match.duplicateOfMatchId !== null"
                                 nzColor="purple"
                               >
-                                与对局 #{{ match.duplicateOfMatchId }} 重复
+                                {{
+                                  match.duplicateReviewState === "confirmed"
+                                    ? "已确认重复"
+                                    : "疑似重复 · 待确认"
+                                }}
+                                · 对局 #{{ match.duplicateOfMatchId }}
+                              </nz-tag>
+                              <nz-tag
+                                *ngIf="
+                                  match.duplicateReviewState === 'dismissed'
+                                "
+                                nzColor="green"
+                              >
+                                已人工确认不是重复
                               </nz-tag>
                             </div>
                             <p>
@@ -830,6 +850,37 @@
                               (nzOnConfirm)="deleteDetectedMatch(match)"
                             >
                               删除误识别
+                            </button>
+                            <button
+                              *ngIf="
+                                match.duplicateOfMatchId !== null &&
+                                match.duplicateReviewState === 'pending'
+                              "
+                              nz-button
+                              nzType="link"
+                              type="button"
+                              nz-popconfirm
+                              nzPopconfirmTitle="确认它和标出的原对局是同一局？确认后继续不计分。"
+                              [nzLoading]="savingMatchIds.has(match.id)"
+                              (nzOnConfirm)="
+                                reviewMatchDuplicate(match, 'confirmed')
+                              "
+                            >
+                              确认重复
+                            </button>
+                            <button
+                              *ngIf="match.duplicateOfMatchId !== null"
+                              nz-button
+                              nzType="link"
+                              type="button"
+                              nz-popconfirm
+                              nzPopconfirmTitle="确认这是另一局？它会恢复计入胜率和排行榜，后续重扫也不会再次误判。"
+                              [nzLoading]="savingMatchIds.has(match.id)"
+                              (nzOnConfirm)="
+                                reviewMatchDuplicate(match, 'dismissed')
+                              "
+                            >
+                              不是重复
                             </button>
                             <button
                               nz-button
@@ -1604,6 +1655,125 @@
         </div>
       </div>
     </nz-spin>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="duplicateReviewVisible"
+  nzTitle="疑似重复对局待确认"
+  [nzFooter]="null"
+  [nzWidth]="1080"
+  (nzOnCancel)="duplicateReviewVisible = false"
+>
+  <ng-container *nzModalContent>
+    <p class="recorded-player-review-help">
+      系统会比对完整战绩和主播本人英雄。这里也可能出现“主播 A 解说主播
+      B”之类的画面；确认前，该局会保留展示但暂不计分。
+    </p>
+    <nz-alert
+      *ngIf="duplicateReviewView.state === 'error'"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="duplicateReviewView.message"
+    ></nz-alert>
+    <div
+      *ngIf="duplicateReviewView.state === 'loading'"
+      class="loading-state"
+    >
+      <nz-spin nzSimple></nz-spin>
+      <span>正在加载疑似重复对局…</span>
+    </div>
+    <div
+      *ngIf="
+        duplicateReviewView.state === 'ready' && duplicateReviews.length === 0
+      "
+      class="empty-state"
+    >
+      <strong>没有待确认的疑似重复对局</strong>
+      <span>当前自动发现的重复关系均已处理。</span>
+    </div>
+    <section
+      *ngIf="duplicateReviews.length > 0"
+      style="display: grid; gap: 12px; max-height: 68vh; overflow: auto"
+      aria-label="疑似重复对局列表"
+    >
+      <article
+        *ngFor="let match of duplicateReviews; trackBy: trackMatch"
+        style="display: grid; gap: 10px; padding: 12px; border: 1px solid #eee"
+      >
+        <header
+          style="display: flex; justify-content: space-between; gap: 12px"
+        >
+          <div>
+            <strong>{{ match.title || "未命名录播" }}</strong>
+            <div>
+              P{{ match.partIndex }} ·
+              {{ formatDuration(match.resultAtMs / 1000) }} ·
+              {{ gameModeLabel(match.gameMode) }}
+            </div>
+          </div>
+          <nz-tag nzColor="purple">
+            疑似与对局 #{{ match.duplicateOfMatchId }} 重复
+          </nz-tag>
+        </header>
+        <div
+          style="
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 10px;
+          "
+        >
+          <figure style="margin: 0">
+            <figcaption>当前识别到的画面</figcaption>
+            <img
+              *ngIf="match.resultFrameUrl"
+              nz-image
+              [nzSrc]="match.resultFrameUrl"
+              alt="当前疑似重复的结算画面"
+              loading="lazy"
+              style="width: 100%; background: #000"
+            />
+          </figure>
+          <figure style="margin: 0">
+            <figcaption>已收录的原对局 #{{ match.duplicateOfMatchId }}</figcaption>
+            <img
+              *ngIf="match.duplicateResultFrameUrl"
+              nz-image
+              [nzSrc]="match.duplicateResultFrameUrl"
+              alt="系统认为相同的原对局结算画面"
+              loading="lazy"
+              style="width: 100%; background: #000"
+            />
+          </figure>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 8px">
+          <button
+            nz-button
+            type="button"
+            [nzLoading]="savingMatchIds.has(match.id)"
+            (click)="reviewMatchDuplicate(match, 'dismissed')"
+          >
+            不是重复
+          </button>
+          <button
+            nz-button
+            nzType="primary"
+            type="button"
+            [nzLoading]="savingMatchIds.has(match.id)"
+            (click)="reviewMatchDuplicate(match, 'confirmed')"
+          >
+            确认重复
+          </button>
+        </div>
+      </article>
+    </section>
+    <p
+      *ngIf="duplicateReviewTotal > duplicateReviews.length"
+      class="recorded-player-review-help"
+    >
+      当前先显示前 {{ duplicateReviews.length }} 条，共
+      {{ duplicateReviewTotal }} 条；处理后重新打开会继续加载下一批。
+    </p>
   </ng-container>
 </nz-modal>
 

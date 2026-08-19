@@ -47,6 +47,8 @@ function match(): VaingloryMatch {
     statsEligible: true,
     statsExclusionReason: null,
     duplicateOfMatchId: null,
+    duplicateResultFrameUrl: null,
+    duplicateReviewState: 'none',
     startedAtMs: 15_000,
     resultAtMs: 600_000,
     durationSeconds: 585,
@@ -285,6 +287,7 @@ describe('VaingloryComponent remote media', () => {
       'suppressZeroMatchSession',
       'restoreZeroMatchSession',
       'listMatches',
+      'listDuplicateReviews',
       'listHeroes',
       'listAnchorStats',
       'listPlayers',
@@ -309,6 +312,7 @@ describe('VaingloryComponent remote media', () => {
       'listRecordedPlayerReviews',
       'setRecordedPlayer',
       'setPlayerHero',
+      'reviewMatchDuplicate',
       'reanalyzeMatch',
       'suppressMatchReview',
       'addAnalysisWorker',
@@ -330,6 +334,9 @@ describe('VaingloryComponent remote media', () => {
       of({ total: 0, items: [] }),
     );
     vainglory.listRecordedPlayerReviews.and.returnValue(
+      of({ total: 0, items: [] }),
+    );
+    vainglory.listDuplicateReviews.and.returnValue(
       of({ total: 0, items: [] }),
     );
     vainglory.listHeroReviews.and.returnValue(of({ total: 0, items: [] }));
@@ -1031,5 +1038,44 @@ describe('VaingloryComponent remote media', () => {
     expect(vainglory.unbindPlayerRoom).toHaveBeenCalledOnceWith(5, 100);
     expect(component.newPlayerName).toBe('');
     expect(component.playerRoomDraft(5)).toBe('');
+  });
+
+  it('confirms a suspected duplicate from the match card', () => {
+    const suspected: VaingloryMatch = {
+      ...match(),
+      statsEligible: false,
+      statsExclusionReason: 'duplicate',
+      duplicateOfMatchId: 2,
+      duplicateResultFrameUrl: '/api/v1/vainglory/matches/2/result-frame',
+      duplicateReviewState: 'pending',
+    };
+    const confirmed: VaingloryMatch = {
+      ...suspected,
+      duplicateReviewState: 'confirmed',
+    };
+    component.matchDetails.set(9, { state: 'ready', items: [suspected] });
+    component.duplicateReviewView = {
+      state: 'ready',
+      total: 1,
+      items: [suspected],
+    };
+    vainglory.reviewMatchDuplicate.and.returnValue(of(confirmed));
+
+    component.reviewMatchDuplicate(suspected, 'confirmed');
+
+    expect(vainglory.reviewMatchDuplicate).toHaveBeenCalledOnceWith(
+      3,
+      'confirmed',
+    );
+    expect(component.detailsFor(9)?.state).toBe('ready');
+    expect(component.matchDetails.get(9)).toEqual({
+      state: 'ready',
+      items: [confirmed],
+    });
+    expect(component.duplicateReviews).toEqual([]);
+    expect(component.duplicateReviewTotal).toBe(0);
+    expect(messages.success).toHaveBeenCalledWith(
+      '已确认重复，这一局继续不计分',
+    );
   });
 });

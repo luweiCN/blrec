@@ -120,6 +120,7 @@ export const TEST_DASHBOARD_MATCHES: readonly DashboardMatch[] = Array.from(
       durationSeconds: 780 + index * 5,
       result: won ? 'W' : 'L',
       duplicateOfMatchId: null,
+      duplicateReviewState: 'none',
       ally: {
         side: 'left',
         color: 'teal',

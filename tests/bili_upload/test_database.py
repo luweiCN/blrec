@@ -2306,6 +2306,28 @@ async def test_migration_79_adds_global_match_deduplication_fields(
             'vainglory_matches_content_fingerprint_idx',
             'vainglory_matches_duplicate_of_idx',
         }.issubset(indexes)
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 79
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 80
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_80_adds_duplicate_review_fields(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        columns = {
+            str(row['name'])
+            for row in await database.fetchall('PRAGMA table_info(vainglory_matches)')
+        }
+        indexes = {
+            str(row['name'])
+            for row in await database.fetchall('PRAGMA index_list(vainglory_matches)')
+        }
+
+        assert {'duplicate_review_state', 'duplicate_review_fingerprint'}.issubset(
+            columns
+        )
+        assert 'vainglory_matches_duplicate_review_idx' in indexes
     finally:
         await database.close()

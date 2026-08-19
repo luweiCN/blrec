@@ -478,6 +478,7 @@ def _match_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
         'match.recorded_player_slot,match.left_color,match.right_color,'
         'match.stats_eligible,match.stats_exclusion_reason,'
         'match.duplicate_of_match_id,'
+        'match.duplicate_review_state,'
         'match.content_fingerprint AS exact_fingerprint,'
         'match.left_kills,match.right_kills,match.left_economy,'
         'match.right_economy,'
@@ -815,6 +816,7 @@ def _public_matches(
                 if row['duplicate_of_match_id'] is None
                 else int(row['duplicate_of_match_id'])
             ),
+            'duplicateReviewState': str(row['duplicate_review_state']),
             'ally': team_value(recorded_side),
             'enemy': team_value(enemy_side),
         }

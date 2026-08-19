@@ -348,6 +348,8 @@ class MatchResponse(ApiModel):
     stats_eligible: bool
     stats_exclusion_reason: Optional[str]
     duplicate_of_match_id: Optional[int]
+    duplicate_result_frame_url: Optional[str]
+    duplicate_review_state: Literal['none', 'pending', 'confirmed', 'dismissed']
     started_at_ms: int
     result_at_ms: int
     duration_seconds: Optional[int]
@@ -547,6 +549,10 @@ class MatchUpdateRequest(ApiModel):
     left_economy: Optional[int] = Field(None, ge=0)
     right_economy: Optional[int] = Field(None, ge=0)
     players: Optional[List[MatchPlayerUpdateRequest]] = Field(None, max_items=10)
+
+
+class DuplicateReviewRequest(ApiModel):
+    decision: Literal['confirmed', 'dismissed']
 
 
 class PlayerNameRequest(ApiModel):
@@ -843,6 +849,14 @@ def _match(value: MatchRecord) -> MatchResponse:
         stats_eligible=value.stats_eligible,
         stats_exclusion_reason=value.stats_exclusion_reason,
         duplicate_of_match_id=value.duplicate_of_match_id,
+        duplicate_result_frame_url=(
+            None
+            if value.duplicate_of_match_id is None
+            else '/api/v1/vainglory/matches/{}/result-frame'.format(
+                value.duplicate_of_match_id
+            )
+        ),
+        duplicate_review_state=value.duplicate_review_state,
         started_at_ms=value.started_at_ms,
         result_at_ms=value.result_at_ms,
         duration_seconds=value.duration_seconds,
@@ -2232,6 +2246,19 @@ async def list_recorded_player_reviews(
     )
 
 
+@router.get('/duplicate-reviews', response_model=MatchListResponse)
+async def list_duplicate_reviews(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> MatchListResponse:
+    page = await index.list_duplicate_reviews(limit=limit, offset=offset)
+    return MatchListResponse(
+        total=page.total, items=[_match(item) for item in page.items]
+    )
+
+
 @router.get('/hero-reviews', response_model=MatchListResponse)
 async def list_hero_reviews(
     limit: int = Query(50, ge=1, le=100),
@@ -2314,6 +2341,24 @@ async def update_match(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
         ) from error
+
+
+@router.put('/matches/{match_id}/duplicate-review', response_model=MatchResponse)
+async def review_match_duplicate(
+    match_id: int,
+    payload: DuplicateReviewRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> MatchResponse:
+    try:
+        return _match(
+            await index.review_match_duplicate(
+                match_id, confirmed=payload.decision == 'confirmed'
+            )
+        )
+    except (VaingloryConflict, VaingloryNotFound) as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
 
 
 @router.post('/matches/{match_id}/reanalyze', status_code=status.HTTP_202_ACCEPTED)

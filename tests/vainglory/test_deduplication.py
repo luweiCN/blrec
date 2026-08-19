@@ -99,3 +99,37 @@ def test_exact_fingerprint_rejects_incomplete_or_changed_results() -> None:
         )
         != original
     )
+
+
+def test_exact_fingerprint_distinguishes_duo_streamers_by_recorded_hero() -> None:
+    teams = _teams()
+
+    first_streamer = exact_match_fingerprint(
+        mode='3v3',
+        duration_seconds=900,
+        winner_side='left',
+        recorded_player_side='left',
+        recorded_hero_name='Hero-0-1',
+        teams=teams,
+    )
+    teammate = exact_match_fingerprint(
+        mode='3v3',
+        duration_seconds=900,
+        winner_side='left',
+        recorded_player_side='left',
+        recorded_hero_name='Hero-0-2',
+        teams=teams,
+    )
+    replay = exact_match_fingerprint(
+        mode='3v3',
+        duration_seconds=900,
+        winner_side='left',
+        recorded_player_side='left',
+        recorded_hero_name='Hero-0-1',
+        teams=teams,
+    )
+
+    assert first_streamer is not None
+    assert teammate is not None
+    assert teammate != first_streamer
+    assert replay == first_streamer

@@ -276,6 +276,8 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   savingHeroReviewKey: string | null = null;
   recordedPlayerReviewVisible = false;
   recordedPlayerReviewView: RecordedPlayerReviewView = { state: 'idle' };
+  duplicateReviewVisible = false;
+  duplicateReviewView: RecordedPlayerReviewView = { state: 'idle' };
   savingRecordedPlayerMatchId: number | null = null;
   savingRecordedPlayerSlot: number | null = null;
   analysisTaskModalVisible = false;
@@ -467,6 +469,18 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   get recordedPlayerReviewTotal(): number {
     return this.recordedPlayerReviewView.state === 'ready'
       ? this.recordedPlayerReviewView.total
+      : 0;
+  }
+
+  get duplicateReviews(): readonly VaingloryMatch[] {
+    return this.duplicateReviewView.state === 'ready'
+      ? this.duplicateReviewView.items
+      : [];
+  }
+
+  get duplicateReviewTotal(): number {
+    return this.duplicateReviewView.state === 'ready'
+      ? this.duplicateReviewView.total
       : 0;
   }
 
@@ -1434,6 +1448,76 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         },
         error: (error: unknown) => {
           this.messages.error(this.errorMessage(error, '统计设置保存失败'));
+        },
+      });
+  }
+
+  reviewMatchDuplicate(
+    match: VaingloryMatch,
+    decision: 'confirmed' | 'dismissed',
+  ): void {
+    if (this.savingMatchIds.has(match.id)) {
+      return;
+    }
+    this.savingMatchIds.add(match.id);
+    this.vainglory
+      .reviewMatchDuplicate(match.id, decision)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.savingMatchIds.delete(match.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (saved) => {
+          this.replaceMatchDetails(saved);
+          if (this.duplicateReviewView.state === 'ready') {
+            this.duplicateReviewView = {
+              state: 'ready',
+              total: Math.max(0, this.duplicateReviewView.total - 1),
+              items: this.duplicateReviewView.items.filter(
+                (item) => item.id !== saved.id,
+              ),
+            };
+          }
+          this.loadPlayerStats();
+          this.loadHeroStats();
+          this.messages.success(
+            decision === 'confirmed'
+              ? '已确认重复，这一局继续不计分'
+              : saved.statsEligible
+                ? '已确认不是重复，这一局已恢复计分'
+                : '已确认不是重复；这一局因其他原因仍不计分',
+          );
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '重复关系确认失败'));
+        },
+      });
+  }
+
+  openDuplicateReviews(): void {
+    this.duplicateReviewVisible = true;
+    this.duplicateReviewView = { state: 'loading' };
+    this.vainglory
+      .listDuplicateReviews()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.duplicateReviewView = {
+            state: 'ready',
+            total: response.total,
+            items: response.items,
+          };
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.duplicateReviewView = {
+            state: 'error',
+            message: this.errorMessage(error, '疑似重复列表加载失败'),
+          };
+          this.changeDetector.markForCheck();
         },
       });
   }

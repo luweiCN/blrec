@@ -638,6 +638,9 @@ class MatchRecord:
     stats_eligible: bool = True
     stats_exclusion_reason: Optional[str] = None
     duplicate_of_match_id: Optional[int] = None
+    duplicate_review_state: Literal['none', 'pending', 'confirmed', 'dismissed'] = (
+        'none'
+    )
     recorded_player_state: str = 'pending'
     rerun_state: Optional[str] = None
     rerun_error: Optional[str] = None
@@ -1091,6 +1094,7 @@ class VaingloryRepository:
         'match.right_economy,match.confidence,match.game_mode,match.team_size,'
         'match.match_kind,match.view_context,match.stats_eligible,'
         'match.stats_exclusion_reason,match.duplicate_of_match_id,'
+        'match.duplicate_review_state,'
         'match.analysis_state,'
         'match.started_at_ms,match.custom_title,'
         'match.result_frame_path,match.recorded_player_confidence,'
@@ -1216,10 +1220,12 @@ class VaingloryRepository:
         rows = connection.execute(
             'SELECT match.id,match.game_mode,match.duration_seconds,'
             'match.winner_side,match.recorded_player_side,'
+            'match.recorded_player_slot,'
             'match.left_kills,match.right_kills,'
             'match.left_economy,match.right_economy,'
             'match.content_fingerprint,match.duplicate_of_match_id,'
-            'match.duplicate_checked_at,match.stats_eligible,'
+            'match.duplicate_checked_at,match.duplicate_review_state,'
+            'match.duplicate_review_fingerprint,match.stats_eligible,'
             'match.stats_exclusion_reason,match.started_at_ms,'
             'part.record_start_time,'
             'COALESCE(room.player_id,direct.player_id) AS tracked_player_id,'
@@ -1250,9 +1256,17 @@ class VaingloryRepository:
                     'duration_seconds': row['duration_seconds'],
                     'winner_side': str(row['winner_side']),
                     'recorded_player_side': str(row['recorded_player_side']),
+                    'recorded_player_slot': (
+                        None
+                        if row['recorded_player_slot'] is None
+                        else int(row['recorded_player_slot'])
+                    ),
+                    'recorded_hero_name': '',
                     'content_fingerprint': row['content_fingerprint'],
                     'duplicate_of_match_id': row['duplicate_of_match_id'],
                     'duplicate_checked_at': row['duplicate_checked_at'],
+                    'duplicate_review_state': str(row['duplicate_review_state']),
+                    'duplicate_review_fingerprint': row['duplicate_review_fingerprint'],
                     'stats_eligible': bool(int(row['stats_eligible'])),
                     'stats_exclusion_reason': row['stats_exclusion_reason'],
                     'tracked_player_id': (
@@ -1292,6 +1306,12 @@ class VaingloryRepository:
                     'economy': row['economy'],
                 }
             )
+            if (
+                side == value['recorded_player_side']
+                and value['recorded_player_slot'] is not None
+                and int(row['slot']) == int(value['recorded_player_slot'])
+            ):
+                value['recorded_hero_name'] = str(row['hero_name'] or '')
         for value in values.values():
             duration = value['duration_seconds']
             value['calculated_fingerprint'] = (
@@ -1303,9 +1323,24 @@ class VaingloryRepository:
                     winner_side=value['winner_side'],
                     recorded_player_side=value['recorded_player_side'],
                     teams=tuple(value['teams'].values()),
+                    recorded_hero_name=value['recorded_hero_name'],
                 )
             )
         return values
+
+    @staticmethod
+    def _duplicate_group_key(
+        value: Mapping[str, Any]
+    ) -> Optional[Tuple[str, int, str]]:
+        fingerprint = value['calculated_fingerprint']
+        if fingerprint is None:
+            return None
+        if str(value['recorded_hero_name'] or '').strip():
+            return (str(fingerprint), 0, 'recorded_hero')
+        tracked_player_id = value['tracked_player_id']
+        if tracked_player_id is None:
+            return (str(fingerprint), int(value['id']), 'match')
+        return (str(fingerprint), int(tracked_player_id), 'player')
 
     @staticmethod
     def _apply_duplicate_plan(
@@ -1315,42 +1350,83 @@ class VaingloryRepository:
     ) -> int:
         groups: Dict[Tuple[str, int, str], List[Mapping[str, Any]]] = {}
         changed = 0
+
+        def apply_value(
+            value: Mapping[str, Any],
+            *,
+            fingerprint: Optional[str],
+            duplicate_of: Optional[int],
+            review_state: str,
+            stats_eligible: bool,
+            exclusion_reason: Optional[str],
+        ) -> None:
+            nonlocal changed
+            desired = (
+                fingerprint,
+                duplicate_of,
+                review_state,
+                stats_eligible,
+                exclusion_reason,
+            )
+            current = (
+                value['content_fingerprint'],
+                value['duplicate_of_match_id'],
+                value['duplicate_review_state'],
+                bool(value['stats_eligible']),
+                value['stats_exclusion_reason'],
+            )
+            if current == desired and value['duplicate_checked_at'] is not None:
+                return
+            connection.execute(
+                'UPDATE vainglory_matches SET content_fingerprint=?,'
+                'duplicate_of_match_id=?,duplicate_checked_at=?,'
+                'duplicate_review_state=?,stats_eligible=?,'
+                'stats_exclusion_reason=? WHERE id=?',
+                (
+                    fingerprint,
+                    duplicate_of,
+                    now,
+                    review_state,
+                    1 if stats_eligible else 0,
+                    exclusion_reason,
+                    int(value['id']),
+                ),
+            )
+            changed += 1
+
         for value in values.values():
             fingerprint = value['calculated_fingerprint']
+            reason = value['stats_exclusion_reason']
+            automatically_eligible = (
+                bool(value['stats_eligible']) or str(reason or '') == 'duplicate'
+            )
             if fingerprint is None:
-                incomplete_desired = (
-                    None,
-                    None,
-                    bool(value['stats_eligible']),
-                    value['stats_exclusion_reason'],
+                apply_value(
+                    value,
+                    fingerprint=None,
+                    duplicate_of=None,
+                    review_state='none',
+                    stats_eligible=automatically_eligible,
+                    exclusion_reason=None if automatically_eligible else reason,
                 )
-                incomplete_current = (
-                    value['content_fingerprint'],
-                    value['duplicate_of_match_id'],
-                    bool(value['stats_eligible']),
-                    value['stats_exclusion_reason'],
-                )
-                if (
-                    incomplete_current != incomplete_desired
-                    or value['duplicate_checked_at'] is None
-                ):
-                    connection.execute(
-                        'UPDATE vainglory_matches SET content_fingerprint=NULL,'
-                        'duplicate_of_match_id=NULL,duplicate_checked_at=? WHERE id=?',
-                        (now, int(value['id'])),
-                    )
-                    changed += 1
                 continue
-            tracked_player_id = value['tracked_player_id']
-            owner_key = (
-                int(value['id'])
-                if tracked_player_id is None
-                else int(tracked_player_id)
-            )
-            owner_kind = 'match' if tracked_player_id is None else 'player'
-            groups.setdefault((str(fingerprint), owner_key, owner_kind), []).append(
-                value
-            )
+            reviewed_fingerprint = str(value['duplicate_review_fingerprint'] or '')
+            if (
+                value['duplicate_review_state'] == 'dismissed'
+                and reviewed_fingerprint == fingerprint
+            ):
+                apply_value(
+                    value,
+                    fingerprint=str(fingerprint),
+                    duplicate_of=None,
+                    review_state='dismissed',
+                    stats_eligible=automatically_eligible,
+                    exclusion_reason=None if automatically_eligible else reason,
+                )
+                continue
+            group_key = VaingloryRepository._duplicate_group_key(value)
+            if group_key is not None:
+                groups.setdefault(group_key, []).append(value)
 
         for (fingerprint, _owner_key, _owner_kind), group in groups.items():
             eligible = [
@@ -1374,6 +1450,7 @@ class VaingloryRepository:
                     duplicate_of = None
                     stats_eligible = automatically_eligible
                     exclusion_reason = None if automatically_eligible else reason
+                    review_state = 'none'
                 else:
                     duplicate_of = canonical_id
                     stats_eligible = (
@@ -1382,37 +1459,21 @@ class VaingloryRepository:
                         else bool(value['stats_eligible'])
                     )
                     exclusion_reason = 'duplicate' if automatically_eligible else reason
-                group_desired = (
-                    fingerprint,
-                    duplicate_of,
-                    stats_eligible,
-                    exclusion_reason,
+                    review_state = (
+                        'confirmed'
+                        if value['duplicate_review_state'] == 'confirmed'
+                        and str(value['duplicate_review_fingerprint'] or '')
+                        == fingerprint
+                        else 'pending'
+                    )
+                apply_value(
+                    value,
+                    fingerprint=fingerprint,
+                    duplicate_of=duplicate_of,
+                    review_state=review_state,
+                    stats_eligible=stats_eligible,
+                    exclusion_reason=exclusion_reason,
                 )
-                group_current = (
-                    value['content_fingerprint'],
-                    value['duplicate_of_match_id'],
-                    bool(value['stats_eligible']),
-                    reason,
-                )
-                if (
-                    group_current == group_desired
-                    and value['duplicate_checked_at'] is not None
-                ):
-                    continue
-                connection.execute(
-                    'UPDATE vainglory_matches SET content_fingerprint=?,'
-                    'duplicate_of_match_id=?,duplicate_checked_at=?,'
-                    'stats_eligible=?,stats_exclusion_reason=? WHERE id=?',
-                    (
-                        fingerprint,
-                        duplicate_of,
-                        now,
-                        1 if stats_eligible else 0,
-                        exclusion_reason,
-                        match_id,
-                    ),
-                )
-                changed += 1
         return changed
 
     def _reconcile_changed_match_duplicates(
@@ -1460,12 +1521,17 @@ class VaingloryRepository:
                 for value in values.values()
                 if value['calculated_fingerprint'] is not None
             ]
-            group_counts: Dict[Tuple[str, int], int] = {}
+            group_counts: Dict[Tuple[str, int, str], int] = {}
             for value in fingerprinted_values:
-                tracked_player_id = value['tracked_player_id']
-                if tracked_player_id is None:
+                if (
+                    value['duplicate_review_state'] == 'dismissed'
+                    and value['duplicate_review_fingerprint']
+                    == value['calculated_fingerprint']
+                ):
                     continue
-                key = (str(value['calculated_fingerprint']), int(tracked_player_id))
+                key = self._duplicate_group_key(value)
+                if key is None:
+                    continue
                 group_counts[key] = group_counts.get(key, 0) + 1
             duplicates = sum(max(0, count - 1) for count in group_counts.values())
             return DuplicateReconciliation(
@@ -5139,6 +5205,32 @@ class VaingloryRepository:
         )
         return MatchPage(total=total, items=await self._hydrate_matches(rows))
 
+    async def list_duplicate_reviews(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> MatchPage:
+        if limit < 1 or limit > 100:
+            raise ValueError('limit must be between 1 and 100')
+        if offset < 0:
+            raise ValueError('offset must not be negative')
+        condition = (
+            "match.duplicate_review_state='pending' "
+            'AND match.duplicate_of_match_id IS NOT NULL'
+        )
+        total = int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM vainglory_matches match WHERE ' + condition
+            )
+        )
+        rows = await self._database.fetchall(
+            self._MATCH_SELECT
+            + 'WHERE '
+            + condition
+            + ' ORDER BY session.started_at DESC,part.part_index DESC,'
+            'match.result_at_ms DESC,match.id DESC LIMIT ? OFFSET ?',
+            (limit, offset),
+        )
+        return MatchPage(total=total, items=await self._hydrate_matches(rows))
+
     async def list_hero_reviews(self, *, limit: int = 50, offset: int = 0) -> MatchPage:
         if limit < 1 or limit > 100:
             raise ValueError('limit must be between 1 and 100')
@@ -6102,6 +6194,73 @@ class VaingloryRepository:
             )
 
         await self._database.write(update)
+        return await self.get_match(match_id)
+
+    async def review_match_duplicate(
+        self, match_id: int, *, confirmed: bool
+    ) -> MatchRecord:
+        now = self._now()
+
+        def review(connection: sqlite3.Connection) -> None:
+            match = connection.execute(
+                'SELECT session_id,result_part_id,result_at_ms,'
+                'content_fingerprint,duplicate_of_match_id,stats_eligible,'
+                'stats_exclusion_reason FROM vainglory_matches WHERE id=?',
+                (int(match_id),),
+            ).fetchone()
+            if match is None:
+                raise VaingloryNotFound('对局不存在')
+            if (
+                match['content_fingerprint'] is None
+                or match['duplicate_of_match_id'] is None
+            ):
+                raise VaingloryConflict('当前对局没有待确认的重复关系')
+            fingerprint = str(match['content_fingerprint'])
+            review_state = 'confirmed' if confirmed else 'dismissed'
+            self._merge_match_override(
+                connection,
+                part_id=int(match['result_part_id']),
+                result_at_ms=int(match['result_at_ms']),
+                patch={
+                    '_duplicate_review': {
+                        'state': review_state,
+                        'fingerprint': fingerprint,
+                    }
+                },
+                now=now,
+            )
+            reason = match['stats_exclusion_reason']
+            automatically_eligible = (
+                bool(int(match['stats_eligible'])) or str(reason or '') == 'duplicate'
+            )
+            connection.execute(
+                'UPDATE vainglory_matches SET duplicate_of_match_id=?,'
+                'duplicate_review_state=?,duplicate_review_fingerprint=?,'
+                'duplicate_checked_at=?,stats_eligible=?,'
+                'stats_exclusion_reason=? WHERE id=?',
+                (
+                    int(match['duplicate_of_match_id']) if confirmed else None,
+                    review_state,
+                    fingerprint,
+                    now,
+                    0 if confirmed else (1 if automatically_eligible else 0),
+                    (
+                        'duplicate'
+                        if confirmed and automatically_eligible
+                        else (
+                            None if not confirmed and automatically_eligible else reason
+                        )
+                    ),
+                    int(match_id),
+                ),
+            )
+            connection.execute(
+                'UPDATE vainglory_publications SET needs_refresh=1 '
+                'WHERE session_id=?',
+                (int(match['session_id']),),
+            )
+
+        await self._database.write(review)
         return await self.get_match(match_id)
 
     async def update_session_title(
@@ -7707,6 +7866,17 @@ class VaingloryRepository:
             eligible = bool(payload['stats_eligible'])
             assignments.extend(('stats_eligible=?', 'stats_exclusion_reason=?'))
             values.extend((1 if eligible else 0, None if eligible else 'manual'))
+        duplicate_review = payload.get('_duplicate_review')
+        if isinstance(duplicate_review, Mapping):
+            review_state = str(duplicate_review.get('state') or '')
+            review_fingerprint = str(duplicate_review.get('fingerprint') or '')
+            if review_state in ('confirmed', 'dismissed') and (
+                len(review_fingerprint) == 67 and review_fingerprint.startswith('v1:')
+            ):
+                assignments.extend(
+                    ('duplicate_review_state=?', 'duplicate_review_fingerprint=?')
+                )
+                values.extend((review_state, review_fingerprint))
         recorded_player = payload.get('recorded_player')
         if isinstance(recorded_player, Mapping):
             side = str(recorded_player.get('side') or '')
@@ -8053,6 +8223,10 @@ class VaingloryRepository:
                 None
                 if row['duplicate_of_match_id'] is None
                 else int(row['duplicate_of_match_id'])
+            ),
+            duplicate_review_state=cast(
+                Literal['none', 'pending', 'confirmed', 'dismissed'],
+                str(row['duplicate_review_state']),
             ),
             started_at_ms=int(row['started_at_ms']),
             result_at_ms=int(row['result_at_ms']),

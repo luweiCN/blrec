@@ -100,6 +100,18 @@ export class VaingloryService {
     );
   }
 
+  listDuplicateReviews(
+    limit = 50,
+    offset = 0,
+  ): Observable<VaingloryMatchList> {
+    return this.http.get<VaingloryMatchList>(
+      this.url.makeApiUrl('/api/v1/vainglory/duplicate-reviews'),
+      {
+        params: new HttpParams().set('limit', limit).set('offset', offset),
+      },
+    );
+  }
+
   listRecordedPlayerReviews(
     limit = 100,
     offset = 0,
@@ -433,6 +445,18 @@ export class VaingloryService {
     return this.http.patch<VaingloryMatch>(
       this.url.makeApiUrl(`/api/v1/vainglory/matches/${matchId}`),
       update,
+    );
+  }
+
+  reviewMatchDuplicate(
+    matchId: number,
+    decision: 'confirmed' | 'dismissed',
+  ): Observable<VaingloryMatch> {
+    return this.http.put<VaingloryMatch>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/matches/${matchId}/duplicate-review`,
+      ),
+      { decision },
     );
   }
 

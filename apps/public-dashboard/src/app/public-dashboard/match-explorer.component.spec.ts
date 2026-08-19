@@ -169,13 +169,14 @@ describe('MatchExplorerComponent', () => {
       {
         ...TEST_DASHBOARD_MATCHES[0],
         duplicateOfMatchId: 1199,
+        duplicateReviewState: 'pending',
       },
     ]);
     fixture.detectChanges();
     const page = fixture.nativeElement as HTMLElement;
 
     expect(page.querySelector('.match-duplicate')?.textContent).toContain(
-      '与对局 #1199 重复 · 不计分',
+      '疑似与对局 #1199 重复 · 待复核 · 不计分',
     );
   });
 

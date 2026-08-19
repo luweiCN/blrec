@@ -144,6 +144,23 @@ describe('VaingloryService', () => {
     ignored.flush(null);
   });
 
+  it('loads and reviews suspected duplicates', () => {
+    service.listDuplicateReviews(20, 40).subscribe();
+    const reviews = http.expectOne(
+      '/api/v1/vainglory/duplicate-reviews?limit=20&offset=40',
+    );
+    expect(reviews.request.method).toBe('GET');
+    reviews.flush({ total: 0, items: [] });
+
+    service.reviewMatchDuplicate(9, 'confirmed').subscribe();
+    const saved = http.expectOne(
+      '/api/v1/vainglory/matches/9/duplicate-review',
+    );
+    expect(saved.request.method).toBe('PUT');
+    expect(saved.request.body).toEqual({ decision: 'confirmed' });
+    saved.flush({});
+  });
+
   it('updates one title for a recording session', () => {
     service.updateSessionTitle(9, '整场标题').subscribe();
 

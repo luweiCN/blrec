@@ -240,6 +240,7 @@ export interface DashboardMatch {
   readonly streamTitle?: string;
   readonly analysisProvisional?: boolean;
   readonly duplicateOfMatchId: number | null;
+  readonly duplicateReviewState: 'none' | 'pending' | 'confirmed' | 'dismissed';
   readonly ally: DashboardMatchTeam;
   readonly enemy: DashboardMatchTeam;
   readonly replay?: DashboardMatchReplay | null;

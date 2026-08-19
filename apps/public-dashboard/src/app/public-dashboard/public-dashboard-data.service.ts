@@ -553,6 +553,10 @@ export function isDashboardMatch(value: unknown): value is DashboardMatch {
     (value['duplicateOfMatchId'] === null ||
       (isNonNegativeInteger(value['duplicateOfMatchId']) &&
         value['duplicateOfMatchId'] > 0)) &&
+    (value['duplicateReviewState'] === 'none' ||
+      value['duplicateReviewState'] === 'pending' ||
+      value['duplicateReviewState'] === 'confirmed' ||
+      value['duplicateReviewState'] === 'dismissed') &&
     isMatchTeam(value['ally']) &&
     isMatchTeam(value['enemy']) &&
     value['ally'].side !== value['enemy'].side &&

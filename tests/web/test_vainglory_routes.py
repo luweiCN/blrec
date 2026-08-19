@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -62,6 +63,7 @@ class FakeService:
         self.suppressed_zero_match_sessions = []
         self.restored_zero_match_sessions = []
         self.suppressed_match_reviews = []
+        self.duplicate_reviews = []
         self.manual_match_markers = []
         self.requested_scans = []
         self.created_players = []
@@ -77,6 +79,20 @@ class FakeService:
     async def list_matches(self, **filters: object) -> MatchPage:
         self.match_filters = filters
         return MatchPage(total=0, items=())
+
+    async def list_duplicate_reviews(self, **filters: object) -> MatchPage:
+        return MatchPage(
+            total=1,
+            items=(
+                replace(
+                    stored_match(),
+                    stats_eligible=False,
+                    stats_exclusion_reason='duplicate',
+                    duplicate_of_match_id=2,
+                    duplicate_review_state='pending',
+                ),
+            ),
+        )
 
     async def list_match_sessions(self, **filters: object) -> MatchSessionPage:
         self.session_filters = filters
@@ -217,6 +233,18 @@ class FakeService:
     async def update_match_fields(self, match_id: int, changes: object) -> MatchRecord:
         self.updated_matches.append((match_id, changes))
         return stored_match()
+
+    async def review_match_duplicate(
+        self, match_id: int, *, confirmed: bool
+    ) -> MatchRecord:
+        self.duplicate_reviews.append((match_id, confirmed))
+        return replace(
+            stored_match(),
+            stats_eligible=not confirmed,
+            stats_exclusion_reason='duplicate' if confirmed else None,
+            duplicate_of_match_id=2 if confirmed else None,
+            duplicate_review_state='confirmed' if confirmed else 'dismissed',
+        )
 
     async def mark_session_match(
         self, session_id: int, *, part_index: int, at_ms: int
@@ -915,12 +943,40 @@ def test_updates_match_title_and_returns_timeline_metadata(
     assert payload['statsEligible'] is True
     assert payload['statsExclusionReason'] is None
     assert payload['duplicateOfMatchId'] is None
+    assert payload['duplicateReviewState'] == 'none'
     assert payload['startedAtMs'] == 60_000
     assert payload['bvid'] == 'BV1abcdefgh'
     assert payload['archivePage'] == 2
     assert payload['resultFrameUrl'] == (
         '/api/v1/vainglory/matches/3/result-frame?v=9-11-960000'
     )
+
+
+def test_reviews_a_suspected_duplicate(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    response = client.put(
+        '/api/v1/vainglory/matches/3/duplicate-review', json={'decision': 'confirmed'}
+    )
+
+    assert response.status_code == 200
+    assert fake.duplicate_reviews == [(3, True)]
+    assert response.json()['duplicateReviewState'] == 'confirmed'
+    assert response.json()['duplicateOfMatchId'] == 2
+
+
+def test_lists_suspected_duplicates_for_review(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, _fake = api_client
+
+    response = client.get('/api/v1/vainglory/duplicate-reviews')
+
+    assert response.status_code == 200
+    assert response.json()['total'] == 1
+    assert response.json()['items'][0]['duplicateReviewState'] == 'pending'
 
 
 def test_suppresses_one_review_queue_without_deleting_the_match(

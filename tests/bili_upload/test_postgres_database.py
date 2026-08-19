@@ -137,6 +137,15 @@ def test_postgres_schema_migration_79_has_global_match_deduplication_fields() ->
     assert 'vainglory_matches_duplicate_of_idx' in statements[4]
 
 
+def test_postgres_schema_migration_80_has_duplicate_review_fields() -> None:
+    statements = tuple(_migration_statements(80))
+
+    assert len(statements) == 3
+    assert 'ADD COLUMN duplicate_review_state TEXT' in statements[0]
+    assert 'ADD COLUMN duplicate_review_fingerprint TEXT' in statements[1]
+    assert 'vainglory_matches_duplicate_review_idx' in statements[2]
+
+
 def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() -> None:
     database_url = os.environ.get('BLREC_TEST_POSTGRES_URL', '').strip()
     if not database_url:
