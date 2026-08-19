@@ -1432,14 +1432,6 @@
                 (ngModelChange)="setPlayerRoomDraft(player.id, $event)"
               >
                 <nz-option
-                  *ngIf="
-                    match.duplicateAnchorName &&
-                    !duplicateAnchorIsManaged(match.duplicateAnchorName)
-                  "
-                  [nzValue]="match.duplicateAnchorName"
-                  [nzLabel]="match.duplicateAnchorName + '（当前绑定）'"
-                ></nz-option>
-                <nz-option
                   *ngFor="let room of managedRooms"
                   [nzValue]="room.roomId.toString()"
                   [nzLabel]="room.label"
@@ -1769,6 +1761,14 @@
                 [ngModel]="duplicateCanonicalAnchorDraft(match)"
                 (ngModelChange)="setDuplicateCanonicalAnchorDraft(match, $event)"
               >
+                <nz-option
+                  *ngIf="
+                    match.duplicateAnchorName &&
+                    !duplicateAnchorIsManaged(match.duplicateAnchorName)
+                  "
+                  [nzValue]="match.duplicateAnchorName"
+                  [nzLabel]="match.duplicateAnchorName + '（当前绑定）'"
+                ></nz-option>
                 <nz-option
                   *ngFor="let anchor of managedAnchors"
                   [nzValue]="anchor.anchorName"
