@@ -19,6 +19,7 @@ _TABLES = (
     'dashboard_publication_standings',
     'match_assets',
     'asset_batches',
+    'replay_visibility_checks',
 )
 _IDENTIFIER_PATTERN = re.compile(r'^[a-z][a-z0-9_]*$')
 

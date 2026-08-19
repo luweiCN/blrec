@@ -71,6 +71,8 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   readonly loadingRows = Array.from({ length: 6 }, (_, index) => index);
   private requestSequence = 0;
   private searchTimer?: ReturnType<typeof setTimeout>;
+  private replayRefreshTimer?: ReturnType<typeof setTimeout>;
+  private replayRefreshAttempt = 0;
   private readonly matchRevisionSubscription: Subscription;
 
   constructor(
@@ -98,6 +100,7 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
     if (this.searchTimer !== undefined) {
       clearTimeout(this.searchTimer);
     }
+    this.cancelReplayRefresh();
     this.matchRevisionSubscription.unsubscribe();
   }
 
@@ -350,15 +353,20 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
     }, 250);
   }
 
-  private async loadApiPage(): Promise<void> {
+  private async loadApiPage(replayRefresh = false): Promise<void> {
+    if (!replayRefresh) {
+      this.cancelReplayRefresh();
+    }
     if (!this.matchApi.enabled) {
       this.requestState = { kind: 'local' };
       return;
     }
     const sequence = ++this.requestSequence;
     const stalePage = this.apiPage;
-    this.requestState = { kind: 'loading', page: stalePage };
-    this.changeDetector.markForCheck();
+    if (!replayRefresh) {
+      this.requestState = { kind: 'loading', page: stalePage };
+      this.changeDetector.markForCheck();
+    }
     let response: DashboardMatchPage;
     try {
       response = await this.matchApi.list({
@@ -374,6 +382,10 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
       if (sequence !== this.requestSequence) {
         return;
       }
+      if (replayRefresh && stalePage !== null) {
+        this.scheduleReplayRefresh(stalePage.items);
+        return;
+      }
       console.warn('Unable to load matches from dashboard API', error);
       this.requestState = {
         kind: 'error',
@@ -387,12 +399,43 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
       return;
     }
     this.requestState = { kind: 'ready', page: response };
+    if (this.selectedMatch !== null) {
+      this.selectedMatch =
+        response.items.find((match) => match.id === this.selectedMatch?.id) ??
+        this.selectedMatch;
+    }
     if (this.page > this.pageCount) {
       this.page = this.pageCount;
       void this.loadApiPage();
       return;
     }
+    this.scheduleReplayRefresh(response.items);
     this.changeDetector.markForCheck();
+  }
+
+  private scheduleReplayRefresh(matches: readonly DashboardMatch[]): void {
+    if (!matches.some((match) => match.replayStatus === 'checking')) {
+      this.replayRefreshAttempt = 0;
+      return;
+    }
+    const delays = [1_500, 2_500, 4_000, 7_000, 12_000, 15_000] as const;
+    if (this.replayRefreshAttempt >= delays.length) {
+      return;
+    }
+    const delay = delays[this.replayRefreshAttempt];
+    this.replayRefreshTimer = setTimeout(() => {
+      this.replayRefreshTimer = undefined;
+      this.replayRefreshAttempt += 1;
+      void this.loadApiPage(true);
+    }, delay);
+  }
+
+  private cancelReplayRefresh(): void {
+    if (this.replayRefreshTimer !== undefined) {
+      clearTimeout(this.replayRefreshTimer);
+      this.replayRefreshTimer = undefined;
+    }
+    this.replayRefreshAttempt = 0;
   }
 
   private get apiPage(): DashboardMatchPage | null {

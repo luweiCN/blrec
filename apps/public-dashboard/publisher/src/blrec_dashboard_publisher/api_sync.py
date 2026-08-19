@@ -10,6 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple, Union
+from urllib.parse import quote
 
 import requests
 from PIL import Image
@@ -17,6 +18,7 @@ from PIL import Image
 from blrec.networking.manager import NetworkRouteManager, RouteSelection
 from blrec.networking.requests_session import RoutedRequestsSession
 
+from .replay_visibility import BVID_PATTERN
 from .snapshot import build_dashboard_asset_source
 from .source_database import connect_source_database
 
@@ -50,12 +52,13 @@ class DashboardApiClient:
             raise DashboardApiSyncError('排行榜 API 必须使用 HTTPS')
         if not token:
             raise DashboardApiSyncError('排行榜 API 写入密钥不能为空')
+        self._base_url = normalized_url
         self._url = normalized_url + '/v1/assets/batches'
         self._token = token
         self._route_manager = route_manager
         self._affinity_key = 'dashboard-api-assets'
         self.selection: RouteSelection = route_manager.select(
-            'dashboard_publish', anonymous=False, affinity_key=self._affinity_key
+            'dashboard_publish', anonymous=False, affinity_key=self._affinity_key + ':0'
         )
         self._session = RoutedRequestsSession(
             route_manager,
@@ -91,6 +94,62 @@ class DashboardApiClient:
         ):
             raise DashboardApiSyncError('排行榜 API 返回了无效结果')
         return value
+
+    def claim_replay_visibility(self, *, wait_seconds: int = 20) -> Optional[str]:
+        response = self._session.post(
+            self._base_url + '/v1/replay-visibility/claim',
+            params={'waitSeconds': str(wait_seconds)},
+            headers={'Authorization': 'Bearer {}'.format(self._token)},
+            timeout=(10, wait_seconds + 10),
+            stream=True,
+        )
+        if response.status_code == 204:
+            response.close()
+            return None
+        try:
+            response.raise_for_status()
+            value = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            response.close()
+            raise DashboardApiSyncError(
+                '排行榜回放核验任务领取失败：HTTP {}'.format(response.status_code)
+            ) from exc
+        bvid = value.get('bvid') if isinstance(value, Mapping) else None
+        if not isinstance(bvid, str) or BVID_PATTERN.fullmatch(bvid) is None:
+            raise DashboardApiSyncError('排行榜回放核验任务无效')
+        return bvid
+
+    def complete_replay_visibility(self, bvid: str, *, public_visible: bool) -> None:
+        content = _canonical_bytes({'publicVisible': public_visible})
+        self._post_replay_visibility(bvid, 'complete', content)
+
+    def fail_replay_visibility(self, bvid: str, *, error: str) -> None:
+        content = _canonical_bytes({'error': error[:500] or 'unknown error'})
+        self._post_replay_visibility(bvid, 'fail', content)
+
+    def _post_replay_visibility(self, bvid: str, action: str, content: bytes) -> None:
+        response = self._session.post(
+            '{}/v1/replay-visibility/{}/{}'.format(
+                self._base_url, quote(bvid, safe=''), action
+            ),
+            data=content,
+            headers={
+                'Authorization': 'Bearer {}'.format(self._token),
+                'Content-Type': 'application/json',
+            },
+            timeout=(10, 30),
+            stream=True,
+        )
+        self._route_manager.traffic_meter.record(
+            self.selection.interface_name, 'dashboard_publish', 'up', len(content)
+        )
+        try:
+            response.raise_for_status()
+            _ = response.content
+        except requests.RequestException as exc:
+            raise DashboardApiSyncError(
+                '排行榜回放核验结果回写失败：HTTP {}'.format(response.status_code)
+            ) from exc
 
     def close(self) -> None:
         self._session.close()

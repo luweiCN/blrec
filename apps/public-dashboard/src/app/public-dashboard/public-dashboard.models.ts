@@ -242,6 +242,7 @@ export interface DashboardMatch {
   readonly ally: DashboardMatchTeam;
   readonly enemy: DashboardMatchTeam;
   readonly replay?: DashboardMatchReplay | null;
+  readonly replayStatus?: 'available' | 'checking' | 'unavailable';
   readonly resultImage?: DashboardMatchResultImage | null;
   readonly rating?: DashboardMatchRating | null;
 }

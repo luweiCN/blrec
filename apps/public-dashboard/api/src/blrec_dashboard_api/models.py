@@ -46,3 +46,11 @@ class AssetBatch(StrictModel):
         if set(image_ids).intersection(removed):
             raise ValueError('a batch cannot update and remove the same asset')
         return values
+
+
+class ReplayVisibilityCompletion(StrictModel):
+    public_visible: bool = Field(alias='publicVisible')
+
+
+class ReplayVisibilityFailure(StrictModel):
+    error: str = Field(min_length=1, max_length=500)

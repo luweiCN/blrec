@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Thread
 from typing import Any, Callable, Iterator, List, Optional, Union
 
 import requests
@@ -18,6 +19,10 @@ from blrec.networking.manager import NetworkRouteManager, RouteSelection
 from blrec.networking.requests_session import RoutedRequestsSession
 
 from .api_sync import DashboardApiClient, sync_dashboard_api_once
+from .replay_visibility import (
+    BilibiliReplayVisibilityChecker,
+    ReplayVisibilityCheckError,
+)
 from .source_database import connect_source_database
 
 __all__ = ('DashboardPublishError', 'OssDashboardStore')
@@ -30,6 +35,7 @@ DEFAULT_RETRY_SECONDS = 60
 DEFAULT_WATCH_SECONDS = 1
 DEFAULT_DEBOUNCE_SECONDS = 2
 DEFAULT_RECONCILE_SECONDS = 24 * 60 * 60
+MIN_REPLAY_VISIBILITY_INTERVAL_SECONDS = 0.5
 
 
 class DashboardPublishError(RuntimeError):
@@ -296,6 +302,64 @@ def _worker_loop(configuration: _WorkerConfiguration) -> None:
         )
 
 
+def _replay_visibility_worker(configuration: _WorkerConfiguration) -> None:
+    route_manager = NetworkRouteManager(
+        lambda: load_network_settings(configuration.settings)
+    )
+    api_client = DashboardApiClient(
+        base_url=configuration.api_url,
+        token=_required_environment('DASHBOARD_API_TOKEN'),
+        route_manager=route_manager,
+    )
+    bili_session = RoutedRequestsSession(
+        route_manager,
+        purpose='bili_api',
+        anonymous=True,
+        affinity_key='dashboard-replay-visibility',
+    )
+    checker = BilibiliReplayVisibilityChecker(bili_session)
+    last_bili_request_at = 0.0
+    try:
+        while True:
+            try:
+                bvid = api_client.claim_replay_visibility(wait_seconds=20)
+                if bvid is None:
+                    continue
+                remaining_interval = MIN_REPLAY_VISIBILITY_INTERVAL_SECONDS - (
+                    time.monotonic() - last_bili_request_at
+                )
+                if remaining_interval > 0:
+                    time.sleep(remaining_interval)
+                try:
+                    public_visible = checker.public_visible(bvid)
+                except ReplayVisibilityCheckError as error:
+                    api_client.fail_replay_visibility(bvid, error=str(error))
+                    LOGGER.warning(
+                        'replay_visibility=retry bvid=%s purpose=bili_api error=%s',
+                        bvid,
+                        error,
+                    )
+                    continue
+                finally:
+                    last_bili_request_at = time.monotonic()
+                api_client.complete_replay_visibility(
+                    bvid, public_visible=public_visible
+                )
+                LOGGER.info(
+                    'replay_visibility=%s bvid=%s purpose=bili_api',
+                    'public' if public_visible else 'unavailable',
+                    bvid,
+                )
+            except Exception:
+                LOGGER.exception(
+                    '排行榜回放可见性核验失败，%s 秒后重试', configuration.retry_seconds
+                )
+                time.sleep(configuration.retry_seconds)
+    finally:
+        bili_session.close()
+        api_client.close()
+
+
 def _environment_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     if value is None:
@@ -413,6 +477,12 @@ def main() -> None:
         if arguments.once:
             _publish(configuration)
         else:
+            Thread(
+                target=_replay_visibility_worker,
+                args=(configuration,),
+                name='dashboard-replay-visibility',
+                daemon=True,
+            ).start()
             _worker_loop(configuration)
 
 

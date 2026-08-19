@@ -556,6 +556,15 @@ export function isDashboardMatch(value: unknown): value is DashboardMatch {
     (value['replay'] === undefined ||
       value['replay'] === null ||
       isMatchReplay(value['replay'])) &&
+    (value['replayStatus'] === undefined ||
+      value['replayStatus'] === 'available' ||
+      value['replayStatus'] === 'checking' ||
+      value['replayStatus'] === 'unavailable') &&
+    (value['replayStatus'] !== 'available' || isMatchReplay(value['replay'])) &&
+    ((value['replayStatus'] !== 'checking' &&
+      value['replayStatus'] !== 'unavailable') ||
+      value['replay'] === undefined ||
+      value['replay'] === null) &&
     (value['resultImage'] === undefined ||
       value['resultImage'] === null ||
       isMatchResultImage(value['resultImage'])) &&

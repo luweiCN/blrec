@@ -20,6 +20,7 @@ from pypinyin import Style, lazy_pinyin
 from .assets import get_match_assets
 from .dashboard import MAX_TREND_PUBLICATIONS, current_dashboard_publication
 from .database import DatabaseTarget, connect_database, is_postgres
+from .replay_visibility import resolve_match_replays
 
 LOGGER = logging.getLogger(__name__)
 
@@ -597,17 +598,27 @@ class DirectDashboardRepository:
         assets = get_match_assets(
             self._auxiliary_target, (int(match['id']) for match in selected)
         )
+        items = [
+            self._public_match(
+                current,
+                match,
+                rating_scope=rating_scope,
+                rating_season=rating_season,
+                result_image=assets.get(int(match['id'])),
+            )
+            for match in selected
+        ]
+        owner_matches = self._current(owner_view=True).matches_by_id
         return {
-            'items': [
-                self._public_match(
-                    current,
-                    match,
-                    rating_scope=rating_scope,
-                    rating_season=rating_season,
-                    result_image=assets.get(int(match['id'])),
-                )
-                for match in selected
-            ],
+            'items': resolve_match_replays(
+                self._auxiliary_target,
+                items,
+                {
+                    int(match['id']): owner_matches.get(int(match['id']), {})
+                    for match in selected
+                },
+                owner_view=owner_view,
+            ),
             'page': page,
             'pageSize': page_size,
             'total': total,
@@ -626,13 +637,20 @@ class DirectDashboardRepository:
         if match is None:
             raise LookupError('match not found')
         image = get_match_assets(self._auxiliary_target, (match_id,)).get(match_id)
-        return self._public_match(
+        value = self._public_match(
             current,
             match,
             rating_scope=rating_scope,
             rating_season=rating_season,
             result_image=image,
         )
+        owner_match = self._current(owner_view=True).matches_by_id.get(match_id, {})
+        return resolve_match_replays(
+            self._auxiliary_target,
+            (value,),
+            {match_id: owner_match},
+            owner_view=owner_view,
+        )[0]
 
     def match_summary(
         self,

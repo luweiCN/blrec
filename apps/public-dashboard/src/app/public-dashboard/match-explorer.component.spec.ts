@@ -1,5 +1,11 @@
 import { CommonModule } from '@angular/common';
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import {
+  ComponentFixture,
+  fakeAsync,
+  flushMicrotasks,
+  TestBed,
+  tick,
+} from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import {
@@ -259,4 +265,53 @@ describe('MatchExplorerComponent', () => {
 
     expect(matchApi.list).toHaveBeenCalledTimes(1);
   });
+
+  it('renders replay checking independently and refreshes only the current page', fakeAsync(() => {
+    matchApi.enabled = true;
+    matchApi.list.and.returnValues(
+      Promise.resolve({
+        items: [
+          {
+            ...TEST_DASHBOARD_MATCHES[0],
+            replay: undefined,
+            replayStatus: 'checking',
+          },
+        ],
+        page: 1,
+        pageSize: 20,
+        total: 1,
+      }),
+      Promise.resolve({
+        items: [
+          {
+            ...TEST_DASHBOARD_MATCHES[0],
+            replayStatus: 'available',
+          },
+        ],
+        page: 1,
+        pageSize: 20,
+        total: 1,
+      }),
+    );
+
+    component.ngOnChanges();
+    flushMicrotasks();
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('.match-replay-link.checking')
+        ?.textContent,
+    ).toContain('核验中');
+    expect(matchApi.list).toHaveBeenCalledTimes(1);
+
+    tick(1_500);
+    flushMicrotasks();
+    fixture.detectChanges();
+
+    expect(matchApi.list).toHaveBeenCalledTimes(2);
+    expect(
+      fixture.nativeElement.querySelector('.match-replay-link.available')
+        ?.textContent,
+    ).toContain('回放');
+  }));
 });

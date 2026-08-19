@@ -1,7 +1,7 @@
-# 群晖排行榜图片资产 worker
+# 群晖排行榜资产与回放核验 worker
 
 该 worker 是独立 Compose 项目 `blrec-dashboard`。它不会重建、切换或停止正在录制的
-`blrec-next` 容器，也不再同步玩家、对局或榜单数据。
+`blrec-next` 容器。它只同步结算图，并按 Dashboard API 队列匿名核验 B 站稿件是否可公开回放；不同步玩家、对局或榜单数据。
 
 ## 凭据与目录
 
@@ -11,9 +11,7 @@
 /volume1/docker/blrec-next/secrets/dashboard-publisher.env
 ```
 
-同一文件还保存 `DASHBOARD_API_TOKEN`，只用于向
-`https://vg-api.luwei.host/v1/assets/batches` 写图片元数据。不要把凭据写入 Compose、
-日志或仓库。
+同一文件还保存 `DASHBOARD_API_TOKEN`，用于写入图片元数据，以及领取和回写回放可见性任务。不要把凭据写入 Compose、日志或仓库。
 
 `DASHBOARD_DATABASE_URL` 使用移动云主库的只读账号，连接 NAS 上的
 `127.0.0.1:15432` 隧道，并固定 `search_path=core`。结算图目录只读挂载为
@@ -21,7 +19,7 @@
 `data/match-images/`。
 
 Publisher 的 `/state` 只保存图片签名、水位和失败 outbox；这些 JSON 文件不是网页或
-榜单数据源。数据库隧道不可用时停止本轮处理，不回退到旧 SQLite。
+榜单数据源。回放可见性队列和 15 分钟缓存持久化在 Dashboard API 数据库中。数据库隧道不可用时停止本轮图片处理，不回退到旧 SQLite。
 
 ## 部署与升级
 
@@ -53,12 +51,11 @@ curl -fsS https://vg-api.luwei.host/v1/dashboard >/dev/null
 ```
 
 日志应出现 `asset_sync=synced` 或 `asset_sync=current`，以及
-`purpose=dashboard_publish`、线路、源地址和上传字节数。失败批次保留在
+`replay_visibility=public|unavailable|retry`。网络审计应记录 `dashboard_publish` 和 `bili_api` 用途的线路与源地址。失败批次保留在
 `/state/api-outbox/`，容器重启后用相同幂等键重试。
 
-常驻 worker 每秒只读 revision；变化后等待 2 秒合并连续写入。它随后只查询符合公开
-条件的对局 ID 和结算图路径，不计算榜单。没有图片变化时不发送 API 请求；每天执行
-一次完整校验。
+常驻 worker 每秒只读图片 revision；变化后等待 2 秒合并连续写入。它随后只查询符合公开
+条件的对局 ID 和结算图路径，不计算榜单。回放核验使用独立长轮询，没有页面请求产生的任务时不访问 B 站；同一稿件合并为一条任务。
 
 ## 人工检查与回滚
 

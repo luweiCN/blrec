@@ -15,6 +15,7 @@ _DATA_TABLES = (
     'dashboard_publications',
     'match_assets',
     'asset_batches',
+    'replay_visibility_checks',
 )
 
 

@@ -1,5 +1,6 @@
 import { environment } from '../../environments/environment';
 import { DashboardMatchApiService } from './dashboard-match-api.service';
+import { TEST_DASHBOARD_MATCHES } from './public-dashboard.test-data';
 
 function jsonResponse(value: unknown): Response {
   return {
@@ -82,5 +83,37 @@ describe('DashboardMatchApiService', () => {
         heroes: [],
       }),
     ).toBeRejectedWithError(/503/u);
+  });
+
+  it('accepts the server replay checking state without a replay URL', async () => {
+    spyOn(window, 'fetch').and.returnValue(
+      Promise.resolve(
+        jsonResponse({
+          items: [
+            {
+              ...TEST_DASHBOARD_MATCHES[0],
+              replay: undefined,
+              replayStatus: 'checking',
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+        }),
+      ),
+    );
+    const service = new DashboardMatchApiService();
+
+    const page = await service.list({
+      page: 1,
+      pageSize: 20,
+      seasonKey: '2026-summer',
+      mode: '3v3',
+      query: '',
+      heroes: [],
+    });
+
+    expect(page.items[0].replay).toBeUndefined();
+    expect(page.items[0].replayStatus).toBe('checking');
   });
 });

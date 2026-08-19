@@ -17,6 +17,10 @@ from blrec_dashboard_api.database import (
     initialize_database,
 )
 from blrec_dashboard_api.direct import DirectDashboardRepository, _rating_trends
+from blrec_dashboard_api.replay_visibility import (
+    complete_replay_visibility,
+    resolve_match_replays,
+)
 from blrec_dashboard_api.settings import ApiSettings
 from blrec_dashboard_publisher.snapshot import build_dashboard_snapshot_from_records
 from fastapi.testclient import TestClient
@@ -152,7 +156,7 @@ def _runtime_source(
                 'enemy': teams[1],
                 'replay': {
                     'kind': 'match',
-                    'url': 'https://www.bilibili.com/video/BV1test?t=120',
+                    'url': 'https://www.bilibili.com/video/BV1test00001?t=120',
                 },
                 'replayAccess': replay_access,
             }
@@ -326,6 +330,166 @@ def test_owner_auth_unlocks_private_replays_without_public_cache_leak(
     assert 'etag' not in owner_dashboard.headers
     assert owner_session.json() == {'owner': True}
     assert owner_session.headers['cache-control'] == 'private, no-store'
+
+
+def test_public_match_replay_is_checked_once_and_uses_the_persistent_cache(
+    tmp_path: Path,
+) -> None:
+    repository, _loads = _repository(tmp_path)
+
+    first = repository.list_matches(
+        page=1,
+        page_size=20,
+        season=None,
+        mode=None,
+        player_id=None,
+        query='',
+        heroes=(),
+        rating_scope='all',
+        rating_season=None,
+    )
+    second = repository.list_matches(
+        page=1,
+        page_size=20,
+        season=None,
+        mode=None,
+        player_id=None,
+        query='',
+        heroes=(),
+        rating_scope='all',
+        rating_season=None,
+    )
+    connection = connect_database(tmp_path / 'public.sqlite3')
+    try:
+        queued = int(
+            connection.execute(
+                'SELECT COUNT(*) FROM replay_visibility_checks'
+            ).fetchone()[0]
+        )
+    finally:
+        connection.close()
+
+    assert first['items'][0]['replayStatus'] == 'checking'
+    assert 'replay' not in first['items'][0]
+    assert 'BV1test00001' not in json.dumps(first['items'][0])
+    assert second['items'][0]['replayStatus'] == 'checking'
+    assert queued == 1
+
+    complete_replay_visibility(
+        tmp_path / 'public.sqlite3', 'BV1test00001', public_visible=True
+    )
+    available = repository.get_match(1, rating_scope='all', rating_season=None)
+
+    assert available['replayStatus'] == 'available'
+    assert available['replay']['url'].endswith('BV1test00001?t=120')
+
+    connection = connect_database(tmp_path / 'public.sqlite3')
+    try:
+        cache = connection.execute(
+            'SELECT checked_at,expires_at FROM replay_visibility_checks '
+            'WHERE bvid=?',
+            ('BV1test00001',),
+        ).fetchone()
+        assert cache is not None
+        assert int(cache['expires_at']) - int(cache['checked_at']) == 15 * 60
+        connection.execute(
+            'UPDATE replay_visibility_checks SET expires_at=0 WHERE bvid=?',
+            ('BV1test00001',),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    expired = repository.get_match(1, rating_scope='all', rating_season=None)
+    assert expired['replayStatus'] == 'checking'
+    assert 'replay' not in expired
+
+
+def test_public_match_hides_a_fresh_unavailable_replay_but_owner_keeps_it(
+    tmp_path: Path,
+) -> None:
+    repository, _loads = _repository(tmp_path)
+    repository.list_matches(
+        page=1,
+        page_size=20,
+        season=None,
+        mode=None,
+        player_id=None,
+        query='',
+        heroes=(),
+        rating_scope='all',
+        rating_season=None,
+    )
+    complete_replay_visibility(
+        tmp_path / 'public.sqlite3', 'BV1test00001', public_visible=False
+    )
+
+    public = repository.get_match(1, rating_scope='all', rating_season=None)
+    owner = repository.get_match(
+        1, rating_scope='all', rating_season=None, owner_view=True
+    )
+
+    assert public['replayStatus'] == 'unavailable'
+    assert 'replay' not in public
+    assert owner['replayStatus'] == 'available'
+    assert owner['replay']['url'].startswith('https://www.bilibili.com/')
+
+
+def test_same_archive_on_a_page_creates_only_one_visibility_task(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / 'public.sqlite3'
+    initialize_database(database_path)
+    replay = {
+        'kind': 'match',
+        'url': 'https://www.bilibili.com/video/BV1test00001?p=2&t=120',
+    }
+
+    values = resolve_match_replays(
+        database_path,
+        ({'id': 1}, {'id': 2}),
+        {1: {'replay': replay}, 2: {'replay': replay}},
+        owner_view=False,
+    )
+    connection = connect_database(database_path)
+    try:
+        queued = int(
+            connection.execute(
+                'SELECT COUNT(*) FROM replay_visibility_checks'
+            ).fetchone()[0]
+        )
+    finally:
+        connection.close()
+
+    assert [value['replayStatus'] for value in values] == ['checking', 'checking']
+    assert queued == 1
+
+
+def test_replay_visibility_worker_endpoints_require_ingest_authentication(
+    tmp_path: Path,
+) -> None:
+    repository, _loads = _repository(tmp_path)
+    client = TestClient(create_app(_settings(tmp_path), repository=repository))
+    client.get('/v1/matches?pageSize=20')
+
+    unauthorized = client.post('/v1/replay-visibility/claim?waitSeconds=0')
+    claimed = client.post(
+        '/v1/replay-visibility/claim?waitSeconds=0',
+        headers={'Authorization': 'Bearer {}'.format(TOKEN)},
+    )
+    completed = client.post(
+        '/v1/replay-visibility/BV1test00001/complete',
+        headers={'Authorization': 'Bearer {}'.format(TOKEN)},
+        json={'publicVisible': True},
+    )
+    public = client.get('/v1/matches/1').json()
+
+    assert unauthorized.status_code == 401
+    assert claimed.status_code == 200
+    assert claimed.json() == {'bvid': 'BV1test00001'}
+    assert completed.status_code == 200
+    assert completed.json()['state'] == 'public'
+    assert public['replayStatus'] == 'available'
 
 
 def test_rating_trend_uses_the_match_date_instead_of_the_calculation_date(

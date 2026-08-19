@@ -116,9 +116,16 @@
         target="_blank"
         rel="noopener noreferrer"
       >{{ replay.kind === "match" ? "本局回放" : "整场录播" }}</a>
-      <span *ngIf="!match.replay" class="match-replay-disabled" aria-label="暂无公开回放">
-        回放
-      </span>
+      <span
+        *ngIf="!match.replay && match.replayStatus === 'checking'"
+        class="match-replay-disabled checking"
+        aria-label="正在核验稿件是否公开"
+      >核验中</span>
+      <span
+        *ngIf="!match.replay && match.replayStatus !== 'checking'"
+        class="match-replay-disabled"
+        aria-label="暂无公开回放"
+      >回放</span>
     </footer>
   </section>
 

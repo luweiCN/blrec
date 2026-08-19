@@ -12,7 +12,9 @@ from threading import Lock
 from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import FastAPI, Header, HTTPException
+from fastapi import Path as ApiPath
+from fastapi import Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
@@ -20,8 +22,14 @@ from starlette.concurrency import run_in_threadpool
 from .assets import IdempotencyConflict, apply_asset_batch
 from .database import database_session, initialize_database
 from .direct import DirectDashboardRepository
-from .models import AssetBatch
+from .models import AssetBatch, ReplayVisibilityCompletion, ReplayVisibilityFailure
 from .realtime import DashboardRealtimeBroker, event_response
+from .replay_visibility import (
+    BVID_PATTERN,
+    claim_replay_visibility,
+    complete_replay_visibility,
+    fail_replay_visibility,
+)
 from .settings import ApiSettings
 
 LOGGER = logging.getLogger(__name__)
@@ -229,6 +237,59 @@ def create_app(
             ) from error
         await realtime_broker.publish('matches', {'batchId': str(result['batchId'])})
         return result
+
+    @app.post('/v1/replay-visibility/claim')
+    async def replay_visibility_claim(
+        authorization: Optional[str] = Header(default=None),
+        wait_seconds: int = Query(default=20, alias='waitSeconds', ge=0, le=25),
+    ) -> Any:
+        _authenticate_write(authorization, active_settings)
+        deadline = asyncio.get_running_loop().time() + wait_seconds
+        while True:
+            bvid = await run_in_threadpool(
+                partial(claim_replay_visibility, auxiliary_target)
+            )
+            if bvid is not None:
+                return {'bvid': bvid}
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return Response(status_code=204)
+            await asyncio.sleep(min(0.5, remaining))
+
+    @app.post('/v1/replay-visibility/{bvid}/complete')
+    async def replay_visibility_complete(
+        completion: ReplayVisibilityCompletion,
+        bvid: str = ApiPath(regex=BVID_PATTERN.pattern),
+        authorization: Optional[str] = Header(default=None),
+    ) -> Mapping[str, str]:
+        _authenticate_write(authorization, active_settings)
+        try:
+            state = await run_in_threadpool(
+                partial(
+                    complete_replay_visibility,
+                    auxiliary_target,
+                    bvid,
+                    public_visible=completion.public_visible,
+                )
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail='task not found') from error
+        return {'state': state}
+
+    @app.post('/v1/replay-visibility/{bvid}/fail')
+    async def replay_visibility_fail(
+        failure: ReplayVisibilityFailure,
+        bvid: str = ApiPath(regex=BVID_PATTERN.pattern),
+        authorization: Optional[str] = Header(default=None),
+    ) -> Mapping[str, int | str]:
+        _authenticate_write(authorization, active_settings)
+        try:
+            delay = await run_in_threadpool(
+                partial(fail_replay_visibility, auxiliary_target, bvid, failure.error)
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail='task not found') from error
+        return {'state': 'pending', 'retryAfterSeconds': delay}
 
     @app.get('/v1/events')
     async def events(request: Request) -> StreamingResponse:
