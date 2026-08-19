@@ -188,9 +188,7 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
                 'CREATE TABLE upload_jobs('
                 'id BIGINT PRIMARY KEY,policy_snapshot_json TEXT)'
             )
-            connection.execute(
-                'CREATE TABLE vainglory_matches(id BIGINT PRIMARY KEY)'
-            )
+            connection.execute('CREATE TABLE vainglory_matches(id BIGINT PRIMARY KEY)')
             connection.execute(
                 'CREATE TABLE vainglory_archive_imports('
                 'id BIGINT PRIMARY KEY,account_id BIGINT,bvid TEXT,'
