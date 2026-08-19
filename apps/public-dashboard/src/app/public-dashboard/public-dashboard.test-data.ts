@@ -119,6 +119,7 @@ export const TEST_DASHBOARD_MATCHES: readonly DashboardMatch[] = Array.from(
       playedAt: `2026-08-${String(3 - Math.floor(index / 5)).padStart(2, '0')}T${String(20 - (index % 5)).padStart(2, '0')}:00:00Z`,
       durationSeconds: 780 + index * 5,
       result: won ? 'W' : 'L',
+      duplicateOfMatchId: null,
       ally: {
         side: 'left',
         color: 'teal',

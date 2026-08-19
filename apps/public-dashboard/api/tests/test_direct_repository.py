@@ -35,6 +35,8 @@ def _runtime_source(
     result: str = 'W',
     public_visible: bool = True,
     replay_access: str = 'public',
+    stats_eligible: bool = True,
+    duplicate_of_match_id: Optional[int] = None,
 ) -> Mapping[str, Any]:
     played_at = 1780272000
     lineups = {
@@ -75,6 +77,7 @@ def _runtime_source(
         'right_kills': 8,
         'left_economy': 40500,
         'right_economy': 33000,
+        'stats_eligible': stats_eligible,
     }
     generated_at = datetime(2026, 8, 11, tzinfo=timezone.utc)
     snapshot = build_dashboard_snapshot_from_records(
@@ -152,6 +155,7 @@ def _runtime_source(
                 'result': result,
                 'streamTitle': '主播深夜排位',
                 'analysisProvisional': False,
+                'duplicateOfMatchId': duplicate_of_match_id,
                 'ally': teams[0],
                 'enemy': teams[1],
                 'replay': {
@@ -238,6 +242,31 @@ def test_dashboard_and_match_queries_are_computed_from_the_runtime_source(
     assert listed['total'] == 1
     assert listed['items'][0]['player']['name'] == '主播'
     assert listed['items'][0]['rating']['scoreDelta'] > 0
+
+
+def test_duplicate_match_remains_visible_without_a_rating(tmp_path: Path) -> None:
+    repository, _loads = _repository(
+        tmp_path,
+        runtime=_runtime_source(stats_eligible=False, duplicate_of_match_id=99),
+    )
+
+    document, _revision = repository.dashboard_document()
+    listed = repository.list_matches(
+        page=1,
+        page_size=10,
+        season=None,
+        mode=None,
+        player_id=None,
+        query='',
+        heroes=(),
+        rating_scope='all',
+        rating_season=None,
+    )
+
+    assert document['snapshot']['sourceMatchCount'] == 0
+    assert listed['total'] == 1
+    assert listed['items'][0]['duplicateOfMatchId'] == 99
+    assert listed['items'][0]['rating'] is None
 
 
 def test_public_cache_shares_safe_matches_but_copies_private_replays(

@@ -125,6 +125,18 @@ def test_postgres_schema_migration_78_has_explicit_supported_statements() -> Non
     assert 'downloads_per_interface BIGINT NOT NULL DEFAULT 3' in statements[0]
 
 
+def test_postgres_schema_migration_79_has_global_match_deduplication_fields() -> None:
+    statements = tuple(_migration_statements(79))
+
+    assert len(statements) == 5
+    assert 'ADD COLUMN content_fingerprint TEXT' in statements[0]
+    assert 'GLOB' not in statements[0]
+    assert 'ADD COLUMN duplicate_of_match_id BIGINT' in statements[1]
+    assert 'ADD COLUMN duplicate_checked_at BIGINT' in statements[2]
+    assert 'vainglory_matches_content_fingerprint_idx' in statements[3]
+    assert 'vainglory_matches_duplicate_of_idx' in statements[4]
+
+
 def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() -> None:
     database_url = os.environ.get('BLREC_TEST_POSTGRES_URL', '').strip()
     if not database_url:

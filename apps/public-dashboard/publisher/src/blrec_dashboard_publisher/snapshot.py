@@ -476,6 +476,9 @@ def _match_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
         'match.result_at_ms,match.started_at_ms,match.duration_seconds,'
         'match.game_mode,match.winner_side,match.recorded_player_side,'
         'match.recorded_player_slot,match.left_color,match.right_color,'
+        'match.stats_eligible,match.stats_exclusion_reason,'
+        'match.duplicate_of_match_id,'
+        'match.content_fingerprint AS exact_fingerprint,'
         'match.left_kills,match.right_kills,match.left_economy,'
         'match.right_economy,'
         "CASE match.winner_side WHEN 'left' THEN match.left_color "
@@ -498,7 +501,7 @@ def _match_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
         'AND recorded.slot=match.recorded_player_slot '
         'LEFT JOIN vainglory_heroes hero ON hero.id=recorded.hero_id '
         "AND length(trim(hero.label))>0 WHERE scan.stats_included=1 "
-        'AND match.stats_eligible=1 '
+        'AND (match.stats_eligible=1 OR match.duplicate_of_match_id IS NOT NULL) '
         "AND match.game_mode IN ('3v3','5v5','aram','other') "
         "AND match.recorded_player_side IN ('left','right') "
         'AND match.recorded_player_slot BETWEEN 1 AND match.team_size '
@@ -807,6 +810,11 @@ def _public_matches(
             'result': ('W' if str(row['winner_side']) == recorded_side else 'L'),
             'streamTitle': str(row['stream_title'] or ''),
             'analysisProvisional': str(row['analysis_state']) == 'provisional',
+            'duplicateOfMatchId': (
+                None
+                if row['duplicate_of_match_id'] is None
+                else int(row['duplicate_of_match_id'])
+            ),
             'ally': team_value(recorded_side),
             'enemy': team_value(enemy_side),
         }
@@ -981,7 +989,8 @@ def build_dashboard_asset_source(
         'JOIN vainglory_matches match ON match.session_id=session.id '
         'JOIN recording_parts part ON part.id=match.result_part_id '
         'JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
-        'WHERE scan.stats_included=1 AND match.stats_eligible=1 '
+        'WHERE scan.stats_included=1 AND (match.stats_eligible=1 '
+        'OR match.duplicate_of_match_id IS NOT NULL) '
         "AND match.game_mode IN ('3v3','5v5','aram','other') "
         "AND match.recorded_player_side IN ('left','right') "
         'AND match.recorded_player_slot BETWEEN 1 AND match.team_size '
@@ -1507,11 +1516,21 @@ def build_dashboard_snapshot_from_records(
         raise ValueError('dashboard snapshot time must include a timezone')
     current_season = _season_for(generated_at)
     source_rows = list(rows)
-    rows = _deduplicate_rows(source_rows, lineups, per_player=True)
+    scoring_rows = [
+        row for row in source_rows if _true_flag(row.get('stats_eligible', True))
+    ]
+    rows = _deduplicate_rows(scoring_rows, lineups, per_player=True)
 
     seasons_by_key: Dict[str, _Season] = {current_season.key: current_season}
+    environment_source = (
+        source_rows if environment_rows is None else list(environment_rows)
+    )
     environment_values = _deduplicate_rows(
-        source_rows if environment_rows is None else environment_rows,
+        [
+            row
+            for row in environment_source
+            if _true_flag(row.get('stats_eligible', True))
+        ],
         lineups,
         per_player=False,
     )
@@ -1561,7 +1580,7 @@ def build_dashboard_snapshot_from_records(
         'publicationDate': publication_date,
         'generatedAt': _utc_iso(generated_at),
         'sourceLastMatchId': source_last_match_id,
-        'sourceMatchCount': len(source_rows),
+        'sourceMatchCount': len(scoring_rows),
         'ratingModel': {'version': RATING_MODEL_VERSION},
         'currentSeasonKey': current_season.key,
         'seasons': [_season_option(season, current_season.key) for season in seasons]

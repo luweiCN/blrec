@@ -618,6 +618,12 @@
                               >
                                 不计榜 · {{ statsExclusionLabel(match) }}
                               </nz-tag>
+                              <nz-tag
+                                *ngIf="match.duplicateOfMatchId !== null"
+                                nzColor="purple"
+                              >
+                                与对局 #{{ match.duplicateOfMatchId }} 重复
+                              </nz-tag>
                             </div>
                             <p>
                               {{ gameModeLabel(match.gameMode) }} · P{{
@@ -835,6 +841,7 @@
                                   ? '确认这一局不计入玩家胜率和排行榜？'
                                   : '恢复这一局计入统计？'
                               "
+                              *ngIf="match.duplicateOfMatchId === null"
                               [nzLoading]="savingMatchIds.has(match.id)"
                               (nzOnConfirm)="toggleMatchStatsEligibility(match)"
                             >

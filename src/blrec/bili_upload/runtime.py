@@ -642,6 +642,15 @@ class BiliAccountRuntime:
                 ),
                 clock=self._clock,
             )
+            duplicate_summary = await vainglory_repository.reconcile_global_duplicates()
+            logger.info(
+                'Vainglory global duplicate reconciliation completed: '
+                'checked={}, fingerprinted={}, duplicates={}, changed={}',
+                duplicate_summary.checked_match_count,
+                duplicate_summary.fingerprinted_match_count,
+                duplicate_summary.duplicate_match_count,
+                duplicate_summary.changed_match_count,
+            )
             vainglory_publication = VaingloryPublicationService(
                 database,
                 vainglory_repository,

@@ -845,6 +845,110 @@ def analyzed_match() -> AnalyzedMatch:
 
 
 @pytest.mark.asyncio
+async def test_complete_part_links_a_global_duplicate_without_counting_it(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first.mp4'
+        replay = tmp_path / 'replay.mp4'
+        first.write_bytes(b'first')
+        replay.write_bytes(b'replay')
+        await seed_session(database, first, session_id=1)
+        await seed_session(database, replay, session_id=2)
+        await database.execute(
+            'UPDATE recording_parts SET record_start_time=id*1000 WHERE id IN (1,2)'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.sync_hero_references(
+            (HeroReference('Caine', 'a' * 64, b'hero'),)
+        )
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        assert await repository.claim_next() is not None
+        await repository.complete_part(
+            2, (replace(analyzed_match(), part_id=2, part_index=1),)
+        )
+
+        matches = {
+            match.session_id: match for match in (await repository.list_matches()).items
+        }
+        original = matches[1]
+        duplicate = matches[2]
+        assert original.stats_eligible is True
+        assert original.duplicate_of_match_id is None
+        assert duplicate.stats_eligible is False
+        assert duplicate.stats_exclusion_reason == 'duplicate'
+        assert duplicate.duplicate_of_match_id == original.id
+
+        await database.execute(
+            'UPDATE vainglory_matches SET content_fingerprint=NULL,'
+            'duplicate_of_match_id=NULL,duplicate_checked_at=NULL,'
+            'stats_eligible=1,stats_exclusion_reason=NULL'
+        )
+        summary = await repository.reconcile_global_duplicates()
+        refreshed = {
+            match.session_id: match for match in (await repository.list_matches()).items
+        }
+
+        assert summary.checked_match_count == 2
+        assert summary.fingerprinted_match_count == 2
+        assert summary.duplicate_match_count == 1
+        assert summary.changed_match_count == 2
+        assert refreshed[2].duplicate_of_match_id == refreshed[1].id
+        assert refreshed[2].stats_eligible is False
+
+        await repository.delete_match(refreshed[1].id)
+        remaining = (await repository.list_matches()).items
+        assert len(remaining) == 1
+        assert remaining[0].session_id == 2
+        assert remaining[0].duplicate_of_match_id is None
+        assert remaining[0].stats_eligible is True
+        assert remaining[0].stats_exclusion_reason is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_same_result_for_different_tracked_players_counts_for_each_player(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first.mp4'
+        second = tmp_path / 'second.mp4'
+        first.write_bytes(b'first')
+        second.write_bytes(b'second')
+        await seed_session(database, first, session_id=1)
+        await seed_session(database, second, session_id=2)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=200,anchor_name='另一位主播' "
+            'WHERE id=2'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.sync_hero_references(
+            (HeroReference('Caine', 'a' * 64, b'hero'),)
+        )
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        assert await repository.claim_next() is not None
+        await repository.complete_part(
+            2, (replace(analyzed_match(), part_id=2, part_index=1),)
+        )
+
+        matches = (await repository.list_matches()).items
+        assert len(matches) == 2
+        assert all(match.stats_eligible for match in matches)
+        assert all(match.duplicate_of_match_id is None for match in matches)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_review_suppression_hides_only_the_selected_queue_and_rerun_restores_it(
     tmp_path: Path,
 ) -> None:

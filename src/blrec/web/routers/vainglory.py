@@ -347,6 +347,7 @@ class MatchResponse(ApiModel):
     view_context: Literal['played', 'observed', 'unknown']
     stats_eligible: bool
     stats_exclusion_reason: Optional[str]
+    duplicate_of_match_id: Optional[int]
     started_at_ms: int
     result_at_ms: int
     duration_seconds: Optional[int]
@@ -841,6 +842,7 @@ def _match(value: MatchRecord) -> MatchResponse:
         view_context=value.view_context,
         stats_eligible=value.stats_eligible,
         stats_exclusion_reason=value.stats_exclusion_reason,
+        duplicate_of_match_id=value.duplicate_of_match_id,
         started_at_ms=value.started_at_ms,
         result_at_ms=value.result_at_ms,
         duration_seconds=value.duration_seconds,

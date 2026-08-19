@@ -46,6 +46,7 @@ function match(): VaingloryMatch {
     viewContext: 'played',
     statsEligible: true,
     statsExclusionReason: null,
+    duplicateOfMatchId: null,
     startedAtMs: 15_000,
     resultAtMs: 600_000,
     durationSeconds: 585,

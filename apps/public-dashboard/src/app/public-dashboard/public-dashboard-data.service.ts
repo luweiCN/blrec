@@ -550,6 +550,9 @@ export function isDashboardMatch(value: unknown): value is DashboardMatch {
       typeof value['streamTitle'] === 'string') &&
     (value['analysisProvisional'] === undefined ||
       typeof value['analysisProvisional'] === 'boolean') &&
+    (value['duplicateOfMatchId'] === null ||
+      (isNonNegativeInteger(value['duplicateOfMatchId']) &&
+        value['duplicateOfMatchId'] > 0)) &&
     isMatchTeam(value['ally']) &&
     isMatchTeam(value['enemy']) &&
     value['ally'].side !== value['enemy'].side &&

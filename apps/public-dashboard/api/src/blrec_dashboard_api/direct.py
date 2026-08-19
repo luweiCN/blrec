@@ -171,6 +171,8 @@ def _rating_events(
         player_matches = []
         seen_fingerprints = set()
         for match in player_group:
+            if match.get('duplicateOfMatchId') is not None:
+                continue
             fingerprint = _match_fingerprint(match)
             if fingerprint is not None:
                 if fingerprint in seen_fingerprints:

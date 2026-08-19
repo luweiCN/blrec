@@ -286,8 +286,24 @@ async def test_runtime_and_asset_sources_read_the_core_tables_directly(
             hero_id=None,
             anchor_name='主播',
         )
+        await seed_match(
+            database,
+            tmp_path,
+            match_id=2,
+            room_id=100,
+            started_at=timestamp(2026, 8, 2),
+            game_mode='3v3',
+            won=True,
+            hero_id=None,
+            anchor_name='主播',
+        )
         await database.execute(
             "UPDATE vainglory_matches SET result_frame_path='1/result.png' WHERE id=1"
+        )
+        await database.execute(
+            "UPDATE vainglory_matches SET result_frame_path='2/result.png',"
+            "stats_eligible=0,stats_exclusion_reason='duplicate',"
+            'duplicate_of_match_id=1 WHERE id=2'
         )
         now = datetime(2026, 8, 3, 10, 30, tzinfo=SHANGHAI)
 
@@ -301,8 +317,13 @@ async def test_runtime_and_asset_sources_read_the_core_tables_directly(
         assert runtime['snapshot']['sourceMatchCount'] == 1
         assert runtime['publicSnapshot']['sourceMatchCount'] == 1
         assert runtime['snapshot']['matches'] == []
-        assert runtime['matches'][0]['id'] == 1
-        assert assets['matches'] == [{'id': 1, 'resultFramePath': '1/result.png'}]
+        assert [match['id'] for match in runtime['matches']] == [2, 1]
+        assert runtime['matches'][0]['duplicateOfMatchId'] == 1
+        assert runtime['matches'][1]['duplicateOfMatchId'] is None
+        assert assets['matches'] == [
+            {'id': 1, 'resultFramePath': '1/result.png'},
+            {'id': 2, 'resultFramePath': '2/result.png'},
+        ]
     finally:
         await database.close()
 

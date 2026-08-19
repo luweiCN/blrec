@@ -914,6 +914,7 @@ def test_updates_match_title_and_returns_timeline_metadata(
     assert payload['viewContext'] == 'unknown'
     assert payload['statsEligible'] is True
     assert payload['statsExclusionReason'] is None
+    assert payload['duplicateOfMatchId'] is None
     assert payload['startedAtMs'] == 60_000
     assert payload['bvid'] == 'BV1abcdefgh'
     assert payload['archivePage'] == 2

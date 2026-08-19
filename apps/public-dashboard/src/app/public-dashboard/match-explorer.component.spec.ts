@@ -164,6 +164,21 @@ describe('MatchExplorerComponent', () => {
     );
   });
 
+  it('marks a duplicate match as visible but not scored', () => {
+    fixture.componentRef.setInput('matches', [
+      {
+        ...TEST_DASHBOARD_MATCHES[0],
+        duplicateOfMatchId: 1199,
+      },
+    ]);
+    fixture.detectChanges();
+    const page = fixture.nativeElement as HTMLElement;
+
+    expect(page.querySelector('.match-duplicate')?.textContent).toContain(
+      '与对局 #1199 重复 · 不计分',
+    );
+  });
+
   it('closes the whole modal after a result image opened from the list', () => {
     fixture.componentRef.setInput('matches', [
       {

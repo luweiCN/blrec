@@ -112,6 +112,10 @@
               <small *ngIf="match.analysisProvisional" class="match-provisional">
                 直播预识别
               </small>
+              <small
+                *ngIf="match.duplicateOfMatchId"
+                class="match-provisional match-duplicate"
+              >与对局 #{{ match.duplicateOfMatchId }} 重复 · 不计分</small>
             </span>
             <small>
               <a

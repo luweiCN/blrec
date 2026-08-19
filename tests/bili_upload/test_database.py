@@ -2211,7 +2211,10 @@ async def test_migration_77_adds_player_visibility_and_repairs_private_uploads(
             'visibility_verified_at': 2,
             'public_visible_at': None,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 78
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
     finally:
         await database.close()
 
@@ -2250,6 +2253,59 @@ async def test_migration_78_adds_remote_media_download_control(tmp_path: Path) -
             'downloads_per_interface': 3,
             'updated_at': 1,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 78
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_79_adds_global_match_deduplication_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 79):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        columns = {
+            str(row['name'])
+            for row in await database.fetchall('PRAGMA table_info(vainglory_matches)')
+        }
+        indexes = {
+            str(row['name'])
+            for row in await database.fetchall('PRAGMA index_list(vainglory_matches)')
+        }
+
+        assert {
+            'content_fingerprint',
+            'duplicate_of_match_id',
+            'duplicate_checked_at',
+        }.issubset(columns)
+        assert {
+            'vainglory_matches_content_fingerprint_idx',
+            'vainglory_matches_duplicate_of_idx',
+        }.issubset(indexes)
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 79
     finally:
         await database.close()

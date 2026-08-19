@@ -575,6 +575,7 @@ export interface VaingloryMatch {
   readonly viewContext: ViewContext;
   readonly statsEligible: boolean;
   readonly statsExclusionReason: string | null;
+  readonly duplicateOfMatchId: number | null;
   readonly startedAtMs: number;
   readonly resultAtMs: number;
   readonly durationSeconds: number | null;
