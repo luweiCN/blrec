@@ -89,6 +89,8 @@ class FakeService:
                     stats_eligible=False,
                     stats_exclusion_reason='duplicate',
                     duplicate_of_match_id=2,
+                    duplicate_session_id=1,
+                    duplicate_anchor_name='原主播',
                     duplicate_review_state='pending',
                 ),
             ),
@@ -235,9 +237,13 @@ class FakeService:
         return stored_match()
 
     async def review_match_duplicate(
-        self, match_id: int, *, confirmed: bool
+        self,
+        match_id: int,
+        *,
+        confirmed: bool,
+        canonical_anchor_name: str | None = None,
     ) -> MatchRecord:
-        self.duplicate_reviews.append((match_id, confirmed))
+        self.duplicate_reviews.append((match_id, confirmed, canonical_anchor_name))
         return replace(
             stored_match(),
             stats_eligible=not confirmed,
@@ -958,11 +964,12 @@ def test_reviews_a_suspected_duplicate(
     client, fake = api_client
 
     response = client.put(
-        '/api/v1/vainglory/matches/3/duplicate-review', json={'decision': 'confirmed'}
+        '/api/v1/vainglory/matches/3/duplicate-review',
+        json={'decision': 'confirmed', 'canonicalAnchorName': '真实主播'},
     )
 
     assert response.status_code == 200
-    assert fake.duplicate_reviews == [(3, True)]
+    assert fake.duplicate_reviews == [(3, True, '真实主播')]
     assert response.json()['duplicateReviewState'] == 'confirmed'
     assert response.json()['duplicateOfMatchId'] == 2
 
@@ -977,6 +984,8 @@ def test_lists_suspected_duplicates_for_review(
     assert response.status_code == 200
     assert response.json()['total'] == 1
     assert response.json()['items'][0]['duplicateReviewState'] == 'pending'
+    assert response.json()['items'][0]['duplicateSessionId'] == 1
+    assert response.json()['items'][0]['duplicateAnchorName'] == '原主播'
 
 
 def test_suppresses_one_review_queue_without_deleting_the_match(

@@ -48,6 +48,8 @@ function match(): VaingloryMatch {
     statsExclusionReason: null,
     duplicateOfMatchId: null,
     duplicateResultFrameUrl: null,
+    duplicateSessionId: null,
+    duplicateAnchorName: null,
     duplicateReviewState: 'none',
     startedAtMs: 15_000,
     resultAtMs: 600_000,
@@ -1047,6 +1049,8 @@ describe('VaingloryComponent remote media', () => {
       statsExclusionReason: 'duplicate',
       duplicateOfMatchId: 2,
       duplicateResultFrameUrl: '/api/v1/vainglory/matches/2/result-frame',
+      duplicateSessionId: 1,
+      duplicateAnchorName: '原主播',
       duplicateReviewState: 'pending',
     };
     const confirmed: VaingloryMatch = {
@@ -1059,6 +1063,7 @@ describe('VaingloryComponent remote media', () => {
       total: 1,
       items: [suspected],
     };
+    component.setDuplicateCanonicalAnchorDraft(suspected, '真实主播');
     vainglory.reviewMatchDuplicate.and.returnValue(of(confirmed));
 
     component.reviewMatchDuplicate(suspected, 'confirmed');
@@ -1066,6 +1071,7 @@ describe('VaingloryComponent remote media', () => {
     expect(vainglory.reviewMatchDuplicate).toHaveBeenCalledOnceWith(
       3,
       'confirmed',
+      '真实主播',
     );
     expect(component.detailsFor(9)?.state).toBe('ready');
     expect(component.matchDetails.get(9)).toEqual({

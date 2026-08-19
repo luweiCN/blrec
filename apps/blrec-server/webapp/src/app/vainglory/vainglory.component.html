@@ -1432,6 +1432,14 @@
                 (ngModelChange)="setPlayerRoomDraft(player.id, $event)"
               >
                 <nz-option
+                  *ngIf="
+                    match.duplicateAnchorName &&
+                    !duplicateAnchorIsManaged(match.duplicateAnchorName)
+                  "
+                  [nzValue]="match.duplicateAnchorName"
+                  [nzLabel]="match.duplicateAnchorName + '（当前绑定）'"
+                ></nz-option>
+                <nz-option
                   *ngFor="let room of managedRooms"
                   [nzValue]="room.roomId.toString()"
                   [nzLabel]="room.label"
@@ -1735,7 +1743,12 @@
             />
           </figure>
           <figure style="margin: 0">
-            <figcaption>已收录的原对局 #{{ match.duplicateOfMatchId }}</figcaption>
+            <figcaption>
+              已收录的原对局 #{{ match.duplicateOfMatchId }}
+              <ng-container *ngIf="match.duplicateAnchorName">
+                · 当前归属 {{ match.duplicateAnchorName }}
+              </ng-container>
+            </figcaption>
             <img
               *ngIf="match.duplicateResultFrameUrl"
               nz-image
@@ -1744,6 +1757,28 @@
               loading="lazy"
               style="width: 100%; background: #000"
             />
+            <div style="display: grid; gap: 6px; margin-top: 8px">
+              <label [for]="'duplicate-anchor-' + match.id">
+                原对局这整场直播的主播
+              </label>
+              <nz-select
+                [attr.id]="'duplicate-anchor-' + match.id"
+                nzShowSearch
+                nzPlaceHolder="选择真实主播"
+                [nzLoading]="managedAnchorsLoading"
+                [ngModel]="duplicateCanonicalAnchorDraft(match)"
+                (ngModelChange)="setDuplicateCanonicalAnchorDraft(match, $event)"
+              >
+                <nz-option
+                  *ngFor="let anchor of managedAnchors"
+                  [nzValue]="anchor.anchorName"
+                  [nzLabel]="anchor.label"
+                ></nz-option>
+              </nz-select>
+              <small class="recorded-player-review-help">
+                只有当前归属不对时才修改；确认重复后会应用到原对局所在的整场直播。
+              </small>
+            </div>
           </figure>
         </div>
         <div style="display: flex; justify-content: flex-end; gap: 8px">

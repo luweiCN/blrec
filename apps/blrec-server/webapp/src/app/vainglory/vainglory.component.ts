@@ -278,6 +278,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   recordedPlayerReviewView: RecordedPlayerReviewView = { state: 'idle' };
   duplicateReviewVisible = false;
   duplicateReviewView: RecordedPlayerReviewView = { state: 'idle' };
+  readonly duplicateCanonicalAnchorDrafts = new Map<number, string>();
   savingRecordedPlayerMatchId: number | null = null;
   savingRecordedPlayerSlot: number | null = null;
   analysisTaskModalVisible = false;
@@ -1459,9 +1460,13 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (this.savingMatchIds.has(match.id)) {
       return;
     }
+    const canonicalAnchorName =
+      decision === 'confirmed'
+        ? this.duplicateCanonicalAnchorDraft(match).trim() || undefined
+        : undefined;
     this.savingMatchIds.add(match.id);
     this.vainglory
-      .reviewMatchDuplicate(match.id, decision)
+      .reviewMatchDuplicate(match.id, decision, canonicalAnchorName)
       .pipe(
         takeUntil(this.destroy$),
         finalize(() => {
@@ -1471,6 +1476,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       )
       .subscribe({
         next: (saved) => {
+          this.duplicateCanonicalAnchorDrafts.delete(saved.id);
           this.replaceMatchDetails(saved);
           if (this.duplicateReviewView.state === 'ready') {
             this.duplicateReviewView = {
@@ -1505,6 +1511,14 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (response) => {
+          for (const item of response.items) {
+            if (!this.duplicateCanonicalAnchorDrafts.has(item.id)) {
+              this.duplicateCanonicalAnchorDrafts.set(
+                item.id,
+                item.duplicateAnchorName ?? '',
+              );
+            }
+          }
           this.duplicateReviewView = {
             state: 'ready',
             total: response.total,
@@ -1520,6 +1534,28 @@ export class VaingloryComponent implements OnInit, OnDestroy {
           this.changeDetector.markForCheck();
         },
       });
+  }
+
+  duplicateCanonicalAnchorDraft(match: VaingloryMatch): string {
+    return (
+      this.duplicateCanonicalAnchorDrafts.get(match.id) ??
+      match.duplicateAnchorName ??
+      ''
+    );
+  }
+
+  setDuplicateCanonicalAnchorDraft(
+    match: VaingloryMatch,
+    anchorName: string,
+  ): void {
+    this.duplicateCanonicalAnchorDrafts.set(match.id, anchorName);
+  }
+
+  duplicateAnchorIsManaged(anchorName: string | null): boolean {
+    return Boolean(
+      anchorName &&
+        this.managedAnchors.some((anchor) => anchor.anchorName === anchorName),
+    );
   }
 
   reanalyzeMatch(match: VaingloryMatch): void {

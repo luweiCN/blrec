@@ -971,11 +971,28 @@ async def test_duplicate_review_survives_reconciliation_and_rescan(
         assert (await repository.list_duplicate_reviews()).total == 1
 
         confirmed = await repository.review_match_duplicate(
-            duplicate.id, confirmed=True
+            duplicate.id, confirmed=True, canonical_anchor_name='真实主播'
         )
         assert confirmed.duplicate_review_state == 'confirmed'
         assert confirmed.duplicate_of_match_id is not None
         assert confirmed.stats_eligible is False
+        canonical_session = await database.fetchone(
+            'SELECT anchor_name FROM recording_sessions WHERE id=?', (1,)
+        )
+        assert canonical_session is not None
+        assert canonical_session['anchor_name'] == '真实主播'
+        await database.execute(
+            'UPDATE recording_sessions SET room_id=321,anchor_uid=654 WHERE id=1'
+        )
+        await repository.review_match_duplicate(
+            duplicate.id, confirmed=True, canonical_anchor_name='真实主播'
+        )
+        unchanged_session = await database.fetchone(
+            'SELECT room_id,anchor_uid FROM recording_sessions WHERE id=?', (1,)
+        )
+        assert unchanged_session is not None
+        assert int(unchanged_session['room_id']) == 321
+        assert int(unchanged_session['anchor_uid']) == 654
         assert (await repository.list_duplicate_reviews()).total == 0
 
         await repository.request_scan(2)

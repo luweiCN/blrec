@@ -638,6 +638,8 @@ class MatchRecord:
     stats_eligible: bool = True
     stats_exclusion_reason: Optional[str] = None
     duplicate_of_match_id: Optional[int] = None
+    duplicate_session_id: Optional[int] = None
+    duplicate_anchor_name: Optional[str] = None
     duplicate_review_state: Literal['none', 'pending', 'confirmed', 'dismissed'] = (
         'none'
     )
@@ -1094,6 +1096,15 @@ class VaingloryRepository:
         'match.right_economy,match.confidence,match.game_mode,match.team_size,'
         'match.match_kind,match.view_context,match.stats_eligible,'
         'match.stats_exclusion_reason,match.duplicate_of_match_id,'
+        '(SELECT canonical_match.session_id FROM vainglory_matches canonical_match '
+        'WHERE canonical_match.id=match.duplicate_of_match_id) '
+        'AS duplicate_session_id,'
+        '(SELECT canonical_session.anchor_name '
+        'FROM vainglory_matches canonical_match '
+        'JOIN recording_sessions canonical_session '
+        'ON canonical_session.id=canonical_match.session_id '
+        'WHERE canonical_match.id=match.duplicate_of_match_id) '
+        'AS duplicate_anchor_name,'
         'match.duplicate_review_state,'
         'match.analysis_state,'
         'match.started_at_ms,match.custom_title,'
@@ -6197,8 +6208,19 @@ class VaingloryRepository:
         return await self.get_match(match_id)
 
     async def review_match_duplicate(
-        self, match_id: int, *, confirmed: bool
+        self,
+        match_id: int,
+        *,
+        confirmed: bool,
+        canonical_anchor_name: Optional[str] = None,
     ) -> MatchRecord:
+        normalized_anchor = None
+        if canonical_anchor_name is not None:
+            normalized_anchor = canonical_anchor_name.strip()
+            if not normalized_anchor:
+                raise ValueError('原对局主播不能为空')
+            if len(normalized_anchor) > 200:
+                raise ValueError('anchor name is too long')
         now = self._now()
 
         def review(connection: sqlite3.Connection) -> None:
@@ -6215,6 +6237,25 @@ class VaingloryRepository:
                 or match['duplicate_of_match_id'] is None
             ):
                 raise VaingloryConflict('当前对局没有待确认的重复关系')
+            canonical = connection.execute(
+                'SELECT canonical.session_id,session.anchor_name '
+                'FROM vainglory_matches canonical '
+                'JOIN recording_sessions session '
+                'ON session.id=canonical.session_id WHERE canonical.id=?',
+                (int(match['duplicate_of_match_id']),),
+            ).fetchone()
+            if canonical is None:
+                raise VaingloryConflict('系统记录的原对局已经不存在')
+            canonical_session_id = int(canonical['session_id'])
+            current_anchor = str(canonical['anchor_name'] or '').strip()
+            if (
+                confirmed
+                and normalized_anchor is not None
+                and normalized_anchor.casefold() != current_anchor.casefold()
+            ):
+                self._set_session_anchor(
+                    connection, canonical_session_id, normalized_anchor, now
+                )
             fingerprint = str(match['content_fingerprint'])
             review_state = 'confirmed' if confirmed else 'dismissed'
             self._merge_match_override(
@@ -6256,8 +6297,8 @@ class VaingloryRepository:
             )
             connection.execute(
                 'UPDATE vainglory_publications SET needs_refresh=1 '
-                'WHERE session_id=?',
-                (int(match['session_id']),),
+                'WHERE session_id IN (?,?)',
+                (int(match['session_id']), canonical_session_id),
             )
 
         await self._database.write(review)
@@ -8223,6 +8264,16 @@ class VaingloryRepository:
                 None
                 if row['duplicate_of_match_id'] is None
                 else int(row['duplicate_of_match_id'])
+            ),
+            duplicate_session_id=(
+                None
+                if row['duplicate_session_id'] is None
+                else int(row['duplicate_session_id'])
+            ),
+            duplicate_anchor_name=(
+                None
+                if row['duplicate_anchor_name'] is None
+                else str(row['duplicate_anchor_name'])
             ),
             duplicate_review_state=cast(
                 Literal['none', 'pending', 'confirmed', 'dismissed'],

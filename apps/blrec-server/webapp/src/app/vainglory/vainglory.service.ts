@@ -451,12 +451,16 @@ export class VaingloryService {
   reviewMatchDuplicate(
     matchId: number,
     decision: 'confirmed' | 'dismissed',
+    canonicalAnchorName?: string,
   ): Observable<VaingloryMatch> {
     return this.http.put<VaingloryMatch>(
       this.url.makeApiUrl(
         `/api/v1/vainglory/matches/${matchId}/duplicate-review`,
       ),
-      { decision },
+      {
+        decision,
+        ...(canonicalAnchorName ? { canonicalAnchorName } : {}),
+      },
     );
   }
 

@@ -349,6 +349,8 @@ class MatchResponse(ApiModel):
     stats_exclusion_reason: Optional[str]
     duplicate_of_match_id: Optional[int]
     duplicate_result_frame_url: Optional[str]
+    duplicate_session_id: Optional[int]
+    duplicate_anchor_name: Optional[str]
     duplicate_review_state: Literal['none', 'pending', 'confirmed', 'dismissed']
     started_at_ms: int
     result_at_ms: int
@@ -553,6 +555,7 @@ class MatchUpdateRequest(ApiModel):
 
 class DuplicateReviewRequest(ApiModel):
     decision: Literal['confirmed', 'dismissed']
+    canonical_anchor_name: Optional[str] = Field(None, max_length=200)
 
 
 class PlayerNameRequest(ApiModel):
@@ -856,6 +859,8 @@ def _match(value: MatchRecord) -> MatchResponse:
                 value.duplicate_of_match_id
             )
         ),
+        duplicate_session_id=value.duplicate_session_id,
+        duplicate_anchor_name=value.duplicate_anchor_name,
         duplicate_review_state=value.duplicate_review_state,
         started_at_ms=value.started_at_ms,
         result_at_ms=value.result_at_ms,
@@ -2351,14 +2356,23 @@ async def review_match_duplicate(
     index: VaingloryIndexService = Depends(get_service),
 ) -> MatchResponse:
     try:
+        confirmed = payload.decision == 'confirmed'
         return _match(
             await index.review_match_duplicate(
-                match_id, confirmed=payload.decision == 'confirmed'
+                match_id,
+                confirmed=confirmed,
+                canonical_anchor_name=(
+                    payload.canonical_anchor_name if confirmed else None
+                ),
             )
         )
     except (VaingloryConflict, VaingloryNotFound) as error:
         _raise_repository_error(error)
         raise AssertionError('unreachable')
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
 
 
 @router.post('/matches/{match_id}/reanalyze', status_code=status.HTTP_202_ACCEPTED)

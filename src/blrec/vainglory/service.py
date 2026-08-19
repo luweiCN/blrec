@@ -1197,10 +1197,14 @@ class VaingloryIndexService:
         return updated
 
     async def review_match_duplicate(
-        self, match_id: int, *, confirmed: bool
+        self,
+        match_id: int,
+        *,
+        confirmed: bool,
+        canonical_anchor_name: Optional[str] = None,
     ) -> MatchRecord:
         return await self._repository.review_match_duplicate(
-            match_id, confirmed=confirmed
+            match_id, confirmed=confirmed, canonical_anchor_name=canonical_anchor_name
         )
 
     async def request_match_rerun(self, match_id: int) -> None:
