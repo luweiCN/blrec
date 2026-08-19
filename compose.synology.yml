@@ -1,6 +1,6 @@
 services:
   blrec-next:
-    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.111}
+    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.112}
     pull_policy: always
     container_name: blrec-next
     network_mode: host
