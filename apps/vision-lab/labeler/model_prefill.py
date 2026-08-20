@@ -237,6 +237,13 @@ def apply_core_prefill(
     """把 Worker 推理结果保存为建议；永远不覆盖人工真值。"""
     item = db.get_training_review_item(conn, int(frame_id), result_groups=result_groups)
     if item is None:
+        db.promote_training_review_candidate(
+            conn, int(frame_id), refresh_material_index=False, commit=False
+        )
+        item = db.get_training_review_item(
+            conn, int(frame_id), result_groups=result_groups
+        )
+    if item is None:
         raise KeyError(f'训练复核图片不存在: {frame_id}')
     db.add_training_review_source(
         conn,

@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
 from labeler import config, db, hero_review, model_prefill, server, vision_jobs
@@ -205,6 +206,7 @@ def test_worker_claim_autonomously_runs_core_then_hero_before_review(
                 frame_id=frame_id,
                 source_type='worker',
                 source_id='autonomous-worker-candidate',
+                stage_for_prefill=True,
             )
             for worker_id in ('mac-studio', 'second-worker'):
                 vision_jobs.register_worker(
@@ -238,6 +240,11 @@ def test_worker_claim_autonomously_runs_core_then_hero_before_review(
         assert claimed is not None
         assert claimed['payload']['frame_id'] == frame_id
         assert claimed['payload']['operation'] == 'core'
+        conn = db.connect(database)
+        try:
+            assert db.get_training_review_item(conn, frame_id) is None
+        finally:
+            conn.close()
         assert (
             server.api_claim_vision_job(
                 mock.Mock(),
@@ -294,6 +301,12 @@ def test_worker_claim_autonomously_runs_core_then_hero_before_review(
                 },
             },
         )
+
+        conn = db.connect(database)
+        try:
+            assert db.get_training_review_item(conn, frame_id) is not None
+        finally:
+            conn.close()
 
         hero_job = server.api_claim_vision_job(
             mock.Mock(), {'worker_id': 'mac-studio', 'capabilities': ['model_prefill']}
@@ -361,6 +374,20 @@ def test_worker_claim_autonomously_runs_core_then_hero_before_review(
             assert '头像位置模型只找到 4 个头像' in hero_source['metadata_json']
         finally:
             conn.close()
+
+
+def test_failed_core_prefill_never_promotes_candidate(monkeypatch) -> None:
+    apply_core = mock.Mock()
+    monkeypatch.setattr(server.model_prefill, 'apply_core_prefill', apply_core)
+
+    with pytest.raises(RuntimeError, match='核心模型预打标失败'):
+        server._apply_remote_model_prefill(
+            mock.Mock(),
+            {'payload': {'frame_id': 7, 'operation': 'core'}},
+            {'errors': {'match_flow': '模型文件损坏'}},
+        )
+
+    apply_core.assert_not_called()
 
 
 def test_paused_worker_does_not_create_autonomous_prefill(monkeypatch) -> None:

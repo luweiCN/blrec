@@ -227,7 +227,7 @@ def sync_worker_candidates(
     maximum: int = 10_000,
     progress: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
-    """导入候选并写入模型预标；已人工确认的项目不会退回待确认。"""
+    """导入候选；Worker 图先进收件箱，预打标后才进正式复核。"""
     ordered = sorted(
         items,
         key=lambda item: (
@@ -372,6 +372,7 @@ def sync_worker_candidates(
                     suggestions=dict(item['suggestions']),
                     metadata={**item, 'source': source_type},
                     source_created_at=_created_at(item),
+                    stage_for_prefill=source_type == 'worker',
                 )
                 known_sources.add((source_type, item['source_id']))
                 result['inserted' if was_inserted else 'updated'] += 1

@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-POSTGRES_SCHEMA_VERSION = 5
+POSTGRES_SCHEMA_VERSION = 6
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
 _INSERT_TABLE = re.compile(
     r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
@@ -281,6 +281,35 @@ POSTGRES_SCHEMA_MIGRATIONS = {
         """
         DELETE FROM training_review_material_totals
         WHERE metric='candidate'
+        """,
+    ),
+    6: (
+        """
+        CREATE TABLE IF NOT EXISTS training_review_candidate_inbox (
+            frame_id BIGINT PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE,
+            prefill_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                prefill_status IN (
+                    'pending','queued','running','failed','promoted')),
+            prefill_stage TEXT NOT NULL DEFAULT 'core' CHECK (
+                prefill_stage IN ('core','hero','complete')),
+            prefill_attempts BIGINT NOT NULL DEFAULT 0 CHECK (
+                prefill_attempts >= 0),
+            prefill_error TEXT NOT NULL DEFAULT '',
+            prefill_screen_type TEXT NOT NULL DEFAULT '' CHECK (
+                prefill_screen_type IN (
+                    '','gameplay_hud','scoreboard','result_page')),
+            prefill_team_size BIGINT CHECK (prefill_team_size IN (3,5)),
+            source_created_at BIGINT NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            promoted_at TEXT
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_candidate_inbox_queue
+        ON training_review_candidate_inbox (
+            prefill_status,prefill_stage,prefill_attempts,
+            source_created_at DESC,frame_id DESC)
         """,
     ),
 }

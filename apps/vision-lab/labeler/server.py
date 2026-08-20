@@ -4143,6 +4143,12 @@ def _apply_remote_model_prefill(
     if frame_id <= 0:
         raise ValueError('预填任务缺少 frame_id')
     if operation == 'core':
+        errors = result.get('errors') if isinstance(result.get('errors'), dict) else {}
+        if errors:
+            raise RuntimeError(
+                '核心模型预打标失败：'
+                + '；'.join(f'{task}: {error}' for task, error in errors.items())
+            )
         item = model_prefill.apply_core_prefill(
             conn, frame_id, result, result_groups={}
         )

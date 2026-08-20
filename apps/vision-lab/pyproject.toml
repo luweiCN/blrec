@@ -29,6 +29,7 @@ blrec-vision-lab = "labeler.server:main"
 blrec-vision-media = "labeler.media_server:main"
 blrec-vision-worker = "labeler.vision_worker:main"
 blrec-vision-backfill-material-index = "labeler.backfill_material_index:main"
+blrec-vision-migrate-candidate-inbox = "labeler.migrate_candidate_inbox:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

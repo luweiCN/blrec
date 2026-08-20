@@ -306,7 +306,13 @@ class PostgresCompatibilityTests(unittest.TestCase):
                 for value in statements
             )
         )
-        self.assertEqual(cursor.calls[-1][1], (5,))
+        self.assertTrue(
+            any(
+                'CREATE TABLE IF NOT EXISTS training_review_candidate_inbox' in value
+                for value in statements
+            )
+        )
+        self.assertEqual(cursor.calls[-1][1], (6,))
 
 
 if __name__ == '__main__':

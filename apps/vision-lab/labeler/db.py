@@ -416,6 +416,30 @@ CREATE INDEX IF NOT EXISTS idx_training_review_sources_sync
 CREATE INDEX IF NOT EXISTS idx_training_review_sources_type_frame
     ON training_review_sources (source_type, frame_id);
 
+-- 候选收件箱只负责预打标的领取、重试和租约。只有核心模型
+-- 已产出结果的图片才会晋级到 training_review_items。
+CREATE TABLE IF NOT EXISTS training_review_candidate_inbox (
+    frame_id INTEGER PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE,
+    prefill_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        prefill_status IN ('pending', 'queued', 'running', 'failed', 'promoted')),
+    prefill_stage TEXT NOT NULL DEFAULT 'core' CHECK (
+        prefill_stage IN ('core', 'hero', 'complete')),
+    prefill_attempts INTEGER NOT NULL DEFAULT 0 CHECK (prefill_attempts >= 0),
+    prefill_error TEXT NOT NULL DEFAULT '',
+    prefill_screen_type TEXT NOT NULL DEFAULT '' CHECK (
+        prefill_screen_type IN (
+            '', 'gameplay_hud', 'scoreboard', 'result_page')),
+    prefill_team_size INTEGER CHECK (prefill_team_size IN (3, 5)),
+    source_created_at INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    promoted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_training_review_candidate_inbox_queue
+    ON training_review_candidate_inbox (
+        prefill_status, prefill_stage, prefill_attempts,
+        source_created_at DESC, frame_id DESC);
+
 -- 打标工作台的可检索事实。来源 JSON 仍完整保留，但列表筛选、排序和素材
 -- 建议只读取这一行，不在请求时反复解析所有 JSON。
 CREATE TABLE IF NOT EXISTS training_review_material_index (
@@ -3438,6 +3462,7 @@ def add_training_review_source(
     metadata: Optional[Dict[str, Any]] = None,
     image_path: str = '',
     source_created_at: int = 0,
+    stage_for_prefill: bool = False,
 ) -> bool:
     """增加一条来源/预标；不会改写任何人工标签。"""
     if not conn.execute(
@@ -3464,7 +3489,9 @@ def add_training_review_source(
     existing = conn.execute(
         'SELECT source.*,EXISTS('
         'SELECT 1 FROM training_review_items item '
-        'WHERE item.frame_id=source.frame_id) AS has_item '
+        'WHERE item.frame_id=source.frame_id) AS has_item,EXISTS('
+        'SELECT 1 FROM training_review_candidate_inbox inbox '
+        'WHERE inbox.frame_id=source.frame_id) AS has_inbox '
         'FROM training_review_sources source '
         'WHERE source.source_type = ? AND source.source_id = ?',
         (normalized_type, normalized_id),
@@ -3476,20 +3503,22 @@ def add_training_review_source(
             str(existing['suggestions_json']) == suggestions_json,
             str(existing['metadata_json']) == metadata_json,
             int(existing['source_created_at']) == normalized_source_created_at,
-            bool(existing['has_item']),
+            bool(existing['has_item'])
+            or (bool(stage_for_prefill) and bool(existing['has_inbox'])),
         )
     ):
         conn.commit()
         return False
-    conn.execute(
-        """
-        INSERT INTO training_review_items
-            (frame_id, review_status, created_at, updated_at)
-        VALUES (?, 'pending', ?, ?)
-        ON CONFLICT(frame_id) DO NOTHING
-        """,
-        (int(frame_id), timestamp, timestamp),
-    )
+    if not stage_for_prefill:
+        conn.execute(
+            """
+            INSERT INTO training_review_items
+                (frame_id, review_status, created_at, updated_at)
+            VALUES (?, 'pending', ?, ?)
+            ON CONFLICT(frame_id) DO NOTHING
+            """,
+            (int(frame_id), timestamp, timestamp),
+        )
     conn.execute(
         """
         INSERT INTO training_review_sources
@@ -3516,9 +3545,184 @@ def add_training_review_source(
             timestamp,
         ),
     )
-    refresh_training_review_material_index(conn, int(frame_id), commit=False)
+    has_item = conn.execute(
+        'SELECT 1 FROM training_review_items WHERE frame_id=?', (int(frame_id),)
+    ).fetchone()
+    if stage_for_prefill and has_item is None:
+        conn.execute(
+            """
+            INSERT INTO training_review_candidate_inbox
+                (frame_id, prefill_status, prefill_stage, prefill_attempts,
+                 source_created_at, created_at, updated_at)
+            VALUES (?, 'pending', 'core', 0, ?, ?, ?)
+            ON CONFLICT(frame_id) DO UPDATE SET
+                source_created_at=CASE
+                    WHEN excluded.source_created_at >
+                         training_review_candidate_inbox.source_created_at
+                    THEN excluded.source_created_at
+                    ELSE training_review_candidate_inbox.source_created_at
+                END,
+                updated_at=excluded.updated_at
+            """,
+            (int(frame_id), normalized_source_created_at, timestamp, timestamp),
+        )
+    else:
+        if has_item is not None:
+            conn.execute(
+                "UPDATE training_review_candidate_inbox SET "
+                "prefill_status='promoted',prefill_stage='complete',"
+                'updated_at=?,promoted_at=COALESCE(promoted_at,?) '
+                'WHERE frame_id=?',
+                (timestamp, timestamp, int(frame_id)),
+            )
+            refresh_training_review_material_index(conn, int(frame_id), commit=False)
     conn.commit()
     return existing is None
+
+
+def promote_training_review_candidate(
+    conn: sqlite3.Connection,
+    frame_id: int,
+    *,
+    refresh_material_index: bool = True,
+    commit: bool = True,
+) -> bool:
+    """核心模型已产生结果时，才把候选图晋级为可人工复核素材。"""
+    inbox = conn.execute(
+        'SELECT 1 FROM training_review_candidate_inbox WHERE frame_id=?',
+        (int(frame_id),),
+    ).fetchone()
+    existing = conn.execute(
+        'SELECT 1 FROM training_review_items WHERE frame_id=?', (int(frame_id),)
+    ).fetchone()
+    if inbox is None:
+        if existing is not None:
+            return False
+        raise KeyError(frame_id)
+    timestamp = now()
+    inserted = conn.execute(
+        'INSERT INTO training_review_items('
+        'frame_id,review_status,created_at,updated_at) '
+        "VALUES(?,'pending',?,?) ON CONFLICT(frame_id) DO NOTHING",
+        (int(frame_id), timestamp, timestamp),
+    ).rowcount
+    conn.execute(
+        "UPDATE training_review_candidate_inbox SET prefill_status='promoted',"
+        "prefill_stage='complete',prefill_error='',updated_at=?,promoted_at=? "
+        'WHERE frame_id=?',
+        (timestamp, timestamp, int(frame_id)),
+    )
+    if refresh_material_index:
+        refresh_training_review_material_index(conn, int(frame_id), commit=False)
+    if commit:
+        conn.commit()
+    return bool(inserted)
+
+
+def training_review_candidate_inbox_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
+    rows = conn.execute(
+        'SELECT prefill_status,COUNT(*) AS count '
+        'FROM training_review_candidate_inbox GROUP BY prefill_status'
+    ).fetchall()
+    statuses = {str(row['prefill_status']): int(row['count']) for row in rows}
+    return {'total': sum(statuses.values()), 'statuses': statuses}
+
+
+def migrate_unprefilled_training_review_candidates(
+    conn: sqlite3.Connection, *, dry_run: bool = True
+) -> Dict[str, int]:
+    """把从未人工复核、也没有新模型预填的 pending 空壳移回候选收件箱。"""
+    rows = conn.execute(
+        """
+        SELECT item.frame_id,COALESCE(MAX(source.source_created_at),0)
+               AS source_created_at
+        FROM training_review_items item
+        JOIN training_review_sources source ON source.frame_id=item.frame_id
+        WHERE item.review_status='pending'
+          AND item.match_flow_label IS NULL
+          AND item.match_mode_label IS NULL
+          AND item.hero_select_label IS NULL
+          AND item.result_panel_label IS NULL
+          AND item.hero_layout_label IS NULL
+          AND TRIM(item.notes)=''
+          AND NOT EXISTS (
+              SELECT 1 FROM audit_log audit
+              WHERE audit.frame_id=item.frame_id
+                AND audit.action='training_review'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM training_review_sources prefill
+              WHERE prefill.frame_id=item.frame_id
+                AND prefill.source_type IN (
+                    'new_model_prefill','new_model_hero_prefill')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM training_review_hero_lineups lineup
+              WHERE lineup.frame_id=item.frame_id
+          )
+        GROUP BY item.frame_id
+        ORDER BY item.frame_id
+        """
+    ).fetchall()
+    result = {'eligible': len(rows), 'migrated': 0}
+    if dry_run or not rows:
+        return result
+    timestamp = now()
+    for offset in range(0, len(rows), 500):
+        batch = rows[offset : offset + 500]
+        frame_ids = [int(row['frame_id']) for row in batch]
+        placeholders = ','.join('?' for _frame_id in frame_ids)
+        conn.executemany(
+            """
+            INSERT INTO training_review_candidate_inbox
+                (frame_id,prefill_status,prefill_stage,prefill_attempts,
+                 source_created_at,created_at,updated_at)
+            VALUES(?,'pending','core',0,?,?,?)
+            ON CONFLICT(frame_id) DO UPDATE SET
+                prefill_status='pending',prefill_stage='core',
+                prefill_attempts=0,prefill_error='',prefill_screen_type='',
+                prefill_team_size=NULL,source_created_at=excluded.source_created_at,
+                updated_at=excluded.updated_at,promoted_at=NULL
+            """,
+            [
+                (
+                    int(row['frame_id']),
+                    int(row['source_created_at']),
+                    timestamp,
+                    timestamp,
+                )
+                for row in batch
+            ],
+        )
+        conn.execute(
+            'DELETE FROM training_review_material_contributions '
+            f'WHERE frame_id IN ({placeholders})',
+            frame_ids,
+        )
+        conn.execute(
+            'DELETE FROM training_review_material_index '
+            f'WHERE frame_id IN ({placeholders})',
+            frame_ids,
+        )
+        deleted = conn.execute(
+            'DELETE FROM training_review_items ' f'WHERE frame_id IN ({placeholders})',
+            frame_ids,
+        ).rowcount
+        conn.commit()
+        result['migrated'] += int(deleted)
+    conn.execute('DELETE FROM training_review_material_totals')
+    conn.execute(
+        'INSERT INTO training_review_material_totals('
+        'kind,scene,match_mode,hero_label,source_scope,metric,'
+        'frame_count,crop_count,updated_at) '
+        'SELECT kind,scene,match_mode,hero_label,source_scope,metric,'
+        'SUM(frame_count),SUM(crop_count),? '
+        'FROM training_review_material_contributions '
+        'GROUP BY kind,scene,match_mode,hero_label,source_scope,metric',
+        (timestamp,),
+    )
+    conn.commit()
+    return result
 
 
 def _training_review_item_dict(
@@ -4763,6 +4967,17 @@ def next_training_review_prefill_candidate(
     """返回下一张需要后台预打标的图，并按需补一条历史派生索引。"""
     if maximum_attempts < 1:
         raise ValueError('预打标最大尝试次数必须大于零')
+    staged = conn.execute(
+        'SELECT inbox.*,frame.video_id FROM training_review_candidate_inbox inbox '
+        'JOIN frames frame ON frame.id=inbox.frame_id '
+        "WHERE inbox.prefill_status IN ('pending','failed') "
+        'AND inbox.prefill_attempts<? '
+        "ORDER BY CASE inbox.prefill_status WHEN 'pending' THEN 0 ELSE 1 END,"
+        'inbox.source_created_at DESC,inbox.frame_id DESC LIMIT 1',
+        (int(maximum_attempts),),
+    ).fetchone()
+    if staged is not None:
+        return {**dict(staged), 'prefill_origin': 'candidate_inbox'}
     candidate_sql = (
         'SELECT material.* FROM training_review_material_index material '
         'JOIN training_review_items item ON item.frame_id=material.frame_id '
@@ -4792,7 +5007,7 @@ def next_training_review_prefill_candidate(
         if missing is not None:
             refresh_training_review_material_index(conn, int(missing['frame_id']))
             row = conn.execute(candidate_sql, parameters).fetchone()
-    return None if row is None else dict(row)
+    return None if row is None else {**dict(row), 'prefill_origin': 'review_item'}
 
 
 def update_training_review_prefill_state(
@@ -4841,15 +5056,43 @@ def update_training_review_prefill_state(
             int(frame_id),
         ),
     )
-    if cursor.rowcount != 1:
-        conn.rollback()
-        raise KeyError(frame_id)
-    refresh_training_review_material_index(conn, int(frame_id), commit=False)
-    conn.commit()
-    row = conn.execute(
-        'SELECT * FROM training_review_material_index WHERE frame_id=?',
-        (int(frame_id),),
-    ).fetchone()
+    if cursor.rowcount == 1:
+        refresh_training_review_material_index(conn, int(frame_id), commit=False)
+        conn.commit()
+        row = conn.execute(
+            'SELECT * FROM training_review_material_index WHERE frame_id=?',
+            (int(frame_id),),
+        ).fetchone()
+    else:
+        inbox_status = 'promoted' if status == 'ready' else status
+        cursor = conn.execute(
+            'UPDATE training_review_candidate_inbox SET prefill_status=?,'
+            'prefill_stage=?,prefill_attempts=CASE WHEN ?=1 THEN 0 '
+            'ELSE prefill_attempts+? END,prefill_error=?,prefill_screen_type=?,'
+            'prefill_team_size=?,updated_at=?,promoted_at=CASE WHEN ?='
+            "'promoted' THEN ? ELSE promoted_at END WHERE frame_id=?",
+            (
+                inbox_status,
+                stage,
+                int(bool(reset_attempts)),
+                int(bool(increment_attempt)),
+                error.strip()[:2_000],
+                normalized_screen,
+                None if team_size is None else int(team_size),
+                timestamp,
+                inbox_status,
+                timestamp,
+                int(frame_id),
+            ),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise KeyError(frame_id)
+        conn.commit()
+        row = conn.execute(
+            'SELECT * FROM training_review_candidate_inbox WHERE frame_id=?',
+            (int(frame_id),),
+        ).fetchone()
     if row is None:
         raise KeyError(frame_id)
     return dict(row)
@@ -4877,6 +5120,7 @@ def training_review_prefill_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
             int(statuses.get(value, 0)) for value in ('pending', 'queued', 'running')
         ),
         'failed': int(statuses.get('failed', 0)),
+        'candidate_inbox': training_review_candidate_inbox_stats(conn),
     }
 
 
@@ -4887,11 +5131,8 @@ def training_review_queue_summary(
     if source_scope != 'new':
         raise ValueError('轻量复核统计目前只支持 Worker 新素材')
     source = conn.execute(
-        "SELECT COUNT(DISTINCT source.frame_id) AS total,"
-        "COUNT(DISTINCT CASE WHEN item.review_status IN ('pending','partial') "
-        'THEN source.frame_id END) AS review_pending '
+        'SELECT COUNT(DISTINCT source.frame_id) AS total '
         'FROM training_review_sources source '
-        'JOIN training_review_items item ON item.frame_id=source.frame_id '
         "WHERE source.source_type IN ('worker','result_archive',"
         "'manual_correction')"
     ).fetchone()
@@ -4906,23 +5147,32 @@ def training_review_queue_summary(
         "COALESCE(SUM(CASE WHEN material.prefill_status='failed' "
         'THEN 1 ELSE 0 END),0) '
         'AS prefill_failed,'
-        "COALESCE(SUM(CASE WHEN material.prefill_status='failed' AND "
+        "COALESCE(SUM(CASE WHEN material.prefill_status IN "
+        "('pending','queued','running') AND "
         "item.review_status IN ('pending','partial') THEN 1 ELSE 0 END),0) "
-        'AS review_failed '
+        'AS review_waiting '
         'FROM training_review_material_index material '
         'JOIN training_review_items item ON item.frame_id=material.frame_id '
         'WHERE material.is_new=1'
     ).fetchone()
+    inbox = conn.execute(
+        'SELECT '
+        "COALESCE(SUM(CASE WHEN prefill_status IN "
+        "('pending','queued','running') THEN 1 ELSE 0 END),0) AS waiting,"
+        "COALESCE(SUM(CASE WHEN prefill_status='failed' "
+        'THEN 1 ELSE 0 END),0) AS failed '
+        'FROM training_review_candidate_inbox'
+    ).fetchone()
     total = int(source['total'] or 0)
-    review_pending = int(source['review_pending'] or 0)
     ready_for_review = int(material['ready_for_review'] or 0)
-    review_failed = int(material['review_failed'] or 0)
     return {
         'total': total,
         'prefill_ready': int(material['prefill_ready'] or 0),
         'ready_for_review': ready_for_review,
-        'prefill_waiting': max(0, review_pending - ready_for_review - review_failed),
-        'prefill_failed': int(material['prefill_failed'] or 0),
+        'prefill_waiting': int(material['review_waiting'] or 0)
+        + int(inbox['waiting'] or 0),
+        'prefill_failed': int(material['prefill_failed'] or 0)
+        + int(inbox['failed'] or 0),
     }
 
 

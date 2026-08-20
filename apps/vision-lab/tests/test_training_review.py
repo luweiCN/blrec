@@ -1695,6 +1695,15 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         Image.new('RGB', (32, 18), (20, 40, 60)).save(buffer, format='JPEG')
         return buffer.getvalue()
 
+    def promote_synced(self, source_id='part-7:12000:test'):
+        source = self.conn.execute(
+            'SELECT frame_id FROM training_review_sources WHERE source_id=?',
+            (source_id,),
+        ).fetchone()
+        self.assertIsNotNone(source)
+        db.promote_training_review_candidate(self.conn, int(source['frame_id']))
+        return int(source['frame_id'])
+
     def test_schema_v3_keeps_suggestions_separate_from_human_labels(self):
         image = self.candidate_image()
         nas = FakeNas(image)
@@ -1704,11 +1713,89 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
 
         self.assertEqual(result['inserted'], 1)
         self.assertEqual(result['downloaded'], 1)
+        self.assertEqual(db.list_training_review_items(self.conn), [])
+        self.promote_synced()
         rows = db.list_training_review_items(self.conn, status='pending')
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]['match_flow_label'])
         self.assertEqual(rows[0]['suggestions']['match_flow']['label'], 'match_flow')
         self.assertEqual(rows[0]['source_count'], 1)
+
+    def test_worker_candidate_can_wait_outside_formal_review_until_prefilled(self):
+        image = self.candidate_image()
+        nas = FakeNas(image)
+        item = self.unified_item(image)
+        item['source_id'] = 'staged-until-prefilled'
+
+        result = worker_candidates.sync_worker_candidates(self.conn, nas, [item])
+
+        self.assertEqual(result['inserted'], 1)
+        self.assertEqual(db.list_training_review_items(self.conn), [])
+        inbox = db.training_review_candidate_inbox_stats(self.conn)
+        self.assertEqual(inbox['total'], 1)
+        self.assertEqual(inbox['statuses']['pending'], 1)
+        self.assertEqual(
+            db.training_review_queue_summary(self.conn),
+            {
+                'total': 1,
+                'prefill_ready': 0,
+                'ready_for_review': 0,
+                'prefill_waiting': 1,
+                'prefill_failed': 0,
+            },
+        )
+        source = self.conn.execute(
+            'SELECT frame_id FROM training_review_sources WHERE source_id=?',
+            ('staged-until-prefilled',),
+        ).fetchone()
+        self.assertIsNotNone(source)
+
+        promoted = db.promote_training_review_candidate(
+            self.conn, int(source['frame_id'])
+        )
+
+        self.assertTrue(promoted)
+        self.assertIsNotNone(
+            db.get_training_review_item(self.conn, int(source['frame_id']))
+        )
+        inbox = db.training_review_candidate_inbox_stats(self.conn)
+        self.assertEqual(inbox['statuses']['promoted'], 1)
+
+    def test_empty_pending_shells_migrate_to_candidate_inbox_without_data_loss(self):
+        image = self.candidate_image()
+        nas = FakeNas(image)
+        item = self.unified_item(image)
+        item['source_id'] = 'legacy-empty-shell'
+        worker_candidates.sync_worker_candidates(self.conn, nas, [item])
+        self.promote_synced('legacy-empty-shell')
+        source = self.conn.execute(
+            'SELECT frame_id FROM training_review_sources WHERE source_id=?',
+            ('legacy-empty-shell',),
+        ).fetchone()
+        frame_id = int(source['frame_id'])
+
+        preview = db.migrate_unprefilled_training_review_candidates(
+            self.conn, dry_run=True
+        )
+        self.assertEqual(preview['eligible'], 1)
+        self.assertIsNotNone(db.get_training_review_item(self.conn, frame_id))
+
+        migrated = db.migrate_unprefilled_training_review_candidates(
+            self.conn, dry_run=False
+        )
+
+        self.assertEqual(migrated['migrated'], 1)
+        self.assertIsNone(db.get_training_review_item(self.conn, frame_id))
+        self.assertEqual(
+            self.conn.execute(
+                'SELECT COUNT(*) FROM training_review_sources WHERE frame_id=?',
+                (frame_id,),
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            db.training_review_candidate_inbox_stats(self.conn)['total'], 1
+        )
 
     def test_schema_v3_resync_skips_an_already_indexed_source(self):
         image = self.candidate_image()
@@ -1761,9 +1848,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         worker_candidates.sync_worker_candidates(
             self.conn, nas, [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
-            'frame_id'
-        ]
+        frame_id = self.promote_synced()
         db.save_training_review(
             self.conn,
             frame_id=frame_id,
@@ -1799,9 +1884,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         worker_candidates.sync_worker_candidates(
             self.conn, nas, [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
-            'frame_id'
-        ]
+        frame_id = self.promote_synced()
         db.save_training_review(
             self.conn,
             frame_id=frame_id,
@@ -1847,9 +1930,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         worker_candidates.sync_worker_candidates(
             self.conn, nas, [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
-            'frame_id'
-        ]
+        frame_id = self.promote_synced()
         slots = [
             {
                 'side': side,
@@ -1945,9 +2026,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         worker_candidates.sync_worker_candidates(
             self.conn, nas, [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
-            'frame_id'
-        ]
+        frame_id = self.promote_synced()
         db.save_training_review(
             self.conn,
             frame_id=frame_id,
@@ -1985,9 +2064,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         worker_candidates.sync_worker_candidates(
             self.conn, FakeNas(image), [self.unified_item(image)]
         )
-        frame_id = db.list_training_review_items(self.conn, status='pending')[0][
-            'frame_id'
-        ]
+        frame_id = self.promote_synced()
         remote = {
             'schema_version': 2,
             'source_ids': ['part-7:12000:test'],
