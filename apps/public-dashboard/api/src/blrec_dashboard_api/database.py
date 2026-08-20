@@ -69,6 +69,13 @@ class PostgresConnection:
         cursor.executemany(_postgres_sql(sql), parameters)
         return cursor
 
+    def copy_rows(self, sql: str, rows: Any) -> Any:
+        cursor = self._connection.cursor()
+        with cursor.copy(sql) as copy:
+            for row in rows:
+                copy.write_row(row)
+        return cursor
+
     def commit(self) -> None:
         self._connection.commit()
 

@@ -44,6 +44,13 @@ def _rating_rows(dataset: Any) -> Mapping[int, Mapping[str, Mapping[str, Any]]]:
     return values
 
 
+def _insert_rows(connection: Any, *, insert_sql: str, copy_sql: str, rows: Any) -> None:
+    if getattr(connection, 'dialect', 'sqlite') == 'postgresql':
+        connection.copy_rows(copy_sql, rows)
+        return
+    connection.executemany(insert_sql, rows)
+
+
 def _publish_dataset(
     connection: Any, *, audience: str, dataset: Any, published_at: int
 ) -> None:
@@ -67,21 +74,37 @@ def _publish_dataset(
         'DELETE FROM dashboard_cache_players ' 'WHERE source_revision=? AND audience=?',
         (source_revision, audience),
     )
-    connection.executemany(
-        'INSERT INTO dashboard_cache_players('
-        'source_revision,audience,player_id,player_json) VALUES(?,?,?,?)',
-        (
+    _insert_rows(
+        connection,
+        insert_sql=(
+            'INSERT INTO dashboard_cache_players('
+            'source_revision,audience,player_id,player_json) VALUES(?,?,?,?)'
+        ),
+        copy_sql=(
+            'COPY dashboard_cache_players('
+            'source_revision,audience,player_id,player_json) FROM STDIN'
+        ),
+        rows=(
             (source_revision, audience, int(player_id), _json_text(player))
             for player_id, player in dataset.players.items()
         ),
     )
     ratings = _rating_rows(dataset)
-    connection.executemany(
-        'INSERT INTO dashboard_cache_matches('
-        'source_revision,audience,match_id,player_id,season_key,mode,'
-        'played_at_epoch,result,duration_seconds,has_replay,match_json,ratings_json'
-        ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-        (
+    _insert_rows(
+        connection,
+        insert_sql=(
+            'INSERT INTO dashboard_cache_matches('
+            'source_revision,audience,match_id,player_id,season_key,mode,'
+            'played_at_epoch,result,duration_seconds,has_replay,'
+            'match_json,ratings_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)'
+        ),
+        copy_sql=(
+            'COPY dashboard_cache_matches('
+            'source_revision,audience,match_id,player_id,season_key,mode,'
+            'played_at_epoch,result,duration_seconds,has_replay,'
+            'match_json,ratings_json) FROM STDIN'
+        ),
+        rows=(
             (
                 source_revision,
                 audience,
@@ -99,11 +122,19 @@ def _publish_dataset(
             for match in dataset.matches
         ),
     )
-    connection.executemany(
-        'INSERT INTO dashboard_cache_match_search('
-        'source_revision,audience,match_id,form_index,normalized,pinyin,initials'
-        ') VALUES(?,?,?,?,?,?,?)',
-        (
+    _insert_rows(
+        connection,
+        insert_sql=(
+            'INSERT INTO dashboard_cache_match_search('
+            'source_revision,audience,match_id,form_index,normalized,pinyin,initials'
+            ') VALUES(?,?,?,?,?,?,?)'
+        ),
+        copy_sql=(
+            'COPY dashboard_cache_match_search('
+            'source_revision,audience,match_id,form_index,normalized,pinyin,initials'
+            ') FROM STDIN'
+        ),
+        rows=(
             (
                 source_revision,
                 audience,
@@ -117,10 +148,17 @@ def _publish_dataset(
             for index, forms in enumerate(values)
         ),
     )
-    connection.executemany(
-        'INSERT INTO dashboard_cache_match_heroes('
-        'source_revision,audience,match_id,hero_name) VALUES(?,?,?,?)',
-        (
+    _insert_rows(
+        connection,
+        insert_sql=(
+            'INSERT INTO dashboard_cache_match_heroes('
+            'source_revision,audience,match_id,hero_name) VALUES(?,?,?,?)'
+        ),
+        copy_sql=(
+            'COPY dashboard_cache_match_heroes('
+            'source_revision,audience,match_id,hero_name) FROM STDIN'
+        ),
+        rows=(
             (source_revision, audience, int(match_id), str(hero_name))
             for match_id, heroes in dataset.heroes.items()
             for hero_name in sorted(heroes)
