@@ -43,6 +43,9 @@ from ..setting import (
 
 __all__ = ('RecordTaskManager',)
 
+_TASK_LOAD_MAX_ATTEMPTS = 3
+_TASK_LOAD_RETRY_DELAY_SECONDS = 5
+
 
 class RecordTaskManager:
     _MANAGED_COOKIE_URL = 'https://api.bilibili.com/'
@@ -85,16 +88,40 @@ class RecordTaskManager:
         assert settings_list is not None
 
         desired_absent_room_ids = desired_absent_room_ids or set()
+        pending_settings = []
         for settings in settings_list:
             if settings.room_id in desired_absent_room_ids:
                 logger.info(
                     'Skipping task {} while its removal is pending', settings.room_id
                 )
                 continue
-            try:
-                await self.add_task(settings)
-            except Exception as e:
-                submit_exception(e)
+            pending_settings.append(settings)
+
+        for attempt in range(1, _TASK_LOAD_MAX_ATTEMPTS + 1):
+            failed_settings: Dict[int, Tuple[TaskSettings, Exception]] = {}
+            for settings in pending_settings:
+                try:
+                    await self.add_task(settings)
+                except Exception as task_error:
+                    failed_settings[settings.room_id] = (settings, task_error)
+            if not failed_settings:
+                break
+            if attempt == _TASK_LOAD_MAX_ATTEMPTS:
+                for _settings, final_error in failed_settings.values():
+                    submit_exception(final_error)
+                break
+            logger.warning(
+                'Retrying {} task(s) after startup failures in {} seconds '
+                '(attempt {}/{})',
+                len(failed_settings),
+                _TASK_LOAD_RETRY_DELAY_SECONDS,
+                attempt + 1,
+                _TASK_LOAD_MAX_ATTEMPTS,
+            )
+            await asyncio.sleep(_TASK_LOAD_RETRY_DELAY_SECONDS)
+            pending_settings = [
+                settings for settings, _error in failed_settings.values()
+            ]
 
         logger.info('Load all tasks complete')
 

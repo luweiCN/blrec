@@ -163,3 +163,65 @@ async def test_load_all_tasks_skips_rooms_with_pending_removal() -> None:
     manager.add_task.assert_awaited_once()  # type: ignore[attr-defined]
     loaded_settings = manager.add_task.await_args.args[0]  # type: ignore[attr-defined]
     assert loaded_settings.room_id == 200
+
+
+@pytest.mark.asyncio
+async def test_load_all_tasks_retries_transient_failure_after_initial_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_manager = Mock()
+    settings_manager.get_settings.return_value = SimpleNamespace(
+        tasks=[TaskSettings(room_id=100), TaskSettings(room_id=200)]
+    )
+    task_manager_module = importlib.import_module('blrec.task.task_manager')
+    manager = task_manager_module.RecordTaskManager(settings_manager)
+    attempts = []
+    transient_error = TimeoutError('room detail timed out')
+
+    async def add_task(settings: TaskSettings) -> None:
+        attempts.append(settings.room_id)
+        if settings.room_id == 100 and attempts.count(100) == 1:
+            raise transient_error
+
+    manager.add_task = AsyncMock(side_effect=add_task)  # type: ignore[method-assign]
+    sleep = AsyncMock()
+    submit = Mock()
+    monkeypatch.setattr(task_manager_module.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(task_manager_module, 'submit_exception', submit)
+
+    await manager.load_all_tasks()
+
+    assert attempts == [100, 200, 100]
+    sleep.assert_awaited_once_with(5)
+    submit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_load_all_tasks_reports_failure_after_bounded_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_manager = Mock()
+    settings_manager.get_settings.return_value = SimpleNamespace(
+        tasks=[TaskSettings(room_id=100), TaskSettings(room_id=200)]
+    )
+    task_manager_module = importlib.import_module('blrec.task.task_manager')
+    manager = task_manager_module.RecordTaskManager(settings_manager)
+    attempts = []
+    persistent_error = TimeoutError('room detail timed out')
+
+    async def add_task(settings: TaskSettings) -> None:
+        attempts.append(settings.room_id)
+        if settings.room_id == 100:
+            raise persistent_error
+
+    manager.add_task = AsyncMock(side_effect=add_task)  # type: ignore[method-assign]
+    sleep = AsyncMock()
+    submit = Mock()
+    monkeypatch.setattr(task_manager_module.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(task_manager_module, 'submit_exception', submit)
+
+    await manager.load_all_tasks()
+
+    assert attempts == [100, 200, 100, 100]
+    assert sleep.await_count == 2
+    submit.assert_called_once_with(persistent_error)
