@@ -4870,17 +4870,21 @@ def training_review_queue_summary(
     ).fetchone()
     material = conn.execute(
         'SELECT '
-        "COALESCE(SUM(CASE WHEN prefill_status='ready' THEN 1 ELSE 0 END),0) "
+        "COALESCE(SUM(CASE WHEN material.prefill_status='ready' "
+        'THEN 1 ELSE 0 END),0) '
         'AS prefill_ready,'
-        "COALESCE(SUM(CASE WHEN prefill_status='ready' AND "
-        "review_status IN ('pending','partial') THEN 1 ELSE 0 END),0) "
+        "COALESCE(SUM(CASE WHEN material.prefill_status='ready' AND "
+        "item.review_status IN ('pending','partial') THEN 1 ELSE 0 END),0) "
         'AS ready_for_review,'
-        "COALESCE(SUM(CASE WHEN prefill_status='failed' THEN 1 ELSE 0 END),0) "
+        "COALESCE(SUM(CASE WHEN material.prefill_status='failed' "
+        'THEN 1 ELSE 0 END),0) '
         'AS prefill_failed,'
-        "COALESCE(SUM(CASE WHEN prefill_status='failed' AND "
-        "review_status IN ('pending','partial') THEN 1 ELSE 0 END),0) "
+        "COALESCE(SUM(CASE WHEN material.prefill_status='failed' AND "
+        "item.review_status IN ('pending','partial') THEN 1 ELSE 0 END),0) "
         'AS review_failed '
-        'FROM training_review_material_index WHERE is_new=1'
+        'FROM training_review_material_index material '
+        'JOIN training_review_items item ON item.frame_id=material.frame_id '
+        'WHERE material.is_new=1'
     ).fetchone()
     total = int(source['total'] or 0)
     review_pending = int(source['review_pending'] or 0)

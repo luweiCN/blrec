@@ -459,6 +459,12 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
             (confirmed,),
         )
         db.refresh_training_review_material_index(self.conn, confirmed)
+        self.conn.execute(
+            "UPDATE training_review_material_index SET review_status='confirmed' "
+            'WHERE frame_id=?',
+            (ready,),
+        )
+        self.conn.commit()
 
         summary = db.training_review_queue_summary(self.conn, source_scope='new')
 
