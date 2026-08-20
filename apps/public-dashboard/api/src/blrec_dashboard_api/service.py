@@ -500,14 +500,10 @@ def _insert_rating_timeline(
         previous_evidence=previous_evidence,
         reset_visible_score=reset_visible_score,
     )
+    rating_rows = []
     for match_number, (row, transition) in enumerate(zip(rows, timeline), start=1):
         after = transition.rating_after
-        connection.execute(
-            'INSERT INTO rating_events('
-            'match_id,player_id,season_key,scope,match_number,result,'
-            'score_before,score_delta,score_after,ability_after,evidence_after,'
-            'provisional,model_version'
-            ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        rating_rows.append(
             (
                 int(row['source_match_id']),
                 int(row['player_id']),
@@ -522,7 +518,16 @@ def _insert_rating_timeline(
                 after.evidence,
                 int(after.provisional),
                 RATING_MODEL_VERSION,
-            ),
+            )
+        )
+    if rating_rows:
+        connection.executemany(
+            'INSERT INTO rating_events('
+            'match_id,player_id,season_key,scope,match_number,result,'
+            'score_before,score_delta,score_after,ability_after,evidence_after,'
+            'provisional,model_version'
+            ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            rating_rows,
         )
     if not timeline:
         return previous_ability, previous_evidence

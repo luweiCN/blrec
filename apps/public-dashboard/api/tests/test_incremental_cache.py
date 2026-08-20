@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
@@ -415,6 +416,39 @@ def test_bootstrap_defers_rating_rebuild_until_the_published_chunk(
     assert first_rating_count == 0
     assert final_result['ratingEventCount'] > 0
     assert rated_match_ids == {1, 2}
+
+
+def test_rating_timeline_batches_event_inserts() -> None:
+    class Connection:
+        def __init__(self) -> None:
+            self.rows: list[tuple[object, ...]] = []
+
+        def execute(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError('rating timeline used per-event database writes')
+
+        def executemany(self, sql: str, rows: Iterable[tuple[object, ...]]) -> None:
+            assert sql.startswith('INSERT INTO rating_events(')
+            self.rows = list(rows)
+
+    connection = Connection()
+    final_ability, final_evidence = service_module._insert_rating_timeline(
+        connection,
+        [
+            {'source_match_id': 1, 'player_id': 7, 'result': 'W'},
+            {'source_match_id': 2, 'player_id': 7, 'result': 'L'},
+        ],
+        scope='all',
+        season_key='2026-summer',
+        previous_ability=None,
+        previous_evidence=None,
+        reset_visible_score=True,
+    )
+
+    assert len(connection.rows) == 2
+    assert [int(row[0]) for row in connection.rows] == [1, 2]
+    assert all(int(row[-1]) == 7 for row in connection.rows)
+    assert final_ability is not None
+    assert final_evidence is not None
 
 
 def test_bootstrap_bulk_writes_matches_and_search_rows(
