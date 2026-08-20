@@ -63,6 +63,37 @@ def test_cache_sync_bootstraps_in_bounded_durable_batches(tmp_path: Path) -> Non
     assert list((state_directory / 'cache-api-outbox').glob('*.json')) == []
 
 
+def test_cache_sync_bootstrap_orders_duplicate_sources_before_references(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / 'source.sqlite3'
+    state_directory = tmp_path / 'state'
+    _database(database_path, 7)
+    posted = []
+    source = _source(0)
+    source['matches'] = [
+        {'id': 3, 'duplicateOfMatchId': 1},
+        {'id': 2, 'duplicateOfMatchId': None},
+        {'id': 1, 'duplicateOfMatchId': None},
+    ]
+
+    def post_batch(key: str, content: bytes) -> Mapping[str, Any]:
+        posted.append((key, json.loads(content)))
+        return {'status': 'applied'}
+
+    sync_dashboard_cache_once(
+        database_path=database_path,
+        state_directory=state_directory,
+        post_batch=post_batch,
+        source_builder=lambda _connection: source,
+        max_batch_matches=2,
+    )
+
+    match_ids = [match['id'] for _key, batch in posted for match in batch['matches']]
+    assert match_ids.index(1) < match_ids.index(3)
+    assert [len(batch['matches']) for _key, batch in posted] == [2, 1]
+
+
 def test_cache_sync_emits_an_empty_fast_forward_batch_for_revision_only_change(
     tmp_path: Path,
 ) -> None:

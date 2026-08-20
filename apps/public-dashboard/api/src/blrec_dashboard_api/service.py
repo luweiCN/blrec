@@ -607,9 +607,11 @@ def apply_ingest_batch(
                 ).fetchall()
             )
         _rebuild_match_search(connection, changed_match_ids)
+        if batch.publish and active_revision == 0:
+            rating_player_ids.update(current_player_ids)
         rating_event_count = (
             _recompute_ratings(connection, rating_player_ids)
-            if rating_player_ids
+            if rating_player_ids and (batch.publish or active_revision > 0)
             else 0
         )
         players_removed = _delete_unreferenced_players(

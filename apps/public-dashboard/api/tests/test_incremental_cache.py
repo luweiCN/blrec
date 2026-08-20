@@ -371,6 +371,52 @@ def test_bootstrap_reset_replaces_stale_rows_without_deleting_assets(
     assert [str(row[0]) for row in batches] == ['fresh-cache-8']
 
 
+def test_bootstrap_defers_rating_rebuild_until_the_published_chunk(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / 'dashboard.sqlite3'
+    initialize_database(database_path)
+    first = cache_batch(source_revision=8)
+    first['publish'] = False
+    first['reset'] = True
+    first_result = apply_ingest_batch(
+        database_path,
+        idempotency_key='bootstrap-first',
+        batch=IngestBatch.parse_obj(first),
+    )
+    connection = connect_database(database_path)
+    try:
+        first_rating_count = int(
+            connection.execute('SELECT COUNT(*) FROM rating_events').fetchone()[0]
+        )
+    finally:
+        connection.close()
+
+    final = cache_batch(source_revision=8)
+    final['matches'][0]['id'] = 2
+    final['sourceLastMatchId'] = 2
+    final_result = apply_ingest_batch(
+        database_path,
+        idempotency_key='bootstrap-final',
+        batch=IngestBatch.parse_obj(final),
+    )
+    connection = connect_database(database_path)
+    try:
+        rated_match_ids = {
+            int(row[0])
+            for row in connection.execute(
+                'SELECT DISTINCT match_id FROM rating_events'
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+    assert first_result['ratingEventCount'] == 0
+    assert first_rating_count == 0
+    assert final_result['ratingEventCount'] > 0
+    assert rated_match_ids == {1, 2}
+
+
 def test_publisher_sync_reaches_the_authenticated_api_ingest_seam(
     tmp_path: Path,
 ) -> None:
@@ -391,6 +437,14 @@ def test_publisher_sync_reaches_the_authenticated_api_ingest_seam(
         cors_origins=('https://vg.luwei.host',),
     )
     source = cache_batch(source_revision=11)
+    original = source['matches'][0]
+    duplicate = json.loads(json.dumps(original))
+    duplicate['id'] = 2
+    duplicate['statsEligible'] = False
+    duplicate['duplicateOfMatchId'] = 1
+    duplicate['duplicateReviewState'] = 'confirmed'
+    source['matches'] = [duplicate, original]
+    source['sourceLastMatchId'] = 2
 
     with TestClient(
         create_app(settings, repository=_StaticRepository())  # type: ignore[arg-type]
@@ -414,6 +468,7 @@ def test_publisher_sync_reaches_the_authenticated_api_ingest_seam(
             state_directory=tmp_path / 'publisher-state',
             post_batch=post_batch,
             source_builder=lambda _connection: source,
+            max_batch_matches=1,
         )
 
     repository = NormalizedDashboardRepository(
@@ -437,4 +492,6 @@ def test_publisher_sync_reaches_the_authenticated_api_ingest_seam(
 
     assert result.synced is True
     assert result.source_revision == 11
-    assert listed['total'] == 1
+    assert listed['total'] == 2
+    assert listed['items'][0]['id'] == 2
+    assert listed['items'][0]['duplicateOfMatchId'] == 1

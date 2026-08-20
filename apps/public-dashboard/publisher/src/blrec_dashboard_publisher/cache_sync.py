@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Union
+from typing import Any, Callable, Dict, Mapping, Sequence, Union
 
 from .snapshot import build_dashboard_cache_source
 from .source_database import connect_source_database, is_postgres
@@ -76,6 +76,32 @@ def _consistent_source(
         raise
     finally:
         connection.close()
+
+
+def _order_match_dependencies(
+    matches: Sequence[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    matches_by_id = {int(match['id']): match for match in matches}
+    ordered: list[Mapping[str, Any]] = []
+    states: Dict[int, str] = {}
+
+    def visit(match_id: int) -> None:
+        state = states.get(match_id)
+        if state == 'complete':
+            return
+        if state == 'visiting':
+            raise DashboardCacheSyncError('排行榜缓存重复对局引用形成循环')
+        states[match_id] = 'visiting'
+        match = matches_by_id[match_id]
+        source_id = match.get('duplicateOfMatchId')
+        if type(source_id) is int and source_id in matches_by_id:
+            visit(source_id)
+        states[match_id] = 'complete'
+        ordered.append(match)
+
+    for match in matches:
+        visit(int(match['id']))
+    return ordered
 
 
 def _send_outboxes(
@@ -183,6 +209,8 @@ def sync_dashboard_cache_once(
         raise DashboardCacheSyncError(
             '排行榜缓存增量超过单批上限，需要在 direct 模式重新引导'
         )
+    if bootstrap:
+        changed_matches = _order_match_dependencies(changed_matches)
     chunks = [
         changed_matches[index : index + max_batch_matches]
         for index in range(0, len(changed_matches), max_batch_matches)
