@@ -1773,6 +1773,19 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
             ('legacy-empty-shell',),
         ).fetchone()
         frame_id = int(source['frame_id'])
+        protected_id = self.frame(901)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=protected_id,
+            source_type='worker',
+            source_id='already-prefilled-source',
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=protected_id,
+            source_type='new_model_prefill',
+            source_id=f'frame:{protected_id}',
+        )
 
         preview = db.migrate_unprefilled_training_review_candidates(
             self.conn, dry_run=True
@@ -1786,6 +1799,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
 
         self.assertEqual(migrated['migrated'], 1)
         self.assertIsNone(db.get_training_review_item(self.conn, frame_id))
+        self.assertIsNotNone(db.get_training_review_item(self.conn, protected_id))
         self.assertEqual(
             self.conn.execute(
                 'SELECT COUNT(*) FROM training_review_sources WHERE frame_id=?',
