@@ -254,6 +254,28 @@ class TestModelPrefill(unittest.TestCase):
         self.assertEqual(partial_context['screen_type'], 'unreadable')
         self.assertFalse(partial_context['complete_detection'])
 
+    def test_hud_slots_do_not_fill_missing_top_avatar_from_kill_feed(self):
+        hud = []
+        for x in (0.30, 0.36, 0.42, 0.56, 0.62):
+            hud.append(
+                {
+                    'class': 'hero_avatar',
+                    'conf': 0.95,
+                    'xywh_norm': [x, 0.04, 0.05, 0.08],
+                }
+            )
+        kill_feed = {
+            'class': 'hero_avatar',
+            'conf': 0.99,
+            'xywh_norm': [0.91, 0.30, 0.05, 0.08],
+        }
+
+        slots = model_prefill._ordered_avatar_slots(
+            hud + [kill_feed], screen_type='gameplay_hud', team_size=3
+        )
+
+        self.assertEqual(slots, [])
+
     def test_hero_prefill_orders_detector_boxes_and_classifies_each_crop(self):
         Image.new('RGB', (1280, 720), (20, 30, 40)).save(self.image)
         boxes = []

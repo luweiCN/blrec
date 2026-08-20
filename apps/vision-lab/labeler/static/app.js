@@ -34,7 +34,6 @@ let candidateReviewStats = {};
 let candidateDraft = null;
 let candidateBoxes = [];
 let candidateDrawStart = null;
-let candidateSyncTimer = null;
 let candidateHeroCatalog = [];
 let candidateHeroCatalogPromise = null;
 let candidateFilterOptionsLoadedScope = '';
@@ -45,7 +44,10 @@ let candidateHeroDraft = new Map();
 let candidateHeroCachedSlots = new Set();
 let candidateHeroDirty = false;
 let candidateHeroLoading = false;
+let candidateHeroPrefillRunning = false;
+let candidateHeroPrefillToken = 0;
 let candidateHeroLoadToken = 0;
+let candidateHeroGeometryRevision = 0;
 let candidateHeroPickerSlot = null;
 let candidateHeroPlayerSlot = null;
 let candidateHeroPlayerStatus = 'pending';
@@ -319,9 +321,15 @@ function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true)
   const historical = candidateSourceScope === 'legacy';
   $('#candidate-page-title').textContent = historical
     ? '历史人工数据' : 'Worker 待复核';
+  $('#candidate-queue-metrics').classList.toggle('hidden', historical);
+  if (!historical) {
+    $('#candidate-worker-total').textContent = '—';
+    $('#candidate-prefill-ready').textContent = '—';
+    $('#candidate-ready-for-review').textContent = '—';
+  }
   $('#candidate-scope-summary').textContent = historical
-    ? '正在读取历史人工数据…' : '正在读取 Worker 候选…';
-  $('#candidate-index-state').classList.toggle('hidden', historical);
+    ? '正在读取历史人工数据…'
+    : '这里只展示已经完成模型预打标、可以直接核对的素材。';
   candidateFilterOptionsLoadedScope = '';
   if (syncNav) {
     $$('.nav-item').forEach((button) => button.classList.remove('active'));
@@ -701,6 +709,7 @@ async function finishCandidateHeroEdit(event, node) {
     else renderCandidateBoxes();
     return;
   }
+  markCandidateHeroGeometryEdited();
   const saveTemplate = candidateHeroLayoutComplete();
   const saved = await persistCandidateHeroLayout(candidateHeroLineup.slots, {
     saveTemplate: saveTemplate,
@@ -1054,6 +1063,7 @@ function closeCandidateHeroPicker() {
 
 function resetCandidateHeroReview() {
   candidateHeroLoadToken += 1;
+  candidateHeroPrefillToken += 1;
   candidateHeroLineup = null;
   candidateHeroDraft = new Map();
   candidateHeroCachedSlots = new Set();
@@ -1061,6 +1071,8 @@ function resetCandidateHeroReview() {
   candidateHeroPlayerStatus = 'pending';
   candidateHeroDirty = false;
   candidateHeroLoading = false;
+  candidateHeroPrefillRunning = false;
+  candidateHeroGeometryRevision = 0;
   candidateHeroDrawMode = false;
   candidateHeroEdit = null;
   closeCandidateHeroPicker();
@@ -1104,6 +1116,11 @@ function candidateHeroLayoutComplete() {
     candidateHeroLineup.team_size &&
     candidateHeroLineup.slots.length === candidateHeroLineup.team_size * 2
   );
+}
+
+function markCandidateHeroGeometryEdited() {
+  candidateHeroGeometryRevision += 1;
+  candidateHeroDirty = true;
 }
 
 function candidateHeroCropCenter(crop) {
@@ -1263,6 +1280,13 @@ function renderCandidateHeroLineup() {
   const review = $('#candidate-hero-review');
   const teams = $('#candidate-hero-teams');
   const tools = $('.candidate-hero-tools');
+  const progress = $('#candidate-hero-progress');
+  const progressText = $('#candidate-hero-progress-text');
+  const busy = candidateHeroLoading || candidateHeroPrefillRunning;
+  progress.classList.toggle('hidden', !busy);
+  progressText.textContent = candidateHeroPrefillRunning
+    ? '正在用模型识别头像位置和英雄…'
+    : '正在读取或保存英雄标注…';
   teams.innerHTML = '';
   const context = candidateHeroContext(currentCandidate());
   if (!context) {
@@ -1604,6 +1628,7 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
     return;
   }
   const token = ++candidateHeroLoadToken;
+  candidateHeroGeometryRevision += 1;
   candidateHeroLoading = true;
   candidateHeroLineup = null;
   candidateHeroDraft = new Map();
@@ -1617,6 +1642,7 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
   $('#candidate-hero-teams').innerHTML = '';
   $('#candidate-hero-status').textContent = '正在读取本图或该主播缓存的英雄框…';
   $('#btn-candidate-save').disabled = true;
+  renderCandidateHeroLineup();
   const entry = prepareCandidateHeroLineup(item, context);
   let queuedJobId = '';
   try {
@@ -1672,6 +1698,9 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
 }
 
 async function refreshCandidateHeroAfterWorker(item, context, entry, token) {
+  const prefillToken = ++candidateHeroPrefillToken;
+  candidateHeroPrefillRunning = true;
+  renderCandidateHeroLineup();
   try {
     const completed = await completeCandidateHeroLineupPrefetch(
       item, context, entry);
@@ -1681,6 +1710,11 @@ async function refreshCandidateHeroAfterWorker(item, context, entry, token) {
     await loadCandidateHeroLineup(item, context);
   } catch (_error) {
     // Worker 暂停或暂时离线时保留人工标注能力，不打断当前图片。
+  } finally {
+    if (prefillToken === candidateHeroPrefillToken) {
+      candidateHeroPrefillRunning = false;
+      renderCandidateHeroLineup();
+    }
   }
 }
 
@@ -1762,7 +1796,8 @@ async function persistCandidateHeroLayout(
     candidateHeroDirty = true;
     const queuedJobId = String((lineup.prefill_job || {}).id || '');
     if (queuedJobId) {
-      refreshCandidateHeroLayoutAfterWorker(item, queuedJobId);
+      refreshCandidateHeroLayoutAfterWorker(
+        item, queuedJobId, candidateHeroGeometryRevision);
     }
     if (lineup.template_saved) {
       $('#candidate-save-state').textContent =
@@ -1780,18 +1815,24 @@ async function persistCandidateHeroLayout(
   }
 }
 
-async function refreshCandidateHeroLayoutAfterWorker(item, jobId) {
+async function refreshCandidateHeroLayoutAfterWorker(
+  item, jobId, geometryRevision) {
+  const prefillToken = ++candidateHeroPrefillToken;
+  candidateHeroPrefillRunning = true;
+  renderCandidateHeroLineup();
   try {
     const finished = await waitForVisionJob(jobId);
     if (!finished || finished.status !== 'succeeded' ||
-        currentCandidate() !== item) return;
+        currentCandidate() !== item ||
+        geometryRevision !== candidateHeroGeometryRevision) return;
     const context = candidateHeroContext(item);
     if (!context) return;
     const query = new URLSearchParams({screen_type: context.screenType});
     if (context.teamSize) query.set('team_size', String(context.teamSize));
     const lineup = await api(
       `/api/training-review/items/${item.frame_id}/hero-lineup?${query}`);
-    if (currentCandidate() !== item || !lineup.applicable) return;
+    if (currentCandidate() !== item || !lineup.applicable ||
+        geometryRevision !== candidateHeroGeometryRevision) return;
     const previousDraft = new Map(candidateHeroDraft);
     candidateHeroLineup = lineup;
     candidateHeroDraft = candidateHeroDraftForLineup(
@@ -1799,6 +1840,11 @@ async function refreshCandidateHeroLayoutAfterWorker(item, jobId) {
     renderCandidateHeroLineup();
   } catch (_error) {
     // Worker 不在线时继续保留人工选择，不把异步错误盖到当前操作上。
+  } finally {
+    if (prefillToken === candidateHeroPrefillToken) {
+      candidateHeroPrefillRunning = false;
+      renderCandidateHeroLineup();
+    }
   }
 }
 
@@ -1815,6 +1861,7 @@ async function addCandidateHeroCircle(crop) {
     candidateHeroLineup.team_size,
   );
   const complete = slots.length === candidateHeroLineup.team_size * 2;
+  markCandidateHeroGeometryEdited();
   const saved = await persistCandidateHeroLayout(slots, {
     recognize: complete,
     saveTemplate: complete,
@@ -1842,6 +1889,7 @@ async function deleteCandidateHeroSlot() {
     candidateHeroPlayerStatus = 'pending';
   }
   closeCandidateHeroPicker();
+  markCandidateHeroGeometryEdited();
   const saved = await persistCandidateHeroLayout(slots);
   if (saved) candidateHeroDrawMode = true;
   renderCandidateHeroLineup();
@@ -1854,6 +1902,7 @@ async function clearCandidateHeroLayout() {
   candidateHeroPlayerSlot = null;
   candidateHeroPlayerStatus = 'pending';
   closeCandidateHeroPicker();
+  markCandidateHeroGeometryEdited();
   const saved = await persistCandidateHeroLayout([]);
   if (saved) candidateHeroDrawMode = true;
   renderCandidateHeroLineup();
@@ -2376,10 +2425,14 @@ async function loadCandidateReviewStats(status, sourceScope) {
     if (screenType) query.set('hero_screen_type', screenType);
   }
   try {
-    const data = await api(`/api/training-review/stats?${query}`);
+    const data = sourceScope === 'new'
+      ? await api(`/api/training-review/queue-summary?${query}`)
+      : await api(`/api/training-review/stats?${query}`);
     if (sourceScope !== candidateSourceScope ||
         status !== $('#candidate-status-filter').value) return;
-    candidateReviewStats = data.stats || {};
+    candidateReviewStats = sourceScope === 'new'
+      ? {...candidateReviewStats, queue_summary: data.summary || {}}
+      : data.stats || {};
     renderCandidateLegacyControls(candidateReviewStats, status);
     renderCandidateSyncStats(candidateReviewStats);
     renderCandidateMaterialSuggestionButton();
@@ -2642,7 +2695,7 @@ async function loadCandidateFilterOptions() {
         '英雄头像暂时加载失败，不影响其他筛选。';
     }
   } catch (error) {
-    $('#candidate-index-state').textContent = '筛选项加载失败：' + error.message;
+    $('#candidate-scope-summary').textContent = '筛选项加载失败：' + error.message;
   }
 }
 
@@ -2704,29 +2757,29 @@ function renderCandidateProgress() {
 
 function renderCandidateSyncStats(stats) {
   const scopes = stats.source_scopes || {};
-  const fresh = scopes.new || {};
   const legacy = scopes.legacy || {};
-  const freshStatuses = fresh.statuses || {};
-  const scope = candidateSourceScope === 'legacy' ? legacy : fresh;
   if (candidateSourceScope === 'legacy') {
     const hero = stats.legacy_hero || {};
     $('#candidate-scope-summary').textContent =
-      `共 ${scope.total || 0} 张旧图 · 迁移待人工复核 ` +
-      `${scope.migration_pending_review || 0} · 新流程人工已确认 ` +
-      `${scope.human_confirmed || 0} · 旧标签不完整 ${scope.needs_review || 0} · ` +
-      `可复核 ${scope.prefill_ready || 0} · ` +
-      `后台待预标 ${scope.prefill_waiting || 0} · ` +
-      `预标失败 ${scope.prefill_failed || 0} · ` +
+      `共 ${legacy.total || 0} 张旧图 · 迁移待人工复核 ` +
+      `${legacy.migration_pending_review || 0} · 新流程人工已确认 ` +
+      `${legacy.human_confirmed || 0} · 旧标签不完整 ${legacy.needs_review || 0} · ` +
+      `可复核 ${legacy.prefill_ready || 0} · ` +
+      `后台待预标 ${legacy.prefill_waiting || 0} · ` +
+      `预标失败 ${legacy.prefill_failed || 0} · ` +
       `头像待补 ${hero.remaining_groups || 0} 组`;
     return;
   }
+  const queue = stats.queue_summary || {};
+  $('#candidate-worker-total').textContent = trainingNumber(queue.total || 0);
+  $('#candidate-prefill-ready').textContent = trainingNumber(
+    queue.prefill_ready || 0);
+  $('#candidate-ready-for-review').textContent = trainingNumber(
+    queue.ready_for_review || 0);
   $('#candidate-scope-summary').textContent =
-    `共 ${scope.total || 0} 张新图 · 待确认 ${scope.needs_review || 0} · ` +
-    `已确认 ${freshStatuses.confirmed || 0} · ` +
-    `待补本人 ${scope.missing_player_hero || 0} · ` +
-    `可复核 ${scope.prefill_ready || 0} · ` +
-    `后台待预标 ${scope.prefill_waiting || 0} · ` +
-    `预标失败 ${scope.prefill_failed || 0} · 待回传 ${stats.dirty || 0}`;
+    `后台待预标 ${trainingNumber(queue.prefill_waiting || 0)} · ` +
+    `预标失败 ${trainingNumber(queue.prefill_failed || 0)}；` +
+    '下方只会出现已经完成预打标的素材。';
 }
 
 function candidateImageUrl(item) {
@@ -2982,6 +3035,7 @@ async function loadCandidateReview() {
   const loadToken = ++candidateReviewLoadToken;
   candidateReviewStats = {};
   renderCandidateMaterialSuggestionButton();
+  void loadCandidateReviewStats(status, sourceScope);
   try {
     const data = await api(candidateReviewQuery(status));
     if (loadToken !== candidateReviewLoadToken ||
@@ -3162,6 +3216,7 @@ async function saveCandidateReview(skip = false) {
     }
     if (nextIndex >= 0) candidateIndex = nextIndex;
     renderCandidateItem();
+    void loadCandidateReviewStats(loadedStatus, candidateLoadedSourceScope);
     if (refillError) {
       showCandidateSaveError('本张已保存，但加载下一批失败：' + refillError.message);
     } else if (candidateStatusIsReviewQueue(loadedStatus) &&
@@ -3215,22 +3270,6 @@ function candidateHeroClickCrop(point) {
   };
 }
 
-async function refreshCandidateIndexState() {
-  try {
-    const value = await api('/api/worker-candidates/state');
-    const sync = value.sync || {};
-    $('#candidate-index-state').textContent = sync.running
-      ? `正在自动发现候选素材：本轮已扫描 ${sync.processed || 0} 张`
-      : sync.error ? `候选素材自动索引失败：${sync.error}`
-      : sync.archive_failed ?
-        `历史结算图失败 ${sync.archive_failed} 张：${sync.archive_last_error || '未知错误'}`
-      : `候选素材自动发现已开启` +
-        (sync.last_completed_at ? ` · 上次 ${sync.last_completed_at}` : '');
-  } catch (error) {
-    $('#candidate-index-state').textContent = '自动索引状态读取失败：' + error.message;
-  }
-}
-
 function bindCandidateReview() {
   const candidateView = $('#view-candidates');
   ['pointerdown', 'input', 'change'].forEach((eventName) => {
@@ -3281,10 +3320,6 @@ function bindCandidateReview() {
     if ($('#candidate-hero-filter').open) ensureCandidateFilterOptions();
   };
   $('#candidate-hero-filter-search').oninput = renderCandidateHeroFilter;
-  refreshCandidateIndexState();
-  if (!candidateSyncTimer) {
-    candidateSyncTimer = setInterval(refreshCandidateIndexState, 30000);
-  }
   $('#btn-candidate-prev').onclick = () => moveCandidate(-1);
   $('#btn-candidate-next').onclick = () => moveCandidate(1);
   $('#btn-candidate-clear-boxes').onclick = () => {

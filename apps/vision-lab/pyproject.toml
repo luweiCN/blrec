@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blrec-vision-lab"
-version = "0.3.25"
+version = "0.3.26"
 description = "Local data collection, labeling, dataset and model training workbench for BLREC"
 readme = "README.md"
 requires-python = ">=3.11"

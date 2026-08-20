@@ -1547,6 +1547,23 @@ def api_training_review_stats(
         conn.close()
 
 
+@app.get('/api/training-review/queue-summary')
+def api_training_review_queue_summary(source_scope: str = 'new') -> Dict[str, Any]:
+    with _training_review_read_guard():
+        conn = _conn()
+        try:
+            try:
+                return {
+                    'summary': db.training_review_queue_summary(
+                        conn, source_scope=source_scope
+                    )
+                }
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        finally:
+            conn.close()
+
+
 @app.get('/api/training-review/material-suggestions')
 def api_training_review_material_suggestions() -> Dict[str, Any]:
     conn = _conn()

@@ -502,10 +502,15 @@
                   class="candidate-material-suggestion-count">读取中</span>
           </button>
         </div>
+        <div id="candidate-queue-metrics" class="candidate-queue-metrics"
+             role="status" aria-live="polite">
+          <span>Worker 候选 <strong id="candidate-worker-total">—</strong></span>
+          <span>模型预打标完成 <strong id="candidate-prefill-ready">—</strong></span>
+          <span>待人工复核 <strong id="candidate-ready-for-review">—</strong></span>
+        </div>
         <div id="candidate-scope-summary" class="candidate-scope-summary muted"
              role="status" aria-live="polite">读取中…</div>
         <div class="toolbar">
-          <span id="candidate-index-state" class="muted">候选素材会自动发现</span>
           <span class="spacer"></span>
           <label>工作队列
             <select id="candidate-status-filter">
@@ -639,6 +644,12 @@
                   </div>
                 </div>
               </section>
+              <div id="candidate-hero-progress"
+                   class="candidate-hero-progress hidden"
+                   role="status" aria-live="polite">
+                <span class="candidate-hero-progress-dot" aria-hidden="true"></span>
+                <span id="candidate-hero-progress-text">正在识别头像位置和英雄…</span>
+              </div>
               <div class="candidate-hero-toolbar-spacer"></div>
               <details class="candidate-hero-help">
                 <summary aria-label="查看英雄阵容标注说明"

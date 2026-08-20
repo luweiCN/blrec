@@ -4853,6 +4853,48 @@ def training_review_prefill_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
+def training_review_queue_summary(
+    conn: sqlite3.Connection, *, source_scope: str = 'new'
+) -> Dict[str, int]:
+    """轻量汇总统一复核队列；不读取来源 JSON 或训练素材分布。"""
+    if source_scope != 'new':
+        raise ValueError('轻量复核统计目前只支持 Worker 新素材')
+    source = conn.execute(
+        "SELECT COUNT(DISTINCT source.frame_id) AS total,"
+        "COUNT(DISTINCT CASE WHEN item.review_status IN ('pending','partial') "
+        'THEN source.frame_id END) AS review_pending '
+        'FROM training_review_sources source '
+        'JOIN training_review_items item ON item.frame_id=source.frame_id '
+        "WHERE source.source_type IN ('worker','result_archive',"
+        "'manual_correction')"
+    ).fetchone()
+    material = conn.execute(
+        'SELECT '
+        "COALESCE(SUM(CASE WHEN prefill_status='ready' THEN 1 ELSE 0 END),0) "
+        'AS prefill_ready,'
+        "COALESCE(SUM(CASE WHEN prefill_status='ready' AND "
+        "review_status IN ('pending','partial') THEN 1 ELSE 0 END),0) "
+        'AS ready_for_review,'
+        "COALESCE(SUM(CASE WHEN prefill_status='failed' THEN 1 ELSE 0 END),0) "
+        'AS prefill_failed,'
+        "COALESCE(SUM(CASE WHEN prefill_status='failed' AND "
+        "review_status IN ('pending','partial') THEN 1 ELSE 0 END),0) "
+        'AS review_failed '
+        'FROM training_review_material_index WHERE is_new=1'
+    ).fetchone()
+    total = int(source['total'] or 0)
+    review_pending = int(source['review_pending'] or 0)
+    ready_for_review = int(material['ready_for_review'] or 0)
+    review_failed = int(material['review_failed'] or 0)
+    return {
+        'total': total,
+        'prefill_ready': int(material['prefill_ready'] or 0),
+        'ready_for_review': ready_for_review,
+        'prefill_waiting': max(0, review_pending - ready_for_review - review_failed),
+        'prefill_failed': int(material['prefill_failed'] or 0),
+    }
+
+
 def _training_review_related_hero_counts(
     conn: sqlite3.Connection,
 ) -> Tuple[Dict[Tuple[str, str, str], Dict[str, int]], Dict[Tuple[str, str], int]]:

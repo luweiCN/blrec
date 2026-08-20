@@ -635,6 +635,26 @@ tr:hover td { background: var(--panel2); }
   text-align: center;
 }
 
+.candidate-queue-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.candidate-queue-metrics span {
+  white-space: nowrap;
+}
+
+.candidate-queue-metrics strong {
+  margin-left: 4px;
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
 .candidate-material-dialog {
   width: min(820px, calc(100vw - 40px));
   max-height: calc(100dvh - 40px);
@@ -1241,6 +1261,34 @@ tr:hover td { background: var(--panel2); }
 
 .candidate-hero-toolbar-spacer {
   flex: 1 1 auto;
+}
+
+.candidate-hero-progress {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  color: #bcd7ff;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.candidate-hero-progress-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #58a6ff;
+  animation: candidate-hero-progress-pulse 900ms ease-in-out infinite alternate;
+}
+
+@keyframes candidate-hero-progress-pulse {
+  from { opacity: .35; transform: scale(.78); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .candidate-hero-progress-dot { animation: none; }
 }
 
 .candidate-hero-help {

@@ -431,6 +431,45 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         assert ready_total == 1
         assert [item['frame_id'] for item in ready_page] == [frame_id]
 
+    def test_queue_summary_counts_only_ready_pending_items_as_reviewable(self) -> None:
+        pending = self.frame(60)
+        ready = self.frame(61)
+        confirmed = self.frame(62)
+        archived = self.frame(63)
+        for frame_id in (pending, ready, confirmed):
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id=f'worker-summary-{frame_id}',
+            )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=archived,
+            source_type='result_archive',
+            source_id='result-summary-63',
+        )
+        for frame_id in (ready, confirmed, archived):
+            db.update_training_review_prefill_state(
+                self.conn, frame_id=frame_id, status='ready', stage='complete'
+            )
+        self.conn.execute(
+            "UPDATE training_review_items SET review_status='confirmed' "
+            'WHERE frame_id=?',
+            (confirmed,),
+        )
+        db.refresh_training_review_material_index(self.conn, confirmed)
+
+        summary = db.training_review_queue_summary(self.conn, source_scope='new')
+
+        assert summary == {
+            'total': 4,
+            'prefill_ready': 3,
+            'ready_for_review': 2,
+            'prefill_waiting': 1,
+            'prefill_failed': 0,
+        }
+
     def test_autonomous_prefill_candidate_keeps_stage_and_retry_state(self) -> None:
         first = self.frame(51)
         second = self.frame(52)

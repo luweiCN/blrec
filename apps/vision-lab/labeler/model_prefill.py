@@ -409,9 +409,26 @@ def _ordered_avatar_slots(
     expected = team_size * 2
     usable = _usable_avatar_detections(detections)
     if screen_type == 'gameplay_hud':
-        top = [value for value in usable if value['center_y'] <= 0.22]
-        if len(top) >= expected:
-            usable = top
+        rows = []
+        for anchor in usable:
+            tolerance = max(0.035, min(0.09, anchor['crop']['h'] * 1.25))
+            row = [
+                value
+                for value in usable
+                if abs(value['center_y'] - anchor['center_y']) <= tolerance
+            ]
+            rows.append(row)
+        if rows:
+            usable = max(
+                rows,
+                key=lambda row: (
+                    len(row),
+                    sum(value['confidence'] for value in row),
+                    -sum(value['center_y'] for value in row) / len(row),
+                ),
+            )
+        if len(usable) < expected:
+            return []
     elif screen_type in {'scoreboard', 'result_page'}:
         panel = [value for value in usable if value['center_y'] >= 0.10]
         if len(panel) >= expected:

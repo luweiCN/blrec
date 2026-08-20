@@ -41,6 +41,9 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'candidate-hero-filter-options' in html
     assert 'btn-candidate-material-suggestions' in html
     assert 'candidate-material-dialog' in html
+    assert 'candidate-worker-total' in html
+    assert 'candidate-prefill-ready' in html
+    assert 'candidate-ready-for-review' in html
 
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
@@ -49,7 +52,7 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'const CANDIDATE_REFILL_LOW_WATER = CANDIDATE_READY_TARGET;' in script
     assert 'limit: String(CANDIDATE_PAGE_SIZE)' in script
     assert "include_stats: 'false'" in script
-    assert '/api/training-review/stats?' in script
+    assert '/api/training-review/queue-summary?' in script
     control_plane_branch = script.index('if (CFG.control_plane_only)')
     assert control_plane_branch < script.index('loadStats();')
     review_loader = script[
@@ -57,7 +60,7 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
             'async function refillCandidateReviewQueue'
         )
     ]
-    assert 'loadCandidateReviewStats(' not in review_loader
+    assert 'void loadCandidateReviewStats(status, sourceScope);' in review_loader
     material_loader = script[
         script.index(
             'async function openCandidateMaterialSuggestions()'
@@ -102,7 +105,29 @@ def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
     assert 'loadToken !== candidateReviewLoadToken' in warmer
     assert 'await image.decode();' in script
     assert 'candidateImagePrefetches.get(frameId)' in script
-    assert 'setInterval(refreshCandidateIndexState, 30000)' in script
+    assert "api('/api/worker-candidates/state')" not in script
+    assert 'setInterval(refreshCandidateIndexState, 30000)' not in script
+
+
+def test_candidate_hud_prefill_shows_progress_and_preserves_manual_edits() -> None:
+    root = Path(__file__).resolve().parent.parent / 'labeler/static'
+    html = (root / 'index.html').read_text(encoding='utf-8')
+    script = (root / 'app.js').read_text(encoding='utf-8')
+
+    progress = html.index('id="candidate-hero-progress"')
+    collapsed_help = html.index('<details class="candidate-hero-help">')
+    assert progress < collapsed_help
+    assert 'role="status" aria-live="polite"' in html[progress : progress + 300]
+    assert 'let candidateHeroGeometryRevision = 0;' in script
+    assert 'let candidateHeroPrefillRunning = false;' in script
+    refresh = script[
+        script.index(
+            'async function refreshCandidateHeroLayoutAfterWorker('
+        ) : script.index('async function addCandidateHeroCircle(')
+    ]
+    assert 'geometryRevision !== candidateHeroGeometryRevision' in refresh
+    assert 'candidateHeroPrefillRunning = true;' in script
+    assert 'candidateHeroPrefillRunning = false;' in script
 
 
 def test_worker_claim_autonomously_runs_core_then_hero_before_review(
@@ -539,6 +564,32 @@ def test_worker_candidate_state_coalesces_repeated_database_reads(monkeypatch) -
     connect.assert_called_once()
     published.assert_called_once()
     full_stats.assert_not_called()
+
+
+def test_review_queue_summary_never_runs_full_training_stats(monkeypatch) -> None:
+    connection = mock.Mock()
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    queue_summary = mock.Mock(
+        return_value={
+            'total': 40_000,
+            'prefill_ready': 100,
+            'ready_for_review': 37,
+            'prefill_waiting': 39_900,
+            'prefill_failed': 0,
+        }
+    )
+    monkeypatch.setattr(server.db, 'training_review_queue_summary', queue_summary)
+    monkeypatch.setattr(
+        server,
+        '_cached_training_review_stats',
+        mock.Mock(side_effect=AssertionError('轻量汇总不得运行全量训练统计')),
+    )
+
+    response = server.api_training_review_queue_summary()
+
+    assert response['summary']['ready_for_review'] == 37
+    queue_summary.assert_called_once_with(connection, source_scope='new')
+    connection.close.assert_called_once()
 
 
 def test_saving_one_review_updates_queue_without_immediate_full_refresh(
