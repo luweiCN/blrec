@@ -92,15 +92,17 @@ def apply_asset_batch(
 
 
 def get_match_assets(
-    database_target: DatabaseTarget, match_ids: Iterable[int]
+    database_target: DatabaseTarget, match_ids: Iterable[int], *, connection: Any = None
 ) -> Mapping[int, Mapping[str, Any]]:
     values = tuple(sorted(set(match_ids)))
     if not values:
         return {}
     placeholders = ','.join('?' for _ in values)
-    connection = connect_database(database_target)
+    active_connection = (
+        connection if connection is not None else connect_database(database_target)
+    )
     try:
-        rows = connection.execute(
+        rows = active_connection.execute(
             'SELECT source_match_id,image_url,image_width,image_height '
             'FROM match_assets WHERE source_match_id IN (' + placeholders + ')',
             values,
@@ -114,4 +116,5 @@ def get_match_assets(
             for row in rows
         }
     finally:
-        connection.close()
+        if connection is None:
+            active_connection.close()

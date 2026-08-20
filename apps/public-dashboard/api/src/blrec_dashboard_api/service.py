@@ -897,7 +897,7 @@ def _rows_matches(
 
     values: List[Dict[str, Any]] = []
     replay_candidates: Dict[int, Mapping[str, Any]] = {}
-    assets = get_match_assets(database_target, match_ids)
+    assets = get_match_assets(database_target, match_ids, connection=connection)
     for row in rows:
         match_id = int(row['source_match_id'])
         player_id = int(row['player_id'])

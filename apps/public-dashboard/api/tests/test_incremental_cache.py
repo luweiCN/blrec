@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 import pytest
+from blrec_dashboard_api import normalized_repository as normalized_repository_module
 from blrec_dashboard_api import service as service_module
 from blrec_dashboard_api.app import create_app
 from blrec_dashboard_api.database import connect_database, initialize_database
@@ -240,6 +241,31 @@ def test_normalized_repository_keeps_private_players_and_replays_owner_only(
     assert owner['total'] == 1
     assert owner['items'][0]['replayStatus'] == 'available'
     assert owner['items'][0]['replay']['kind'] == 'match'
+
+
+def test_normalized_repository_skips_payload_reload_when_head_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database_path = tmp_path / 'dashboard.sqlite3'
+    initialize_database(database_path)
+    apply_ingest_batch(
+        database_path,
+        idempotency_key='cache-7',
+        batch=IngestBatch.parse_obj(cache_batch(source_revision=7)),
+    )
+    repository = NormalizedDashboardRepository(
+        source_target=tmp_path / 'unused.sqlite3', auxiliary_target=database_path
+    )
+    repository.refresh(force=True)
+
+    def unexpected_payload_reload(_target: object) -> object:
+        raise AssertionError('unchanged dashboard head reloaded audience payloads')
+
+    monkeypatch.setattr(
+        normalized_repository_module, '_load_state', unexpected_payload_reload
+    )
+
+    assert repository.refresh() is False
 
 
 def test_incremental_endpoint_authenticates_and_refreshes_the_active_repository(

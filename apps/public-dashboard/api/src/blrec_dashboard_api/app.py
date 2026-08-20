@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .assets import IdempotencyConflict, apply_asset_batch
 from .dashboard_cache import PostgresDashboardRepository
-from .database import database_session, initialize_database
+from .database import database_session, initialize_database, is_postgres
 from .direct import DirectDashboardRepository
 from .models import (
     AssetBatch,
@@ -270,6 +270,16 @@ def create_app(
     def health() -> Dict[str, str]:
         with database_session(auxiliary_target) as connection:
             connection.execute('SELECT 1').fetchone()
+            if (
+                active_settings.repository_mode == 'incremental'
+                and is_postgres(auxiliary_target)
+                and not active_settings.source_database_url
+            ):
+                connection.execute(
+                    'SELECT revision FROM core.dashboard_source_state '
+                    'WHERE singleton_id=1'
+                ).fetchone()
+                return {'status': 'ok'}
         with database_session(active_settings.source_database_target) as connection:
             connection.execute(
                 'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'

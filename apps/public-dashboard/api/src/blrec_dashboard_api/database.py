@@ -13,6 +13,7 @@ LATEST_SCHEMA_VERSION = 10
 DatabaseTarget = Union[Path, str]
 _POSTGRES_POOLS: dict[str, Any] = {}
 _POSTGRES_POOLS_LOCK = Lock()
+_POSTGRES_POOL_SIZE = 4
 
 
 class DatabaseRow(Mapping[str, Any]):
@@ -114,11 +115,15 @@ def _postgres_pool(database_url: str) -> Any:
         if pool is None:
             from psycopg_pool import ConnectionPool
 
+            def configure(connection: Any) -> None:
+                connection.execute('SELECT 1').fetchone()
+
             pool = ConnectionPool(
                 database_url,
-                min_size=1,
-                max_size=8,
+                min_size=_POSTGRES_POOL_SIZE,
+                max_size=_POSTGRES_POOL_SIZE,
                 kwargs={'autocommit': True, 'row_factory': _postgres_row_factory},
+                configure=configure,
                 check=ConnectionPool.check_connection,
                 open=True,
             )

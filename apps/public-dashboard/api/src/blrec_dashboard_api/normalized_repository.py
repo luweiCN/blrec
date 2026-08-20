@@ -23,6 +23,27 @@ class _RepositoryState:
     owner: _AudienceState
 
 
+def _load_published_revision(database_target: DatabaseTarget) -> int:
+    connection = connect_database(database_target)
+    try:
+        row = connection.execute(
+            'SELECT COUNT(*),MIN(source_revision),MAX(source_revision) '
+            'FROM dashboard_audience_state '
+            "WHERE audience IN ('public','owner')"
+        ).fetchone()
+    finally:
+        connection.close()
+    if (
+        row is None
+        or int(row[0]) != 2
+        or row[1] is None
+        or row[2] is None
+        or int(row[1]) != int(row[2])
+    ):
+        raise RuntimeError('dashboard incremental cache has no complete publication')
+    return int(row[1])
+
+
 def _load_state(database_target: DatabaseTarget) -> _RepositoryState:
     connection = connect_database(database_target)
     try:
@@ -66,16 +87,17 @@ class NormalizedDashboardRepository:
 
     def refresh(self, *, force: bool = False) -> bool:
         with self._refresh_lock:
-            next_state = _load_state(self._auxiliary_target)
             with self._state_lock:
                 previous = self._state
-                if (
-                    not force
-                    and previous is not None
-                    and previous.public.source_revision
-                    == next_state.public.source_revision
-                ):
-                    return False
+            if (
+                not force
+                and previous is not None
+                and previous.public.source_revision
+                == _load_published_revision(self._auxiliary_target)
+            ):
+                return False
+            next_state = _load_state(self._auxiliary_target)
+            with self._state_lock:
                 self._state = next_state
             return (
                 previous is None
