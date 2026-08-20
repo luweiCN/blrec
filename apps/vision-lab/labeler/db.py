@@ -4594,6 +4594,7 @@ def rebuild_training_review_material_index(
         "UPDATE training_review_material_index SET linked_match_id=NULL,"
         "match_link_source=''"
     )
+    conn.commit()
     frame_ids = [
         int(row['frame_id'])
         for row in conn.execute(
@@ -4627,7 +4628,7 @@ def rebuild_training_review_material_index(
             indexed += int(
                 refresh_training_review_material_index(conn, frame_id, commit=False)
             )
-        conn.commit()
+            conn.commit()
         if progress is not None:
             progress(
                 {
@@ -4650,27 +4651,36 @@ def rebuild_training_review_material_index(
         grouped_frame_ids.add(int(frame_id))
     affected_groups = sorted(previously_grouped | grouped_frame_ids)
     if affected_groups:
-        conn.executemany(
-            'UPDATE training_review_material_index SET '
-            'result_group_representative_frame_id=frame_id,result_group_size=1 '
-            'WHERE frame_id=?',
-            [(frame_id,) for frame_id in affected_groups],
-        )
-        conn.executemany(
-            'UPDATE training_review_material_index SET '
-            'result_group_representative_frame_id=?,result_group_size=? '
-            'WHERE frame_id=?',
-            [
-                (
-                    int(
-                        result_groups[frame_id]['result_group_representative_frame_id']
-                    ),
-                    int(result_groups[frame_id]['result_group_size']),
-                    frame_id,
-                )
-                for frame_id in sorted(grouped_frame_ids)
-            ],
-        )
+        for offset in range(0, len(affected_groups), batch_size):
+            batch = affected_groups[offset : offset + batch_size]
+            conn.executemany(
+                'UPDATE training_review_material_index SET '
+                'result_group_representative_frame_id=frame_id,result_group_size=1 '
+                'WHERE frame_id=?',
+                [(frame_id,) for frame_id in batch],
+            )
+            conn.commit()
+        ordered_grouped = sorted(grouped_frame_ids)
+        for offset in range(0, len(ordered_grouped), batch_size):
+            batch = ordered_grouped[offset : offset + batch_size]
+            conn.executemany(
+                'UPDATE training_review_material_index SET '
+                'result_group_representative_frame_id=?,result_group_size=? '
+                'WHERE frame_id=?',
+                [
+                    (
+                        int(
+                            result_groups[frame_id][
+                                'result_group_representative_frame_id'
+                            ]
+                        ),
+                        int(result_groups[frame_id]['result_group_size']),
+                        frame_id,
+                    )
+                    for frame_id in batch
+                ],
+            )
+            conn.commit()
         for frame_id in affected_groups:
             indexed_row = conn.execute(
                 'SELECT * FROM training_review_material_index WHERE frame_id=?',
@@ -4683,7 +4693,7 @@ def rebuild_training_review_material_index(
                 frame_id,
                 _training_review_material_contributions(conn, indexed_row),
             )
-        conn.commit()
+            conn.commit()
     conn.execute('DELETE FROM training_review_material_totals')
     conn.execute(
         'INSERT INTO training_review_material_totals('
