@@ -3172,24 +3172,14 @@ async function saveCandidateReview(skip = false) {
   }
   $('#candidate-save-state').textContent = '正在保存…';
   try {
-    if (heroLabels && (
+    const heroLineupPayload = heroLabels && (
       candidateHeroDirty || candidateHeroLineup.review_status !== 'confirmed'
-    )) {
-      candidateHeroLineup = await api(
-        `/api/training-review/items/${item.frame_id}/hero-lineup`, {
-          method: 'PUT',
-          body: JSON.stringify({
-            heroes: heroLabels,
-            player_status: candidateHeroPlayerStatus,
-            player_side: playerPosition && playerPosition.side,
-            player_slot: playerPosition && playerPosition.slot,
-          }),
-        });
-      candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(
-        candidateHeroLineup);
-      candidateHeroPlayerSlot = candidateHeroPlayerKey(candidateHeroLineup);
-      candidateHeroDirty = false;
-    }
+    ) ? {
+      heroes: heroLabels,
+      player_status: candidateHeroPlayerStatus,
+      player_side: playerPosition && playerPosition.side,
+      player_slot: playerPosition && playerPosition.slot,
+    } : null;
     const labels = skip ? {
       match_flow_label: null, match_mode_label: null,
       hero_select_label: null, hero_select_variant: null,
@@ -3204,9 +3194,17 @@ async function saveCandidateReview(skip = false) {
         review_status: skip ? 'skipped' : 'confirmed',
         result_box: !skip && candidateDraft.result_panel_label === 'result_panel'
           ? candidateBoxes[0] : null,
+        hero_lineup: heroLineupPayload,
         notes: $('#candidate-notes').value,
       }),
     });
+    if (saved.hero_lineup) {
+      candidateHeroLineup = saved.hero_lineup;
+      candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(
+        candidateHeroLineup);
+      candidateHeroPlayerSlot = candidateHeroPlayerKey(candidateHeroLineup);
+      candidateHeroDirty = false;
+    }
     const updated = {...item, ...saved};
     if (!skip) {
       cacheCandidateReviewLabels(candidateDraft);

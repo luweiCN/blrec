@@ -179,6 +179,60 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         assert after_5v5['candidate_count'] == 0
         assert after_3v3['confirmed_count'] == 1
 
+    def test_material_suggestions_include_unindexed_confirmed_truth(self) -> None:
+        frame_id = self.frame(201)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='legacy_annotation',
+            source_id='legacy-confirmed-5v5-result',
+        )
+        db.save_box(self.conn, frame_id, 'result_panel', 0.1, 0.2, 0.8, 0.7)
+        db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='5v5',
+            hero_select_label='not_select',
+            result_panel_label='result_panel',
+            hero_layout_label=None,
+            status='confirmed',
+            result_groups={},
+        )
+        db._replace_training_review_material_contributions(self.conn, frame_id, {})
+        self.conn.execute(
+            'DELETE FROM training_review_material_index WHERE frame_id=?', (frame_id,)
+        )
+        self.conn.commit()
+
+        suggestion = next(
+            value
+            for value in db.training_review_material_suggestions(self.conn)
+            if value['kind'] == 'scene_mode'
+            and value['scene'] == 'result_page'
+            and value['match_mode'] == '5v5'
+        )
+
+        assert suggestion['confirmed_count'] == 1
+
+    def test_material_contribution_delta_does_not_select_every_total_row(self) -> None:
+        frame_id = self.frame(202)
+        key = ('scene_mode', 'gameplay_hud', '3v3', '', 'all', 'confirmed')
+        statements = []
+        self.conn.set_trace_callback(statements.append)
+        try:
+            db._replace_training_review_material_contributions(
+                self.conn, frame_id, {key: (1, 0)}
+            )
+        finally:
+            self.conn.set_trace_callback(None)
+
+        assert not any(
+            'SELECT frame_count,crop_count FROM training_review_material_totals'
+            in statement
+            for statement in statements
+        )
+
     def test_hero_confirmation_updates_hero_scene_totals(self) -> None:
         frame_id = self.frame(3)
         db.add_training_review_source(
@@ -969,4 +1023,4 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         finally:
             self.conn.set_trace_callback(None)
 
-        assert len(statements) == 4
+        assert len(statements) == 6

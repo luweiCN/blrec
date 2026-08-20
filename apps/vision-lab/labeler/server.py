@@ -2437,6 +2437,18 @@ def api_save_training_review_item(
     status = str(body.get('review_status') or 'confirmed')
     result_label = body.get('result_panel_label')
     result_box = _training_review_box(body.get('result_box'))
+    hero_lineup_body = body.get('hero_lineup')
+    if hero_lineup_body is not None and not isinstance(hero_lineup_body, dict):
+        raise HTTPException(400, '英雄阵容必须是对象')
+    allowed_heroes: Optional[set[str]] = None
+    if hero_lineup_body is not None:
+        labels = hero_lineup_body.get('heroes')
+        if not isinstance(labels, list):
+            raise HTTPException(400, '英雄阵容必须是列表')
+        try:
+            allowed_heroes = hero_review.allowed_hero_labels()
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
     with _db_lock:
         conn = _conn()
         try:
@@ -2462,8 +2474,22 @@ def api_save_training_review_item(
                         result_box['y'],
                         result_box['w'],
                         result_box['h'],
+                        commit=False,
                     )
             try:
+                saved_lineup = None
+                if hero_lineup_body is not None:
+                    saved_lineup = db.save_training_review_hero_lineup(
+                        conn,
+                        frame_id=frame_id,
+                        labels=hero_lineup_body['heroes'],
+                        allowed_labels=allowed_heroes or set(),
+                        player_status=hero_lineup_body.get('player_status'),
+                        player_side=hero_lineup_body.get('player_side'),
+                        player_slot=hero_lineup_body.get('player_slot'),
+                        refresh_material_index=False,
+                        commit=False,
+                    )
                 saved = db.save_training_review(
                     conn,
                     frame_id=frame_id,
@@ -2482,7 +2508,10 @@ def api_save_training_review_item(
                     notes=str(body.get('notes') or ''),
                     result_groups={},
                     hydrate=False,
+                    commit=True,
                 )
+                if saved_lineup is not None:
+                    saved['hero_lineup'] = _hero_lineup_payload(saved_lineup)
                 _mark_training_review_saved(frame_id)
                 return saved
             except KeyError as exc:

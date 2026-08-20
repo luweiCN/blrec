@@ -1284,13 +1284,15 @@ def audit(
     frame_id: int = None,
     event_id: int = None,
     detail: str = '',
+    commit: bool = True,
 ) -> None:
     conn.execute(
         'INSERT INTO audit_log (frame_id, event_id, action, detail, created_at) '
         'VALUES (?, ?, ?, ?, ?)',
         (frame_id, event_id, action, detail, now()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # ---------- 视频 ----------
@@ -1666,6 +1668,8 @@ def save_box(
     y: float,
     w: float,
     h: float,
+    *,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -1692,14 +1696,18 @@ def save_box(
             """,
             (row['streamer'], box_type, x, y, w, h, now()),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def delete_box(conn: sqlite3.Connection, frame_id: int, box_type: str) -> None:
+def delete_box(
+    conn: sqlite3.Connection, frame_id: int, box_type: str, *, commit: bool = True
+) -> None:
     conn.execute(
         'DELETE FROM boxes WHERE frame_id = ? AND box_type = ?', (frame_id, box_type)
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_boxes(conn: sqlite3.Connection, frame_id: int) -> Dict[str, Dict[str, float]]:
@@ -4347,37 +4355,46 @@ def _replace_training_review_material_contributions(
         for row in old_rows
     }
     timestamp = now()
+    deltas = []
     for key in set(old) | set(values):
         old_frame_count, old_crop_count = old.get(key, (0, 0))
         new_frame_count, new_crop_count = values.get(key, (0, 0))
-        total = conn.execute(
-            'SELECT frame_count,crop_count FROM training_review_material_totals '
+        frame_delta = new_frame_count - old_frame_count
+        crop_delta = new_crop_count - old_crop_count
+        if frame_delta or crop_delta:
+            deltas.append((*key, frame_delta, crop_delta, timestamp))
+    if deltas:
+        insertable = [
+            (*row[:6], 0, 0, row[8])
+            for row in deltas
+            if int(row[6]) >= 0 and int(row[7]) >= 0
+        ]
+        if insertable:
+            conn.executemany(
+                'INSERT INTO training_review_material_totals('
+                'kind,scene,match_mode,hero_label,source_scope,metric,'
+                'frame_count,crop_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?) '
+                'ON CONFLICT(kind,scene,match_mode,hero_label,source_scope,metric) '
+                'DO NOTHING',
+                insertable,
+            )
+        updated = conn.executemany(
+            'UPDATE training_review_material_totals SET '
+            'frame_count=frame_count+?,crop_count=crop_count+?,updated_at=? '
             'WHERE kind=? AND scene=? AND match_mode=? AND hero_label=? '
             'AND source_scope=? AND metric=?',
-            key,
-        ).fetchone()
-        current_frame_count = 0 if total is None else int(total['frame_count'])
-        current_crop_count = 0 if total is None else int(total['crop_count'])
-        next_frame_count = current_frame_count - old_frame_count + new_frame_count
-        next_crop_count = current_crop_count - old_crop_count + new_crop_count
-        if next_frame_count < 0 or next_crop_count < 0:
+            [(row[6], row[7], row[8], *row[:6]) for row in deltas],
+        )
+        if updated.rowcount != len(deltas):
+            raise RuntimeError('训练素材增量统计缺少原始记录')
+        if conn.execute(
+            'SELECT 1 FROM training_review_material_totals '
+            'WHERE frame_count<0 OR crop_count<0 LIMIT 1'
+        ).fetchone():
             raise RuntimeError('训练素材增量统计出现负数')
-        if next_frame_count == 0 and next_crop_count == 0:
-            conn.execute(
-                'DELETE FROM training_review_material_totals '
-                'WHERE kind=? AND scene=? AND match_mode=? AND hero_label=? '
-                'AND source_scope=? AND metric=?',
-                key,
-            )
-            continue
         conn.execute(
-            'INSERT INTO training_review_material_totals('
-            'kind,scene,match_mode,hero_label,source_scope,metric,'
-            'frame_count,crop_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?) '
-            'ON CONFLICT(kind,scene,match_mode,hero_label,source_scope,metric) '
-            'DO UPDATE SET frame_count=excluded.frame_count,'
-            'crop_count=excluded.crop_count,updated_at=excluded.updated_at',
-            (*key, next_frame_count, next_crop_count, timestamp),
+            'DELETE FROM training_review_material_totals '
+            'WHERE frame_count=0 AND crop_count=0'
         )
     conn.execute(
         'DELETE FROM training_review_material_contributions WHERE frame_id=?',
@@ -5030,6 +5047,59 @@ def training_review_material_suggestions(
         ).fetchall()
     }
 
+    confirmed_scene_rows = conn.execute(
+        """
+        SELECT scene,match_mode,COUNT(*) AS frame_count FROM (
+            SELECT
+                CASE
+                    WHEN hero_select_label LIKE 'select_%' THEN 'hero_select'
+                    WHEN hero_layout_label IN
+                         ('gameplay_hud','scoreboard','result_page')
+                    THEN hero_layout_label
+                    WHEN result_panel_label='result_panel' THEN 'result_page'
+                    ELSE ''
+                END AS scene,
+                CASE
+                    WHEN match_mode_label IN ('3v3','aram','5v5')
+                    THEN match_mode_label
+                    WHEN hero_select_label='select_3v3' THEN '3v3'
+                    WHEN hero_select_label='select_aram' THEN 'aram'
+                    WHEN hero_select_label='select_5v5' THEN '5v5'
+                    ELSE ''
+                END AS match_mode
+            FROM training_review_items
+            WHERE review_status='confirmed'
+        ) truth
+        WHERE scene IN ('gameplay_hud','scoreboard','result_page','hero_select')
+          AND match_mode IN ('3v3','aram','5v5')
+        GROUP BY scene,match_mode
+        """
+    ).fetchall()
+    confirmed_scenes = {
+        (str(row['scene']), str(row['match_mode'])): int(row['frame_count'])
+        for row in confirmed_scene_rows
+    }
+    confirmed_hero_rows = conn.execute(
+        """
+        SELECT lineup.screen_type AS scene,slot.confirmed_label AS hero_label,
+               COUNT(DISTINCT lineup.frame_id) AS frame_count,
+               COUNT(*) AS crop_count
+        FROM training_review_hero_lineups lineup
+        JOIN training_review_hero_slots slot ON slot.frame_id=lineup.frame_id
+        WHERE lineup.review_status='confirmed'
+          AND lineup.screen_type IN ('gameplay_hud','scoreboard','result_page')
+          AND COALESCE(slot.confirmed_label,'') NOT IN ('','unreadable')
+        GROUP BY lineup.screen_type,slot.confirmed_label
+        """
+    ).fetchall()
+    confirmed_heroes = {
+        (str(row['scene']), str(row['hero_label'])): (
+            int(row['frame_count']),
+            int(row['crop_count']),
+        )
+        for row in confirmed_hero_rows
+    }
+
     def total(
         kind: str,
         scene: str,
@@ -5038,6 +5108,11 @@ def training_review_material_suggestions(
         source_scope: str,
         metric: str,
     ) -> Tuple[int, int]:
+        if source_scope == 'all' and metric == 'confirmed':
+            if kind == 'scene_mode':
+                return confirmed_scenes.get((scene, match_mode), 0), 0
+            if kind == 'hero_scene':
+                return confirmed_heroes.get((scene, hero_label), (0, 0))
         return totals.get(
             (kind, scene, match_mode, hero_label, source_scope, metric), (0, 0)
         )
@@ -5095,6 +5170,8 @@ def training_review_material_suggestions(
     for key in totals:
         if key[0] == 'hero_scene' and key[3]:
             catalog_by_label.setdefault(key[3], key[3])
+    for _scene, hero_label in confirmed_heroes:
+        catalog_by_label.setdefault(hero_label, hero_label)
     for hero_label, hero_name in sorted(
         catalog_by_label.items(), key=lambda item: (item[1], item[0])
     ):
@@ -6879,6 +6956,7 @@ def save_training_review(
     notes: str = '',
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
     hydrate: bool = True,
+    commit: bool = True,
 ) -> Dict[str, Any]:
     labels = {
         'match_flow': match_flow_label,
@@ -6997,7 +7075,7 @@ def save_training_review(
             ):
                 raise ValueError('请先画满并确认全部英雄头像')
     if status != 'skipped' and result_panel_label != 'result_panel':
-        delete_box(conn, int(frame_id), 'result_panel')
+        delete_box(conn, int(frame_id), 'result_panel', commit=False)
     timestamp = now()
     conn.execute(
         """
@@ -7073,8 +7151,11 @@ def save_training_review(
             separators=(',', ':'),
             sort_keys=True,
         ),
+        commit=False,
     )
-    refresh_training_review_material_index(conn, int(frame_id))
+    refresh_training_review_material_index(conn, int(frame_id), commit=False)
+    if commit:
+        conn.commit()
     if not hydrate:
         return {
             'frame_id': int(frame_id),
@@ -7571,6 +7652,8 @@ def save_training_review_hero_lineup(
     player_status: Optional[str] = None,
     player_side: Optional[str] = None,
     player_slot: Optional[int] = None,
+    refresh_material_index: bool = True,
+    commit: bool = True,
 ) -> Dict[str, Any]:
     lineup = get_training_review_hero_lineup(conn, int(frame_id))
     if lineup is None:
@@ -7660,8 +7743,12 @@ def save_training_review_hero_lineup(
             separators=(',', ':'),
             sort_keys=True,
         ),
+        commit=False,
     )
-    refresh_training_review_material_index(conn, int(frame_id))
+    if refresh_material_index:
+        refresh_training_review_material_index(conn, int(frame_id), commit=False)
+    if commit:
+        conn.commit()
     labels_by_position = {(side, slot): label for label, side, slot in normalized}
     for slot in lineup['slots']:
         slot['confirmed_label'] = labels_by_position[

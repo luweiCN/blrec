@@ -677,6 +677,63 @@ def test_review_save_returns_lightweight_ack(monkeypatch) -> None:
     mark_saved.assert_called_once_with(7)
 
 
+def test_review_save_bundles_dirty_hero_lineup_into_one_transaction(
+    monkeypatch,
+) -> None:
+    connection = mock.Mock()
+    connection.execute.return_value.fetchone.return_value = (1,)
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(
+        server.hero_review, 'allowed_hero_labels', mock.Mock(return_value={'Adagio'})
+    )
+    lineup = {
+        'frame_id': 7,
+        'screen_type': 'gameplay_hud',
+        'review_status': 'confirmed',
+        'slots': [],
+    }
+    save_lineup = mock.Mock(return_value=lineup)
+    save_review = mock.Mock(return_value={'frame_id': 7, 'review_status': 'confirmed'})
+    monkeypatch.setattr(server.db, 'save_training_review_hero_lineup', save_lineup)
+    monkeypatch.setattr(server.db, 'save_training_review', save_review)
+    monkeypatch.setattr(server, '_mark_training_review_saved', mock.Mock())
+
+    result = server.api_save_training_review_item(
+        7,
+        {
+            'match_flow_label': 'match_flow',
+            'match_mode_label': '3v3',
+            'hero_select_label': 'not_select',
+            'result_panel_label': 'no_result_panel',
+            'hero_layout_label': 'gameplay_hud',
+            'review_status': 'confirmed',
+            'hero_lineup': {
+                'heroes': [{'side': 'left', 'slot': 1, 'hero_label': 'Adagio'}],
+                'player_status': 'pending',
+            },
+        },
+    )
+
+    assert result['hero_lineup'] == {'applicable': True, **lineup}
+    assert save_lineup.call_args.kwargs['refresh_material_index'] is False
+    assert save_lineup.call_args.kwargs['commit'] is False
+    assert save_review.call_args.kwargs['commit'] is True
+
+
+def test_candidate_save_posts_hero_lineup_with_review_in_one_request() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    save = script[
+        script.index('async function saveCandidateReview(') : script.index(
+            'function candidatePoint('
+        )
+    ]
+
+    assert '/hero-lineup' not in save
+    assert 'hero_lineup:' in save
+
+
 def test_worker_control_plane_redirects_only_frame_media_to_nas(monkeypatch) -> None:
     monkeypatch.setattr(config, 'MEDIA_SERVER_URL', 'http://nas:8800/')
     local_database = mock.Mock(side_effect=AssertionError('图片回源不应查询本地数据库'))
