@@ -162,6 +162,17 @@ class RuntimeProbe:
         self.events.append('runtime.close')
 
 
+class OutboxRuntimeProbe:
+    def __init__(self, events) -> None:
+        self.events = events
+
+    async def start(self) -> None:
+        self.events.append('recording_runtime.start')
+
+    async def close(self) -> None:
+        self.events.append('recording_runtime.close')
+
+
 class FailingApplicationProbe:
     def __init__(self, events) -> None:
         self.events = events
@@ -191,8 +202,8 @@ async def test_startup_failure_always_closes_password_work_and_auth_store(
     active_media = ActiveMediaProbe(events)
     dispatcher = NotificationDispatcherProbe(events)
 
-    async def fail_start() -> None:
-        events.append('runtime.start')
+    async def fail_recording_start() -> None:
+        events.append('recording_runtime.start')
         raise RuntimeError('startup failed')
 
     async def fail_close() -> None:
@@ -212,8 +223,16 @@ async def test_startup_failure_always_closes_password_work_and_auth_store(
     monkeypatch.setattr(web_main, '_notification_dispatcher', dispatcher)
     monkeypatch.setattr(
         web_main,
-        '_bili_account_runtime',
-        SimpleNamespace(start=fail_start, close=fail_close),
+        '_recording_outbox_runtime',
+        SimpleNamespace(
+            start=fail_recording_start,
+            close=AsyncMock(
+                side_effect=lambda: events.append('recording_runtime.close')
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        web_main, '_bili_account_runtime', SimpleNamespace(close=fail_close)
     )
     monkeypatch.setattr(
         web_main._realtime_sampler,
@@ -235,7 +254,8 @@ async def test_startup_failure_always_closes_password_work_and_auth_store(
     assert 'active_media.close_admission' in events
     assert 'auth.reset' in events
     assert 'security.reset' in events
-    assert events.index('notifications.start') < events.index('runtime.start')
+    assert events.index('notifications.start') < events.index('recording_runtime.start')
+    assert 'runtime.start' not in events
     assert events.index('notifications.close') > events.index('runtime.close')
     assert dispatcher.close_calls == 1
     assert events.index('password.shutdown') > events.index('runtime.close')
@@ -264,6 +284,9 @@ async def test_startup_failure_after_application_launch_entered_calls_exit(
     monkeypatch.setattr(web_main, 'ActiveMediaService', lambda: active_media)
     monkeypatch.setattr(web_main, '_notification_dispatcher', dispatcher)
     monkeypatch.setattr(web_main, '_bili_account_runtime', RuntimeProbe(events))
+    monkeypatch.setattr(
+        web_main, '_recording_outbox_runtime', OutboxRuntimeProbe(events)
+    )
     monkeypatch.setattr(web_main, 'app', FailingApplicationProbe(events))
     monkeypatch.setattr(web_main, '_control_operation_journal', JournalProbe(events))
     monkeypatch.setattr(
@@ -320,6 +343,9 @@ async def test_shutdown_stops_password_admission_before_application_cleanup(
     monkeypatch.setattr(
         web_main, '_bili_account_runtime', SimpleNamespace(close=runtime_close)
     )
+    monkeypatch.setattr(
+        web_main, '_recording_outbox_runtime', OutboxRuntimeProbe(events)
+    )
     monkeypatch.setattr(web_main.browser_extension, 'reset', lambda: None)
     monkeypatch.setattr(
         web_main.security, 'reset', lambda: events.append('security.reset')
@@ -336,3 +362,5 @@ async def test_shutdown_stops_password_admission_before_application_cleanup(
     assert events.index('active_media.shutdown') > events.index('runtime.close')
     assert events.index('notifications.close') > events.index('runtime.close')
     assert events.index('store.close') > events.index('password.shutdown')
+    assert events.index('app.exit') < events.index('recording_runtime.close')
+    assert events.index('recording_runtime.close') < events.index('runtime.close')

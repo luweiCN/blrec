@@ -24,7 +24,7 @@ from .task import RecordTask
 if TYPE_CHECKING:
     from ..bili.anonymous_room_client import AnonymousRoomClient
     from ..bili.live_status_coordinator import LiveStatusCoordinator
-    from ..bili_upload.journal import RecordingJournalBridge
+    from ..bili_upload.journal import RecordingJournalSink
     from ..networking.aiohttp_session import AiohttpSessionPool
     from ..networking.manager import NetworkRouteManager
     from ..setting import SettingsManager
@@ -56,7 +56,7 @@ class RecordTaskManager:
             Callable[[str], Awaitable[Optional[str]]]
         ] = None,
         auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
-        recording_journal: Optional[RecordingJournalBridge] = None,
+        recording_journal: Optional[RecordingJournalSink] = None,
         network_session_pool: Optional[AiohttpSessionPool] = None,
         network_route_manager: Optional[NetworkRouteManager] = None,
     ) -> None:

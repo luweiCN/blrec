@@ -1533,7 +1533,8 @@ class UploadTaskActionManager:
         if submit_state in ('in_flight', 'unknown_outcome'):
             raise UploadTaskActionRejected('投稿结果未知，自动重试可能产生重复稿件')
         parts = connection.execute(
-            'SELECT id,artifact_state,upload_state FROM upload_parts '
+            'SELECT id,artifact_state,upload_state,remote_filename,file_identity,'
+            'repair_stage,repair_remux_attempts FROM upload_parts '
             'WHERE job_id=? ORDER BY part_index',
             (job_id,),
         ).fetchall()
@@ -1583,6 +1584,22 @@ class UploadTaskActionManager:
             )
             return '正在立即请求投稿，不会重复上传已确认分 P'
 
+        timestamp_repair = (
+            submit_state == 'failed_permanent'
+            and job['aid'] is None
+            and not job['bvid']
+            and '21588' in review_reason
+            and '时间戳跳变' in review_reason
+            and all(
+                str(part['artifact_state']) == 'ready'
+                and str(part['upload_state']) == 'confirmed'
+                and part['remote_filename']
+                and part['file_identity']
+                and str(part['repair_stage']) == 'none'
+                and int(part['repair_remux_attempts']) == 0
+                for part in parts
+            )
+        )
         old_state = '{}/{}'.format(job['state'], submit_state)
         retrying_submission = False
         if submit_state == 'confirmed':
@@ -1590,41 +1607,55 @@ class UploadTaskActionManager:
                 raise UploadTaskActionRejected('已投稿任务缺少 AID/BVID')
             new_state = 'waiting_review'
         elif submit_state in ('prepared', 'failed_permanent'):
-            failed = [part for part in parts if str(part['upload_state']) == 'failed']
-            if any(str(part['artifact_state']) != 'ready' for part in failed):
-                identity_change_review = review_reason == 'file identity changed'
-                if not identity_change_review or any(
-                    str(part['artifact_state']) != 'manual_review' for part in failed
-                ):
-                    raise UploadTaskActionRejected('失败分 P 的本地视频不可用')
-            for part in failed:
-                part_id = int(part['id'])
-                connection.execute(
-                    'DELETE FROM upload_chunks WHERE part_id=?', (part_id,)
+            if timestamp_repair:
+                updated_parts = connection.execute(
+                    "UPDATE upload_parts SET repair_stage='remux',"
+                    'repair_diagnostic=? WHERE job_id=? '
+                    "AND repair_stage='none' AND repair_remux_attempts=0",
+                    (review_reason[:500], job_id),
                 )
-                if str(part['artifact_state']) == 'manual_review':
+                if updated_parts.rowcount != len(parts):
+                    raise UploadTaskActionRejected('上传分 P 状态已经发生变化')
+                new_state = 'uploading'
+            else:
+                failed = [
+                    part for part in parts if str(part['upload_state']) == 'failed'
+                ]
+                if any(str(part['artifact_state']) != 'ready' for part in failed):
+                    identity_change_review = review_reason == 'file identity changed'
+                    if not identity_change_review or any(
+                        str(part['artifact_state']) != 'manual_review'
+                        for part in failed
+                    ):
+                        raise UploadTaskActionRejected('失败分 P 的本地视频不可用')
+                for part in failed:
+                    part_id = int(part['id'])
                     connection.execute(
-                        "UPDATE upload_parts SET upload_state='prepared',"
-                        "artifact_state='ready',remote_filename=NULL,"
-                        'upload_session_json=NULL,file_identity=NULL '
-                        'WHERE id=? AND job_id=?',
-                        (part_id, job_id),
+                        'DELETE FROM upload_chunks WHERE part_id=?', (part_id,)
                     )
-                else:
-                    connection.execute(
-                        "UPDATE upload_parts SET upload_state='prepared',"
-                        'remote_filename=NULL,upload_session_json=NULL '
-                        'WHERE id=? AND job_id=?',
-                        (part_id, job_id),
-                    )
-            remaining = connection.execute(
-                'SELECT upload_state FROM upload_parts WHERE job_id=?', (job_id,)
-            ).fetchall()
-            all_confirmed = all(
-                str(part['upload_state']) == 'confirmed' for part in remaining
-            )
-            new_state = 'submitting' if all_confirmed else 'ready'
-            retrying_submission = all_confirmed
+                    if str(part['artifact_state']) == 'manual_review':
+                        connection.execute(
+                            "UPDATE upload_parts SET upload_state='prepared',"
+                            "artifact_state='ready',remote_filename=NULL,"
+                            'upload_session_json=NULL,file_identity=NULL '
+                            'WHERE id=? AND job_id=?',
+                            (part_id, job_id),
+                        )
+                    else:
+                        connection.execute(
+                            "UPDATE upload_parts SET upload_state='prepared',"
+                            'remote_filename=NULL,upload_session_json=NULL '
+                            'WHERE id=? AND job_id=?',
+                            (part_id, job_id),
+                        )
+                remaining = connection.execute(
+                    'SELECT upload_state FROM upload_parts WHERE job_id=?', (job_id,)
+                ).fetchall()
+                all_confirmed = all(
+                    str(part['upload_state']) == 'confirmed' for part in remaining
+                )
+                new_state = 'submitting' if all_confirmed else 'ready'
+                retrying_submission = all_confirmed
             submit_state = 'prepared'
         else:
             raise UploadTaskActionRejected('当前投稿状态不能安全重试')
@@ -1637,9 +1668,13 @@ class UploadTaskActionManager:
                 new_state,
                 submit_state,
                 (
-                    '管理员已重新排队投稿'
-                    if retrying_submission
-                    else '管理员已重新排队失败任务'
+                    '管理员已排队自动检查并修复视频时间戳'
+                    if timestamp_repair
+                    else (
+                        '管理员已重新排队投稿'
+                        if retrying_submission
+                        else '管理员已重新排队失败任务'
+                    )
                 ),
                 now,
                 job_id,
@@ -1654,9 +1689,15 @@ class UploadTaskActionManager:
             job_id=job_id,
             old_state=old_state,
             new_state='{}/{}'.format(new_state, submit_state),
-            reason='管理员手动重试失败任务',
+            reason=(
+                '管理员请求自动修复视频时间戳'
+                if timestamp_repair
+                else '管理员手动重试失败任务'
+            ),
             now=now,
         )
+        if timestamp_repair:
+            return '已排队自动检查时间戳，只会重新上传异常分 P'
         if retrying_submission:
             return '投稿失败任务已重新排队，不会重复上传已确认分 P'
         return '失败任务已重新排队'

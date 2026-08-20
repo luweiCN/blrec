@@ -689,6 +689,68 @@ async def test_retry_failed_submission_preserves_confirmed_parts(
 
 
 @pytest.mark.asyncio
+async def test_retry_failed_timestamp_jump_queues_repair_before_resubmitting(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    wakeups: List[str] = []
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state='paused',
+            submit_state='failed_permanent',
+            second_upload_state='confirmed',
+        )
+        await database.execute(
+            'UPDATE upload_jobs SET review_reason=? WHERE id=9',
+            ('B 站拒绝投稿（21588）：该视频内部存在时间戳跳变',),
+        )
+        manager, _, _ = make_manager(
+            database,
+            FakeProtocol(archive_response()),
+            tmp_path,
+            wake_uploads=lambda: wakeups.append('wake'),
+        )
+
+        message = await manager.retry_failed(9, manager_subject='manager')
+
+        assert message == '已排队自动检查时间戳，只会重新上传异常分 P'
+        job = await database.fetchone(
+            'SELECT state,submit_state,review_reason FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'uploading',
+            'submit_state': 'prepared',
+            'review_reason': '管理员已排队自动检查并修复视频时间戳',
+        }
+        parts = await database.fetchall(
+            'SELECT upload_state,remote_filename,repair_stage,'
+            'repair_remux_attempts FROM upload_parts WHERE job_id=9 '
+            'ORDER BY part_index'
+        )
+        assert [dict(part) for part in parts] == [
+            {
+                'upload_state': 'confirmed',
+                'remote_filename': 'remote-11',
+                'repair_stage': 'remux',
+                'repair_remux_attempts': 0,
+            },
+            {
+                'upload_state': 'confirmed',
+                'remote_filename': 'remote-12',
+                'repair_stage': 'remux',
+                'repair_remux_attempts': 0,
+            },
+        ]
+        assert wakeups == ['wake']
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_retry_failed_can_immediately_probe_a_safe_frequency_wait(
     tmp_path: Path,
 ) -> None:

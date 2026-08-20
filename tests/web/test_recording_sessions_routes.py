@@ -31,6 +31,7 @@ from blrec.bili_upload.recording_content import (
     RecordingMediaCandidate,
     RecordingMediaDescriptor,
 )
+from blrec.bili_upload.recording_outbox import RecordingOutboxStatus
 from blrec.bili_upload.remote_media import RemoteMediaStatus
 from blrec.bili_upload.session_submission import SessionSubmissionView
 from blrec.flv.common import create_metadata_tag, parse_metadata
@@ -375,6 +376,10 @@ class FakeRemoteMediaCache:
 def restore_router_state() -> Iterator[None]:
     old_journal = recording_sessions.journal
     old_reason = recording_sessions.unavailable_reason
+    old_local_outbox = getattr(recording_sessions, 'local_outbox', None)
+    old_local_ready_provider = getattr(
+        recording_sessions, 'local_outbox_ready_provider', None
+    )
     old_task_actions = getattr(recording_sessions, 'task_actions', None)
     old_session_action_runner = getattr(
         recording_sessions, 'session_action_runner', None
@@ -392,6 +397,8 @@ def restore_router_state() -> Iterator[None]:
     yield
     recording_sessions.journal = old_journal
     recording_sessions.unavailable_reason = old_reason
+    recording_sessions.local_outbox = old_local_outbox
+    recording_sessions.local_outbox_ready_provider = old_local_ready_provider
     recording_sessions.task_actions = old_task_actions
     recording_sessions.session_action_runner = old_session_action_runner
     recording_sessions.session_batch_runner = old_session_batch_runner
@@ -539,6 +546,43 @@ def test_list_recording_sessions_returns_redacted_part_state(
     }
     assert 'cookie' not in response.text.lower()
     assert 'token' not in response.text.lower()
+
+
+def test_local_recording_outbox_status_remains_available_without_remote_journal(
+    client: TestClient,
+) -> None:
+    class FakeOutbox:
+        degraded_reason = None
+
+        async def status(self) -> RecordingOutboxStatus:
+            return RecordingOutboxStatus(
+                pending_count=3,
+                oldest_pending_at=1_000,
+                last_synced_at=900,
+                last_error='PostgreSQL unavailable',
+                attempt_count=4,
+            )
+
+    recording_sessions.local_outbox = FakeOutbox()  # type: ignore[assignment]
+    recording_sessions.local_outbox_ready_provider = lambda: True
+    recording_sessions.journal = None
+    recording_sessions.unavailable_reason = 'PostgreSQL unavailable'
+
+    response = client.get(
+        '/api/v1/recording-sessions/outbox-status',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ready'] is True
+    assert payload['degradedReason'] is None
+    assert payload['pendingCount'] == 3
+    assert payload['oldestPendingAt'] == 1_000
+    assert payload['oldestPendingAgeSeconds'] > 0
+    assert payload['lastSyncedAt'] == 900
+    assert payload['lastError'] == 'PostgreSQL unavailable'
+    assert payload['attemptCount'] == 4
 
 
 def test_recording_session_list_is_summary_and_detail_stays_complete(

@@ -11,7 +11,12 @@ from typing import Any, Mapping, Sequence
 
 from .upos import FileIdentity
 
-__all__ = ('RemuxedArtifact', 'TranscodeRemuxError', 'TranscodeRemuxer')
+__all__ = (
+    'RemuxedArtifact',
+    'TimestampInspection',
+    'TranscodeRemuxError',
+    'TranscodeRemuxer',
+)
 
 
 class TranscodeRemuxError(RuntimeError):
@@ -32,7 +37,20 @@ class RemuxedArtifact:
     diagnostic: str
 
 
+@dataclass(frozen=True)
+class TimestampInspection:
+    needs_remux: bool
+    diagnostic: str
+
+
 class TranscodeRemuxer:
+    _TIMESTAMP_DISCONTINUITY_MARKERS = (
+        'invalid dropping',
+        'non-monotonous dts',
+        'non monotonically increasing dts',
+        'timestamps are unset in a packet',
+    )
+
     def __init__(
         self,
         work_directory: Path,
@@ -49,6 +67,57 @@ class TranscodeRemuxer:
         self._ffprobe = ffprobe
         self._remux_timeout_seconds = remux_timeout_seconds
         self._probe_timeout_seconds = probe_timeout_seconds
+
+    def inspect_timestamps(self, source_path: str) -> TimestampInspection:
+        source = Path(source_path).resolve()
+        if not source.is_file() or source.stat().st_size <= 0:
+            raise TranscodeRemuxError('待检查的视频不存在或为空')
+        command = (
+            self._ffmpeg,
+            '-hide_banner',
+            '-nostdin',
+            '-v',
+            'warning',
+            '-i',
+            str(source),
+            '-map',
+            '0:v?',
+            '-map',
+            '0:a?',
+            '-c',
+            'copy',
+            '-f',
+            'null',
+            '-',
+        )
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                shell=False,
+                timeout=self._remux_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise TranscodeRemuxError('FFmpeg 时间戳检查超时') from error
+        except OSError as error:
+            raise TranscodeRemuxError(
+                '无法启动 FFmpeg，请确认已经安装 ffmpeg'
+            ) from error
+        diagnostic = self._diagnostic(result.stderr)
+        if result.returncode != 0:
+            raise TranscodeRemuxError(
+                'FFmpeg 时间戳检查失败{}'.format(
+                    '：{}'.format(diagnostic) if diagnostic else ''
+                )
+            )
+        output = result.stderr.decode('utf8', errors='replace').lower()
+        return TimestampInspection(
+            needs_remux=any(
+                marker in output for marker in self._TIMESTAMP_DISCONTINUITY_MARKERS
+            ),
+            diagnostic=diagnostic or 'FFmpeg 时间戳检查正常',
+        )
 
     def remux(self, source_path: str, *, part_id: int) -> RemuxedArtifact:
         source = Path(source_path).resolve()

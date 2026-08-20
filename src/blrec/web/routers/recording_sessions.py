@@ -41,6 +41,7 @@ from blrec.bili_upload.recording_content import (
     RecordingContentReader,
     RecordingContentUnavailable,
 )
+from blrec.bili_upload.recording_outbox import LocalRecordingOutbox
 from blrec.bili_upload.remote_media import (
     RemoteMediaCache,
     RemoteMediaNotFound,
@@ -75,6 +76,8 @@ from .bili_accounts import authenticated_manager_subject
 from .room_upload_policies import RoomUploadPolicyRequest
 
 journal: Optional[RecordingJournalBridge] = None
+local_outbox: Optional[LocalRecordingOutbox] = None
+local_outbox_ready_provider: Optional[Callable[[], bool]] = None
 content_reader: Optional[RecordingContentReader] = None
 task_actions: Optional[UploadTaskActionManager] = None
 session_action_runner: Optional[Callable[..., Awaitable[str]]] = None
@@ -460,6 +463,17 @@ class RecordingSessionsResponse(ApiModel):
     degraded_reason: Optional[str]
     total: int
     sessions: List[RecordingSessionSummaryResponse]
+
+
+class RecordingOutboxStatusResponse(ApiModel):
+    ready: bool
+    degraded_reason: Optional[str]
+    pending_count: int
+    oldest_pending_at: Optional[float]
+    oldest_pending_age_seconds: Optional[int]
+    last_synced_at: Optional[float]
+    last_error: Optional[str]
+    attempt_count: int
 
 
 class SessionSubmissionSettingsResponse(ApiModel):
@@ -1096,6 +1110,55 @@ async def list_recording_sessions(
         degraded_reason=recording_journal.degraded_reason,
         total=total,
         sessions=[_session_summary_response(session) for session in sessions],
+    )
+
+
+@router.get('/outbox-status', response_model=RecordingOutboxStatusResponse)
+async def get_recording_outbox_status(
+    _subject: str = Depends(authenticated_manager_subject),
+) -> RecordingOutboxStatusResponse:
+    outbox = local_outbox
+    ready_provider = local_outbox_ready_provider
+    ready = ready_provider is not None and ready_provider()
+    if outbox is None:
+        return RecordingOutboxStatusResponse(
+            ready=False,
+            degraded_reason='Local recording journal is unavailable',
+            pending_count=0,
+            oldest_pending_at=None,
+            oldest_pending_age_seconds=None,
+            last_synced_at=None,
+            last_error=None,
+            attempt_count=0,
+        )
+    try:
+        outbox_status = await outbox.status()
+    except Exception as error:
+        return RecordingOutboxStatusResponse(
+            ready=False,
+            degraded_reason=outbox.degraded_reason
+            or '{}: {}'.format(type(error).__name__, error),
+            pending_count=0,
+            oldest_pending_at=None,
+            oldest_pending_age_seconds=None,
+            last_synced_at=None,
+            last_error=None,
+            attempt_count=0,
+        )
+    oldest_pending_at = outbox_status.oldest_pending_at
+    return RecordingOutboxStatusResponse(
+        ready=ready,
+        degraded_reason=outbox.degraded_reason,
+        pending_count=outbox_status.pending_count,
+        oldest_pending_at=oldest_pending_at,
+        oldest_pending_age_seconds=(
+            None
+            if oldest_pending_at is None
+            else max(0, int(time.time() - oldest_pending_at))
+        ),
+        last_synced_at=outbox_status.last_synced_at,
+        last_error=outbox_status.last_error,
+        attempt_count=outbox_status.attempt_count,
     )
 
 

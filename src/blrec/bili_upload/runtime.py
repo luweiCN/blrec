@@ -120,6 +120,9 @@ class BiliAccountRuntime:
         notification_senders: Optional[Mapping[str, Any]] = None,
         notification_channel_enabled: Callable[[str], bool] = lambda _channel: False,
         control_operation_journal: Optional[ControlOperationJournal] = None,
+        recording_event_reconciler: Optional[
+            Callable[[RecordingJournalBridge], Awaitable[None]]
+        ] = None,
     ) -> None:
         if refresh_interval_seconds <= 0:
             raise ValueError('refresh interval must be positive')
@@ -146,6 +149,7 @@ class BiliAccountRuntime:
         self._notification_senders = dict(notification_senders or {})
         self._notification_channel_enabled = notification_channel_enabled
         self._control_operation_journal = control_operation_journal
+        self._recording_event_reconciler = recording_event_reconciler
         self._database: Optional[BiliUploadDatabase] = None
         self._transport: Optional[AiohttpProtocolTransport] = None
         self._manager: Optional[AccountManager] = None
@@ -366,6 +370,8 @@ class BiliAccountRuntime:
                 media_library_root=media_library_root,
             )
             await journal.reconcile_open_sessions()
+            if self._recording_event_reconciler is not None:
+                await self._recording_event_reconciler(journal)
             lossless_clipper = LosslessClipper()
             highlight_danmaku_clipper = HighlightDanmakuClipper()
             highlight_service = HighlightService(
@@ -696,21 +702,36 @@ class BiliAccountRuntime:
             )
             await archive_migration.start()
             await vainglory_publication.start()
-        except Exception:
-            logger.exception('Bilibili account management failed to start')
-            if vainglory_publication is not None:
-                await vainglory_publication.close()
-            if archive_migration is not None:
-                await archive_migration.close()
-            if archive_backfill is not None:
-                await archive_backfill.close()
-            if vainglory_service is not None:
-                await vainglory_service.close()
-            if remote_media_cache is not None:
-                await remote_media_cache.close()
-            if highlight_service is not None:
-                await highlight_service.shutdown()
-            await self._close_partial(database)
+        except BaseException as error:
+            must_reraise = not isinstance(error, Exception)
+            if not must_reraise:
+                logger.exception('Bilibili account management failed to start')
+            cleanup_error: Optional[BaseException] = None
+            try:
+                if vainglory_publication is not None:
+                    await vainglory_publication.close()
+                if archive_migration is not None:
+                    await archive_migration.close()
+                if archive_backfill is not None:
+                    await archive_backfill.close()
+                if vainglory_service is not None:
+                    await vainglory_service.close()
+                if remote_media_cache is not None:
+                    await remote_media_cache.close()
+                if highlight_service is not None:
+                    await highlight_service.shutdown()
+                await self._close_partial(database)
+            except BaseException as partial_close_error:
+                cleanup_error = partial_close_error
+            if must_reraise:
+                if cleanup_error is not None:
+                    logger.error(
+                        'Bilibili account aborted-start cleanup failed: {!r}',
+                        cleanup_error,
+                    )
+                raise
+            if cleanup_error is not None:
+                raise cleanup_error
             self._unavailable_reason = 'Bilibili account management failed to start'
             return False
 

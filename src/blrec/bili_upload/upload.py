@@ -8,6 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from liquid import Environment
@@ -49,6 +50,7 @@ from .policies import (
     room_upload_policy_command,
 )
 from .session_submission import InvalidSessionSubmission, decode_submission_settings
+from .transcode_remux import TranscodeRemuxer, TranscodeRemuxError
 from .upos import (
     FileIdentity,
     UposUploadDeferred,
@@ -133,6 +135,7 @@ class UploadCoordinator:
     _MEDIA_PROBE_MAX_FAILURES = 5
     _MEDIA_PROBE_PENDING_REASON = '录像媒体信息暂时无法读取，等待重新校验'
     _MEDIA_PROBE_FAILED_REASON = '录像媒体信息连续校验失败，已排除自动投稿'
+    _TIMESTAMP_JUMP_REJECTION_CODE = 21588
 
     def __init__(
         self,
@@ -152,6 +155,7 @@ class UploadCoordinator:
         ),
         archive_reader: Optional[ArchiveReadService] = None,
         read_timeout_seconds: float = 60,
+        timestamp_remuxer: Optional[TranscodeRemuxer] = None,
     ) -> None:
         if stability_seconds < 0:
             raise ValueError('file stability window must not be negative')
@@ -172,6 +176,9 @@ class UploadCoordinator:
             protocol, clock=clock
         )
         self._read_timeout_seconds = read_timeout_seconds
+        self._timestamp_remuxer = timestamp_remuxer or TranscodeRemuxer(
+            Path(database.path).parent / 'transcode-remux'
+        )
         self._artifact_probe_next_at: Dict[int, int] = {}
         self._run_lock = asyncio.Lock()
         self._liquid = Environment()
@@ -2660,7 +2667,13 @@ class UploadCoordinator:
             await self._pause_job(claim, '投稿账号不可用')
             return
         submit_started = False
+        timestamp_repair_ids: Optional[Tuple[int, ...]] = ()
         try:
+            timestamp_repair_ids = await self._prepare_submission_timestamp_repairs(
+                claim
+            )
+            if timestamp_repair_ids is None:
+                return
             if job.state != 'submitting':
                 await self._update_job(
                     claim, {'state': 'uploading', 'updated_at': int(self._clock())}
@@ -2677,6 +2690,10 @@ class UploadCoordinator:
                 bundle = await self._bundle_loader(job.account_id)
                 await self._uploader.upload_part(
                     int(part['id']), bundle=bundle, claim=claim
+                )
+            if timestamp_repair_ids:
+                await self._complete_submission_timestamp_repairs(
+                    claim, timestamp_repair_ids
                 )
             audit(
                 'upload_parts_completed',
@@ -3051,7 +3068,20 @@ class UploadCoordinator:
                     result='manual_action_required',
                 )
                 return
-            rejection_reason = await self._bili_rejection_reason(claim.id, error)
+            timestamp_repair = None
+            if submit_started and self._is_timestamp_jump_rejection(error):
+                timestamp_repair = await self._queue_submission_timestamp_repair(
+                    claim, error
+                )
+                if timestamp_repair == 'queued':
+                    return
+            if timestamp_repair == 'exhausted':
+                rejection_reason = (
+                    'B 站仍提示视频内部存在时间戳跳变；'
+                    '自动重新封装修复后仍被拒绝，已停止自动重试'
+                )
+            else:
+                rejection_reason = await self._bili_rejection_reason(claim.id, error)
             values = {
                 'state': 'paused',
                 'submit_state': 'failed_permanent' if submit_started else 'prepared',
@@ -3931,6 +3961,392 @@ class UploadCoordinator:
             job_id=claim.id,
             stage='submission' if submit_started else 'upload',
             delay_seconds=delay,
+        )
+
+    @classmethod
+    def _is_timestamp_jump_rejection(cls, error: BiliApiError) -> bool:
+        if error.code != cls._TIMESTAMP_JUMP_REJECTION_CODE:
+            return False
+        message = (error.public_message or '').replace(' ', '')
+        return '时间戳跳变' in message
+
+    async def _queue_submission_timestamp_repair(
+        self, claim: LeaseClaim, error: BiliApiError
+    ) -> str:
+        now = int(self._clock())
+        diagnostic = (error.public_message or 'B 站视频时间戳检查未通过')[:500]
+
+        def queue(connection: sqlite3.Connection) -> Tuple[bool, str, int]:
+            if not self._owner_is_active(connection, claim):
+                self._settle_archive_handoff_in_transaction(
+                    connection,
+                    claim,
+                    outcome_state='confirmed_failure',
+                    outcome={'error_code': error.code},
+                    now=now,
+                )
+                return False, 'cancelled', 0
+            job = connection.execute(
+                'SELECT aid,bvid FROM upload_jobs WHERE id=?', (claim.id,)
+            ).fetchone()
+            parts = connection.execute(
+                'SELECT id,artifact_state,upload_state,remote_filename,'
+                'file_identity,repair_stage,repair_remux_attempts '
+                'FROM upload_parts WHERE job_id=? ORDER BY part_index',
+                (claim.id,),
+            ).fetchall()
+            if job is None or job['aid'] is not None or job['bvid'] is not None:
+                return True, 'unavailable', 0
+            if any(int(part['repair_remux_attempts']) > 0 for part in parts):
+                return True, 'exhausted', len(parts)
+            if not parts or any(
+                str(part['artifact_state']) != 'ready'
+                or str(part['upload_state']) != 'confirmed'
+                or not part['remote_filename']
+                or not part['file_identity']
+                or str(part['repair_stage']) != 'none'
+                for part in parts
+            ):
+                return True, 'unavailable', len(parts)
+            part_cursor = connection.execute(
+                "UPDATE upload_parts SET repair_stage='remux',repair_diagnostic=? "
+                "WHERE job_id=? AND repair_stage='none' "
+                'AND repair_remux_attempts=0',
+                (diagnostic, claim.id),
+            )
+            if part_cursor.rowcount != len(parts):
+                raise LeaseLost('timestamp repair parts changed while queuing')
+            job_cursor = connection.execute(
+                "UPDATE upload_jobs SET state='uploading',submit_state='prepared',"
+                'review_reason=?,next_attempt_at=?,lease_owner=NULL,'
+                'lease_until=NULL,updated_at=? WHERE id=? AND lease_owner=? '
+                'AND lease_generation=?',
+                (
+                    'B 站检测到视频时间戳跳变，正在自动检查并重新封装异常分 P',
+                    now,
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            if job_cursor.rowcount != 1:
+                raise LeaseLost('upload job lease was lost')
+            archive_cursor = connection.execute(
+                "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                "AND owner_id=? AND side_effect_key='archive_submit' "
+                "AND source_generation=? AND outcome_state='in_flight'",
+                (claim.id, self._source_generation(claim)),
+            )
+            if archive_cursor.rowcount != 1:
+                raise LeaseLost('archive submission handoff intent was lost')
+            claim_cursor = connection.execute(
+                "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                'AND owner_id=? AND side_effect_key=? AND source_generation=? '
+                "AND outcome_state='in_flight'",
+                (
+                    claim.id,
+                    self._lease_side_effect_key(claim),
+                    self._source_generation(claim),
+                ),
+            )
+            if claim_cursor.rowcount != 1:
+                raise LeaseLost('upload owner handoff intent was lost')
+            return True, 'queued', len(parts)
+
+        active, state, part_count = await self._database.write(queue)
+        if not active:
+            raise _UploadDeletionRequested()
+        audit(
+            'upload_submission_timestamp_repair',
+            level='WARNING',
+            job_id=claim.id,
+            error_code=error.code,
+            parts=part_count,
+            result=state,
+        )
+        return state
+
+    async def _prepare_submission_timestamp_repairs(
+        self, claim: LeaseClaim
+    ) -> Optional[Tuple[int, ...]]:
+        rows = await self._database.fetchall(
+            'SELECT id,part_index,source_path,final_path,file_identity,'
+            'artifact_state,upload_state,remote_filename,repair_stage,'
+            'repair_remux_attempts,repair_diagnostic,repair_temp_path,'
+            'repair_original_path,repair_original_identity '
+            "FROM upload_parts WHERE job_id=? AND repair_stage='remux' "
+            'ORDER BY part_index',
+            (claim.id,),
+        )
+        if not rows:
+            return ()
+        completed_ids = tuple(
+            int(row['id'])
+            for row in rows
+            if int(row['repair_remux_attempts']) == 1
+            and str(row['upload_state']) == 'confirmed'
+            and row['remote_filename']
+        )
+        if completed_ids:
+            await self._complete_submission_timestamp_repairs(claim, completed_ids)
+        prepared: List[int] = []
+        try:
+            for row in rows:
+                part_id = int(row['id'])
+                if part_id in completed_ids:
+                    continue
+                prepared_part = await self._prepare_submission_timestamp_part(
+                    claim, row
+                )
+                if prepared_part:
+                    prepared.append(part_id)
+        except (TranscodeRemuxError, ValueError) as error:
+            await self._abort_submission_timestamp_repair(
+                claim, '自动检查或重新封装失败：{}'.format(error)
+            )
+            return None
+        if prepared or completed_ids:
+            return tuple(prepared)
+        await self._abort_submission_timestamp_repair(
+            claim, 'B 站报告视频时间戳跳变，但本地扫描未定位异常分 P，已停止自动重试'
+        )
+        return None
+
+    async def _prepare_submission_timestamp_part(
+        self, claim: LeaseClaim, row: Any
+    ) -> bool:
+        part_id = int(row['id'])
+        attempts = int(row['repair_remux_attempts'])
+        temporary_path = (
+            None if row['repair_temp_path'] is None else str(row['repair_temp_path'])
+        )
+        if attempts == 1 and temporary_path is not None:
+            stored_temporary_identity = row['file_identity']
+            try:
+                current_temporary_identity = await self._file_identity(temporary_path)
+                expected_temporary_identity = FileIdentity.from_json(
+                    str(stored_temporary_identity)
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+            else:
+                if current_temporary_identity == expected_temporary_identity:
+                    return True
+            self._timestamp_remuxer.remove(temporary_path)
+        original_path = str(
+            row['repair_original_path'] or row['final_path'] or row['source_path']
+        )
+        original_identity_text = row['repair_original_identity'] or row['file_identity']
+        if original_identity_text is None:
+            raise TranscodeRemuxError('待修复分 P 缺少文件身份记录')
+        try:
+            expected_original_identity = FileIdentity.from_json(
+                str(original_identity_text)
+            )
+            current_original_identity = await self._file_identity(original_path)
+        except (OSError, ValueError) as error:
+            raise TranscodeRemuxError('待修复分 P 的本地视频无法校验') from error
+        if current_original_identity != expected_original_identity:
+            raise TranscodeRemuxError('待修复分 P 的本地视频已经发生变化')
+        if attempts == 0:
+            loop = asyncio.get_running_loop()
+            inspection = await loop.run_in_executor(
+                None, self._timestamp_remuxer.inspect_timestamps, original_path
+            )
+            audit(
+                'upload_part_timestamp_inspected',
+                level='WARNING' if inspection.needs_remux else 'INFO',
+                job_id=claim.id,
+                part_id=part_id,
+                part_index=int(row['part_index']),
+                result='repair_needed' if inspection.needs_remux else 'clean',
+            )
+            if not inspection.needs_remux:
+                await self._mark_submission_timestamp_part_clean(
+                    claim, part_id, inspection.diagnostic
+                )
+                return False
+        loop = asyncio.get_running_loop()
+        artifact = await loop.run_in_executor(
+            None, lambda: self._timestamp_remuxer.remux(original_path, part_id=part_id)
+        )
+
+        def store(connection: sqlite3.Connection) -> bool:
+            if not self._owner_is_active(connection, claim):
+                self._release_cancelled_claim_in_transaction(
+                    connection, claim, int(self._clock())
+                )
+                return False
+            current = connection.execute(
+                'SELECT repair_stage,repair_remux_attempts FROM upload_parts '
+                'WHERE id=? AND job_id=?',
+                (part_id, claim.id),
+            ).fetchone()
+            if current is None or str(current['repair_stage']) != 'remux':
+                raise LeaseLost('timestamp repair part changed')
+            if int(current['repair_remux_attempts']) not in (0, 1):
+                raise LeaseLost('timestamp repair attempt changed')
+            connection.execute('DELETE FROM upload_chunks WHERE part_id=?', (part_id,))
+            cursor = connection.execute(
+                "UPDATE upload_parts SET upload_state='prepared',"
+                'remote_filename=NULL,cid=NULL,upload_session_json=NULL,'
+                'repair_temp_path=?,repair_original_path=?,'
+                'repair_original_identity=?,final_path=?,file_identity=?,'
+                'repair_remux_attempts=1,repair_diagnostic=? '
+                'WHERE id=? AND job_id=?',
+                (
+                    artifact.path,
+                    original_path,
+                    expected_original_identity.to_json(),
+                    artifact.path,
+                    artifact.identity.to_json(),
+                    artifact.diagnostic[:500],
+                    part_id,
+                    claim.id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('timestamp repair part changed')
+            return True
+
+        try:
+            active = await self._database.write(store)
+        except BaseException:
+            self._timestamp_remuxer.remove(artifact.path)
+            raise
+        if not active:
+            self._timestamp_remuxer.remove(artifact.path)
+            raise _UploadDeletionRequested()
+        audit(
+            'upload_part_timestamp_remuxed',
+            job_id=claim.id,
+            part_id=part_id,
+            part_index=int(row['part_index']),
+            result='prepared',
+        )
+        return True
+
+    async def _mark_submission_timestamp_part_clean(
+        self, claim: LeaseClaim, part_id: int, diagnostic: str
+    ) -> None:
+        def mark(connection: sqlite3.Connection) -> bool:
+            if not self._owner_is_active(connection, claim):
+                self._release_cancelled_claim_in_transaction(
+                    connection, claim, int(self._clock())
+                )
+                return False
+            cursor = connection.execute(
+                "UPDATE upload_parts SET repair_stage='none',repair_diagnostic=? "
+                "WHERE id=? AND job_id=? AND repair_stage='remux' "
+                'AND repair_remux_attempts=0',
+                (diagnostic[:500], part_id, claim.id),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('timestamp repair part changed')
+            return True
+
+        if not await self._database.write(mark):
+            raise _UploadDeletionRequested()
+
+    async def _complete_submission_timestamp_repairs(
+        self, claim: LeaseClaim, part_ids: Tuple[int, ...]
+    ) -> None:
+        if not part_ids:
+            return
+        placeholders = ','.join('?' for _ in part_ids)
+        rows = await self._database.fetchall(
+            'SELECT id,repair_temp_path FROM upload_parts WHERE job_id=? '
+            'AND id IN ({})'.format(placeholders),
+            (claim.id, *part_ids),
+        )
+        for row in rows:
+            if row['repair_temp_path'] is not None:
+                self._timestamp_remuxer.remove(str(row['repair_temp_path']))
+
+        def complete(connection: sqlite3.Connection) -> bool:
+            if not self._owner_is_active(connection, claim):
+                self._release_cancelled_claim_in_transaction(
+                    connection, claim, int(self._clock())
+                )
+                return False
+            for part_id in part_ids:
+                cursor = connection.execute(
+                    "UPDATE upload_parts SET repair_stage='completed',"
+                    'final_path=COALESCE(repair_original_path,final_path),'
+                    'file_identity=COALESCE(repair_original_identity,file_identity),'
+                    'repair_temp_path=NULL,repair_original_path=NULL,'
+                    'repair_original_identity=NULL WHERE id=? AND job_id=? '
+                    "AND repair_stage='remux' AND repair_remux_attempts=1 "
+                    "AND upload_state='confirmed' AND remote_filename IS NOT NULL",
+                    (part_id, claim.id),
+                )
+                if cursor.rowcount != 1:
+                    raise LeaseLost('timestamp repair upload is incomplete')
+            return True
+
+        if not await self._database.write(complete):
+            raise _UploadDeletionRequested()
+        audit(
+            'upload_submission_timestamp_parts_repaired',
+            job_id=claim.id,
+            parts=len(part_ids),
+            result='completed',
+        )
+
+    async def _abort_submission_timestamp_repair(
+        self, claim: LeaseClaim, reason: str
+    ) -> None:
+        rows = await self._database.fetchall(
+            'SELECT repair_temp_path FROM upload_parts '
+            "WHERE job_id=? AND repair_stage='remux'",
+            (claim.id,),
+        )
+        for row in rows:
+            if row['repair_temp_path'] is not None:
+                self._timestamp_remuxer.remove(str(row['repair_temp_path']))
+        now = int(self._clock())
+
+        def abort(connection: sqlite3.Connection) -> bool:
+            if not self._owner_is_active(connection, claim):
+                self._release_cancelled_claim_in_transaction(connection, claim, now)
+                return False
+            connection.execute(
+                "UPDATE upload_parts SET repair_stage='exhausted',"
+                'final_path=COALESCE(repair_original_path,final_path),'
+                'file_identity=COALESCE(repair_original_identity,file_identity),'
+                'repair_temp_path=NULL,repair_original_path=NULL,'
+                'repair_original_identity=NULL,repair_diagnostic=? '
+                "WHERE job_id=? AND repair_stage='remux'",
+                (reason[:500], claim.id),
+            )
+            cursor = connection.execute(
+                "UPDATE upload_jobs SET state='paused',"
+                "submit_state='failed_permanent',review_reason=?,"
+                'lease_owner=NULL,lease_until=NULL,updated_at=? '
+                'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (reason, now, claim.id, claim.lease_owner, claim.lease_generation),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('upload job lease was lost')
+            connection.execute(
+                "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                'AND owner_id=? AND side_effect_key=? AND source_generation=?',
+                (
+                    claim.id,
+                    self._lease_side_effect_key(claim),
+                    self._source_generation(claim),
+                ),
+            )
+            return True
+
+        active = await self._database.write(abort)
+        audit(
+            'upload_submission_timestamp_repair_failed',
+            level='ERROR',
+            job_id=claim.id,
+            reason=reason,
+            result='paused' if active else 'cancelled_local',
         )
 
     async def _bili_rejection_reason(self, job_id: int, error: BiliApiError) -> str:

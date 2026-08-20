@@ -156,6 +156,12 @@ def _backup_postgres(
 def main(values: Sequence[str] = ()) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--database', default='/cfg/blrec.sqlite3')
+    parser.add_argument(
+        '--recording-journal',
+        default=os.environ.get(
+            'BLREC_RECORDING_JOURNAL_DATABASE', '/cfg/recording-journal.sqlite3'
+        ),
+    )
     parser.add_argument('--backup-dir', default='/cfg/backups')
     parser.add_argument('--label', required=True)
     parser.add_argument('--database-url-env', default='BLREC_DATABASE_URL')
@@ -193,9 +199,31 @@ def main(values: Sequence[str] = ()) -> None:
 
     if not backup_path.is_file() or backup_path.stat().st_size == 0:
         raise RuntimeError('database backup is empty')
+
+    recording_journal_backup = None
+    recording_journal_path = Path(
+        os.path.abspath(os.path.expanduser(args.recording_journal))
+    )
+    if recording_journal_path.exists() or recording_journal_path.is_symlink():
+        recording_journal_backup = _backup_path(
+            backup_dir, 'recording-journal-{}'.format(label), '.sqlite3'
+        )
+        _backup_sqlite(recording_journal_path, recording_journal_backup)
+        if (
+            not recording_journal_backup.is_file()
+            or recording_journal_backup.stat().st_size == 0
+        ):
+            raise RuntimeError('recording journal backup is empty')
     print(
-        'backend={} backup={} bytes={} integrity=ok'.format(
-            backend, backup_path.name, backup_path.stat().st_size
+        'backend={} backup={} bytes={} recording_journal_backup={} integrity=ok'.format(
+            backend,
+            backup_path.name,
+            backup_path.stat().st_size,
+            (
+                'none'
+                if recording_journal_backup is None
+                else recording_journal_backup.name
+            ),
         )
     )
 

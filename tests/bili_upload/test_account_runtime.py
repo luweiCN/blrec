@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import blrec.bili_upload.runtime as runtime_module
 from blrec.bili_upload.covers import CoverLibrary
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.highlight_worker import HighlightWorker
@@ -110,6 +111,43 @@ async def test_runtime_requires_credential_key_without_creating_database(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_start_closes_partial_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+
+    class BlockingDatabase:
+        path = str(tmp_path / 'blrec.sqlite3')
+
+        async def open(self) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def close(self) -> None:
+            closed.set()
+
+    database = BlockingDatabase()
+    monkeypatch.setattr(
+        runtime_module, 'create_bili_upload_database', lambda *args, **kwargs: database
+    )
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key=None,
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+    )
+
+    start = asyncio.create_task(runtime.start())
+    await asyncio.wait_for(entered.wait(), timeout=0.2)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
 async def test_runtime_starts_without_api_key(tmp_path: Path) -> None:
     runtime = BiliAccountRuntime(
         BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
@@ -123,6 +161,33 @@ async def test_runtime_starts_without_api_key(tmp_path: Path) -> None:
         assert runtime.manager is not None
         assert runtime.unavailable_reason is None
         assert (tmp_path / 'blrec.sqlite3').exists()
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_reconciles_local_recording_events_before_upload_worker(
+    tmp_path: Path,
+) -> None:
+    events: List[str] = []
+
+    async def reconcile(_journal: RecordingJournalBridge) -> None:
+        events.append('recording.reconcile')
+
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key=None,
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+        recording_event_reconciler=reconcile,
+    )
+    runtime._start_upload_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda: events.append('upload.start')
+    )
+
+    try:
+        assert await runtime.start()
+        assert events.index('recording.reconcile') < events.index('upload.start')
     finally:
         await runtime.close()
 

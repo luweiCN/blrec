@@ -23,7 +23,7 @@ from blrec.bili.live_monitor import LiveMonitor
 from blrec.bili.live_status import ObservedStatus
 from blrec.bili.models import RoomInfo, UserInfo
 from blrec.bili.typing import QualityNumber, StreamFormat
-from blrec.bili_upload.journal import RecordingJournalBridge, RecordingJournalListener
+from blrec.bili_upload.journal import RecordingJournalListener
 from blrec.core import Recorder
 from blrec.core.cover_downloader import CoverSaveStrategy
 from blrec.core.typing import MetaData
@@ -50,6 +50,7 @@ from .models import (
 if TYPE_CHECKING:
     from blrec.bili.anonymous_room_client import AnonymousRoomClient
     from blrec.bili.live_status_coordinator import LiveStatusCoordinator
+    from blrec.bili_upload.journal import RecordingJournalSink
     from blrec.networking.aiohttp_session import AiohttpSessionPool
     from blrec.networking.manager import NetworkRouteManager
 
@@ -71,7 +72,7 @@ class RecordTask:
         live_status_coordinator: Optional['LiveStatusCoordinator'] = None,
         anonymous_room_client: Optional['AnonymousRoomClient'] = None,
         auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
-        recording_journal: Optional[RecordingJournalBridge] = None,
+        recording_journal: Optional['RecordingJournalSink'] = None,
         network_session_pool: Optional['AiohttpSessionPool'] = None,
         network_route_manager: Optional['NetworkRouteManager'] = None,
     ) -> None:

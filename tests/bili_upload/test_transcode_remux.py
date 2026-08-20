@@ -23,6 +23,53 @@ def _probe(*, duration: float, audio: bool = True) -> SimpleNamespace:
     )
 
 
+@pytest.mark.parametrize(
+    ('stderr', 'expected'),
+    (
+        (b'DTS 268435456, next:419702333 st:1 invalid dropping\n', True),
+        (b'Application provided invalid, non monotonically increasing dts\n', True),
+        (b'', False),
+    ),
+)
+def test_timestamp_inspection_detects_ffmpeg_discontinuities(
+    tmp_path: Path, monkeypatch, stderr: bytes, expected: bool
+) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'source-video')
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=stderr)
+
+    monkeypatch.setattr(subprocess, 'run', run)
+
+    inspection = TranscodeRemuxer(tmp_path / 'work').inspect_timestamps(str(source))
+
+    command, options = calls[0]
+    assert command == (
+        'ffmpeg',
+        '-hide_banner',
+        '-nostdin',
+        '-v',
+        'warning',
+        '-i',
+        str(source.resolve()),
+        '-map',
+        '0:v?',
+        '-map',
+        '0:a?',
+        '-c',
+        'copy',
+        '-f',
+        'null',
+        '-',
+    )
+    assert options['capture_output'] is True
+    assert options['shell'] is False
+    assert inspection.needs_remux is expected
+
+
 def test_remux_uses_safe_argument_arrays_and_validates_output(
     tmp_path: Path, monkeypatch
 ) -> None:

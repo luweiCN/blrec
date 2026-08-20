@@ -26,7 +26,9 @@ from blrec.bili_upload.policies import (
     default_room_upload_policy,
 )
 from blrec.bili_upload.session_submission import SessionSubmissionManager
+from blrec.bili_upload.transcode_remux import RemuxedArtifact, TimestampInspection
 from blrec.bili_upload.upload import InvalidUploadPolicy, UploadCoordinator
+from blrec.bili_upload.upos import FileIdentity, UposUploadDeferred
 
 
 class FakeUploader:
@@ -54,6 +56,42 @@ class FakeUploader:
             (remote, part_id),
         )
         return remote
+
+
+class FakeTimestampRemuxer:
+    def __init__(self, work_directory: Path, invalid_paths: Tuple[str, ...]) -> None:
+        self._work_directory = work_directory
+        self._invalid_paths = set(invalid_paths)
+        self.inspected: List[str] = []
+        self.remuxed: List[str] = []
+
+    def inspect_timestamps(self, source_path: str) -> TimestampInspection:
+        self.inspected.append(source_path)
+        needs_remux = source_path in self._invalid_paths
+        return TimestampInspection(
+            needs_remux=needs_remux,
+            diagnostic=(
+                'DTS 268435456 invalid dropping' if needs_remux else '时间戳检查正常'
+            ),
+        )
+
+    def remux(self, source_path: str, *, part_id: int) -> RemuxedArtifact:
+        self.remuxed.append(source_path)
+        self._work_directory.mkdir(parents=True, exist_ok=True)
+        output = self._work_directory / 'part-{}.mp4'.format(part_id)
+        output.write_bytes(Path(source_path).read_bytes() + b'-remuxed')
+        return RemuxedArtifact(
+            path=str(output),
+            identity=FileIdentity.from_path(str(output)),
+            diagnostic='FFmpeg 流复制重新封装完成',
+        )
+
+    @staticmethod
+    def remove(path: str) -> None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
 
 class RateLimitedUploader(FakeUploader):
@@ -273,6 +311,7 @@ def coordinator(
     stop_requested=lambda: False,
     archive_reader: Optional[ArchiveReadService] = None,
     read_timeout_seconds: float = 60,
+    timestamp_remuxer: Any = None,
 ) -> UploadCoordinator:
     async def load_bundle(account_id: int) -> Any:
         assert account_id in account_ids
@@ -290,6 +329,7 @@ def coordinator(
         stop_requested=stop_requested,
         archive_reader=archive_reader or ArchiveReadService(protocol),
         read_timeout_seconds=read_timeout_seconds,
+        timestamp_remuxer=timestamp_remuxer,
         artifact_probe=artifact_probe
         or (lambda path: RecoveredArtifact(path, os.path.getsize(path), 120)),
     )
@@ -2852,6 +2892,245 @@ async def test_bvc_rejection_names_the_affected_local_part(tmp_path: Path) -> No
         assert job is not None
         assert job['state'] == 'paused'
         assert job['review_reason'] == ('B 站视频检测未通过：P1 该视频时长不足 1 秒')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_timestamp_jump_rejection_repairs_only_invalid_part_and_retries(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = BiliApiError(
+            21588,
+            '该视频内部存在时间戳跳变，请检查文件并重新压制后再上传。',
+            operation='submit_archive',
+        )
+        uploader = FakeUploader(database)
+        remuxer = FakeTimestampRemuxer(tmp_path / 'remux', (str(paths[1]),))
+        worker = coordinator(
+            database, protocol, uploader, MutableClock(1000), timestamp_remuxer=remuxer
+        )
+        await worker.create_ready_jobs()
+
+        assert await worker.run_once() == 1
+
+        queued = await database.fetchone(
+            'SELECT state,submit_state,review_reason FROM upload_jobs WHERE id=1'
+        )
+        assert queued is not None
+        assert queued['state'] == 'uploading'
+        assert queued['submit_state'] == 'prepared'
+        assert '自动检查并重新封装' in str(queued['review_reason'])
+        assert [
+            str(row['repair_stage'])
+            for row in await database.fetchall(
+                'SELECT repair_stage FROM upload_parts WHERE job_id=1 ORDER BY id'
+            )
+        ] == ['remux', 'remux']
+
+        protocol.submit_error = None
+        assert await worker.run_once() == 1
+
+        completed = await database.fetchone(
+            'SELECT state,submit_state,bvid FROM upload_jobs WHERE id=1'
+        )
+        assert completed is not None
+        assert dict(completed) == {
+            'state': 'waiting_review',
+            'submit_state': 'confirmed',
+            'bvid': 'BVfixture',
+        }
+        parts = await database.fetchall(
+            'SELECT part_index,final_path,upload_state,repair_stage,'
+            'repair_remux_attempts,repair_temp_path FROM upload_parts '
+            'WHERE job_id=1 ORDER BY part_index'
+        )
+        assert [dict(part) for part in parts] == [
+            {
+                'part_index': 1,
+                'final_path': str(paths[0]),
+                'upload_state': 'confirmed',
+                'repair_stage': 'none',
+                'repair_remux_attempts': 0,
+                'repair_temp_path': None,
+            },
+            {
+                'part_index': 2,
+                'final_path': str(paths[1]),
+                'upload_state': 'confirmed',
+                'repair_stage': 'completed',
+                'repair_remux_attempts': 1,
+                'repair_temp_path': None,
+            },
+        ]
+        assert remuxer.inspected == [str(paths[0]), str(paths[1])]
+        assert remuxer.remuxed == [str(paths[1])]
+        assert uploader.calls == [1, 2, 2]
+        assert len(protocol.submit_calls) == 2
+        assert not (tmp_path / 'remux' / 'part-2.mp4').exists()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_timestamp_jump_repair_is_attempted_only_once(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = BiliApiError(
+            21588,
+            '该视频内部存在时间戳跳变，请检查文件并重新压制后再上传。',
+            operation='submit_archive',
+        )
+        remuxer = FakeTimestampRemuxer(tmp_path / 'remux', (str(paths[1]),))
+        worker = coordinator(
+            database,
+            protocol,
+            FakeUploader(database),
+            MutableClock(1000),
+            timestamp_remuxer=remuxer,
+        )
+        await worker.create_ready_jobs()
+
+        assert await worker.run_once() == 1
+        assert await worker.run_once() == 1
+        assert await worker.run_once() is None
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,review_reason FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert job['state'] == 'paused'
+        assert job['submit_state'] == 'failed_permanent'
+        assert '自动重新封装修复后仍被拒绝' in str(job['review_reason'])
+        assert remuxer.remuxed == [str(paths[1])]
+        assert len(protocol.submit_calls) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_timestamp_jump_repair_resumes_from_persisted_remux(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+
+    class DeferringUploader(FakeUploader):
+        async def upload_part(
+            self, part_id: int, *, bundle: Any, claim: LeaseClaim
+        ) -> str:
+            if part_id == 2:
+                raise UposUploadDeferred(1, 'fixture rate limit')
+            return await super().upload_part(part_id, bundle=bundle, claim=claim)
+
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = BiliApiError(
+            21588,
+            '该视频内部存在时间戳跳变，请检查文件并重新压制后再上传。',
+            operation='submit_archive',
+        )
+        clock = MutableClock(1000)
+        remuxer = FakeTimestampRemuxer(tmp_path / 'remux', (str(paths[1]),))
+        first = coordinator(
+            database, protocol, FakeUploader(database), clock, timestamp_remuxer=remuxer
+        )
+        await first.create_ready_jobs()
+        assert await first.run_once() == 1
+
+        protocol.submit_error = None
+        interrupted = coordinator(
+            database,
+            protocol,
+            DeferringUploader(database),
+            clock,
+            timestamp_remuxer=remuxer,
+        )
+        assert await interrupted.run_once() == 1
+        pending = await database.fetchone(
+            'SELECT final_path,repair_temp_path,repair_remux_attempts '
+            'FROM upload_parts WHERE id=2'
+        )
+        assert pending is not None
+        assert pending['final_path'] == pending['repair_temp_path']
+        assert int(pending['repair_remux_attempts']) == 1
+        assert Path(str(pending['repair_temp_path'])).is_file()
+
+        clock.now = 1001
+        restarted_uploader = FakeUploader(database)
+        restarted = coordinator(
+            database, protocol, restarted_uploader, clock, timestamp_remuxer=remuxer
+        )
+        assert await restarted.run_once() == 1
+
+        assert remuxer.remuxed == [str(paths[1])]
+        assert restarted_uploader.calls == [2]
+        assert (
+            await database.scalar(
+                "SELECT state FROM upload_jobs WHERE id=1 AND bvid='BVfixture'"
+            )
+            == 'waiting_review'
+        )
+        repaired = await database.fetchone(
+            'SELECT final_path,repair_temp_path,repair_stage FROM upload_parts '
+            'WHERE id=2'
+        )
+        assert repaired is not None
+        assert dict(repaired) == {
+            'final_path': str(paths[1]),
+            'repair_temp_path': None,
+            'repair_stage': 'completed',
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_timestamp_jump_repair_pauses_when_scan_finds_no_bad_part(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = BiliApiError(
+            21588,
+            '该视频内部存在时间戳跳变，请检查文件并重新压制后再上传。',
+            operation='submit_archive',
+        )
+        remuxer = FakeTimestampRemuxer(tmp_path / 'remux', ())
+        worker = coordinator(
+            database,
+            protocol,
+            FakeUploader(database),
+            MutableClock(1000),
+            timestamp_remuxer=remuxer,
+        )
+        await worker.create_ready_jobs()
+
+        assert await worker.run_once() == 1
+        assert await worker.run_once() == 1
+        assert await worker.run_once() is None
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,review_reason FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert job['state'] == 'paused'
+        assert job['submit_state'] == 'failed_permanent'
+        assert '本地扫描未定位异常分 P' in str(job['review_reason'])
+        assert len(protocol.submit_calls) == 1
+        assert remuxer.remuxed == []
     finally:
         await database.close()
 

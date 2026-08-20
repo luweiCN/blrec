@@ -31,7 +31,7 @@ from .utils.string import camel_case
 
 if TYPE_CHECKING:
     from .bili.live_status_coordinator import LiveStatusCoordinator
-    from .bili_upload.journal import RecordingJournalBridge
+    from .bili_upload.journal import RecordingJournalSink
     from .bili_upload.retention import RetentionManager
     from .control.operations import ControlOperationJournal, ControlOperationSnapshot
     from .core.typing import MetaData
@@ -113,7 +113,7 @@ class Application:
         ] = None,
         auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
         recording_journal_provider: Optional[
-            Callable[[], Optional[RecordingJournalBridge]]
+            Callable[[], Optional[RecordingJournalSink]]
         ] = None,
         recording_retention_provider: Optional[
             Callable[[], Optional[RetentionManager]]

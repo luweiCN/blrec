@@ -1643,6 +1643,36 @@ async def test_valid_finished_tail_is_left_for_the_postprocessor(
 
 
 @pytest.mark.asyncio
+async def test_valid_finished_tail_is_recovered_after_postprocessor_grace(
+    database, tmp_path: Path
+) -> None:
+    now = [1_000]
+    tail = tmp_path / 'tail.flv'
+    tail.write_bytes(b'valid video')
+    journal = RecordingJournalBridge(
+        database,
+        clock=lambda: now[0],
+        artifact_probe=lambda path: RecoveredArtifact(path, 11, 5),
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(tail), record_start_time=990)
+    await journal.recording_finished(run_id)
+
+    now[0] = 1_599
+    assert await journal.reconcile_stale_finished_parts(recovery_grace_seconds=600) == 0
+
+    now[0] = 1_600
+    assert await journal.reconcile_stale_finished_parts(recovery_grace_seconds=600) == 1
+    part = (await journal.parts_for_run(run_id))[0]
+    assert part.artifact_state == 'ready'
+    assert part.final_path == str(tail)
+    assert part.file_size_bytes == 11
+    assert part.record_duration_seconds == 5
+    assert part.error_message == '录制结束事件缺失，已自动恢复原始文件'
+    assert (await journal.session_for_run(run_id)).state == 'closed'
+
+
+@pytest.mark.asyncio
 async def test_video_completion_wins_race_with_finished_tail_reconciliation(
     database, tmp_path: Path
 ) -> None:

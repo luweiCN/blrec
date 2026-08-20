@@ -16,6 +16,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Protocol,
     Sequence,
     Tuple,
     TypeVar,
@@ -72,6 +73,8 @@ _VAINGLORY_STATUS_JOIN_SQL = (
 if TYPE_CHECKING:
     from blrec.core.recorder import Recorder
     from blrec.postprocess.postprocessor import Postprocessor
+
+    from .recording_outbox import RecordingOutboxEvent
 
 
 class JournalConsistencyError(RuntimeError):
@@ -409,6 +412,138 @@ class RecordingJournalBridge:
     def pause_automation(self, error: BaseException) -> None:
         self._degraded_reason = '{}: {}'.format(type(error).__name__, error)
 
+    async def apply_recording_event(self, event: 'RecordingOutboxEvent') -> None:
+        payload = event.payload
+        try:
+            if event.event_type == 'recording_started':
+                metadata_payload = payload.get('metadata')
+                metadata = (
+                    None
+                    if metadata_payload is None
+                    else RecordingSessionMetadata(
+                        title=str(metadata_payload['title']),
+                        cover_url=str(metadata_payload['cover_url']),
+                        anchor_uid=int(metadata_payload['anchor_uid']),
+                        anchor_name=str(metadata_payload['anchor_name']),
+                        area_id=int(metadata_payload['area_id']),
+                        area_name=str(metadata_payload['area_name']),
+                        parent_area_id=int(metadata_payload['parent_area_id']),
+                        parent_area_name=str(metadata_payload['parent_area_name']),
+                    )
+                )
+                projected_run_id = await self.recording_started(
+                    event.room_id,
+                    live_start_time=int(payload['live_start_time']),
+                    metadata=metadata,
+                    event_id=event.event_id,
+                    run_id=event.run_id,
+                    occurred_at=event.occurred_at,
+                )
+                if projected_run_id != event.run_id:
+                    raise JournalConsistencyError(
+                        "event '{}' projected a conflicting run".format(event.event_id)
+                    )
+                return
+            if event.event_type == 'recording_finished':
+                await self.recording_finished(
+                    event.run_id, event_id=event.event_id, occurred_at=event.occurred_at
+                )
+                return
+            if event.event_type == 'recording_cancelled':
+                await self.recording_cancelled(
+                    event.run_id, event_id=event.event_id, occurred_at=event.occurred_at
+                )
+                return
+            if event.event_type == 'cover_downloaded':
+                await self.cover_downloaded(
+                    event.run_id,
+                    self._required_event_path(event),
+                    event_id=event.event_id,
+                    occurred_at=event.occurred_at,
+                )
+                return
+            if event.event_type == 'video_created':
+                await self.video_created(
+                    event.run_id,
+                    self._required_event_path(event),
+                    record_start_time=int(payload['record_start_time']),
+                    timeline_start_at_ms=int(payload['timeline_start_at_ms']),
+                    event_id=event.event_id,
+                    occurred_at=event.occurred_at,
+                )
+                return
+            if event.event_type == 'video_completed':
+                await self.video_completed(
+                    event.run_id,
+                    self._required_event_path(event),
+                    event_id=event.event_id,
+                    occurred_at=event.occurred_at,
+                )
+                return
+            if event.event_type == 'video_postprocessed':
+                file_size = payload.get('file_size_bytes')
+                await self.video_postprocessed(
+                    event.run_id,
+                    str(payload['source_path']),
+                    self._required_event_path(event),
+                    event_id=event.event_id,
+                    file_size_bytes=None if file_size is None else int(file_size),
+                    file_size_provided=True,
+                    occurred_at=event.occurred_at,
+                )
+                return
+            if event.event_type == 'video_postprocessing_failed':
+                artifact_payload = payload.get('recovered_artifact')
+                artifact = (
+                    None
+                    if artifact_payload is None
+                    else RecoveredArtifact(
+                        path=str(artifact_payload['path']),
+                        size_bytes=int(artifact_payload['size_bytes']),
+                        duration_seconds=(
+                            None
+                            if artifact_payload.get('duration_seconds') is None
+                            else int(artifact_payload['duration_seconds'])
+                        ),
+                    )
+                )
+                error_message = str(payload['error'])
+                await self.video_postprocessing_failed(
+                    event.run_id,
+                    self._required_event_path(event),
+                    RuntimeError(error_message),
+                    event_id=event.event_id,
+                    error_message=error_message,
+                    recovered_artifact=artifact,
+                    artifact_provided=True,
+                    occurred_at=event.occurred_at,
+                )
+                return
+            if event.event_type == 'danmaku_completed':
+                await self.danmaku_completed(
+                    event.run_id,
+                    self._required_event_path(event),
+                    event_id=event.event_id,
+                    danmaku_count=int(payload['danmaku_count']),
+                    occurred_at=event.occurred_at,
+                )
+                return
+        except (KeyError, TypeError, ValueError) as error:
+            raise JournalConsistencyError(
+                "recording event '{}' has invalid payload".format(event.event_id)
+            ) from error
+        raise JournalConsistencyError(
+            "unsupported recording event '{}'".format(event.event_type)
+        )
+
+    @staticmethod
+    def _required_event_path(event: 'RecordingOutboxEvent') -> str:
+        if not event.path:
+            raise JournalConsistencyError(
+                "recording event '{}' requires a path".format(event.event_id)
+            )
+        return event.path
+
     async def recording_started(
         self,
         room_id: int,
@@ -416,9 +551,12 @@ class RecordingJournalBridge:
         live_start_time: int,
         metadata: Optional[RecordingSessionMetadata] = None,
         event_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        occurred_at: Optional[float] = None,
     ) -> str:
-        now = int(self._clock())
-        run_id = self._uuid_factory()
+        now = int(self._clock() if occurred_at is None else occurred_at)
+        requested_run_id = run_id
+        recording_run_id = run_id or self._uuid_factory()
         journal_id = self._new_event_id(event_id)
 
         def write(connection: sqlite3.Connection) -> str:
@@ -429,6 +567,10 @@ class RecordingJournalBridge:
                 if (
                     replayed['event_type'] != 'recording_started'
                     or not replayed['run_id']
+                    or (
+                        requested_run_id is not None
+                        and str(replayed['run_id']) != requested_run_id
+                    )
                 ):
                     raise JournalConsistencyError(
                         "event '{}' has conflicting content".format(journal_id)
@@ -561,14 +703,14 @@ class RecordingJournalBridge:
             connection.execute(
                 'INSERT INTO recording_runs(id,session_id,state,started_at) '
                 "VALUES(?,?,'recording',?)",
-                (run_id, session_id, now),
+                (recording_run_id, session_id, now),
             )
             self._insert_event(
                 connection,
                 journal_id,
                 'recording_started',
                 room_id,
-                run_id,
+                recording_run_id,
                 None,
                 {
                     'live_start_time': live_start_time,
@@ -576,7 +718,7 @@ class RecordingJournalBridge:
                 },
                 now,
             )
-            return run_id
+            return recording_run_id
 
         persisted_run_id = await self._database.write(write)
         audit(
@@ -589,9 +731,14 @@ class RecordingJournalBridge:
         return persisted_run_id
 
     async def cover_downloaded(
-        self, run_id: str, path: str, *, event_id: Optional[str] = None
+        self,
+        run_id: str,
+        path: str,
+        *,
+        event_id: Optional[str] = None,
+        occurred_at: Optional[float] = None,
     ) -> None:
-        now = int(self._clock())
+        now = int(self._clock() if occurred_at is None else occurred_at)
         cover_path = self._normalize_path(path)
         journal_id = self._new_event_id(event_id)
 
@@ -836,11 +983,18 @@ class RecordingJournalBridge:
             result='completed',
         )
 
-    async def reconcile_stale_finished_parts(self, *, grace_seconds: int = 60) -> int:
+    async def reconcile_stale_finished_parts(
+        self, *, grace_seconds: int = 60, recovery_grace_seconds: int = 600
+    ) -> int:
         if grace_seconds < 0:
             raise ValueError('finished artifact grace must not be negative')
+        if recovery_grace_seconds < grace_seconds:
+            raise ValueError(
+                'finished artifact recovery grace must not be shorter than grace'
+            )
         now = int(self._clock())
         cutoff = now - grace_seconds
+        recovery_cutoff = now - recovery_grace_seconds
         candidates = await self._database.fetchall(
             'SELECT part.id,part.session_id,part.run_id,part.source_path,'
             'part.final_path,part.record_start_time,part.updated_at,'
@@ -879,7 +1033,7 @@ class RecordingJournalBridge:
                 except OSError:
                     has_nonempty_path = True
                     break
-            if has_nonempty_path:
+            if has_nonempty_path and int(part['live_end_time']) > recovery_cutoff:
                 recoveries[int(part['id'])] = None
                 continue
             recoveries[int(part['id'])] = await loop.run_in_executor(
@@ -891,8 +1045,11 @@ class RecordingJournalBridge:
             for candidate in candidates:
                 part_id = int(candidate['id'])
                 decision = recoveries[part_id]
-                if decision is None or decision.artifact is not None:
+                if decision is None:
                     continue
+                decision_cutoff = (
+                    recovery_cutoff if decision.artifact is not None else cutoff
+                )
                 current = connection.execute(
                     'SELECT part.session_id,part.record_start_time,'
                     'session.live_end_time '
@@ -919,25 +1076,48 @@ class RecordingJournalBridge:
                         str(candidate['run_id']),
                         int(candidate['updated_at']),
                         int(candidate['live_end_time']),
-                        cutoff,
+                        decision_cutoff,
                         int(candidate['cancellation_generation']),
                     ),
                 ).fetchone()
                 if current is None:
                     continue
                 live_end_time = int(current['live_end_time'])
-                state = 'failed' if decision.any_path_exists else 'missing'
-                message = (
-                    '录制结束后文件无法解析，已自动排除'
-                    if decision.any_path_exists
-                    else '录制结束后文件缺失，已自动排除'
-                )
+                artifact = decision.artifact
+                final_path: Optional[str]
+                file_size_bytes: Optional[int]
+                if artifact is not None:
+                    duration = artifact.duration_seconds
+                    if duration is None:
+                        duration = max(
+                            0, live_end_time - int(current['record_start_time'])
+                        )
+                    state = 'ready'
+                    final_path = artifact.path
+                    file_size_bytes = artifact.size_bytes
+                    record_end_time = int(current['record_start_time']) + duration
+                    message = (
+                        '录制结束事件缺失，已自动恢复原始文件'
+                        if decision.used_source
+                        else '录制结束事件缺失，已自动恢复成品文件'
+                    )
+                else:
+                    duration = max(0, live_end_time - int(current['record_start_time']))
+                    state = 'failed' if decision.any_path_exists else 'missing'
+                    final_path = None
+                    file_size_bytes = None
+                    record_end_time = live_end_time
+                    message = (
+                        '录制结束后文件无法解析，已自动排除'
+                        if decision.any_path_exists
+                        else '录制结束后文件缺失，已自动排除'
+                    )
                 updated = connection.execute(
                     'UPDATE recording_parts SET artifact_state=?,'
-                    'final_path=NULL,file_size_bytes=NULL,'
+                    'final_path=?,file_size_bytes=?,'
                     'record_end_time=COALESCE(record_end_time,?),'
                     'record_duration_seconds=COALESCE('
-                    'record_duration_seconds,MAX(0,?-record_start_time)),'
+                    'record_duration_seconds,?),'
                     'source_completed_at=COALESCE(source_completed_at,?),'
                     'postprocessed_at=COALESCE(postprocessed_at,?),'
                     'error_message=?,updated_at=? '
@@ -945,8 +1125,10 @@ class RecordingJournalBridge:
                     'AND source_completed_at IS NULL AND updated_at=?',
                     (
                         state,
-                        live_end_time,
-                        live_end_time,
+                        final_path,
+                        file_size_bytes,
+                        record_end_time,
+                        duration,
                         now,
                         now,
                         message,
@@ -1069,10 +1251,16 @@ class RecordingJournalBridge:
         *,
         record_start_time: int,
         event_id: Optional[str] = None,
+        timeline_start_at_ms: Optional[int] = None,
+        occurred_at: Optional[float] = None,
     ) -> None:
-        clock_now = self._clock()
+        clock_now = self._clock() if occurred_at is None else occurred_at
         now = int(clock_now)
-        timeline_start_at_ms = int(clock_now * 1000)
+        timeline_start_at_ms = (
+            int(clock_now * 1000)
+            if timeline_start_at_ms is None
+            else timeline_start_at_ms
+        )
         source_path = self._normalize_path(path)
         journal_id = self._new_event_id(event_id)
 
@@ -1151,9 +1339,14 @@ class RecordingJournalBridge:
         )
 
     async def video_completed(
-        self, run_id: str, path: str, *, event_id: Optional[str] = None
+        self,
+        run_id: str,
+        path: str,
+        *,
+        event_id: Optional[str] = None,
+        occurred_at: Optional[float] = None,
     ) -> None:
-        now = int(self._clock())
+        now = int(self._clock() if occurred_at is None else occurred_at)
         source_path = self._normalize_path(path)
         journal_id = self._new_event_id(event_id)
 
@@ -1207,15 +1400,19 @@ class RecordingJournalBridge:
         final_path: str,
         *,
         event_id: Optional[str] = None,
+        file_size_bytes: Optional[int] = None,
+        file_size_provided: bool = False,
+        occurred_at: Optional[float] = None,
     ) -> None:
-        now = int(self._clock())
+        now = int(self._clock() if occurred_at is None else occurred_at)
         source = self._normalize_path(source_path)
         final = self._normalize_path(final_path)
         journal_id = self._new_event_id(event_id)
         loop = asyncio.get_running_loop()
-        file_size_bytes = await loop.run_in_executor(
-            None, self._file_size_or_none, final
-        )
+        if not file_size_provided:
+            file_size_bytes = await loop.run_in_executor(
+                None, self._file_size_or_none, final
+            )
 
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'video_postprocessed'):
@@ -1273,9 +1470,13 @@ class RecordingJournalBridge:
         )
 
     async def recording_cancelled(
-        self, run_id: str, *, event_id: Optional[str] = None
+        self,
+        run_id: str,
+        *,
+        event_id: Optional[str] = None,
+        occurred_at: Optional[float] = None,
     ) -> None:
-        now = int(self._clock())
+        now = int(self._clock() if occurred_at is None else occurred_at)
         journal_id = self._new_event_id(event_id)
 
         def write(connection: sqlite3.Connection) -> None:
@@ -1317,9 +1518,13 @@ class RecordingJournalBridge:
         audit('recording_cancelled', run_id=run_id, result='journaled')
 
     async def recording_finished(
-        self, run_id: str, *, event_id: Optional[str] = None
+        self,
+        run_id: str,
+        *,
+        event_id: Optional[str] = None,
+        occurred_at: Optional[float] = None,
     ) -> None:
-        now = int(self._clock())
+        now = int(self._clock() if occurred_at is None else occurred_at)
         journal_id = self._new_event_id(event_id)
 
         def write(connection: sqlite3.Connection) -> None:
@@ -1367,16 +1572,26 @@ class RecordingJournalBridge:
         error: BaseException,
         *,
         event_id: Optional[str] = None,
+        error_message: Optional[str] = None,
+        recovered_artifact: Optional[RecoveredArtifact] = None,
+        artifact_provided: bool = False,
+        occurred_at: Optional[float] = None,
     ) -> None:
-        now = int(self._clock())
+        now = int(self._clock() if occurred_at is None else occurred_at)
         source = self._normalize_path(source_path)
         journal_id = self._new_event_id(event_id)
-        message = '{}: {}'.format(type(error).__name__, error)[:500]
-        loop = asyncio.get_running_loop()
-        recovery = await loop.run_in_executor(
-            None, self._recover_artifact, source, None
+        message = (
+            '{}: {}'.format(type(error).__name__, error)[:500]
+            if error_message is None
+            else error_message[:500]
         )
-        artifact = recovery.artifact
+        artifact = recovered_artifact
+        if not artifact_provided:
+            loop = asyncio.get_running_loop()
+            recovery = await loop.run_in_executor(
+                None, self._recover_artifact, source, None
+            )
+            artifact = recovery.artifact
 
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(
@@ -1467,15 +1682,22 @@ class RecordingJournalBridge:
         )
 
     async def danmaku_completed(
-        self, run_id: str, path: str, *, event_id: Optional[str] = None
+        self,
+        run_id: str,
+        path: str,
+        *,
+        event_id: Optional[str] = None,
+        danmaku_count: Optional[int] = None,
+        occurred_at: Optional[float] = None,
     ) -> None:
-        now = int(self._clock())
+        now = int(self._clock() if occurred_at is None else occurred_at)
         xml_path = self._normalize_path(path)
         journal_id = self._new_event_id(event_id)
-        loop = asyncio.get_running_loop()
-        danmaku_count = await loop.run_in_executor(
-            None, self._count_danmaku_sync, xml_path
-        )
+        if danmaku_count is None:
+            loop = asyncio.get_running_loop()
+            danmaku_count = await loop.run_in_executor(
+                None, self._count_danmaku_sync, xml_path
+            )
 
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'danmaku_completed'):
@@ -3224,10 +3446,57 @@ class RecordingJournalBridge:
         return count
 
 
+class RecordingJournalSink(Protocol):
+    def pause_automation(self, error: BaseException) -> None:
+        pass
+
+    async def recording_started(
+        self,
+        room_id: int,
+        *,
+        live_start_time: int,
+        metadata: Optional[RecordingSessionMetadata] = None,
+    ) -> str:
+        pass
+
+    async def recording_finished(self, run_id: str) -> None:
+        pass
+
+    async def recording_cancelled(self, run_id: str) -> None:
+        pass
+
+    async def cover_downloaded(self, run_id: str, path: str) -> None:
+        pass
+
+    async def video_created(
+        self, run_id: str, path: str, *, record_start_time: int
+    ) -> None:
+        pass
+
+    async def video_completed(self, run_id: str, path: str) -> None:
+        pass
+
+    async def video_postprocessed(
+        self, run_id: str, source_path: str, final_path: str
+    ) -> None:
+        pass
+
+    async def video_postprocessing_failed(
+        self, run_id: str, source_path: str, error: BaseException
+    ) -> None:
+        pass
+
+    async def danmaku_completed(self, run_id: str, path: str) -> None:
+        pass
+
+    async def run_id_for_source(self, source_path: str) -> str:
+        pass
+
+
 class RecordingJournalListener:
     def __init__(
         self,
-        journal: RecordingJournalBridge,
+        journal: RecordingJournalSink,
         recorder: Recorder,
         postprocessor: Postprocessor,
     ) -> None:

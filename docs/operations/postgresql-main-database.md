@@ -7,10 +7,14 @@ NAS 的在线业务数据统一写入移动云 PostgreSQL 数据库 `blrec_dashb
 - `core` schema 是唯一业务主库，保存稿件、分 P、录像会话、上传任务、对局、模型结果、实时预分析、Worker 状态、训练候选元数据和访问日志归档。
 - Public Dashboard API 直接只读 `core` 中经过批准的公开业务表；当前榜单和对局不再复制到另一套投影表。`public` schema 只保存结构化历史趋势、结算图片元数据和写入幂等记录。
 - 录像、结算截图、训练图片、模型文件、日志和缓存仍是 NAS 文件，数据库只保存路径、摘要和状态。
-- `auth.sqlite3` 与 `control.sqlite3` 继续留在 `/cfg`。它们体积很小，分别负责后台登录会话和断网时的本机控制幂等性，不参与业务查询。
+- `auth.sqlite3`、`control.sqlite3` 与 `recording-journal.sqlite3` 继续留在 `/cfg`。前两者分别负责后台登录会话和断网时的本机控制幂等性；`recording-journal.sqlite3` 只保存 Recorder/Postprocessor 的本地有序事件和 source/run 关联，供 PostgreSQL 恢复后幂等投影。三者都不提供业务列表查询，也不是第二业务主库。
 - 原 `blrec.sqlite3` 在切换后只作为回滚快照，不再接受在线写入。
 
-主库不可达时服务必须停止业务数据库操作，禁止自动写回 SQLite，否则恢复连接后会形成两套互相冲突的数据。
+主库不可达时，账号、投稿、审核、分析和公开数据等远端业务数据库操作必须暂停，禁止把这些业务表自动写回 SQLite，否则恢复连接后会形成两套互相冲突的数据。录像文件仍写入 `/rec`，录制生命周期只追加到本地 `recording-journal.sqlite3`；后台按 sequence 重试，远端事务提交后才在本地确认。该 outbox 是采集日志，不属于业务双主。
+
+本地 journal 使用 WAL、`synchronous=FULL`、`foreign_keys=ON`、固定 application/schema version 和 `0600` 权限。可通过认证接口 `GET /api/v1/recording-sessions/outbox-status` 查看本地是否 ready、积压数量、最老积压年龄、最近同步时间和错误；该接口不依赖 PostgreSQL 录制列表。
+
+旧部署升级后会在设置文件同目录自动创建 `recording-journal.sqlite3`，无需从旧 `blrec.sqlite3` 迁表；可用 `BLREC_RECORDING_JOURNAL_DATABASE` 仅覆盖该本地文件路径。首版保留全部已同步事件用于审计和恢复，不自动清理；容量评估和备份必须包含它。
 
 ## 连接与权限
 
@@ -86,6 +90,7 @@ Compose 项目。不得再配置 `DASHBOARD_DATABASE=/cfg/blrec.sqlite3`。
 3. 管理页登录、列表、任务领取与心跳、实时预分析、录播分析和 Publisher 各完成一次真实读写。
 4. Public Dashboard API 能直接读取 `core`，榜单与迁移前相同；修改业务数据后 revision 增长、进程缓存刷新且外网页面的 SSE 更新正常。
 5. 切换后执行一次 PostgreSQL 备份；输出必须非空并显示 `integrity=ok`。
+6. 检查 outbox status 为 ready；正常稳定期 pending 应很快回到 0。模拟短暂断库时，确认录像文件和本地事件继续增长，恢复后积压归零且场次/分 P 不重复。
 
 ```bash
 docker exec blrec-next python /app/scripts/backup_blrec_database.py \
@@ -93,24 +98,28 @@ docker exec blrec-next python /app/scripts/backup_blrec_database.py \
 ```
 
 PostgreSQL 模式下该脚本使用 16 版 `pg_dump` 生成自定义格式文件，并用
-`pg_restore --list` 验证。备份保存在 NAS `/cfg/backups`，因此即使移动云磁盘损坏仍有
-异机副本。日常升级、迁移和批量重算前都必须先执行同一脚本。
+`pg_restore --list` 验证；若 `/cfg/recording-journal.sqlite3` 已存在，脚本同时通过 SQLite
+backup API 生成一致快照并对源与备份执行 `PRAGMA quick_check`，不会遗漏运行中的 WAL。
+两份备份都保存在 NAS `/cfg/backups`。日常升级、迁移和批量重算前都必须先执行同一脚本，
+任一份为空或完整性失败都必须终止更新。
 
 ## 回滚
 
 只允许整体回滚，不能让 PostgreSQL 和 SQLite 同时写入：
 
 1. 停止主服务和 Publisher，记录 PostgreSQL 最后写入时间并保留最新 `.dump`。
-2. 若 PostgreSQL 已产生新业务数据，先恢复问题或把新数据完整迁回 SQLite；不得直接启动旧快照覆盖这些写入。
-3. 只有确认 PostgreSQL 自切换后没有新写入，才能移除 `compose.postgres.yml` 和 `BLREC_DATABASE_URL`，恢复迁移前的 `/cfg` 备份与旧镜像。
-4. 启动后执行 SQLite `PRAGMA quick_check`，再核对关键表数量和页面数据。
+2. 查询 outbox status；pending 不为 0 时必须先恢复 PostgreSQL 并完成投影，或保留 journal 交给仍支持它的版本处理，禁止直接启动不识别 outbox 的旧镜像丢弃事件。
+3. 若 PostgreSQL 已产生新业务数据，先恢复问题或把新数据完整迁回 SQLite；不得直接启动旧快照覆盖这些写入。
+4. 只有确认 PostgreSQL 自切换后没有新写入，才能移除 `compose.postgres.yml` 和 `BLREC_DATABASE_URL`，恢复迁移前的 `/cfg` 备份与旧镜像。恢复或替换 `recording-journal.sqlite3` 时服务必须停止，主文件、WAL/SHM 不得分开裸拷贝。
+5. 启动后对业务 SQLite 和 recording journal 分别执行 `PRAGMA quick_check`，再核对关键表数量和页面数据。
 
 后续每次提升 `BiliUploadDatabase.LATEST_SCHEMA_VERSION`，都必须同时提供并测试
 PostgreSQL 迁移；应用遇到版本不一致会拒绝启动，不会猜测或静默修改生产 schema。
 
 ## 后续版本升级
 
-主库切换到 PostgreSQL 后，版本升级仍需短暂停写。先在旧容器中执行并验证备份，
+主库切换到 PostgreSQL 后，版本升级仍需短暂停写。先在旧容器中执行并验证 PostgreSQL
+与 recording journal 两份备份，
 再停止主服务；迁移工具会尝试取得与主服务相同的数据库独占锁，若仍有主服务持有锁会
 直接拒绝执行。使用目标版本镜像运行：
 

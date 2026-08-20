@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 from pkg_resources import resource_filename
 from pydantic import ValidationError
 from starlette.responses import Response
@@ -22,6 +23,10 @@ from blrec.bili_upload.recording_content import (
     MediaResource,
     RecordingContentNotFound,
     RecordingContentUnavailable,
+)
+from blrec.bili_upload.recording_outbox import (
+    LocalRecordingOutbox,
+    RecordingOutboxRuntime,
 )
 from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.cloud_cost import (
@@ -129,6 +134,14 @@ _application_started = False
 _control_operation_journal = ControlOperationJournal(
     Path(_path).with_name('control.sqlite3')
 )
+_recording_outbox = LocalRecordingOutbox(
+    Path(
+        os.environ.get(
+            'BLREC_RECORDING_JOURNAL_DATABASE',
+            str(Path(_path).with_name('recording-journal.sqlite3')),
+        )
+    )
+)
 _network_route_manager = NetworkRouteManager(lambda: _settings.network)
 
 _notification_providers = {
@@ -175,6 +188,15 @@ async def _enable_collect_upload_policy(room_id: int) -> None:
     )
 
 
+async def _reconcile_recording_events(journal: Any) -> None:
+    projected = await _recording_outbox_runtime.drain_pending(journal)
+    if projected:
+        logger.info(
+            'Projected {} local recording events before remote workers started',
+            projected,
+        )
+
+
 _bili_account_runtime = BiliAccountRuntime(
     _settings.bili_upload,
     api_key=_env_settings.api_key,
@@ -196,12 +218,13 @@ _bili_account_runtime = BiliAccountRuntime(
     },
     notification_channel_enabled=_notification_channel_enabled,
     control_operation_journal=_control_operation_journal,
+    recording_event_reconciler=_reconcile_recording_events,
 )
 app = Application(
     _settings,
     managed_cookie_provider=_managed_cookie_provider,
     auth_failure_reporter=_report_primary_auth_failure,
-    recording_journal_provider=lambda: _bili_account_runtime.journal,
+    recording_journal_provider=lambda: _recording_outbox,
     recording_retention_provider=(lambda: _bili_account_runtime.retention_manager),
     network_route_manager=_network_route_manager,
     control_operation_journal=_control_operation_journal,
@@ -237,6 +260,79 @@ _visitor_analytics_client = AliyunSlsQueryClient(
 )
 visitor_analytics.service = VisitorAnalyticsService(
     _visitor_analytics_config, _visitor_analytics_client
+)
+
+
+def _bind_bili_runtime_services() -> None:
+    runtime = _bili_account_runtime
+    bili_accounts.manager = runtime.manager
+    bili_accounts.archive_migration = runtime.archive_migration
+    bili_accounts.unavailable_reason = runtime.unavailable_reason
+    recording_sessions.journal = runtime.journal
+    recording_sessions.content_reader = runtime.content_reader
+    recording_sessions.remote_media_cache = runtime.remote_media_cache
+    recording_sessions.task_actions = runtime.task_actions
+    recording_sessions.session_action_runner = runtime.run_recording_session_action
+    recording_sessions.session_batch_runner = runtime.run_recording_session_batch
+    recording_sessions.submission_manager = runtime.session_submission_manager
+    recording_sessions.active_media_service = _active_media_service
+    recording_sessions.unavailable_reason = runtime.unavailable_reason
+    media_library.library = runtime.media_library
+    media_library.item_deleter = runtime.delete_media_library_item
+    media_library.unavailable_reason = runtime.unavailable_reason
+    recording_retention.manager = runtime.retention_manager
+    recording_retention.unavailable_reason = runtime.unavailable_reason
+    room_upload_policies.manager = runtime.policy_manager
+    room_upload_policies.category_catalog = runtime.category_catalog
+    room_upload_policies.unavailable_reason = runtime.unavailable_reason
+    upload_covers.library = runtime.cover_library
+    upload_covers.unavailable_reason = runtime.unavailable_reason
+    bili_collections.manager = runtime.collection_manager
+    bili_collections.unavailable_reason = runtime.unavailable_reason
+    highlights.service = runtime.highlight_service
+    highlights.worker = runtime.highlight_worker
+    highlights.upload_task_creator = runtime.create_highlight_upload_task
+    highlights.clip_deleter = runtime.delete_highlight_clip
+    highlights.unavailable_reason = runtime.unavailable_reason
+    browser_extension.highlight_service = runtime.highlight_service
+    browser_extension.policy_manager = runtime.policy_manager
+    browser_extension.category_catalog = runtime.category_catalog
+    browser_extension.vainglory_service = runtime.vainglory_service
+    browser_extension.unavailable_reason = runtime.unavailable_reason
+    vainglory.service = runtime.vainglory_service
+    vainglory.publication = runtime.vainglory_publication
+    vainglory.archive_backfill = runtime.archive_backfill
+    vainglory.unavailable_reason = runtime.unavailable_reason
+
+
+async def _on_bili_runtime_ready() -> None:
+    global _visitor_analytics_sync
+    analytics_database = _bili_account_runtime.database
+    if analytics_database is not None and _visitor_analytics_sync is None:
+        analytics_archive = VisitorAnalyticsArchive(analytics_database)
+        visitor_analytics.service = VisitorAnalyticsService(
+            _visitor_analytics_config,
+            _visitor_analytics_client,
+            archive=analytics_archive,
+        )
+        _visitor_analytics_sync = VisitorAnalyticsSynchronizer(
+            _visitor_analytics_config, _visitor_analytics_client, analytics_archive
+        )
+    _bind_bili_runtime_services()
+    if _application_started:
+        await app.refresh_managed_cookie()
+        if _visitor_analytics_sync is not None:
+            _visitor_analytics_sync.start()
+
+
+_recording_outbox_runtime = RecordingOutboxRuntime(
+    _recording_outbox,
+    lambda: _bili_account_runtime,
+    on_remote_ready=_on_bili_runtime_ready,
+)
+recording_sessions.local_outbox = _recording_outbox
+recording_sessions.local_outbox_ready_provider = (
+    lambda: _recording_outbox_runtime.local_ready
 )
 
 
@@ -918,68 +1014,8 @@ async def on_startup() -> None:
         )
         browser_extension.application = app
         await _notification_dispatcher.start()
-        await _bili_account_runtime.start()
-        analytics_database = getattr(_bili_account_runtime, 'database', None)
-        if analytics_database is not None:
-            analytics_archive = VisitorAnalyticsArchive(analytics_database)
-            visitor_analytics.service = VisitorAnalyticsService(
-                _visitor_analytics_config,
-                _visitor_analytics_client,
-                archive=analytics_archive,
-            )
-            _visitor_analytics_sync = VisitorAnalyticsSynchronizer(
-                _visitor_analytics_config, _visitor_analytics_client, analytics_archive
-            )
-        bili_accounts.manager = _bili_account_runtime.manager
-        bili_accounts.archive_migration = _bili_account_runtime.archive_migration
-        bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
-        recording_sessions.journal = _bili_account_runtime.journal
-        recording_sessions.content_reader = _bili_account_runtime.content_reader
-        recording_sessions.remote_media_cache = _bili_account_runtime.remote_media_cache
-        recording_sessions.task_actions = _bili_account_runtime.task_actions
-        recording_sessions.session_action_runner = (
-            _bili_account_runtime.run_recording_session_action
-        )
-        recording_sessions.session_batch_runner = (
-            _bili_account_runtime.run_recording_session_batch
-        )
-        recording_sessions.submission_manager = (
-            _bili_account_runtime.session_submission_manager
-        )
-        recording_sessions.active_media_service = active_media
-        recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
-        media_library.library = _bili_account_runtime.media_library
-        media_library.item_deleter = _bili_account_runtime.delete_media_library_item
-        media_library.unavailable_reason = _bili_account_runtime.unavailable_reason
-        recording_retention.manager = _bili_account_runtime.retention_manager
-        recording_retention.unavailable_reason = (
-            _bili_account_runtime.unavailable_reason
-        )
-        room_upload_policies.manager = _bili_account_runtime.policy_manager
-        room_upload_policies.category_catalog = _bili_account_runtime.category_catalog
-        room_upload_policies.unavailable_reason = (
-            _bili_account_runtime.unavailable_reason
-        )
-        upload_covers.library = _bili_account_runtime.cover_library
-        upload_covers.unavailable_reason = _bili_account_runtime.unavailable_reason
-        bili_collections.manager = _bili_account_runtime.collection_manager
-        bili_collections.unavailable_reason = _bili_account_runtime.unavailable_reason
-        highlights.service = _bili_account_runtime.highlight_service
-        highlights.worker = _bili_account_runtime.highlight_worker
-        highlights.upload_task_creator = (
-            _bili_account_runtime.create_highlight_upload_task
-        )
-        highlights.clip_deleter = _bili_account_runtime.delete_highlight_clip
-        highlights.unavailable_reason = _bili_account_runtime.unavailable_reason
-        browser_extension.highlight_service = _bili_account_runtime.highlight_service
-        browser_extension.policy_manager = _bili_account_runtime.policy_manager
-        browser_extension.category_catalog = _bili_account_runtime.category_catalog
-        browser_extension.vainglory_service = _bili_account_runtime.vainglory_service
-        browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
-        vainglory.service = _bili_account_runtime.vainglory_service
-        vainglory.publication = _bili_account_runtime.vainglory_publication
-        vainglory.archive_backfill = _bili_account_runtime.archive_backfill
-        vainglory.unavailable_reason = _bili_account_runtime.unavailable_reason
+        await _recording_outbox_runtime.start()
+        _bind_bili_runtime_services()
         application_launch_entered = True
         await app.launch()
         await settings_apply.recover()
@@ -1041,7 +1077,10 @@ async def on_startup() -> None:
                 if _visitor_analytics_sync is not None:
                     await _visitor_analytics_sync.close()
                     _visitor_analytics_sync = None
-                await _bili_account_runtime.close()
+                try:
+                    await _recording_outbox_runtime.close()
+                finally:
+                    await _bili_account_runtime.close()
             finally:
                 try:
                     await _notification_dispatcher.close(drain_timeout_seconds=15)
@@ -1123,7 +1162,10 @@ async def on_shuntdown() -> None:
                 if _visitor_analytics_sync is not None:
                     await _visitor_analytics_sync.close()
                     _visitor_analytics_sync = None
-                await _bili_account_runtime.close()
+                try:
+                    await _recording_outbox_runtime.close()
+                finally:
+                    await _bili_account_runtime.close()
             finally:
                 await _notification_dispatcher.close(drain_timeout_seconds=15)
     finally:
