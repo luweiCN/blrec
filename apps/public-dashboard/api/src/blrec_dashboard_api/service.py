@@ -212,6 +212,52 @@ def _delete_unreferenced_players(
     return cursor.rowcount > 0
 
 
+_MATCH_INSERT_SQL = (
+    'INSERT INTO matches('
+    'source_match_id,revision_sha256,player_id,season_key,mode,played_at,'
+    'played_at_epoch,duration_seconds,result,stream_title,replay_kind,replay_url,'
+    'result_image_url,result_image_width,result_image_height,exact_fingerprint,'
+    'analysis_provisional,stats_eligible,replay_access,duplicate_of_match_id,'
+    'duplicate_review_state,created_at,updated_at'
+    ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+)
+
+
+def _match_values(
+    match: IngestMatch, *, revision: str, fingerprint: Optional[str], now: int
+) -> Tuple[Any, ...]:
+    replay_kind = None if match.replay is None else match.replay.kind
+    replay_url = None if match.replay is None else str(match.replay.url)
+    image_url = None if match.result_image is None else str(match.result_image.url)
+    image_width = None if match.result_image is None else match.result_image.width
+    image_height = None if match.result_image is None else match.result_image.height
+    return (
+        match.id,
+        revision,
+        match.player_id,
+        match.season_key,
+        match.mode,
+        _utc_iso(match.played_at),
+        int(match.played_at.timestamp()),
+        match.duration_seconds,
+        match.result,
+        match.stream_title,
+        replay_kind,
+        replay_url,
+        image_url,
+        image_width,
+        image_height,
+        fingerprint,
+        int(match.analysis_provisional),
+        int(match.stats_eligible),
+        match.replay_access,
+        match.duplicate_of_match_id,
+        match.duplicate_review_state,
+        now,
+        now,
+    )
+
+
 def _insert_team(connection: Any, match_id: int, team: IngestMatchTeam) -> None:
     connection.execute(
         'INSERT INTO match_teams(match_id,role,side,color,kills,economy) '
@@ -260,21 +306,8 @@ def _upsert_match(
         affected_player_ids.update(
             _players_for_fingerprints(connection, (existing['exact_fingerprint'],))
         )
-    replay_kind = None if match.replay is None else match.replay.kind
-    replay_url = None if match.replay is None else str(match.replay.url)
-    image_url = None if match.result_image is None else str(match.result_image.url)
-    image_width = None if match.result_image is None else match.result_image.width
-    image_height = None if match.result_image is None else match.result_image.height
-    played_at = _utc_iso(match.played_at)
-    played_at_epoch = int(match.played_at.timestamp())
     connection.execute(
-        'INSERT INTO matches('
-        'source_match_id,revision_sha256,player_id,season_key,mode,played_at,'
-        'played_at_epoch,duration_seconds,result,stream_title,replay_kind,replay_url,'
-        'result_image_url,result_image_width,result_image_height,exact_fingerprint,'
-        'analysis_provisional,stats_eligible,replay_access,duplicate_of_match_id,'
-        'duplicate_review_state,created_at,updated_at'
-        ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+        _MATCH_INSERT_SQL + ' '
         'ON CONFLICT(source_match_id) DO UPDATE SET '
         'revision_sha256=excluded.revision_sha256,player_id=excluded.player_id,'
         'season_key=excluded.season_key,mode=excluded.mode,'
@@ -291,31 +324,7 @@ def _upsert_match(
         'duplicate_of_match_id=excluded.duplicate_of_match_id,'
         'duplicate_review_state=excluded.duplicate_review_state,'
         'updated_at=excluded.updated_at',
-        (
-            match.id,
-            revision,
-            match.player_id,
-            match.season_key,
-            match.mode,
-            played_at,
-            played_at_epoch,
-            match.duration_seconds,
-            match.result,
-            match.stream_title,
-            replay_kind,
-            replay_url,
-            image_url,
-            image_width,
-            image_height,
-            fingerprint,
-            int(match.analysis_provisional),
-            int(match.stats_eligible),
-            match.replay_access,
-            match.duplicate_of_match_id,
-            match.duplicate_review_state,
-            now,
-            now,
-        ),
+        _match_values(match, revision=revision, fingerprint=fingerprint, now=now),
     )
     connection.execute('DELETE FROM match_teams WHERE match_id=?', (match.id,))
     _insert_team(connection, match.id, match.ally)
@@ -338,6 +347,90 @@ def _search_forms(value: str) -> Tuple[str, str, str]:
         _normalize_search(''.join(lazy_pinyin(value, style=Style.NORMAL))),
         _normalize_search(''.join(lazy_pinyin(value, style=Style.FIRST_LETTER))),
     )
+
+
+def _insert_bootstrap_matches(
+    connection: Any,
+    matches: Sequence[IngestMatch],
+    players: Sequence[IngestPlayer],
+    now: int,
+) -> Tuple[Set[int], Set[int]]:
+    if not matches:
+        return set(), set()
+    match_rows = []
+    team_rows = []
+    participant_rows = []
+    search_rows = []
+    players_by_id = {player.id: player for player in players}
+    for match in matches:
+        fingerprint = _ingest_match_fingerprint(match)
+        match_rows.append(
+            _match_values(
+                match, revision=_match_revision(match), fingerprint=fingerprint, now=now
+            )
+        )
+        for team in (match.ally, match.enemy):
+            team_rows.append(
+                (match.id, team.role, team.side, team.color, team.kills, team.economy)
+            )
+            participant_rows.extend(
+                (
+                    match.id,
+                    team.role,
+                    player.slot,
+                    player.name,
+                    player.hero_name,
+                    player.kills,
+                    player.deaths,
+                    player.assists,
+                    player.economy,
+                    player.last_hits,
+                    int(player.is_recorded_player),
+                )
+                for player in team.players
+            )
+        player = players_by_id.get(match.player_id)
+        if player is None:
+            raise ValueError('dashboard cache match references an unknown player')
+        segments: List[Tuple[str, str]] = [
+            ('stream_title', match.stream_title),
+            ('player_name', player.name),
+            ('room_label', player.room_label),
+        ]
+        segments.extend(('player_alias', alias) for alias in sorted(player.aliases))
+        segments.extend(
+            ('room_id', str(room_id)) for room_id in sorted(player.room_ids)
+        )
+        segments.extend(
+            ('participant_name', participant.name)
+            for team in (match.ally, match.enemy)
+            for participant in team.players
+        )
+        for kind, raw_value in segments:
+            normalized, pinyin, initials = _search_forms(raw_value)
+            if normalized:
+                search_rows.append((match.id, kind, normalized, pinyin, initials))
+
+    connection.executemany(_MATCH_INSERT_SQL, match_rows)
+    connection.executemany(
+        'INSERT INTO match_teams(match_id,role,side,color,kills,economy) '
+        'VALUES(?,?,?,?,?,?)',
+        team_rows,
+    )
+    connection.executemany(
+        'INSERT INTO match_participants('
+        'match_id,team_role,slot,player_name,hero_name,kills,deaths,assists,'
+        'economy,last_hits,is_recorded_player'
+        ') VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        participant_rows,
+    )
+    connection.executemany(
+        'INSERT INTO match_search('
+        'match_id,segment_kind,normalized,pinyin,initials'
+        ') VALUES(?,?,?,?,?)',
+        search_rows,
+    )
+    return ({match.id for match in matches}, {match.player_id for match in matches})
 
 
 def _rebuild_match_search(connection: Any, match_ids: Iterable[int]) -> None:
@@ -589,11 +682,19 @@ def apply_ingest_batch(
                 'removed_at=excluded.removed_at',
                 (removed_match_id, now),
             )
-        for match in batch.matches:
-            changed, affected_player_ids = _upsert_match(connection, match, now)
-            if changed:
-                changed_match_ids.add(match.id)
-                rating_player_ids.update(affected_player_ids)
+        bootstrap_chunk = active_revision == 0
+        if bootstrap_chunk:
+            bulk_match_ids, bulk_player_ids = _insert_bootstrap_matches(
+                connection, batch.matches, batch.players, now
+            )
+            changed_match_ids.update(bulk_match_ids)
+            rating_player_ids.update(bulk_player_ids)
+        else:
+            for match in batch.matches:
+                changed, affected_player_ids = _upsert_match(connection, match, now)
+                if changed:
+                    changed_match_ids.add(match.id)
+                    rating_player_ids.update(affected_player_ids)
 
         if changed_player_ids:
             placeholders = ','.join('?' for _ in changed_player_ids)
@@ -606,7 +707,8 @@ def apply_ingest_batch(
                     tuple(sorted(changed_player_ids)),
                 ).fetchall()
             )
-        _rebuild_match_search(connection, changed_match_ids)
+        if not bootstrap_chunk:
+            _rebuild_match_search(connection, changed_match_ids)
         if batch.publish and active_revision == 0:
             rating_player_ids.update(current_player_ids)
         rating_event_count = (

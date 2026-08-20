@@ -417,6 +417,41 @@ def test_bootstrap_defers_rating_rebuild_until_the_published_chunk(
     assert rated_match_ids == {1, 2}
 
 
+def test_bootstrap_bulk_writes_matches_and_search_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database_path = tmp_path / 'dashboard.sqlite3'
+    initialize_database(database_path)
+    first = cache_batch(source_revision=8)
+    first['publish'] = False
+    first['reset'] = True
+
+    def unexpected_row_writes(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError('bootstrap used per-match database writes')
+
+    monkeypatch.setattr(service_module, '_upsert_match', unexpected_row_writes)
+    monkeypatch.setattr(service_module, '_rebuild_match_search', unexpected_row_writes)
+
+    result = apply_ingest_batch(
+        database_path,
+        idempotency_key='bootstrap-bulk-first',
+        batch=IngestBatch.parse_obj(first),
+    )
+    connection = connect_database(database_path)
+    try:
+        counts = connection.execute(
+            'SELECT (SELECT COUNT(*) FROM matches),'
+            '(SELECT COUNT(*) FROM match_teams),'
+            '(SELECT COUNT(*) FROM match_participants),'
+            '(SELECT COUNT(*) FROM match_search)'
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert result['matchCount'] == 1
+    assert tuple(int(value) for value in counts) == (1, 2, 2, 7)
+
+
 def test_publisher_sync_reaches_the_authenticated_api_ingest_seam(
     tmp_path: Path,
 ) -> None:
