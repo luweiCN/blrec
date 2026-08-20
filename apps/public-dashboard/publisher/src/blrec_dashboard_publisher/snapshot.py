@@ -30,7 +30,7 @@ from .rating import (
     RatingGoalForecast,
     VirtualMatchRating,
     calculate_rating_forecast,
-    calculate_virtual_match_rating,
+    calculate_virtual_match_rating_timeline,
 )
 from .source_database import connect_source_database
 
@@ -203,10 +203,25 @@ class _Performance:
         )
 
     def public_value(
-        self, rating: Optional[VirtualMatchRating] = None
+        self,
+        rating: Optional[VirtualMatchRating] = None,
+        peak_rating_score: Optional[float] = None,
     ) -> Mapping[str, Any]:
+        public_rating_score = (
+            peak_rating_score
+            if peak_rating_score is not None
+            else (rating.score if rating is not None else None)
+        )
         forecast = (
-            calculate_rating_forecast(rating=rating, win_rate=self.wins / self.matches)
+            calculate_rating_forecast(
+                rating=rating,
+                win_rate=self.wins / self.matches,
+                achieved_display_score=(
+                    round(public_rating_score * 3)
+                    if public_rating_score is not None
+                    else None
+                ),
+            )
             if rating is not None and self.matches > 0
             else None
         )
@@ -215,7 +230,8 @@ class _Performance:
             'wins': self.wins,
             'topHero': self.top_hero(),
             'form': list((self.results or [])[-5:]),
-            'ratingScore': rating.score if rating is not None else None,
+            'ratingScore': public_rating_score,
+            'currentRatingScore': rating.score if rating is not None else None,
             'provisional': rating.provisional if rating is not None else False,
             'ratingForecast': _rating_forecast_value(forecast),
         }
@@ -321,12 +337,7 @@ def _format_period(season: _Season) -> str:
 
 
 def _season_option(season: _Season, current_key: str) -> Mapping[str, Any]:
-    year_label = (
-        '{}–{}'.format(season.starts_at.year, season.ends_at.year)
-        if season.name == 'winter'
-        else str(season.year)
-    )
-    label = '{} {}'.format(year_label, SEASON_NAMES[season.name])
+    label = '{} {}'.format(season.year, SEASON_NAMES[season.name])
     current = season.key == current_key
     return {
         'key': season.key,
@@ -1450,16 +1461,26 @@ def _standings_for_rows(
         metadata = players[player_id]
         modes = player_modes[player_id]
         ratings: Dict[str, Optional[VirtualMatchRating]] = {}
+        peak_rating_scores: Dict[str, Optional[float]] = {}
         for mode in PUBLIC_MODES:
             previous = previous_ratings.get((player_id, mode))
             performance = modes[mode]
-            rating = calculate_virtual_match_rating(
+            timeline = calculate_virtual_match_rating_timeline(
                 results=performance.results or (),
                 previous_ability=(previous.ability if previous is not None else None),
                 previous_evidence=(previous.evidence if previous is not None else None),
                 reset_visible_score=reset_visible_score,
             )
+            rating = None if not timeline else timeline[-1].rating_after
             ratings[mode] = rating
+            peak_rating_scores[mode] = (
+                max(
+                    timeline[0].rating_before.score,
+                    *(transition.rating_after.score for transition in timeline),
+                )
+                if timeline and reset_visible_score
+                else (rating.score if rating is not None else None)
+            )
             if rating is not None:
                 previous_ratings[(player_id, mode)] = _PreviousRating(
                     ability=rating.ability, evidence=rating.evidence
@@ -1476,7 +1497,9 @@ def _standings_for_rows(
                 'trend': 0,
                 'form': list((modes['all'].results or [])[-5:]),
                 'modes': {
-                    mode: modes[mode].public_value(ratings[mode])
+                    mode: modes[mode].public_value(
+                        ratings[mode], peak_rating_scores[mode]
+                    )
                     for mode in PUBLIC_MODES
                 },
                 'heroPool': _hero_pool(modes['all']),

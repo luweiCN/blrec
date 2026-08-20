@@ -10,7 +10,7 @@ from typing import Any, Dict, Mapping, Optional
 
 import pytest
 from blrec_dashboard_api.app import create_app
-from blrec_dashboard_api.dashboard import load_dashboard_trends
+from blrec_dashboard_api.dashboard import _ranked_trend_rows, load_dashboard_trends
 from blrec_dashboard_api.dashboard_cache import (
     PostgresDashboardRepository,
     publish_dashboard_cache,
@@ -674,6 +674,85 @@ def test_rating_trend_uses_the_match_date_instead_of_the_calculation_date(
     historical = publications[0]['standings']['2026-summer']['3v3'][0]
     latest = publications[-1]['standings']['2026-summer']['3v3'][0]
     assert historical['ratingScore'] == latest['ratingScore']
+
+
+def test_current_trend_ranks_by_season_peak_but_keeps_the_current_score() -> None:
+    def player(
+        player_id: int, *, peak_score: float, current_score: float
+    ) -> Mapping[str, Any]:
+        return {
+            'id': player_id,
+            'modes': {
+                '3v3': {
+                    'ratingScore': peak_score,
+                    'currentRatingScore': current_score,
+                    'matches': 10,
+                    'wins': 6,
+                }
+            },
+        }
+
+    standings = _ranked_trend_rows(
+        [
+            player(1, peak_score=940, current_score=900),
+            player(2, peak_score=930, current_score=920),
+        ],
+        '3v3',
+    )
+
+    assert standings == [
+        {'playerId': 1, 'rank': 1, 'ratingScore': 900},
+        {'playerId': 2, 'rank': 2, 'ratingScore': 920},
+    ]
+
+
+def test_historical_trend_rank_keeps_the_season_peak_after_a_loss() -> None:
+    snapshot = _runtime_source()['snapshot']
+    matches = [
+        {
+            'id': 1,
+            'playerId': 1,
+            'seasonKey': '2026-summer',
+            'mode': '3v3',
+            'playedAt': '2026-06-01T01:00:00Z',
+            'result': 'W',
+        },
+        {
+            'id': 2,
+            'playerId': 2,
+            'seasonKey': '2026-summer',
+            'mode': '3v3',
+            'playedAt': '2026-06-01T02:00:00Z',
+            'result': 'W',
+        },
+        {
+            'id': 3,
+            'playerId': 1,
+            'seasonKey': '2026-summer',
+            'mode': '3v3',
+            'playedAt': '2026-06-02T01:00:00Z',
+            'result': 'L',
+        },
+    ]
+    ratings = {}
+    for match_id, before, after in ((1, 900, 910), (2, 900, 905), (3, 910, 880)):
+        for scope in ('all', '3v3'):
+            ratings[(match_id, scope, '2026-summer')] = {
+                'scoreBefore': before,
+                'scoreAfter': after,
+            }
+
+    trends = _rating_trends(snapshot, matches, ratings)
+    standings = next(
+        publication['standings']['2026-summer']['3v3']
+        for publication in trends['publications']
+        if publication['publicationDate'] == '2026-06-02'
+    )
+
+    assert standings == [
+        {'playerId': 1, 'rank': 1, 'ratingScore': 880 / 3},
+        {'playerId': 2, 'rank': 2, 'ratingScore': 905 / 3},
+    ]
 
 
 def test_rating_trends_keep_only_the_latest_frontend_supported_publications() -> None:

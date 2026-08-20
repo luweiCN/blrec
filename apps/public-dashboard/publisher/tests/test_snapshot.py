@@ -9,6 +9,7 @@ import pytest
 from blrec_dashboard_publisher.snapshot import (
     _allows_public_replay,
     _season_for,
+    _season_option,
     build_dashboard_api_source,
     build_dashboard_asset_source,
     build_dashboard_cache_source,
@@ -470,6 +471,17 @@ def test_seasons_follow_the_original_game_calendar() -> None:
         )
 
 
+def test_winter_season_name_uses_its_start_year_only() -> None:
+    season = _season_for(datetime(2026, 2, 28, tzinfo=SHANGHAI))
+
+    option = _season_option(season, '2026-summer')
+
+    assert option['key'] == '2025-winter'
+    assert option['label'] == '2025 冬季赛'
+    assert option['shortLabel'] == '2025 冬季赛'
+    assert option['period'] == '2025.12.01—2026.02.28'
+
+
 @pytest.mark.asyncio
 async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
@@ -597,8 +609,20 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
         assert first['modes']['all']['wins'] == 1
         assert first['modes']['all']['topHero'] == 'Caine'
         assert first['modes']['all']['form'] == ['W', 'L']
+        assert (
+            first['modes']['all']['ratingScore']
+            > first['modes']['all']['currentRatingScore']
+        )
+        assert (
+            first['modes']['all']['ratingForecast']['nextWinScore']
+            > first['modes']['all']['currentRatingScore']
+        )
         assert first['modes']['3v3']['matches'] == 1
         assert isinstance(first['modes']['3v3']['ratingScore'], (int, float))
+        assert (
+            first['modes']['3v3']['currentRatingScore']
+            == first['modes']['3v3']['ratingScore']
+        )
         assert first['modes']['3v3']['provisional'] is True
         forecast = first['modes']['3v3']['ratingForecast']
         assert forecast['nextWinScore'] > first['modes']['3v3']['ratingScore']
@@ -609,6 +633,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
         assert forecast['nextDivision']['allWinMatches'] > 0
         assert first['modes']['5v5']['ratingForecast'] is None
         assert first['modes']['5v5']['ratingScore'] is None
+        assert first['modes']['5v5']['currentRatingScore'] is None
         assert first['modes']['brawl']['matches'] == 1
         assert first['modes']['5v5']['matches'] == 0
         assert [

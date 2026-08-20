@@ -303,6 +303,28 @@ def test_forecast_switches_the_ultimate_goal_after_entering_tier_nine() -> None:
     assert tier_ten.ultimate.target_display_score == 2800
 
 
+def test_forecast_targets_follow_peak_achievement_but_start_from_current_score() -> (
+    None
+):
+    current = VirtualMatchRating(
+        ability=expected_win_probability(2400),
+        evidence=CARRYOVER_MATCH_CAP,
+        score=800.0,
+        provisional=False,
+    )
+
+    forecast = calculate_rating_forecast(
+        rating=current, win_rate=0.8, achieved_display_score=2755
+    )
+
+    assert forecast.next_win_score * 3 > 2400
+    assert forecast.next_division is not None
+    assert forecast.next_division.target_display_score == 2800
+    assert forecast.next_division.all_win_matches > 0
+    assert forecast.next_tier is None
+    assert forecast.ultimate.target_display_score == 2800
+
+
 def test_more_evidence_beats_a_small_sample_at_the_same_win_rate() -> None:
     short = calculate_virtual_match_rating(
         results=['W', 'W', 'W', 'W', 'L'], reset_visible_score=False

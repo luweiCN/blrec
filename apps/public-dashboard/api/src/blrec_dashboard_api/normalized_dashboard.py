@@ -154,11 +154,12 @@ def _trend_inputs(
     ]
     ratings = {
         (int(row['match_id']), str(row['scope']), str(row['season_key'])): {
-            'scoreAfter': int(row['score_after'])
+            'scoreBefore': int(row['score_before']),
+            'scoreAfter': int(row['score_after']),
         }
         for row in connection.execute(
             'SELECT rating.match_id,rating.scope,rating.season_key,'
-            'rating.score_after FROM rating_events rating '
+            'rating.score_before,rating.score_after FROM rating_events rating '
             'JOIN players player ON player.player_id=rating.player_id'
             + _visibility_clause(owner_view)
         ).fetchall()

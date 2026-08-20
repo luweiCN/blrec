@@ -12,26 +12,28 @@ MAX_TREND_PUBLICATIONS = 180
 def _ranked_trend_rows(
     players: Sequence[Mapping[str, Any]], mode: str
 ) -> List[Mapping[str, Any]]:
-    candidates: List[Tuple[int, float, int, float]] = []
+    candidates: List[Tuple[int, float, float, int, float]] = []
     for player in players:
         player_id = int(player['id'])
         performance = player['modes'][mode]
-        rating_score = performance['ratingScore']
+        ranking_score = performance['ratingScore']
+        rating_score = performance.get('currentRatingScore', ranking_score)
         matches = int(performance['matches'])
         wins = int(performance['wins'])
-        if rating_score is None:
+        if ranking_score is None or rating_score is None:
             continue
         candidates.append(
             (
                 player_id,
+                float(ranking_score),
                 float(rating_score),
                 matches,
                 wins / matches if matches else 0.0,
             )
         )
-    candidates.sort(key=lambda row: (-row[1], -row[2], -row[3], row[0]))
+    candidates.sort(key=lambda row: (-row[1], -row[3], -row[4], row[0]))
     return [
-        {'playerId': row[0], 'rank': index + 1, 'ratingScore': row[1]}
+        {'playerId': row[0], 'rank': index + 1, 'ratingScore': row[2]}
         for index, row in enumerate(candidates)
     ]
 

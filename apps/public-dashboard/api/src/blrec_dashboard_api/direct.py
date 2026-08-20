@@ -51,6 +51,7 @@ class _RepositoryState:
 @dataclass
 class _TrendPerformance:
     rating_score: float
+    ranking_score: float
     matches: int
     wins: int
 
@@ -242,7 +243,7 @@ def _rank_trend_performances(
     candidates = sorted(
         performances.items(),
         key=lambda item: (
-            -item[1].rating_score,
+            -item[1].ranking_score,
             -item[1].matches,
             -(item[1].wins / item[1].matches if item[1].matches else 0.0),
             item[0],
@@ -297,8 +298,23 @@ def _rating_trends(
                         scope, {}
                     )
                     previous = performances.get(player_id)
+                    rating_score = int(event['scoreAfter']) / 3
+                    ranking_score = (
+                        rating_score
+                        if rating_season == 'all-time'
+                        else max(
+                            rating_score,
+                            int(event.get('scoreBefore', event['scoreAfter'])) / 3,
+                            (
+                                previous.ranking_score
+                                if previous is not None
+                                else rating_score
+                            ),
+                        )
+                    )
                     performances[player_id] = _TrendPerformance(
-                        rating_score=int(event['scoreAfter']) / 3,
+                        rating_score=rating_score,
+                        ranking_score=ranking_score,
                         matches=1 if previous is None else previous.matches + 1,
                         wins=(
                             int(str(match['result']) == 'W')

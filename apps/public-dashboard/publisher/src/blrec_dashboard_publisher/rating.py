@@ -402,12 +402,24 @@ def _current_win_rate_matches_for_targets(
 
 
 def calculate_rating_forecast(
-    *, rating: VirtualMatchRating, win_rate: float
+    *,
+    rating: VirtualMatchRating,
+    win_rate: float,
+    achieved_display_score: Optional[int] = None,
 ) -> RatingForecast:
     if not math.isfinite(win_rate) or not 0.0 <= win_rate <= 1.0:
         raise ValueError('virtual match forecast win rate must be between zero and one')
+    current_display_score = round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
+    if achieved_display_score is not None:
+        if not 0 <= achieved_display_score <= _DISPLAY_SCORE_MAXIMUM:
+            raise ValueError(
+                'virtual match achieved display score must be between zero and maximum'
+            )
+        goal_progress_score = max(current_display_score, achieved_display_score)
+    else:
+        goal_progress_score = current_display_score
     next_division_target, next_tier_target, ultimate_target = _goal_target_scores(
-        round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
+        goal_progress_score
     )
     targets = tuple(
         target
