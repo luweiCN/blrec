@@ -91,6 +91,16 @@ def test_deployment_backup_is_limited_to_public_schema() -> None:
     assert 'for _attempt in {1..120}; do' in script
 
 
+def test_deployment_retries_transient_core_database_checks() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / 'deploy' / 'install-release.sh'
+    ).read_text(encoding='utf-8')
+
+    assert 'source_ready=false' in script
+    assert 'for _attempt in {1..5}; do' in script
+    assert 'if [[ "$source_ready" != "true" ]]; then' in script
+
+
 def test_ingest_batch_routes_allow_long_running_children() -> None:
     config = (
         Path(__file__).resolve().parents[1] / 'deploy' / 'vg-api.luwei.host.nginx.conf'

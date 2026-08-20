@@ -130,7 +130,9 @@ PY
     echo "PostgreSQL SSH tunnel did not become ready" >&2
     exit 1
   fi
-  if ! "$release/venv/bin/python" - "$source_database_url" <<'PY'
+  source_ready=false
+  for _attempt in {1..5}; do
+    if "$release/venv/bin/python" - "$source_database_url" <<'PY'
 import sys
 
 import psycopg
@@ -161,7 +163,13 @@ with psycopg.connect(sys.argv[1], connect_timeout=5) as connection:
     if revision is None or int(revision[0]) <= 0:
         raise RuntimeError('dashboard core source revision is missing')
 PY
-  then
+    then
+      source_ready=true
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$source_ready" != "true" ]]; then
     echo "API database role cannot read the approved core dashboard tables" >&2
     exit 1
   fi
