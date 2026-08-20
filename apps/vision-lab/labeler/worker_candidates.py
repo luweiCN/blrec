@@ -248,16 +248,30 @@ def sync_worker_candidates(
         'last_error': '',
         'by_task': {},
     }
-    source_types = tuple(sorted(_REMOTE_SOURCE_TYPES))
-    source_placeholders = ','.join('?' for _ in source_types)
-    known_sources = {
-        (str(row['source_type']), str(row['source_id']))
-        for row in conn.execute(
-            'SELECT source_type, source_id FROM training_review_sources '
-            f'WHERE source_type IN ({source_placeholders})',
-            source_types,
-        ).fetchall()
-    }
+    requested_sources: Dict[str, set[str]] = {}
+    for raw_item in ordered:
+        if int(raw_item.get('schema_version', 0)) != 3:
+            continue
+        source_type = str(raw_item.get('source_type') or 'worker')
+        if source_type not in _REMOTE_SOURCE_TYPES:
+            source_type = 'worker'
+        source_id = str(raw_item.get('source_id') or '')
+        if source_id:
+            requested_sources.setdefault(source_type, set()).add(source_id)
+    known_sources = set()
+    for source_type, source_ids in requested_sources.items():
+        ordered_ids = sorted(source_ids)
+        for offset in range(0, len(ordered_ids), 400):
+            batch = ordered_ids[offset : offset + 400]
+            placeholders = ','.join('?' for _source_id in batch)
+            known_sources.update(
+                (str(row['source_type']), str(row['source_id']))
+                for row in conn.execute(
+                    'SELECT source_type,source_id FROM training_review_sources '
+                    f'WHERE source_type=? AND source_id IN ({placeholders})',
+                    (source_type, *batch),
+                ).fetchall()
+            )
     for raw_item in ordered:
         try:
             item = _validate(raw_item)

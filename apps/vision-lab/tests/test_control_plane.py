@@ -1,11 +1,12 @@
 """NAS 控制面不得直接执行视频处理或旧模型批量推理。"""
 
+import tempfile
 from pathlib import Path
 from unittest import mock
 
 from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
-from labeler import config, hero_review, server
+from labeler import config, db, hero_review, model_prefill, server, vision_jobs
 
 
 def test_control_plane_rejects_local_heavy_operations(monkeypatch) -> None:
@@ -73,12 +74,14 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
         "$('#candidate-streamer-filter').onfocus = ensureCandidateFilterOptions"
         in script
     )
-    assert 'const candidatePrefillRequests = new Map();' in script
+    assert 'const candidatePrefillRequests = new Map();' not in script
     assert 'function prefetchCandidateImage(item)' in script
     assert 'function prefetchNextCandidate()' in script
     assert 'knownRemaining <= CANDIDATE_REFILL_LOW_WATER' in script
     assert 'completeCandidateHeroLineupPrefetch' in script
     assert 'prefetchNextCandidate();' in script
+    assert '/api/training-review/items/${frameId}/prefill' not in script
+    assert 'requestCandidateModelPrefill(item);' not in script
     assert 'function applyCandidateMaterialSuggestion(suggestion)' in script
     assert 'renderCandidateMaterialSuggestions();' in script
 
@@ -100,6 +103,240 @@ def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
     assert 'await image.decode();' in script
     assert 'candidateImagePrefetches.get(frameId)' in script
     assert 'setInterval(refreshCandidateIndexState, 30000)' in script
+
+
+def test_worker_claim_autonomously_runs_core_then_hero_before_review(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        database = root / 'lab.db'
+        image = root / 'frame.jpg'
+        image.write_bytes(b'candidate')
+        conn = db.connect(database)
+        try:
+            video_id = db.upsert_video(
+                conn,
+                remote_path='/nas/candidate.mp4',
+                streamer='测试主播',
+                room_id='100',
+                filename='candidate.mp4',
+                duration_seconds=60,
+                size_bytes=1,
+            )
+            frame_id = db.add_frames(
+                conn,
+                video_id,
+                [
+                    {
+                        'timestamp_ms': 1_000,
+                        'width': 1280,
+                        'height': 720,
+                        'sha256': '5' * 64,
+                        'phash': '',
+                        'frame_path': str(image),
+                        'thumb_path': '',
+                        'strategy': 'test',
+                        'model_source': '',
+                        'model_confidence': None,
+                    }
+                ],
+            )[0]
+            db.add_training_review_source(
+                conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id='autonomous-worker-candidate',
+            )
+            for worker_id in ('mac-studio', 'second-worker'):
+                vision_jobs.register_worker(
+                    conn,
+                    worker_id=worker_id,
+                    display_name=worker_id,
+                    capabilities=['model_prefill'],
+                )
+        finally:
+            conn.close()
+
+        monkeypatch.setattr(server, '_require_vision_worker', lambda _request: None)
+        monkeypatch.setattr(server, '_conn', lambda: db.connect(database))
+
+        def model_specs(_conn, task_ids):
+            return {
+                task_id: {
+                    'run_id': f'{task_id}-v1',
+                    'metadata': {'task_id': task_id},
+                    'artifact_size': 1,
+                }
+                for task_id in task_ids
+            }
+
+        monkeypatch.setattr(model_prefill, 'latest_model_specs', model_specs)
+
+        claimed = server.api_claim_vision_job(
+            mock.Mock(), {'worker_id': 'mac-studio', 'capabilities': ['model_prefill']}
+        )['job']
+
+        assert claimed is not None
+        assert claimed['payload']['frame_id'] == frame_id
+        assert claimed['payload']['operation'] == 'core'
+        assert (
+            server.api_claim_vision_job(
+                mock.Mock(),
+                {'worker_id': 'second-worker', 'capabilities': ['model_prefill']},
+            )['job']
+            is None
+        )
+
+        server.api_complete_vision_job(
+            claimed['id'],
+            mock.Mock(),
+            {
+                'worker_id': 'mac-studio',
+                'lease_token': claimed['lease_token'],
+                'result': {
+                    'operation': 'core',
+                    'frame_id': frame_id,
+                    'suggestions': {
+                        'match_flow': {
+                            'label': 'match_flow',
+                            'confidence': 0.99,
+                            'origin': 'new_model_prefill',
+                            'model_run_id': 'match-flow-v1',
+                        },
+                        'hero_select': {
+                            'label': 'not_select',
+                            'confidence': 0.99,
+                            'origin': 'new_model_prefill',
+                            'model_run_id': 'hero-select-v1',
+                        },
+                        'match_mode': {
+                            'label': '3v3',
+                            'confidence': 0.99,
+                            'origin': 'new_model_prefill',
+                            'model_run_id': 'match-mode-v1',
+                        },
+                        'result_panel': {
+                            'label': 'no_result_panel',
+                            'confidence': 0.99,
+                            'origin': 'new_model_prefill',
+                            'model_run_id': 'result-v1',
+                        },
+                    },
+                    'model_outputs': [],
+                    'suggested_boxes': [],
+                    'hero_context_suggestion': {
+                        'screen_type': 'scoreboard',
+                        'team_size': 3,
+                        'confidence': 0.95,
+                        'complete_detection': True,
+                    },
+                    'errors': {},
+                    'model_runs': {'match_flow': 'match-flow-v1'},
+                },
+            },
+        )
+
+        hero_job = server.api_claim_vision_job(
+            mock.Mock(), {'worker_id': 'mac-studio', 'capabilities': ['model_prefill']}
+        )['job']
+        assert hero_job is not None
+        assert hero_job['payload']['operation'] == 'hero_lineup'
+        assert hero_job['payload']['screen_type'] == 'scoreboard'
+        assert hero_job['payload']['team_size'] == 3
+
+        server.api_complete_vision_job(
+            hero_job['id'],
+            mock.Mock(),
+            {
+                'worker_id': 'mac-studio',
+                'lease_token': hero_job['lease_token'],
+                'result': {
+                    'operation': 'hero_lineup',
+                    'frame_id': frame_id,
+                    'screen_type': 'scoreboard',
+                    'team_size': 3,
+                    'complete': False,
+                    'reason': '头像位置模型只找到 4 个头像',
+                    'slots': [],
+                    'model_runs': {
+                        'hero_avatar_detector': 'hero-avatar-v1',
+                        'hero_identity': 'hero-identity-v1',
+                        'player_position': 'player-position-v1',
+                    },
+                },
+            },
+        )
+
+        conn = db.connect(database)
+        try:
+            indexed = conn.execute(
+                'SELECT prefill_status,prefill_stage,prefill_attempts '
+                'FROM training_review_material_index WHERE frame_id=?',
+                (frame_id,),
+            ).fetchone()
+            assert indexed is not None
+            assert indexed['prefill_status'] == 'ready'
+            assert indexed['prefill_stage'] == 'complete'
+            assert indexed['prefill_attempts'] == 1
+            page, total = db.training_review_page(
+                conn,
+                status='needs_review',
+                source_scope='new',
+                prefill_ready_only=True,
+                limit=10,
+            )
+            assert total == 1
+            assert [item['frame_id'] for item in page] == [frame_id]
+            hero_source = conn.execute(
+                'SELECT metadata_json FROM training_review_sources '
+                "WHERE source_type='new_model_hero_prefill' AND frame_id=?",
+                (frame_id,),
+            ).fetchone()
+            assert hero_source is not None
+            assert '头像位置模型只找到 4 个头像' in hero_source['metadata_json']
+        finally:
+            conn.close()
+
+
+def test_paused_worker_does_not_create_autonomous_prefill(monkeypatch) -> None:
+    connection = mock.Mock()
+    monkeypatch.setattr(server, '_require_vision_worker', lambda _request: None)
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(server.vision_jobs, 'claim_job', mock.Mock(return_value=None))
+    monkeypatch.setattr(
+        server.vision_jobs, 'get_worker', mock.Mock(return_value={'enabled': False})
+    )
+    queue_next = mock.Mock()
+    monkeypatch.setattr(server, '_queue_next_autonomous_model_prefill', queue_next)
+
+    result = server.api_claim_vision_job(
+        mock.Mock(), {'worker_id': 'paused', 'capabilities': ['model_prefill']}
+    )
+
+    assert result == {'job': None}
+    queue_next.assert_not_called()
+
+
+def test_hero_selection_prefill_does_not_start_lineup_detection(monkeypatch) -> None:
+    update_state = mock.Mock()
+    monkeypatch.setattr(server.db, 'update_training_review_prefill_state', update_state)
+
+    server._update_autonomous_prefill_after_result(
+        mock.Mock(),
+        {'payload': {'frame_id': 9, 'operation': 'core'}},
+        {
+            'suggestions': {
+                'hero_select': {'label': 'select_aram', 'confidence': 0.99}
+            },
+            'hero_context_suggestion': {'screen_type': 'scoreboard', 'team_size': 3},
+            'errors': {},
+        },
+    )
+
+    update_state.assert_called_once_with(
+        mock.ANY, frame_id=9, status='ready', stage='complete'
+    )
 
 
 def test_schema_v3_model_outputs_are_used_for_review_defaults() -> None:
@@ -163,16 +400,15 @@ def test_material_suggestions_are_loaded_only_when_dialog_opens() -> None:
     assert "api('/api/training-review/material-suggestions')" in script
 
 
-def test_late_model_prefill_refreshes_heroes_after_unrelated_form_click() -> None:
+def test_review_page_does_not_wait_for_late_core_model_prefill() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
     ).read_text(encoding='utf-8')
 
-    assert 'let candidateHeroContextTouched = false;' in script
-    assert 'function refreshCandidateHeroFromUpdatedModelItem(item)' in script
-    assert 'candidateHeroDirty || candidateHeroContextTouched' in script
-    assert 'candidateHeroDirty || candidateFormTouched' not in script
-    assert 'refreshCandidateHeroFromUpdatedModelItem(currentCandidate());' in script
+    assert 'function refreshCandidateHeroFromUpdatedModelItem(item)' not in script
+    assert 'requestCandidateModelPrefill(item);' not in script
+    assert 'function prepareCandidateForReview(item)' in script
+    assert 'loadCandidateHeroLineup(item);' in script
 
 
 def test_single_item_prefill_does_not_rebuild_all_result_groups(monkeypatch) -> None:

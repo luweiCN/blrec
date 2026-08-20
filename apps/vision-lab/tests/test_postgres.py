@@ -1,5 +1,6 @@
 """PostgreSQL adapter keeps Vision Lab's SQLite query contract."""
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -140,6 +141,10 @@ class PostgresCompatibilityTests(unittest.TestCase):
 
         self.assertLess(table_names.index('events'), table_names.index('frames'))
         self.assertLess(table_names.index('frames'), table_names.index('annotations'))
+        self.assertLess(
+            table_names.index('training_review_match_contexts'),
+            table_names.index('training_review_material_index'),
+        )
         self.assertIn('videos', identities)
         self.assertNotIn('training_review_items', identities)
         self.assertNotIn('annotations', identities)
@@ -177,6 +182,71 @@ class PostgresCompatibilityTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_existing_sqlite_material_index_gets_match_columns_before_indexes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'lab.db'
+            connection = sqlite3.connect(path)
+            connection.execute(
+                """
+                CREATE TABLE training_review_material_index (
+                    frame_id INTEGER PRIMARY KEY,
+                    video_id INTEGER NOT NULL,
+                    review_status TEXT NOT NULL,
+                    scene TEXT NOT NULL DEFAULT 'other',
+                    match_mode TEXT NOT NULL DEFAULT '',
+                    is_new INTEGER NOT NULL DEFAULT 0,
+                    is_legacy INTEGER NOT NULL DEFAULT 0,
+                    has_worker INTEGER NOT NULL DEFAULT 0,
+                    has_result_archive INTEGER NOT NULL DEFAULT 0,
+                    has_manual_correction INTEGER NOT NULL DEFAULT 0,
+                    has_model_prefill INTEGER NOT NULL DEFAULT 0,
+                    has_hero_model_prefill INTEGER NOT NULL DEFAULT 0,
+                    has_low_confidence INTEGER NOT NULL DEFAULT 0,
+                    has_boundary_confidence INTEGER NOT NULL DEFAULT 0,
+                    has_high_confidence INTEGER NOT NULL DEFAULT 0,
+                    selects_aram INTEGER NOT NULL DEFAULT 0,
+                    suggests_aram INTEGER NOT NULL DEFAULT 0,
+                    source_created_at INTEGER NOT NULL DEFAULT 0,
+                    source_offset INTEGER NOT NULL DEFAULT 0,
+                    result_group_representative_frame_id INTEGER NOT NULL,
+                    result_group_size INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            migrated = db.connect_sqlite(path)
+            try:
+                columns = {
+                    str(row['name'])
+                    for row in migrated.execute(
+                        'PRAGMA table_info(training_review_material_index)'
+                    )
+                }
+                self.assertTrue(
+                    {
+                        'session_id',
+                        'part_id',
+                        'at_ms',
+                        'linked_match_id',
+                        'match_link_source',
+                        'prefill_status',
+                        'prefill_stage',
+                        'prefill_attempts',
+                        'prefill_error',
+                        'prefill_screen_type',
+                        'prefill_team_size',
+                        'prefill_updated_at',
+                        'prefilled_at',
+                    }.issubset(columns)
+                )
+            finally:
+                migrated.close()
+
     def test_existing_schema_does_not_require_database_create_privilege(self) -> None:
         class Cursor:
             def __init__(self) -> None:
@@ -196,7 +266,7 @@ class PostgresCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(len(cursor.calls), 1)
 
-    def test_version_one_schema_migrates_service_runtime_state_table(self) -> None:
+    def test_version_one_schema_migrates_runtime_and_material_index(self) -> None:
         class Cursor:
             def __init__(self) -> None:
                 self.calls: List[Tuple[Any, Sequence[Any]]] = []
@@ -218,7 +288,25 @@ class PostgresCompatibilityTests(unittest.TestCase):
                 for value in statements
             )
         )
-        self.assertEqual(cursor.calls[-1][1], (2,))
+        self.assertTrue(
+            any(
+                'CREATE TABLE IF NOT EXISTS training_review_material_index' in value
+                for value in statements
+            )
+        )
+        self.assertTrue(
+            any(
+                'CREATE TABLE IF NOT EXISTS training_review_match_contexts' in value
+                for value in statements
+            )
+        )
+        self.assertTrue(
+            any(
+                'ADD COLUMN IF NOT EXISTS prefill_status' in value
+                for value in statements
+            )
+        )
+        self.assertEqual(cursor.calls[-1][1], (5,))
 
 
 if __name__ == '__main__':

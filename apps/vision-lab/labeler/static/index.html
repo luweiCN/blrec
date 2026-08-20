@@ -592,7 +592,7 @@
           </details>
           <button id="btn-candidate-clear-filters" type="button">清空筛选</button>
         </div>
-        <p id="candidate-page-hint" class="hint small">这里只显示 Worker 新采样和 NAS 结算归档。新模型会先填写分类、结算框及可判断的英雄信息，你只需核对和修正；未经人工确认的图片不会进入训练集。</p>
+        <p id="candidate-page-hint" class="hint small">Vision Worker 会在后台持续预打标；这里只显示已经跑完全部适用模型的素材。新模型会先填写分类、结算框及可判断的英雄信息，你只需核对和修正；未经人工确认的图片不会进入训练集。</p>
       </header>
       <dialog id="candidate-material-dialog" class="candidate-material-dialog"
               aria-labelledby="candidate-material-dialog-title">
@@ -665,7 +665,7 @@
             </div>
             <div id="candidate-hero-teams" class="candidate-hero-teams"></div>
           </section>
-          <div id="candidate-empty" class="empty-state">当前筛选条件下没有候选</div>
+          <div id="candidate-empty" class="empty-state">当前筛选条件下还没有已完成预打标的素材，Vision Worker 会继续在后台处理</div>
           <div id="candidate-hero-picker" class="candidate-hero-picker hidden"
                role="dialog" aria-label="选择英雄">
             <div class="candidate-hero-picker-head">
@@ -690,6 +690,9 @@
             <button id="btn-candidate-next">→</button>
           </div>
           <div id="candidate-meta" class="muted small"></div>
+          <div id="candidate-hero-filter-reasons"
+               class="candidate-hero-filter-reasons hidden"
+               aria-label="英雄筛选命中原因"></div>
           <div class="insp-block">
             <h3>人工确认</h3>
             <div id="candidate-label-actions" class="candidate-label-actions"></div>

@@ -85,7 +85,10 @@ async def lifespan(_app: FastAPI):
         conn.commit()
         conn.close()
         if config.CONTROL_PLANE_ONLY:
-            if config.CANDIDATE_LOCAL_DIR is not None:
+            if (
+                config.CANDIDATE_LOCAL_DIR is not None
+                and config.CANDIDATE_RECONCILIATION_ENABLED
+            ):
                 candidate_index_thread = threading.Thread(
                     target=_candidate_index_loop,
                     args=(candidate_index_stop,),
@@ -188,6 +191,8 @@ def _single_training_review_item(conn: Any, frame_id: int) -> Optional[Dict[str,
 
 
 def _cached_training_review_groups(conn: Any) -> Dict[int, Dict[str, Any]]:
+    if db.training_review_material_index_complete(conn):
+        return db.training_review_result_groups(conn)
     now = time.monotonic()
     with _training_review_cache_lock:
         value = _training_review_cache['groups']
@@ -227,6 +232,10 @@ def _cached_training_review_stats(conn: Any) -> Dict[str, Any]:
 
 
 def _cached_training_review_material_suggestions(conn: Any) -> List[Dict[str, Any]]:
+    if db.training_review_material_index_complete(conn):
+        return db.training_review_material_suggestions(
+            conn, hero_catalog=hero_review.hero_catalog()
+        )
     now = time.monotonic()
     with _training_review_cache_lock:
         value = _training_review_cache['material_suggestions']
@@ -262,6 +271,16 @@ def _cached_training_review_material_suggestions(conn: Any) -> List[Dict[str, An
 def _cached_default_training_review_queue(
     conn: Any, result_groups: Dict[int, Dict[str, Any]]
 ) -> tuple[int, ...]:
+    if db.training_review_material_index_complete(conn):
+        return tuple(
+            db.training_review_frame_ids(
+                conn,
+                status='needs_review',
+                source_scope='new',
+                prefill_ready_only=True,
+                result_groups=result_groups,
+            )
+        )
     now = time.monotonic()
     with _training_review_cache_lock:
         value = _training_review_cache['default_queue']
@@ -272,7 +291,11 @@ def _cached_default_training_review_queue(
             return value
     value = tuple(
         db.training_review_frame_ids(
-            conn, status='needs_review', source_scope='new', result_groups=result_groups
+            conn,
+            status='needs_review',
+            source_scope='new',
+            prefill_ready_only=True,
+            result_groups=result_groups,
         )
     )
     with _training_review_cache_lock:
@@ -1460,6 +1483,7 @@ def api_training_review_items(
                         match_mode=match_mode,
                         hero=hero_values,
                         confidence=confidence,
+                        prefill_ready_only=True,
                         result_groups=result_groups,
                     )
             except ValueError as exc:
@@ -1493,7 +1517,10 @@ def _training_review_stats_response(
         stats['legacy_hero'] = db.legacy_hero_review_stats(conn)
     if status == 'legacy_hero':
         stats['legacy_hero_filtered'] = db.legacy_hero_review_stats(
-            conn, streamer=streamer, screen_type=hero_screen_type
+            conn,
+            streamer=streamer,
+            screen_type=hero_screen_type,
+            prefill_ready_only=True,
         )
     return stats
 
@@ -1648,6 +1675,105 @@ def _queue_model_prefill(
     )
 
 
+def _queue_next_autonomous_model_prefill(conn: Any) -> Optional[Dict[str, Any]]:
+    """在 Worker 领取边界按需生成一张预打标任务。"""
+    candidate = db.next_training_review_prefill_candidate(conn)
+    if candidate is None:
+        return None
+    frame_id = int(candidate['frame_id'])
+    stage = str(candidate['prefill_stage'])
+    if stage == 'core':
+        task_ids = (*model_prefill.CORE_PREFILL_TASKS, 'hero_avatar_detector')
+        operation = 'core'
+        screen_type = ''
+        team_size = None
+    elif stage == 'hero':
+        task_ids = model_prefill.HERO_PREFILL_TASKS
+        operation = 'hero_lineup'
+        screen_type = str(candidate['prefill_screen_type'] or '')
+        team_size = int(candidate['prefill_team_size'] or 0)
+    else:
+        db.update_training_review_prefill_state(
+            conn, frame_id=frame_id, status='ready', stage='complete'
+        )
+        return None
+    models = model_prefill.latest_model_specs(conn, task_ids)
+    if any(task_id not in models for task_id in task_ids):
+        return None
+    job = _queue_model_prefill(
+        conn,
+        frame_id=frame_id,
+        operation=operation,
+        models=models,
+        screen_type=screen_type,
+        team_size=team_size,
+    )
+    db.update_training_review_prefill_state(
+        conn,
+        frame_id=frame_id,
+        status='queued',
+        stage=stage,
+        screen_type=screen_type,
+        team_size=team_size,
+        increment_attempt=True,
+    )
+    return job
+
+
+def _update_autonomous_prefill_after_result(
+    conn: Any, leased: Dict[str, Any], result: Dict[str, Any]
+) -> None:
+    payload = leased.get('payload') or {}
+    frame_id = int(payload.get('frame_id') or result.get('frame_id') or 0)
+    operation = str(payload.get('operation') or result.get('operation') or 'core')
+    if frame_id <= 0:
+        return
+    if operation != 'core':
+        db.update_training_review_prefill_state(
+            conn,
+            frame_id=frame_id,
+            status='ready',
+            stage='complete',
+            screen_type=str(payload.get('screen_type') or ''),
+            team_size=(int(payload['team_size']) if payload.get('team_size') else None),
+        )
+        return
+    errors = result.get('errors') if isinstance(result.get('errors'), dict) else {}
+    if errors:
+        raise RuntimeError(
+            '核心模型预打标失败：'
+            + '；'.join(f'{task}: {error}' for task, error in errors.items())
+        )
+    suggestions = (
+        result.get('suggestions') if isinstance(result.get('suggestions'), dict) else {}
+    )
+    select = suggestions.get('hero_select')
+    select_label = str(select.get('label') or '') if isinstance(select, dict) else ''
+    context = result.get('hero_context_suggestion')
+    context = context if isinstance(context, dict) else {}
+    screen_type = str(context.get('screen_type') or '')
+    team_size = int(context.get('team_size') or 0)
+    needs_hero = (
+        not select_label.startswith('select_')
+        and screen_type in {'gameplay_hud', 'scoreboard', 'result_page'}
+        and team_size in {3, 5}
+    )
+    if needs_hero:
+        db.update_training_review_prefill_state(
+            conn,
+            frame_id=frame_id,
+            status='pending',
+            stage='hero',
+            screen_type=screen_type,
+            team_size=team_size,
+            reset_attempts=True,
+        )
+    else:
+        db.update_training_review_prefill_state(
+            conn, frame_id=frame_id, status='ready', stage='complete'
+        )
+
+
 def _queue_model_validation(
     conn: Any,
     *,
@@ -1720,6 +1846,8 @@ def _save_new_model_hero_prefill_source(
         metadata={
             'screen_type': screen_type,
             'team_size': team_size,
+            'complete': bool(result.get('complete')),
+            'reason': str(result.get('reason') or '')[:500],
             'model_runs': result.get('model_runs') or {},
             'player_suggestion': result.get('player_suggestion'),
             'detected': int(result.get('detected') or 0),
@@ -3744,6 +3872,35 @@ def api_claim_vision_job(request: Request, body: Dict[str, Any]) -> Dict[str, An
                     capabilities=capabilities,
                     lease_seconds=config.VISION_WORKER_LEASE_SECONDS,
                 )
+                worker = vision_jobs.get_worker(conn, worker_id)
+                if (
+                    job is None
+                    and worker is not None
+                    and bool(worker['enabled'])
+                    and 'model_prefill' in capabilities
+                    and _queue_next_autonomous_model_prefill(conn) is not None
+                ):
+                    job = vision_jobs.claim_job(
+                        conn,
+                        worker_id=worker_id,
+                        capabilities=capabilities,
+                        lease_seconds=config.VISION_WORKER_LEASE_SECONDS,
+                    )
+                if job is not None and job['kind'] == 'model_prefill':
+                    payload = job.get('payload') or {}
+                    operation = str(payload.get('operation') or 'core')
+                    screen_type = str(payload.get('screen_type') or '')
+                    team_size = (
+                        int(payload['team_size']) if payload.get('team_size') else None
+                    )
+                    db.update_training_review_prefill_state(
+                        conn,
+                        frame_id=int(payload['frame_id']),
+                        status='running',
+                        stage='core' if operation == 'core' else 'hero',
+                        screen_type=screen_type,
+                        team_size=team_size,
+                    )
             except KeyError:
                 raise HTTPException(409, '请先注册 Vision Worker')
             return {'job': job}
@@ -3979,10 +4136,28 @@ def _apply_remote_model_prefill(
     team_size = int(payload.get('team_size') or result.get('team_size') or 0)
     result_slots = result.get('slots') if isinstance(result.get('slots'), list) else []
     if not result.get('complete') or len(result_slots) != team_size * 2:
+        lineup = db.replace_training_review_hero_layout(
+            conn,
+            frame_id=frame_id,
+            screen_type=screen_type,
+            team_size=team_size,
+            method='new-model-incomplete-worker-v1',
+            slots=result_slots,
+        )
+        _save_new_model_hero_prefill_source(
+            conn,
+            frame_id=frame_id,
+            item=item,
+            screen_type=screen_type,
+            team_size=team_size,
+            result=result,
+        )
         return {
-            'applied': False,
+            'applied': True,
             'frame_id': frame_id,
+            'complete': False,
             'reason': str(result.get('reason') or '模型没有找全头像'),
+            'lineup': lineup,
         }
     if operation == 'hero_slots':
         expected_slots = (
@@ -4089,10 +4264,10 @@ def api_complete_vision_job(
                     finished_at=db.now(),
                 )
             elif leased['kind'] == 'model_prefill':
-                result = {
-                    **result,
-                    'application': _apply_remote_model_prefill(conn, leased, result),
-                }
+                application = _apply_remote_model_prefill(conn, leased, result)
+                _update_autonomous_prefill_after_result(conn, leased, result)
+                result = {**result, 'application': application}
+                _invalidate_training_review_cache()
             elif leased['kind'] == 'package_models':
                 package_id = str(leased['related_id'])
                 archive = config.WORK_DIR / 'model-packages' / f'{package_id}.zip'
@@ -4149,6 +4324,21 @@ def api_fail_vision_job(
                     error=error,
                     finished_at=db.now(),
                 )
+            elif leased['kind'] == 'model_prefill':
+                payload = leased.get('payload') or {}
+                operation = str(payload.get('operation') or 'core')
+                db.update_training_review_prefill_state(
+                    conn,
+                    frame_id=int(payload['frame_id']),
+                    status='failed',
+                    stage='core' if operation == 'core' else 'hero',
+                    screen_type=str(payload.get('screen_type') or ''),
+                    team_size=(
+                        int(payload['team_size']) if payload.get('team_size') else None
+                    ),
+                    error=error,
+                )
+                _invalidate_training_review_cache()
             job = vision_jobs.finish_job(
                 conn,
                 job_id=job_id,

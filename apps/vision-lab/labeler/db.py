@@ -13,7 +13,7 @@ import math
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import config
 
@@ -413,6 +413,137 @@ CREATE INDEX IF NOT EXISTS idx_training_review_sources_frame
     ON training_review_sources (frame_id, source_created_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_training_review_sources_sync
     ON training_review_sources (source_type, sync_state, id);
+CREATE INDEX IF NOT EXISTS idx_training_review_sources_type_frame
+    ON training_review_sources (source_type, frame_id);
+
+-- 打标工作台的可检索事实。来源 JSON 仍完整保留，但列表筛选、排序和素材
+-- 建议只读取这一行，不在请求时反复解析所有 JSON。
+CREATE TABLE IF NOT EXISTS training_review_material_index (
+    frame_id INTEGER PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE,
+    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL DEFAULT 0 CHECK (session_id >= 0),
+    part_id INTEGER NOT NULL DEFAULT 0 CHECK (part_id >= 0),
+    at_ms INTEGER NOT NULL DEFAULT 0 CHECK (at_ms >= 0),
+    linked_match_id INTEGER REFERENCES training_review_match_contexts(match_id)
+        ON DELETE SET NULL,
+    match_link_source TEXT NOT NULL DEFAULT '' CHECK (
+        match_link_source IN ('', 'result_archive', 'time_window')),
+    review_status TEXT NOT NULL CHECK (
+        review_status IN ('pending', 'partial', 'confirmed', 'skipped')),
+    scene TEXT NOT NULL DEFAULT 'other' CHECK (
+        scene IN ('gameplay_hud', 'scoreboard', 'result_page',
+                  'hero_select', 'other')),
+    match_mode TEXT NOT NULL DEFAULT '' CHECK (
+        match_mode IN ('', '3v3', 'aram', '5v5')),
+    is_new INTEGER NOT NULL DEFAULT 0 CHECK (is_new IN (0, 1)),
+    is_legacy INTEGER NOT NULL DEFAULT 0 CHECK (is_legacy IN (0, 1)),
+    has_worker INTEGER NOT NULL DEFAULT 0 CHECK (has_worker IN (0, 1)),
+    has_result_archive INTEGER NOT NULL DEFAULT 0 CHECK (
+        has_result_archive IN (0, 1)),
+    has_manual_correction INTEGER NOT NULL DEFAULT 0 CHECK (
+        has_manual_correction IN (0, 1)),
+    has_model_prefill INTEGER NOT NULL DEFAULT 0 CHECK (
+        has_model_prefill IN (0, 1)),
+    has_hero_model_prefill INTEGER NOT NULL DEFAULT 0 CHECK (
+        has_hero_model_prefill IN (0, 1)),
+    prefill_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        prefill_status IN ('pending', 'queued', 'running', 'ready', 'failed')),
+    prefill_stage TEXT NOT NULL DEFAULT 'core' CHECK (
+        prefill_stage IN ('core', 'hero', 'complete')),
+    prefill_attempts INTEGER NOT NULL DEFAULT 0 CHECK (prefill_attempts >= 0),
+    prefill_error TEXT NOT NULL DEFAULT '',
+    prefill_screen_type TEXT NOT NULL DEFAULT '' CHECK (
+        prefill_screen_type IN (
+            '', 'gameplay_hud', 'scoreboard', 'result_page')),
+    prefill_team_size INTEGER CHECK (prefill_team_size IN (3, 5)),
+    prefill_updated_at TEXT NOT NULL DEFAULT '',
+    prefilled_at TEXT,
+    has_low_confidence INTEGER NOT NULL DEFAULT 0 CHECK (
+        has_low_confidence IN (0, 1)),
+    has_boundary_confidence INTEGER NOT NULL DEFAULT 0 CHECK (
+        has_boundary_confidence IN (0, 1)),
+    has_high_confidence INTEGER NOT NULL DEFAULT 0 CHECK (
+        has_high_confidence IN (0, 1)),
+    selects_aram INTEGER NOT NULL DEFAULT 0 CHECK (selects_aram IN (0, 1)),
+    suggests_aram INTEGER NOT NULL DEFAULT 0 CHECK (suggests_aram IN (0, 1)),
+    source_created_at INTEGER NOT NULL DEFAULT 0,
+    source_offset INTEGER NOT NULL DEFAULT 0,
+    result_group_representative_frame_id INTEGER NOT NULL,
+    result_group_size INTEGER NOT NULL DEFAULT 1 CHECK (result_group_size >= 1),
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_training_review_material_queue
+    ON training_review_material_index (
+        review_status, is_new, scene, match_mode,
+        source_created_at DESC, source_offset DESC, frame_id DESC);
+CREATE INDEX IF NOT EXISTS idx_training_review_material_legacy_queue
+    ON training_review_material_index (
+        review_status, is_legacy, scene, match_mode,
+        source_created_at DESC, frame_id DESC);
+CREATE INDEX IF NOT EXISTS idx_training_review_material_video_mode
+    ON training_review_material_index (video_id, review_status, match_mode);
+CREATE INDEX IF NOT EXISTS idx_training_review_material_source_time
+    ON training_review_material_index (session_id, part_id, at_ms, frame_id);
+CREATE INDEX IF NOT EXISTS idx_training_review_material_match_scene
+    ON training_review_material_index (
+        linked_match_id, review_status, scene, frame_id);
+CREATE INDEX IF NOT EXISTS idx_training_review_material_video_link_scene
+    ON training_review_material_index (
+        video_id, linked_match_id, review_status, scene, frame_id);
+CREATE INDEX IF NOT EXISTS idx_training_review_material_representative
+    ON training_review_material_index (
+        result_group_representative_frame_id, frame_id);
+CREATE INDEX IF NOT EXISTS idx_training_review_material_prefill_queue
+    ON training_review_material_index (
+        prefill_status, prefill_stage, prefill_attempts, review_status,
+        is_new, source_created_at DESC, frame_id DESC);
+
+-- 只镜像素材检索需要的最小对局时间窗。英雄证据仍来自各帧的人工确认或
+-- 模型预填槽位，不复制主业务库的玩家真值。
+CREATE TABLE IF NOT EXISTS training_review_match_contexts (
+    match_id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL CHECK (session_id > 0),
+    part_id INTEGER NOT NULL CHECK (part_id > 0),
+    started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
+    result_at_ms INTEGER NOT NULL CHECK (result_at_ms >= started_at_ms),
+    game_mode TEXT NOT NULL DEFAULT '' CHECK (
+        game_mode IN ('', '3v3', 'aram', '5v5')),
+    source_type TEXT NOT NULL CHECK (
+        source_type IN ('result_archive', 'manual_correction')),
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_training_review_match_context_window
+    ON training_review_match_contexts (
+        session_id, part_id, started_at_ms, result_at_ms, match_id);
+
+-- 每帧对素材建议的贡献与汇总分开保存。更新一帧时先扣除旧贡献，再增加
+-- 新贡献；同一帧反复导入或改标不会重复累计。
+CREATE TABLE IF NOT EXISTS training_review_material_contributions (
+    frame_id INTEGER NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('scene_mode', 'hero_scene')),
+    scene TEXT NOT NULL,
+    match_mode TEXT NOT NULL DEFAULT '',
+    hero_label TEXT NOT NULL DEFAULT '',
+    source_scope TEXT NOT NULL CHECK (source_scope IN ('all', 'new', 'legacy')),
+    metric TEXT NOT NULL CHECK (metric IN ('confirmed', 'candidate')),
+    frame_count INTEGER NOT NULL DEFAULT 0 CHECK (frame_count >= 0),
+    crop_count INTEGER NOT NULL DEFAULT 0 CHECK (crop_count >= 0),
+    PRIMARY KEY (
+        frame_id, kind, scene, match_mode, hero_label, source_scope, metric)
+);
+
+CREATE TABLE IF NOT EXISTS training_review_material_totals (
+    kind TEXT NOT NULL CHECK (kind IN ('scene_mode', 'hero_scene')),
+    scene TEXT NOT NULL,
+    match_mode TEXT NOT NULL DEFAULT '',
+    hero_label TEXT NOT NULL DEFAULT '',
+    source_scope TEXT NOT NULL CHECK (source_scope IN ('all', 'new', 'legacy')),
+    metric TEXT NOT NULL CHECK (metric IN ('confirmed', 'candidate')),
+    frame_count INTEGER NOT NULL DEFAULT 0 CHECK (frame_count >= 0),
+    crop_count INTEGER NOT NULL DEFAULT 0 CHECK (crop_count >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (kind, scene, match_mode, hero_label, source_scope, metric)
+);
 
 -- 积分板／结算图的英雄阵容复核。算法预填与人工结论分列保存，避免未确认
 -- 的 SIFT 结果直接成为训练真值。
@@ -453,6 +584,10 @@ CREATE TABLE IF NOT EXISTS training_review_hero_slots (
 );
 CREATE INDEX IF NOT EXISTS idx_training_review_hero_status
     ON training_review_hero_lineups (review_status, updated_at DESC, frame_id);
+CREATE INDEX IF NOT EXISTS idx_training_review_hero_confirmed_label
+    ON training_review_hero_slots (confirmed_label, frame_id);
+CREATE INDEX IF NOT EXISTS idx_training_review_hero_suggested_label
+    ON training_review_hero_slots (suggested_label, frame_id);
 
 -- 主播在同一类画面和近似宽高比下，英雄头像位置通常保持不变。模板只保存
 -- 人工画出的圆框位置，不保存算法预填或英雄真值。
@@ -610,6 +745,8 @@ def connect_sqlite(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    _prepare_training_review_match_columns(conn)
+    _prepare_training_review_prefill_columns(conn)
     conn.executescript(_SCHEMA)
     conn.executemany(
         'INSERT OR IGNORE INTO annotation_tasks (id, name, description) '
@@ -797,7 +934,117 @@ def _migrate(conn: sqlite3.Connection) -> None:
     )
     _migrate_training_review_hero_lineups(conn)
     _migrate_training_review_player_slot(conn)
+    _prepare_training_review_match_columns(conn)
+    _prepare_training_review_prefill_columns(conn)
     repair_managed_paths(conn)
+
+
+def _prepare_training_review_match_columns(conn: sqlite3.Connection) -> None:
+    """在创建新索引前给旧素材索引补齐同局关联列。"""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        ('training_review_material_index',),
+    ).fetchone()
+    if exists is None:
+        return
+    columns = {
+        str(row['name'])
+        for row in conn.execute('PRAGMA table_info(training_review_material_index)')
+    }
+    additions = (
+        ('session_id', 'INTEGER NOT NULL DEFAULT 0 CHECK (session_id >= 0)'),
+        ('part_id', 'INTEGER NOT NULL DEFAULT 0 CHECK (part_id >= 0)'),
+        ('at_ms', 'INTEGER NOT NULL DEFAULT 0 CHECK (at_ms >= 0)'),
+        (
+            'linked_match_id',
+            'INTEGER REFERENCES training_review_match_contexts(match_id) '
+            'ON DELETE SET NULL',
+        ),
+        (
+            'match_link_source',
+            "TEXT NOT NULL DEFAULT '' CHECK (match_link_source IN ("
+            "'', 'result_archive', 'time_window'))",
+        ),
+    )
+    for column, definition in additions:
+        if column not in columns:
+            conn.execute(
+                'ALTER TABLE training_review_material_index '
+                f'ADD COLUMN {column} {definition}'
+            )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_training_review_material_source_time '
+        'ON training_review_material_index (session_id,part_id,at_ms,frame_id)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_training_review_material_match_scene '
+        'ON training_review_material_index '
+        '(linked_match_id,review_status,scene,frame_id)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_training_review_material_video_link_scene '
+        'ON training_review_material_index '
+        '(video_id,linked_match_id,review_status,scene,frame_id)'
+    )
+
+
+def _prepare_training_review_prefill_columns(conn: sqlite3.Connection) -> None:
+    """给旧素材索引补齐后台预打标生命周期。"""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        ('training_review_material_index',),
+    ).fetchone()
+    if exists is None:
+        return
+    columns = {
+        str(row['name'])
+        for row in conn.execute('PRAGMA table_info(training_review_material_index)')
+    }
+    initializes_lifecycle = 'prefill_status' not in columns
+    additions = (
+        (
+            'prefill_status',
+            "TEXT NOT NULL DEFAULT 'pending' CHECK (prefill_status IN ("
+            "'pending','queued','running','ready','failed'))",
+        ),
+        (
+            'prefill_stage',
+            "TEXT NOT NULL DEFAULT 'core' CHECK (prefill_stage IN ("
+            "'core','hero','complete'))",
+        ),
+        ('prefill_attempts', 'INTEGER NOT NULL DEFAULT 0 CHECK (prefill_attempts>=0)'),
+        ('prefill_error', "TEXT NOT NULL DEFAULT ''"),
+        (
+            'prefill_screen_type',
+            "TEXT NOT NULL DEFAULT '' CHECK (prefill_screen_type IN ("
+            "'','gameplay_hud','scoreboard','result_page'))",
+        ),
+        ('prefill_team_size', 'INTEGER CHECK (prefill_team_size IN (3,5))'),
+        ('prefill_updated_at', "TEXT NOT NULL DEFAULT ''"),
+        ('prefilled_at', 'TEXT'),
+    )
+    for column, definition in additions:
+        if column not in columns:
+            conn.execute(
+                'ALTER TABLE training_review_material_index '
+                f'ADD COLUMN {column} {definition}'
+            )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_training_review_material_prefill_queue '
+        'ON training_review_material_index('
+        'prefill_status,prefill_stage,prefill_attempts,review_status,is_new,'
+        'source_created_at DESC,frame_id DESC)'
+    )
+    if initializes_lifecycle:
+        for table in (
+            'training_review_material_contributions',
+            'training_review_material_totals',
+        ):
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if exists is not None:
+                conn.execute(f"DELETE FROM {table} WHERE metric='candidate'")
 
 
 def _migrate_training_review_hero_lineups(conn: sqlite3.Connection) -> None:
@@ -3141,6 +3388,19 @@ COALESCE((
     WHERE source.frame_id = item.frame_id
 ), 0)
 """
+_TRAINING_REVIEW_INDEXED_ARAM_PRIORITY = """
+CASE
+    WHEN material.selects_aram=1 THEN 0
+    WHEN material.suggests_aram=1 OR material.match_mode='aram' THEN 1
+    WHEN EXISTS (
+        SELECT 1 FROM training_review_material_index known_material
+        WHERE known_material.video_id=material.video_id
+          AND known_material.review_status='confirmed'
+          AND known_material.match_mode='aram'
+    ) THEN 2
+    ELSE 3
+END
+"""
 
 
 def validate_training_suggestions(value: Any) -> Dict[str, Dict[str, Any]]:
@@ -3232,6 +3492,7 @@ def add_training_review_source(
             timestamp,
         ),
     )
+    refresh_training_review_material_index(conn, int(frame_id), commit=False)
     conn.commit()
     return existing is None
 
@@ -3301,7 +3562,7 @@ def _training_review_item_dict(
     return item
 
 
-def training_review_result_groups(
+def _calculate_training_review_result_groups(
     conn: sqlite3.Connection,
 ) -> Dict[int, Dict[str, Any]]:
     """把同一局的多张结算候选折叠为一个复核／训练代表图。"""
@@ -3486,6 +3747,28 @@ def training_review_result_groups(
     return result
 
 
+def training_review_result_groups(
+    conn: sqlite3.Connection,
+) -> Dict[int, Dict[str, Any]]:
+    """优先读取已回填的代表图索引；旧库回填前保留兼容计算。"""
+    if training_review_material_index_complete(conn):
+        rows = conn.execute(
+            'SELECT frame_id,result_group_representative_frame_id,'
+            'result_group_size FROM training_review_material_index '
+            'WHERE result_group_size>1'
+        ).fetchall()
+        return {
+            int(row['frame_id']): {
+                'result_group_size': int(row['result_group_size']),
+                'result_group_representative_frame_id': int(
+                    row['result_group_representative_frame_id']
+                ),
+            }
+            for row in rows
+        }
+    return _calculate_training_review_result_groups(conn)
+
+
 def _training_review_source_category(source_type: Any) -> str:
     normalized = str(source_type or '')
     if normalized == 'manual_correction':
@@ -3658,6 +3941,1165 @@ def _training_review_material_mode(
                 if value in {'3v3', 'aram', '5v5'}:
                     return value
     return None
+
+
+def _training_review_material_source_facts(
+    conn: sqlite3.Connection, frame_id: int
+) -> Dict[str, Any]:
+    rows = conn.execute(
+        'SELECT source_type,suggestions_json,metadata_json,source_created_at '
+        'FROM training_review_sources WHERE frame_id=?',
+        (int(frame_id),),
+    ).fetchall()
+    signal: Dict[str, Any] = {'suggestions': {}, 'suggestion_ranks': {}, 'metadata': []}
+    categories: set[str] = set()
+    confidences: List[float] = []
+    source_created_at = 0
+    source_offset = 0
+    selects_aram = False
+    suggests_aram = False
+    session_id = 0
+    part_id = 0
+    at_ms = 0
+    match_contexts: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        source_type = str(row['source_type'] or '')
+        categories.add(_training_review_source_category(source_type))
+        source_created_at = max(source_created_at, int(row['source_created_at'] or 0))
+        suggestions = _training_review_json_object(row['suggestions_json'])
+        metadata = _training_review_json_object(row['metadata_json'])
+        try:
+            session_id = max(session_id, int(metadata.get('session_id') or 0))
+            part_id = max(part_id, int(metadata.get('part_id') or 0))
+        except (TypeError, ValueError):
+            pass
+        for key in ('at_ms', 'result_at_ms'):
+            try:
+                at_ms = max(at_ms, int(metadata.get(key) or 0))
+            except (TypeError, ValueError):
+                pass
+        correction = metadata.get('manual_correction')
+        correction = correction if isinstance(correction, dict) else {}
+        try:
+            match_id = int(metadata.get('match_id') or correction.get('match_id') or 0)
+            context_session_id = int(metadata.get('session_id') or 0)
+            context_part_id = int(metadata.get('part_id') or 0)
+            result_at_ms = int(
+                metadata.get('result_at_ms') or metadata.get('at_ms') or -1
+            )
+            duration_ms = max(0, int(metadata.get('duration_seconds') or 0)) * 1_000
+            raw_started_at = metadata.get('started_at_ms')
+            if raw_started_at is None:
+                raw_started_at = metadata.get('segment_start_ms')
+            started_at_ms = (
+                max(0, result_at_ms - duration_ms)
+                if raw_started_at is None
+                else max(0, int(raw_started_at))
+            )
+        except (TypeError, ValueError):
+            match_id = 0
+            context_session_id = 0
+            context_part_id = 0
+            result_at_ms = -1
+            started_at_ms = 0
+        context_source = (
+            source_type
+            if source_type in {'result_archive', 'manual_correction'}
+            else ''
+        )
+        if (
+            context_source
+            and match_id > 0
+            and context_session_id > 0
+            and context_part_id > 0
+            and result_at_ms >= started_at_ms
+        ):
+            mode = str(metadata.get('game_mode') or '')
+            after = correction.get('after')
+            if mode not in {'3v3', 'aram', '5v5'} and isinstance(after, dict):
+                mode = str(after.get('game_mode') or '')
+            match_contexts[match_id] = {
+                'match_id': match_id,
+                'session_id': context_session_id,
+                'part_id': context_part_id,
+                'started_at_ms': started_at_ms,
+                'result_at_ms': result_at_ms,
+                'game_mode': mode if mode in {'3v3', 'aram', '5v5'} else '',
+                'source_type': context_source,
+            }
+        signal_metadata = dict(metadata)
+        if metadata.get('screen_type') is not None:
+            signal_metadata['source_screen_type'] = str(metadata['screen_type'])
+        if metadata.get('stage_class') is not None:
+            signal_metadata['source_stage_class'] = str(metadata['stage_class'])
+        outputs = metadata.get('model_outputs')
+        if isinstance(outputs, list) and outputs and isinstance(outputs[0], dict):
+            if outputs[0].get('stage_class') is not None:
+                signal_metadata['model_stage_class'] = str(outputs[0]['stage_class'])
+            if outputs[0].get('mode_class') is not None:
+                signal_metadata['model_mode_class'] = str(outputs[0]['mode_class'])
+        signal['metadata'].append(signal_metadata)
+        for task, raw in suggestions.items():
+            if not isinstance(raw, dict):
+                continue
+            label = str(raw.get('label') or '')
+            confidence = _training_review_float(raw.get('confidence'))
+            confidences.append(confidence)
+            if confidence > signal['suggestion_ranks'].get(task, -1.0):
+                signal['suggestions'][task] = {'label': label, 'confidence': confidence}
+                signal['suggestion_ranks'][task] = confidence
+            if task == 'hero_select' and label == 'select_aram':
+                selects_aram = True
+            if task == 'match_mode' and label == 'aram':
+                suggests_aram = True
+        for key in ('at_ms', 'result_at_ms'):
+            try:
+                source_offset = max(source_offset, int(metadata.get(key) or 0))
+            except (TypeError, ValueError):
+                pass
+        for key in ('game_mode', 'mode_class'):
+            if str(metadata.get(key) or '') == 'aram':
+                suggests_aram = True
+        if isinstance(outputs, list):
+            for output in outputs:
+                if not isinstance(output, dict):
+                    continue
+                if str(output.get('mode_class') or '') == 'aram':
+                    suggests_aram = True
+    return {
+        'signal': signal,
+        'categories': categories,
+        'source_created_at': source_created_at,
+        'source_offset': source_offset,
+        'has_low_confidence': any(value < 0.6 for value in confidences),
+        'has_boundary_confidence': any(0.6 <= value <= 0.85 for value in confidences),
+        'has_high_confidence': any(value >= 0.85 for value in confidences),
+        'selects_aram': selects_aram,
+        'suggests_aram': suggests_aram,
+        'session_id': session_id,
+        'part_id': part_id,
+        'at_ms': at_ms,
+        'match_contexts': tuple(match_contexts.values()),
+    }
+
+
+def _training_review_match_for_time(
+    conn: sqlite3.Connection, *, session_id: int, part_id: int, at_ms: int
+) -> Optional[int]:
+    if session_id <= 0 or part_id <= 0 or at_ms < 0:
+        return None
+    row = conn.execute(
+        'SELECT match_id FROM training_review_match_contexts '
+        'WHERE session_id=? AND part_id=? AND started_at_ms<=? '
+        'AND result_at_ms+30000>=? '
+        'ORDER BY (result_at_ms-started_at_ms),result_at_ms,match_id LIMIT 1',
+        (int(session_id), int(part_id), int(at_ms), int(at_ms)),
+    ).fetchone()
+    return None if row is None else int(row['match_id'])
+
+
+def _relink_training_review_material_matches(
+    conn: sqlite3.Connection, *, session_id: int, part_id: int
+) -> None:
+    rows = conn.execute(
+        'SELECT material.frame_id,('
+        'SELECT context.match_id FROM training_review_match_contexts context '
+        'WHERE context.session_id=material.session_id '
+        'AND context.part_id=material.part_id '
+        'AND context.started_at_ms<=material.at_ms '
+        'AND context.result_at_ms+30000>=material.at_ms '
+        'ORDER BY (context.result_at_ms-context.started_at_ms),'
+        'context.result_at_ms,context.match_id LIMIT 1) AS match_id '
+        'FROM training_review_material_index material '
+        'WHERE material.session_id=? AND material.part_id=?',
+        (int(session_id), int(part_id)),
+    ).fetchall()
+    updates = [
+        (
+            row['match_id'],
+            'time_window' if row['match_id'] is not None else '',
+            int(row['frame_id']),
+        )
+        for row in rows
+    ]
+    if updates:
+        conn.executemany(
+            'UPDATE training_review_material_index SET linked_match_id=?, '
+            'match_link_source=? WHERE frame_id=?',
+            updates,
+        )
+
+
+def _upsert_training_review_match_context(
+    conn: sqlite3.Connection, context: Mapping[str, Any]
+) -> bool:
+    match_id = int(context['match_id'])
+    values = (
+        int(context['session_id']),
+        int(context['part_id']),
+        int(context['started_at_ms']),
+        int(context['result_at_ms']),
+        str(context['game_mode']),
+        str(context['source_type']),
+    )
+    current = conn.execute(
+        'SELECT session_id,part_id,started_at_ms,result_at_ms,game_mode,source_type '
+        'FROM training_review_match_contexts WHERE match_id=?',
+        (match_id,),
+    ).fetchone()
+    current_values = (
+        None
+        if current is None
+        else tuple(
+            current[name]
+            for name in (
+                'session_id',
+                'part_id',
+                'started_at_ms',
+                'result_at_ms',
+                'game_mode',
+                'source_type',
+            )
+        )
+    )
+    if current_values == values:
+        return False
+    conn.execute(
+        'INSERT INTO training_review_match_contexts('
+        'match_id,session_id,part_id,started_at_ms,result_at_ms,game_mode,'
+        'source_type,updated_at) VALUES(?,?,?,?,?,?,?,?) '
+        'ON CONFLICT(match_id) DO UPDATE SET '
+        'session_id=excluded.session_id,part_id=excluded.part_id,'
+        'started_at_ms=excluded.started_at_ms,result_at_ms=excluded.result_at_ms,'
+        'game_mode=excluded.game_mode,source_type=excluded.source_type,'
+        'updated_at=excluded.updated_at',
+        (match_id, *values, now()),
+    )
+    _relink_training_review_material_matches(
+        conn, session_id=int(context['session_id']), part_id=int(context['part_id'])
+    )
+    return True
+
+
+def _training_review_material_contributions(
+    conn: sqlite3.Connection, index_row: Mapping[str, Any]
+) -> Dict[Tuple[str, str, str, str, str, str], Tuple[int, int]]:
+    if int(index_row['result_group_representative_frame_id']) != int(
+        index_row['frame_id']
+    ):
+        return {}
+    frame_id = int(index_row['frame_id'])
+    status = str(index_row['review_status'])
+    scene = str(index_row['scene'])
+    match_mode = str(index_row['match_mode'])
+    contributions: Dict[Tuple[str, str, str, str, str, str], Tuple[int, int]] = {}
+
+    def add(
+        kind: str,
+        target_scene: str,
+        target_mode: str,
+        hero_label: str,
+        source_scope: str,
+        metric: str,
+        *,
+        frame_count: int,
+        crop_count: int,
+    ) -> None:
+        key = (kind, target_scene, target_mode, hero_label, source_scope, metric)
+        old_frame_count, old_crop_count = contributions.get(key, (0, 0))
+        contributions[key] = (
+            old_frame_count + frame_count,
+            old_crop_count + crop_count,
+        )
+
+    valid_scene_modes = {
+        (target_scene, target_mode)
+        for target_scene, _label, _minimum in _MATERIAL_SUGGESTION_SCENES
+        for target_mode, _mode_label in _MATERIAL_SUGGESTION_MODES
+    }
+    if (scene, match_mode) in valid_scene_modes:
+        if status == 'confirmed':
+            add(
+                'scene_mode',
+                scene,
+                match_mode,
+                '',
+                'all',
+                'confirmed',
+                frame_count=1,
+                crop_count=0,
+            )
+        elif (
+            status in {'pending', 'partial'}
+            and str(index_row['prefill_status']) == 'ready'
+        ):
+            for source_scope, enabled in (
+                ('new', int(index_row['is_new'])),
+                ('legacy', int(index_row['is_legacy'])),
+            ):
+                if enabled:
+                    add(
+                        'scene_mode',
+                        scene,
+                        match_mode,
+                        '',
+                        source_scope,
+                        'candidate',
+                        frame_count=1,
+                        crop_count=0,
+                    )
+
+    lineup = conn.execute(
+        'SELECT screen_type,review_status FROM training_review_hero_lineups '
+        'WHERE frame_id=?',
+        (frame_id,),
+    ).fetchone()
+    if lineup is None or str(lineup['screen_type']) not in _HERO_SCREEN_TYPES:
+        return contributions
+    hero_scene = str(lineup['screen_type'])
+    slots = conn.execute(
+        'SELECT suggested_label,confirmed_label FROM training_review_hero_slots '
+        'WHERE frame_id=?',
+        (frame_id,),
+    ).fetchall()
+    if str(lineup['review_status']) == 'confirmed':
+        labels: Dict[str, int] = {}
+        for slot in slots:
+            label = str(slot['confirmed_label'] or '')
+            if label in {'', 'unreadable'}:
+                continue
+            labels[label] = labels.get(label, 0) + 1
+        for label, crop_count in labels.items():
+            add(
+                'hero_scene',
+                hero_scene,
+                '',
+                label,
+                'all',
+                'confirmed',
+                frame_count=1,
+                crop_count=crop_count,
+            )
+    elif (
+        status in {'pending', 'partial'} and str(index_row['prefill_status']) == 'ready'
+    ):
+        labels = {}
+        for slot in slots:
+            label = str(slot['suggested_label'] or '')
+            if label in {'', 'unreadable'}:
+                continue
+            labels[label] = labels.get(label, 0) + 1
+        for label, crop_count in labels.items():
+            for source_scope, enabled in (
+                ('new', int(index_row['is_new'])),
+                ('legacy', int(index_row['is_legacy'])),
+            ):
+                if enabled:
+                    add(
+                        'hero_scene',
+                        hero_scene,
+                        '',
+                        label,
+                        source_scope,
+                        'candidate',
+                        frame_count=1,
+                        crop_count=crop_count,
+                    )
+    return contributions
+
+
+def _replace_training_review_material_contributions(
+    conn: sqlite3.Connection,
+    frame_id: int,
+    values: Mapping[Tuple[str, str, str, str, str, str], Tuple[int, int]],
+) -> None:
+    old_rows = conn.execute(
+        'SELECT kind,scene,match_mode,hero_label,source_scope,metric,'
+        'frame_count,crop_count FROM training_review_material_contributions '
+        'WHERE frame_id=?',
+        (int(frame_id),),
+    ).fetchall()
+    old = {
+        (
+            str(row['kind']),
+            str(row['scene']),
+            str(row['match_mode']),
+            str(row['hero_label']),
+            str(row['source_scope']),
+            str(row['metric']),
+        ): (int(row['frame_count']), int(row['crop_count']))
+        for row in old_rows
+    }
+    timestamp = now()
+    for key in set(old) | set(values):
+        old_frame_count, old_crop_count = old.get(key, (0, 0))
+        new_frame_count, new_crop_count = values.get(key, (0, 0))
+        total = conn.execute(
+            'SELECT frame_count,crop_count FROM training_review_material_totals '
+            'WHERE kind=? AND scene=? AND match_mode=? AND hero_label=? '
+            'AND source_scope=? AND metric=?',
+            key,
+        ).fetchone()
+        current_frame_count = 0 if total is None else int(total['frame_count'])
+        current_crop_count = 0 if total is None else int(total['crop_count'])
+        next_frame_count = current_frame_count - old_frame_count + new_frame_count
+        next_crop_count = current_crop_count - old_crop_count + new_crop_count
+        if next_frame_count < 0 or next_crop_count < 0:
+            raise RuntimeError('训练素材增量统计出现负数')
+        if next_frame_count == 0 and next_crop_count == 0:
+            conn.execute(
+                'DELETE FROM training_review_material_totals '
+                'WHERE kind=? AND scene=? AND match_mode=? AND hero_label=? '
+                'AND source_scope=? AND metric=?',
+                key,
+            )
+            continue
+        conn.execute(
+            'INSERT INTO training_review_material_totals('
+            'kind,scene,match_mode,hero_label,source_scope,metric,'
+            'frame_count,crop_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?) '
+            'ON CONFLICT(kind,scene,match_mode,hero_label,source_scope,metric) '
+            'DO UPDATE SET frame_count=excluded.frame_count,'
+            'crop_count=excluded.crop_count,updated_at=excluded.updated_at',
+            (*key, next_frame_count, next_crop_count, timestamp),
+        )
+    conn.execute(
+        'DELETE FROM training_review_material_contributions WHERE frame_id=?',
+        (int(frame_id),),
+    )
+    if values:
+        conn.executemany(
+            'INSERT INTO training_review_material_contributions('
+            'frame_id,kind,scene,match_mode,hero_label,source_scope,metric,'
+            'frame_count,crop_count) VALUES(?,?,?,?,?,?,?,?,?)',
+            [
+                (int(frame_id), *key, frame_count, crop_count)
+                for key, (frame_count, crop_count) in values.items()
+            ],
+        )
+
+
+def _refresh_training_review_event_group(
+    conn: sqlite3.Connection, frame_id: int
+) -> set[int]:
+    event = conn.execute(
+        'SELECT event_id FROM frames WHERE id=?', (int(frame_id),)
+    ).fetchone()
+    if event is None or event['event_id'] is None:
+        return {int(frame_id)}
+    rows = conn.execute(
+        """
+        SELECT material.frame_id,material.scene,item.review_status,
+               item.hero_layout_label,item.panel_render_state,item.ocr_usable,
+               item.result_occlusion,frame.timestamp_ms,frame.is_representative,
+               frame.model_confidence,
+               EXISTS (
+                   SELECT 1 FROM boxes box
+                   WHERE box.frame_id=material.frame_id
+                     AND box.box_type='result_panel'
+               ) AS has_result_box,
+               EXISTS (
+                   SELECT 1 FROM training_review_hero_lineups lineup
+                   WHERE lineup.frame_id=material.frame_id
+                     AND lineup.review_status='confirmed'
+                     AND lineup.player_status='identified'
+               ) AS has_complete_lineup
+        FROM training_review_material_index material
+        JOIN training_review_items item ON item.frame_id=material.frame_id
+        JOIN frames frame ON frame.id=material.frame_id
+        WHERE frame.event_id=?
+        """,
+        (int(event['event_id']),),
+    ).fetchall()
+    affected = {int(row['frame_id']) for row in rows}
+    if not affected:
+        return {int(frame_id)}
+    conn.executemany(
+        'UPDATE training_review_material_index SET '
+        'result_group_representative_frame_id=frame_id,result_group_size=1 '
+        'WHERE frame_id=?',
+        [(value,) for value in affected],
+    )
+    positives = [row for row in rows if str(row['scene']) == 'result_page']
+    if len(positives) < 2:
+        return affected
+    timestamps = sorted(int(row['timestamp_ms']) for row in positives)
+    median = timestamps[len(timestamps) // 2]
+
+    def rank(row: Mapping[str, Any]) -> Tuple[Any, ...]:
+        return (
+            int(row['has_complete_lineup']),
+            int(str(row['review_status']) == 'confirmed'),
+            int(str(row['hero_layout_label'] or '') == 'result_page'),
+            int(row['has_result_box']),
+            int(str(row['panel_render_state']) == 'clear'),
+            int(str(row['ocr_usable']) == 'yes'),
+            int(str(row['result_occlusion']) == 'none'),
+            int(row['is_representative']),
+            float(row['model_confidence'] or 0),
+            -abs(int(row['timestamp_ms']) - median),
+            -int(row['frame_id']),
+        )
+
+    representative = int(max(positives, key=rank)['frame_id'])
+    conn.executemany(
+        'UPDATE training_review_material_index SET '
+        'result_group_representative_frame_id=?,result_group_size=? '
+        'WHERE frame_id=?',
+        [(representative, len(positives), int(row['frame_id'])) for row in positives],
+    )
+    return affected
+
+
+def refresh_training_review_material_index(
+    conn: sqlite3.Connection, frame_id: int, *, commit: bool = True
+) -> bool:
+    """按当前人工真值与模型来源重算单帧索引；可安全重复调用。"""
+    item = conn.execute(
+        'SELECT item.*,frame.video_id,frame.timestamp_ms AS frame_timestamp_ms '
+        'FROM training_review_items item '
+        'JOIN frames frame ON frame.id=item.frame_id WHERE item.frame_id=?',
+        (int(frame_id),),
+    ).fetchone()
+    if item is None:
+        _replace_training_review_material_contributions(conn, int(frame_id), {})
+        conn.execute(
+            'DELETE FROM training_review_material_index WHERE frame_id=?',
+            (int(frame_id),),
+        )
+        if commit:
+            conn.commit()
+        return False
+    source_facts = _training_review_material_source_facts(conn, int(frame_id))
+    contexts = tuple(source_facts['match_contexts'])
+    for context in contexts:
+        _upsert_training_review_match_context(conn, context)
+    signal = source_facts['signal']
+    categories = source_facts['categories']
+    scene = _training_review_material_scene(item, signal) or 'other'
+    match_mode = _training_review_material_mode(item, signal) or ''
+    session_id = int(source_facts['session_id'])
+    part_id = int(source_facts['part_id'])
+    at_ms = int(source_facts['at_ms'] or item['frame_timestamp_ms'] or 0)
+    exact_match_id = int(contexts[0]['match_id']) if len(contexts) == 1 else None
+    linked_match_id = exact_match_id or _training_review_match_for_time(
+        conn, session_id=session_id, part_id=part_id, at_ms=at_ms
+    )
+    match_link_source = (
+        'result_archive'
+        if exact_match_id is not None
+        else 'time_window' if linked_match_id is not None else ''
+    )
+    existing = conn.execute(
+        'SELECT result_group_representative_frame_id,result_group_size '
+        'FROM training_review_material_index WHERE frame_id=?',
+        (int(frame_id),),
+    ).fetchone()
+    representative = (
+        int(frame_id)
+        if existing is None
+        else int(existing['result_group_representative_frame_id'])
+    )
+    group_size = 1 if existing is None else int(existing['result_group_size'])
+    values = {
+        'frame_id': int(frame_id),
+        'video_id': int(item['video_id']),
+        'session_id': session_id,
+        'part_id': part_id,
+        'at_ms': at_ms,
+        'linked_match_id': linked_match_id,
+        'match_link_source': match_link_source,
+        'review_status': str(item['review_status']),
+        'scene': scene,
+        'match_mode': match_mode,
+        'is_new': int(
+            bool(categories & {'worker', 'result_archive', 'manual_correction'})
+        ),
+        'is_legacy': int('legacy' in categories),
+        'has_worker': int('worker' in categories),
+        'has_result_archive': int('result_archive' in categories),
+        'has_manual_correction': int('manual_correction' in categories),
+        'has_model_prefill': int('model_prefill' in categories),
+        'has_hero_model_prefill': int('hero_model_prefill' in categories),
+        'has_low_confidence': int(source_facts['has_low_confidence']),
+        'has_boundary_confidence': int(source_facts['has_boundary_confidence']),
+        'has_high_confidence': int(source_facts['has_high_confidence']),
+        'selects_aram': int(source_facts['selects_aram']),
+        'suggests_aram': int(source_facts['suggests_aram']),
+        'source_created_at': int(source_facts['source_created_at']),
+        'source_offset': int(source_facts['source_offset']),
+        'result_group_representative_frame_id': representative,
+        'result_group_size': group_size,
+        'updated_at': now(),
+    }
+    columns = tuple(values)
+    conn.execute(
+        'INSERT INTO training_review_material_index('
+        + ','.join(columns)
+        + ') VALUES('
+        + ','.join('?' for _column in columns)
+        + ') ON CONFLICT(frame_id) DO UPDATE SET '
+        + ','.join(
+            '{}=excluded.{}'.format(column, column)
+            for column in columns
+            if column != 'frame_id'
+        ),
+        tuple(values[column] for column in columns),
+    )
+    affected = _refresh_training_review_event_group(conn, int(frame_id))
+    for affected_frame_id in affected:
+        indexed = conn.execute(
+            'SELECT * FROM training_review_material_index WHERE frame_id=?',
+            (affected_frame_id,),
+        ).fetchone()
+        if indexed is None:
+            continue
+        _replace_training_review_material_contributions(
+            conn,
+            affected_frame_id,
+            _training_review_material_contributions(conn, indexed),
+        )
+    if commit:
+        conn.commit()
+    return True
+
+
+def rebuild_training_review_material_index(
+    conn: sqlite3.Connection,
+    *,
+    batch_size: int = 500,
+    progress: Optional[Callable[[Dict[str, int]], None]] = None,
+) -> Dict[str, int]:
+    """从现有真值和来源续建索引；中断后可重跑且不会重复累计。"""
+    if batch_size < 1:
+        raise ValueError('素材索引回填批次必须大于零')
+    conn.execute('DELETE FROM training_review_match_contexts')
+    conn.execute(
+        "UPDATE training_review_material_index SET linked_match_id=NULL,"
+        "match_link_source=''"
+    )
+    frame_ids = [
+        int(row['frame_id'])
+        for row in conn.execute(
+            'SELECT frame_id FROM training_review_items ORDER BY frame_id'
+        ).fetchall()
+    ]
+    result_groups = _calculate_training_review_result_groups(conn)
+    stale_frame_ids = {
+        int(row['frame_id'])
+        for row in conn.execute(
+            'SELECT material.frame_id FROM training_review_material_index material '
+            'LEFT JOIN training_review_items item ON item.frame_id=material.frame_id '
+            'WHERE item.frame_id IS NULL'
+        ).fetchall()
+    }
+    stale_frame_ids.update(
+        int(row['frame_id'])
+        for row in conn.execute(
+            'SELECT DISTINCT contribution.frame_id '
+            'FROM training_review_material_contributions contribution '
+            'LEFT JOIN training_review_items item '
+            'ON item.frame_id=contribution.frame_id WHERE item.frame_id IS NULL'
+        ).fetchall()
+    )
+    for frame_id in stale_frame_ids:
+        refresh_training_review_material_index(conn, frame_id, commit=False)
+    conn.commit()
+    indexed = 0
+    for offset in range(0, len(frame_ids), batch_size):
+        for frame_id in frame_ids[offset : offset + batch_size]:
+            indexed += int(
+                refresh_training_review_material_index(conn, frame_id, commit=False)
+            )
+        conn.commit()
+        if progress is not None:
+            progress(
+                {
+                    'total': len(frame_ids),
+                    'processed': min(len(frame_ids), offset + batch_size),
+                    'indexed': indexed,
+                }
+            )
+    previously_grouped = {
+        int(row['frame_id'])
+        for row in conn.execute(
+            'SELECT frame_id FROM training_review_material_index '
+            'WHERE result_group_size>1'
+        ).fetchall()
+    }
+    grouped_frame_ids = set()
+    for frame_id, group in result_groups.items():
+        if int(group['result_group_size']) <= 1:
+            continue
+        grouped_frame_ids.add(int(frame_id))
+    affected_groups = sorted(previously_grouped | grouped_frame_ids)
+    if affected_groups:
+        conn.executemany(
+            'UPDATE training_review_material_index SET '
+            'result_group_representative_frame_id=frame_id,result_group_size=1 '
+            'WHERE frame_id=?',
+            [(frame_id,) for frame_id in affected_groups],
+        )
+        conn.executemany(
+            'UPDATE training_review_material_index SET '
+            'result_group_representative_frame_id=?,result_group_size=? '
+            'WHERE frame_id=?',
+            [
+                (
+                    int(
+                        result_groups[frame_id]['result_group_representative_frame_id']
+                    ),
+                    int(result_groups[frame_id]['result_group_size']),
+                    frame_id,
+                )
+                for frame_id in sorted(grouped_frame_ids)
+            ],
+        )
+        for frame_id in affected_groups:
+            indexed_row = conn.execute(
+                'SELECT * FROM training_review_material_index WHERE frame_id=?',
+                (frame_id,),
+            ).fetchone()
+            if indexed_row is None:
+                continue
+            _replace_training_review_material_contributions(
+                conn,
+                frame_id,
+                _training_review_material_contributions(conn, indexed_row),
+            )
+        conn.commit()
+    conn.execute('DELETE FROM training_review_material_totals')
+    conn.execute(
+        'INSERT INTO training_review_material_totals('
+        'kind,scene,match_mode,hero_label,source_scope,metric,'
+        'frame_count,crop_count,updated_at) '
+        'SELECT kind,scene,match_mode,hero_label,source_scope,metric,'
+        'SUM(frame_count),SUM(crop_count),? '
+        'FROM training_review_material_contributions '
+        'GROUP BY kind,scene,match_mode,hero_label,source_scope,metric',
+        (now(),),
+    )
+    conn.commit()
+    return {
+        'total': len(frame_ids),
+        'indexed': indexed,
+        'contributions': int(
+            conn.execute(
+                'SELECT COUNT(*) FROM training_review_material_contributions'
+            ).fetchone()[0]
+        ),
+        'totals': int(
+            conn.execute(
+                'SELECT COUNT(*) FROM training_review_material_totals'
+            ).fetchone()[0]
+        ),
+        'grouped': len(grouped_frame_ids),
+    }
+
+
+def training_review_material_index_complete(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        'SELECT (SELECT COUNT(*) FROM training_review_items) AS items,'
+        '(SELECT COUNT(*) FROM training_review_material_index) AS indexed'
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        return int(row['items']) == int(row['indexed'])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+_TRAINING_REVIEW_PREFILL_STATUSES = {'pending', 'queued', 'running', 'ready', 'failed'}
+_TRAINING_REVIEW_PREFILL_STAGES = {'core', 'hero', 'complete'}
+
+
+def next_training_review_prefill_candidate(
+    conn: sqlite3.Connection, *, maximum_attempts: int = 3
+) -> Optional[Dict[str, Any]]:
+    """返回下一张需要后台预打标的图；不在这里创建任务或改状态。"""
+    if maximum_attempts < 1:
+        raise ValueError('预打标最大尝试次数必须大于零')
+    row = conn.execute(
+        'SELECT material.* FROM training_review_material_index material '
+        'JOIN training_review_items item ON item.frame_id=material.frame_id '
+        "WHERE material.prefill_status IN ('pending','failed') "
+        'AND material.prefill_attempts<? AND ('
+        "item.review_status IN ('pending','partial') OR ("
+        "item.review_status='confirmed' AND material.is_legacy=1 "
+        f'AND NOT ({_UNIFIED_MANUAL_REVIEWED}))) '
+        "ORDER BY CASE material.prefill_stage WHEN 'hero' THEN 0 ELSE 1 END,"
+        "CASE material.prefill_status WHEN 'pending' THEN 0 ELSE 1 END,"
+        'CASE WHEN material.result_group_representative_frame_id='
+        'material.frame_id THEN 0 ELSE 1 END,'
+        'material.is_new DESC,material.source_created_at DESC,'
+        'material.source_offset DESC,material.frame_id DESC LIMIT 1',
+        (int(maximum_attempts),),
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
+def update_training_review_prefill_state(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    status: str,
+    stage: str,
+    screen_type: str = '',
+    team_size: Optional[int] = None,
+    error: str = '',
+    increment_attempt: bool = False,
+    reset_attempts: bool = False,
+) -> Dict[str, Any]:
+    """更新单帧预打标生命周期，并同步该帧可筛选统计。"""
+    if status not in _TRAINING_REVIEW_PREFILL_STATUSES:
+        raise ValueError('预打标状态无效')
+    if stage not in _TRAINING_REVIEW_PREFILL_STAGES:
+        raise ValueError('预打标阶段无效')
+    normalized_screen = screen_type.strip()
+    if normalized_screen not in {'', *_HERO_SCREEN_TYPES}:
+        raise ValueError('预打标英雄画面类型无效')
+    if team_size is not None and int(team_size) not in {3, 5}:
+        raise ValueError('预打标英雄人数必须是 3 或 5')
+    if stage == 'hero' and (
+        normalized_screen not in _HERO_SCREEN_TYPES or team_size is None
+    ):
+        raise ValueError('英雄预打标阶段缺少画面类型或人数')
+    timestamp = now()
+    cursor = conn.execute(
+        'UPDATE training_review_material_index SET prefill_status=?,'
+        'prefill_stage=?,prefill_attempts=CASE WHEN ?=1 THEN 0 '
+        'ELSE prefill_attempts+? END,'
+        'prefill_error=?,prefill_screen_type=?,prefill_team_size=?,'
+        'prefill_updated_at=?,prefilled_at=? WHERE frame_id=?',
+        (
+            status,
+            stage,
+            int(bool(reset_attempts)),
+            int(bool(increment_attempt)),
+            error.strip()[:2_000],
+            normalized_screen,
+            None if team_size is None else int(team_size),
+            timestamp,
+            timestamp if status == 'ready' else None,
+            int(frame_id),
+        ),
+    )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        raise KeyError(frame_id)
+    refresh_training_review_material_index(conn, int(frame_id), commit=False)
+    conn.commit()
+    row = conn.execute(
+        'SELECT * FROM training_review_material_index WHERE frame_id=?',
+        (int(frame_id),),
+    ).fetchone()
+    if row is None:
+        raise KeyError(frame_id)
+    return dict(row)
+
+
+def training_review_prefill_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
+    rows = conn.execute(
+        'SELECT prefill_status,prefill_stage,COUNT(*) AS count '
+        'FROM training_review_material_index GROUP BY prefill_status,prefill_stage'
+    ).fetchall()
+    statuses: Dict[str, int] = {}
+    stages: Dict[str, int] = {}
+    for row in rows:
+        count = int(row['count'])
+        status = str(row['prefill_status'])
+        stage = str(row['prefill_stage'])
+        statuses[status] = statuses.get(status, 0) + count
+        stages[stage] = stages.get(stage, 0) + count
+    return {
+        'total': sum(statuses.values()),
+        'statuses': statuses,
+        'stages': stages,
+        'ready': int(statuses.get('ready', 0)),
+        'waiting': sum(
+            int(statuses.get(value, 0)) for value in ('pending', 'queued', 'running')
+        ),
+        'failed': int(statuses.get('failed', 0)),
+    }
+
+
+def _training_review_related_hero_counts(
+    conn: sqlite3.Connection,
+) -> Tuple[Dict[Tuple[str, str, str], Dict[str, int]], Dict[Tuple[str, str], int]]:
+    """一次聚合出模型漏认但同局／同视频仍可复核的候选数量。"""
+    scenes = tuple(value[0] for value in _MATERIAL_SUGGESTION_SCENES[:3])
+    scene_values = ','.join("('{}')".format(value) for value in scenes)
+    effective = "COALESCE(NULLIF({slot}.confirmed_label,''),{slot}.suggested_label)"
+    direct_missing = (
+        'NOT EXISTS (SELECT 1 FROM training_review_hero_slots target_slot '
+        'WHERE target_slot.frame_id=target.frame_id AND '
+        + effective.format(slot='target_slot')
+        + '=evidence.hero_label)'
+    )
+    related: Dict[Tuple[str, str, str], Dict[str, int]] = {}
+
+    match_rows = conn.execute(
+        'WITH evidence AS ('
+        'SELECT DISTINCT material.linked_match_id AS match_id,'
+        + effective.format(slot='slot')
+        + ' AS hero_label FROM training_review_material_index material '
+        'JOIN training_review_hero_slots slot ON slot.frame_id=material.frame_id '
+        'WHERE material.linked_match_id IS NOT NULL AND '
+        + effective.format(slot='slot')
+        + " NOT IN ('','unreadable')) "
+        'SELECT evidence.hero_label,target.scene,'
+        'COUNT(DISTINCT CASE WHEN target.is_new=1 THEN target.frame_id END) '
+        'AS new_count,'
+        'COUNT(DISTINCT CASE WHEN target.is_legacy=1 THEN target.frame_id END) '
+        'AS legacy_count FROM evidence '
+        'JOIN training_review_material_index target '
+        'ON target.linked_match_id=evidence.match_id '
+        "WHERE target.review_status IN ('pending','partial') "
+        "AND target.scene IN ('gameplay_hud','scoreboard','result_page') "
+        'AND target.result_group_representative_frame_id=target.frame_id AND '
+        + direct_missing
+        + ' GROUP BY evidence.hero_label,target.scene'
+    ).fetchall()
+    for row in match_rows:
+        for scope in ('new', 'legacy'):
+            related.setdefault(
+                (str(row['hero_label']), str(row['scene']), scope),
+                {'same_match': 0, 'same_video': 0},
+            )['same_match'] = int(row[f'{scope}_count'])
+
+    video_rows = conn.execute(
+        'WITH linked_videos AS ('
+        'SELECT DISTINCT video_id FROM training_review_material_index '
+        'WHERE linked_match_id IS NOT NULL),evidence AS ('
+        'SELECT DISTINCT material.video_id,'
+        + effective.format(slot='slot')
+        + ' AS hero_label FROM training_review_material_index material '
+        'JOIN training_review_hero_slots slot ON slot.frame_id=material.frame_id '
+        'LEFT JOIN linked_videos linked ON linked.video_id=material.video_id '
+        'WHERE material.linked_match_id IS NULL AND material.session_id>0 '
+        'AND material.part_id>0 AND linked.video_id IS NULL AND '
+        + effective.format(slot='slot')
+        + " NOT IN ('','unreadable')) "
+        'SELECT evidence.hero_label,target.scene,'
+        'COUNT(DISTINCT CASE WHEN target.is_new=1 THEN target.frame_id END) '
+        'AS new_count,'
+        'COUNT(DISTINCT CASE WHEN target.is_legacy=1 THEN target.frame_id END) '
+        'AS legacy_count FROM evidence '
+        'JOIN training_review_material_index target '
+        'ON target.video_id=evidence.video_id '
+        "WHERE target.review_status IN ('pending','partial') "
+        'AND target.linked_match_id IS NULL '
+        "AND target.scene IN ('gameplay_hud','scoreboard','result_page') "
+        'AND target.result_group_representative_frame_id=target.frame_id AND '
+        + direct_missing
+        + ' GROUP BY evidence.hero_label,target.scene'
+    ).fetchall()
+    for row in video_rows:
+        for scope in ('new', 'legacy'):
+            related.setdefault(
+                (str(row['hero_label']), str(row['scene']), scope),
+                {'same_match': 0, 'same_video': 0},
+            )['same_video'] = int(row[f'{scope}_count'])
+
+    missing_rows = conn.execute(
+        'WITH evidence AS ('
+        'SELECT DISTINCT material.linked_match_id AS match_id,'
+        + effective.format(slot='slot')
+        + ' AS hero_label FROM training_review_material_index material '
+        'JOIN training_review_hero_slots slot ON slot.frame_id=material.frame_id '
+        'WHERE material.linked_match_id IS NOT NULL AND '
+        + effective.format(slot='slot')
+        + " NOT IN ('','unreadable')),desired(scene) AS (VALUES "
+        + scene_values
+        + ') SELECT evidence.hero_label,desired.scene,COUNT(*) AS match_count '
+        'FROM evidence CROSS JOIN desired WHERE NOT EXISTS ('
+        'SELECT 1 FROM training_review_material_index target '
+        'WHERE target.linked_match_id=evidence.match_id '
+        'AND target.scene=desired.scene) '
+        'GROUP BY evidence.hero_label,desired.scene'
+    ).fetchall()
+    missing = {
+        (str(row['hero_label']), str(row['scene'])): int(row['match_count'])
+        for row in missing_rows
+    }
+    return related, missing
+
+
+def training_review_material_suggestions(
+    conn: sqlite3.Connection, *, hero_catalog: Sequence[Dict[str, str]] = ()
+) -> List[Dict[str, Any]]:
+    """只读取增量汇总，生成素材缺口建议。"""
+    totals = {
+        (
+            str(row['kind']),
+            str(row['scene']),
+            str(row['match_mode']),
+            str(row['hero_label']),
+            str(row['source_scope']),
+            str(row['metric']),
+        ): (int(row['frame_count']), int(row['crop_count']))
+        for row in conn.execute(
+            'SELECT kind,scene,match_mode,hero_label,source_scope,metric,'
+            'frame_count,crop_count FROM training_review_material_totals'
+        ).fetchall()
+    }
+
+    def total(
+        kind: str,
+        scene: str,
+        match_mode: str,
+        hero_label: str,
+        source_scope: str,
+        metric: str,
+    ) -> Tuple[int, int]:
+        return totals.get(
+            (kind, scene, match_mode, hero_label, source_scope, metric), (0, 0)
+        )
+
+    result: List[Dict[str, Any]] = []
+    related_heroes, missing_hero_scenes = _training_review_related_hero_counts(conn)
+    for scene, scene_label, minimum in _MATERIAL_SUGGESTION_SCENES:
+        strongest = max(
+            total('scene_mode', scene, mode, '', 'all', 'confirmed')[0]
+            for mode, _label in _MATERIAL_SUGGESTION_MODES
+        )
+        target = max(minimum, math.ceil(strongest * 0.6))
+        for mode, mode_label in _MATERIAL_SUGGESTION_MODES:
+            count = total('scene_mode', scene, mode, '', 'all', 'confirmed')[0]
+            new_count = total('scene_mode', scene, mode, '', 'new', 'candidate')[0]
+            legacy_count = total('scene_mode', scene, mode, '', 'legacy', 'candidate')[
+                0
+            ]
+            source_scope = 'new' if new_count >= legacy_count else 'legacy'
+            available = new_count if source_scope == 'new' else legacy_count
+            ratio = count / target if target else 1.0
+            sufficient = count >= target
+            severity = (
+                'sufficient'
+                if sufficient
+                else 'urgent' if count == 0 else 'scarce' if ratio < 0.35 else 'low'
+            )
+            result.append(
+                {
+                    'kind': 'scene_mode',
+                    'scene': scene,
+                    'scene_label': scene_label,
+                    'match_mode': mode,
+                    'mode_label': mode_label,
+                    'confirmed_count': count,
+                    'target_count': target,
+                    'shortage_count': max(0, target - count),
+                    'candidate_count': available,
+                    'source_scope': source_scope,
+                    'severity': severity,
+                    'status': 'sufficient' if sufficient else 'shortage',
+                    'filters': {
+                        'status': 'needs_review',
+                        'scene': scene,
+                        'match_mode': mode,
+                    },
+                }
+            )
+
+    catalog_by_label = {
+        str(hero.get('label') or ''): str(hero.get('name') or hero.get('label') or '')
+        for hero in hero_catalog
+        if str(hero.get('label') or '')
+    }
+    for key in totals:
+        if key[0] == 'hero_scene' and key[3]:
+            catalog_by_label.setdefault(key[3], key[3])
+    for hero_label, hero_name in sorted(
+        catalog_by_label.items(), key=lambda item: (item[1], item[0])
+    ):
+        for scene, scene_label, _minimum in _MATERIAL_SUGGESTION_SCENES[:3]:
+            count = total('hero_scene', scene, '', hero_label, 'all', 'confirmed')[1]
+            new_frames, new_crops = total(
+                'hero_scene', scene, '', hero_label, 'new', 'candidate'
+            )
+            legacy_frames, legacy_crops = total(
+                'hero_scene', scene, '', hero_label, 'legacy', 'candidate'
+            )
+            new_related = related_heroes.get(
+                (hero_label, scene, 'new'), {'same_match': 0, 'same_video': 0}
+            )
+            legacy_related = related_heroes.get(
+                (hero_label, scene, 'legacy'), {'same_match': 0, 'same_video': 0}
+            )
+            new_available = (
+                new_frames
+                + int(new_related['same_match'])
+                + int(new_related['same_video'])
+            )
+            legacy_available = (
+                legacy_frames
+                + int(legacy_related['same_match'])
+                + int(legacy_related['same_video'])
+            )
+            source_scope = 'new' if new_available >= legacy_available else 'legacy'
+            if source_scope == 'new':
+                candidate_count = new_available
+                candidate_crop_count = new_crops
+                related_counts = new_related
+                model_prefill_count = new_frames
+            else:
+                candidate_count = legacy_available
+                candidate_crop_count = legacy_crops
+                related_counts = legacy_related
+                model_prefill_count = legacy_frames
+            target = _MATERIAL_HERO_SCENE_TARGET
+            sufficient = count >= target
+            ratio = count / target
+            result.append(
+                {
+                    'kind': 'hero_scene',
+                    'scene': scene,
+                    'scene_label': scene_label,
+                    'hero_label': hero_label,
+                    'hero_name': hero_name,
+                    'confirmed_count': count,
+                    'target_count': target,
+                    'shortage_count': max(0, target - count),
+                    'candidate_count': candidate_count,
+                    'candidate_crop_count': candidate_crop_count,
+                    'model_prefill_count': model_prefill_count,
+                    'model_prefill_crop_count': candidate_crop_count,
+                    'same_match_candidate_count': int(related_counts['same_match']),
+                    'same_video_candidate_count': int(related_counts['same_video']),
+                    'matches_without_scene_candidate': missing_hero_scenes.get(
+                        (hero_label, scene), 0
+                    ),
+                    'source_scope': source_scope,
+                    'severity': (
+                        'sufficient'
+                        if sufficient
+                        else (
+                            'urgent'
+                            if count == 0
+                            else 'scarce' if ratio < 0.35 else 'low'
+                        )
+                    ),
+                    'status': 'sufficient' if sufficient else 'shortage',
+                    'filters': {
+                        'status': 'needs_review',
+                        'scene': scene,
+                        'hero': hero_label,
+                    },
+                }
+            )
+    severity_rank = {'urgent': 0, 'scarce': 1, 'low': 2, 'sufficient': 3}
+    return sorted(
+        result,
+        key=lambda value: (
+            severity_rank[value['severity']],
+            -int(value['candidate_count'] > 0),
+            -int(value['shortage_count']),
+            0 if value['kind'] == 'scene_mode' else 1,
+            str(value['scene']),
+            str(value.get('match_mode') or value.get('hero_name') or ''),
+        ),
+    )
 
 
 def _training_review_material_suggestions(
@@ -3853,7 +5295,12 @@ def _training_review_origin_frame_ids(
         raise ValueError('训练复核数据来源无效')
     if source_scope == 'all':
         return None
-    if source_scope == 'legacy':
+    if training_review_material_index_complete(conn):
+        column = 'is_legacy' if source_scope == 'legacy' else 'is_new'
+        rows = conn.execute(
+            'SELECT frame_id FROM training_review_material_index ' f'WHERE {column}=1'
+        ).fetchall()
+    elif source_scope == 'legacy':
         rows = conn.execute(
             'SELECT DISTINCT frame_id FROM training_review_sources '
             "WHERE source_type LIKE 'legacy_%'"
@@ -3930,6 +5377,10 @@ def get_training_review_item(
         SELECT item.*, frame.video_id, frame.timestamp_ms, frame.width,
                frame.height, frame.frame_path, frame.thumb_path, frame.sha256,
                video.streamer, video.filename, video.remote_path,
+               COALESCE(material.prefill_status, 'pending') AS prefill_status,
+               COALESCE(material.prefill_stage, 'core') AS prefill_stage,
+               COALESCE(material.prefill_attempts, 0) AS prefill_attempts,
+               COALESCE(material.prefill_error, '') AS prefill_error,
                CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW})
                     THEN 1 ELSE 0 END AS needs_player_hero_review,
                CASE WHEN ({_UNIFIED_MANUAL_REVIEWED})
@@ -3937,6 +5388,8 @@ def get_training_review_item(
         FROM training_review_items item
         JOIN frames frame ON frame.id = item.frame_id
         JOIN videos video ON video.id = frame.video_id
+        LEFT JOIN training_review_material_index material
+          ON material.frame_id=item.frame_id
         WHERE item.frame_id = ?
         """,
         (int(frame_id),),
@@ -3990,10 +5443,16 @@ def get_training_review_items(
             SELECT item.*, frame.video_id, frame.timestamp_ms, frame.width,
                    frame.height, frame.frame_path, frame.thumb_path, frame.sha256,
                    video.streamer, video.filename, video.remote_path,
+                   COALESCE(material.prefill_status, 'pending') AS prefill_status,
+                   COALESCE(material.prefill_stage, 'core') AS prefill_stage,
+                   COALESCE(material.prefill_attempts, 0) AS prefill_attempts,
+                   COALESCE(material.prefill_error, '') AS prefill_error,
                    {review_columns}
             FROM training_review_items item
             JOIN frames frame ON frame.id = item.frame_id
             JOIN videos video ON video.id = frame.video_id
+            LEFT JOIN training_review_material_index material
+              ON material.frame_id=item.frame_id
             WHERE item.frame_id IN ({placeholders})
             """,
             batch,
@@ -4057,7 +5516,11 @@ _LEGACY_HERO_SCREEN_TYPES = {
 
 
 def _legacy_hero_review_groups(
-    conn: sqlite3.Connection, *, streamer: str = '', screen_type: str = ''
+    conn: sqlite3.Connection,
+    *,
+    streamer: str = '',
+    screen_type: str = '',
+    prefill_ready_only: bool = False,
 ) -> List[Dict[str, Any]]:
     if screen_type and screen_type not in _HERO_SCREEN_TYPES:
         raise ValueError('历史英雄补标画面类型无效')
@@ -4069,6 +5532,7 @@ def _legacy_hero_review_groups(
                frame.video_id, frame.timestamp_ms, frame.width, frame.height,
                frame.is_representative, frame.model_confidence,
                video.streamer, video.filename,
+               COALESCE(material.prefill_status, 'pending') AS prefill_status,
                COALESCE(lineup.screen_type, '') AS lineup_screen_type,
                COALESCE(lineup.review_status, '') AS lineup_review_status,
                (
@@ -4083,6 +5547,8 @@ def _legacy_hero_review_groups(
           ON item.frame_id = annotation.frame_id
         LEFT JOIN training_review_hero_lineups lineup
           ON lineup.frame_id = annotation.frame_id
+        LEFT JOIN training_review_material_index material
+          ON material.frame_id = annotation.frame_id
         WHERE annotation.annotation_status = 'complete'
           AND annotation.content_family = 'vainglory'
           AND (? = '' OR video.streamer = ?)
@@ -4133,6 +5599,13 @@ def _legacy_hero_review_groups(
         )
         timestamps = sorted(int(row['timestamp_ms']) for row in members)
         median = timestamps[len(timestamps) // 2]
+        eligible_members = (
+            [row for row in members if str(row['prefill_status']) == 'ready']
+            if prefill_ready_only
+            else members
+        )
+        if not eligible_members:
+            continue
 
         def rank(row: sqlite3.Row) -> Tuple[Any, ...]:
             matching_layout = str(row['lineup_screen_type']) == target_screen
@@ -4146,7 +5619,7 @@ def _legacy_hero_review_groups(
                 -int(row['frame_id']),
             )
 
-        representative = max(members, key=rank)
+        representative = max(eligible_members, key=rank)
         mode_counts: Dict[str, int] = {}
         for row in members:
             mode = str(row['game_mode'] or '')
@@ -4199,13 +5672,17 @@ def list_legacy_hero_review_items(
     screen_type: str = '',
     limit: int = 1000,
     offset: int = 0,
+    prefill_ready_only: bool = False,
 ) -> List[Dict[str, Any]]:
     if limit < 1 or limit > 10_000 or offset < 0:
         raise ValueError('训练复核分页参数无效')
     groups = [
         group
         for group in _legacy_hero_review_groups(
-            conn, streamer=streamer, screen_type=screen_type
+            conn,
+            streamer=streamer,
+            screen_type=screen_type,
+            prefill_ready_only=prefill_ready_only,
         )
         if not group['completed']
     ]
@@ -4236,10 +5713,17 @@ def list_legacy_hero_review_items(
 
 
 def legacy_hero_review_stats(
-    conn: sqlite3.Connection, *, streamer: str = '', screen_type: str = ''
+    conn: sqlite3.Connection,
+    *,
+    streamer: str = '',
+    screen_type: str = '',
+    prefill_ready_only: bool = False,
 ) -> Dict[str, Any]:
     groups = _legacy_hero_review_groups(
-        conn, streamer=streamer, screen_type=screen_type
+        conn,
+        streamer=streamer,
+        screen_type=screen_type,
+        prefill_ready_only=prefill_ready_only,
     )
     remaining = [group for group in groups if not group['completed']]
     by_screen_type = {
@@ -4278,7 +5762,236 @@ def legacy_hero_review_stats(
     }
 
 
-def _training_review_attribute_frame_ids(
+def _normalized_training_review_heroes(hero: Sequence[str] | str) -> List[str]:
+    heroes = (
+        [hero.strip()]
+        if isinstance(hero, str) and hero.strip()
+        else [str(value).strip() for value in hero if str(value).strip()]
+    )
+    heroes = list(dict.fromkeys(heroes))
+    if len(heroes) > 100:
+        raise ValueError('英雄筛选数量过多')
+    return heroes
+
+
+def _training_review_related_hero_condition(
+    heroes: Sequence[str], *, material_alias: str = 'material'
+) -> Tuple[str, List[Any]]:
+    placeholders = ','.join('?' for _hero in heroes)
+    effective_label = (
+        "COALESCE(NULLIF({slot}.confirmed_label,''),{slot}.suggested_label)"
+    )
+    condition = (
+        '(EXISTS (SELECT 1 FROM training_review_hero_slots direct_slot '
+        'WHERE direct_slot.frame_id=item.frame_id AND '
+        + effective_label.format(slot='direct_slot')
+        + f' IN ({placeholders})) OR ('
+        + f'{material_alias}.linked_match_id IS NOT NULL AND EXISTS ('
+        'SELECT 1 FROM training_review_material_index match_peer '
+        'JOIN training_review_hero_slots match_slot '
+        'ON match_slot.frame_id=match_peer.frame_id '
+        + f'WHERE match_peer.linked_match_id={material_alias}.linked_match_id AND '
+        + effective_label.format(slot='match_slot')
+        + f' IN ({placeholders}))) OR ('
+        + f'{material_alias}.linked_match_id IS NULL '
+        + f'AND {material_alias}.session_id>0 AND {material_alias}.part_id>0 '
+        'AND NOT EXISTS ('
+        'SELECT 1 FROM training_review_material_index linked_video '
+        + f'WHERE linked_video.video_id={material_alias}.video_id '
+        'AND linked_video.linked_match_id IS NOT NULL) AND EXISTS ('
+        'SELECT 1 FROM training_review_material_index video_peer '
+        'JOIN training_review_hero_slots video_slot '
+        'ON video_slot.frame_id=video_peer.frame_id '
+        + f'WHERE video_peer.video_id={material_alias}.video_id AND '
+        + effective_label.format(slot='video_slot')
+        + f' IN ({placeholders}))))'
+    )
+    return condition, [*heroes, *heroes, *heroes]
+
+
+def _training_review_related_hero_order(
+    heroes: Sequence[str], *, material_alias: str = 'material'
+) -> Tuple[str, List[Any]]:
+    placeholders = ','.join('?' for _hero in heroes)
+    effective = "COALESCE(NULLIF(direct_slot.confirmed_label,''),"
+    effective += 'direct_slot.suggested_label)'
+    has_direct = (
+        'EXISTS (SELECT 1 FROM training_review_hero_slots direct_slot '
+        'WHERE direct_slot.frame_id=item.frame_id AND '
+        + effective
+        + f' IN ({placeholders}))'
+    )
+    has_confirmed = (
+        'EXISTS (SELECT 1 FROM training_review_hero_slots confirmed_slot '
+        'WHERE confirmed_slot.frame_id=item.frame_id '
+        "AND NULLIF(confirmed_slot.confirmed_label,'') "
+        f'IN ({placeholders}))'
+    )
+    return (
+        'CASE '
+        f'WHEN NOT ({has_direct}) AND {material_alias}.linked_match_id '
+        'IS NOT NULL THEN 0 '
+        f'WHEN NOT ({has_direct}) THEN 1 '
+        f'WHEN {has_confirmed} THEN 3 ELSE 2 END,',
+        [*heroes, *heroes, *heroes],
+    )
+
+
+def training_review_hero_filter_matches(
+    conn: sqlite3.Connection, frame_ids: Sequence[int], hero: Sequence[str] | str
+) -> Dict[int, List[Dict[str, Any]]]:
+    heroes = _normalized_training_review_heroes(hero)
+    ordered_ids = list(dict.fromkeys(int(value) for value in frame_ids))
+    if not heroes or not ordered_ids:
+        return {}
+    hero_set = set(heroes)
+    direct: Dict[int, Dict[str, str]] = {}
+    materials: Dict[int, Dict[str, Optional[int]]] = {}
+    for offset in range(0, len(ordered_ids), 350):
+        batch = ordered_ids[offset : offset + 350]
+        frame_placeholders = ','.join('?' for _frame_id in batch)
+        hero_placeholders = ','.join('?' for _hero in heroes)
+        rows = conn.execute(
+            'SELECT frame_id,confirmed_label,suggested_label '
+            'FROM training_review_hero_slots '
+            f'WHERE frame_id IN ({frame_placeholders}) AND '
+            "COALESCE(NULLIF(confirmed_label,''),suggested_label) "
+            f'IN ({hero_placeholders})',
+            (*batch, *heroes),
+        ).fetchall()
+        for row in rows:
+            frame_id = int(row['frame_id'])
+            confirmed = str(row['confirmed_label'] or '')
+            label = confirmed or str(row['suggested_label'] or '')
+            if label in hero_set:
+                direct.setdefault(frame_id, {})[label] = (
+                    'direct_confirmed' if confirmed else 'direct_suggested'
+                )
+        rows = conn.execute(
+            'SELECT frame_id,video_id,session_id,part_id,linked_match_id '
+            'FROM training_review_material_index '
+            f'WHERE frame_id IN ({frame_placeholders})',
+            batch,
+        ).fetchall()
+        for row in rows:
+            materials[int(row['frame_id'])] = {
+                'video_id': int(row['video_id']),
+                'session_id': int(row['session_id']),
+                'part_id': int(row['part_id']),
+                'match_id': (
+                    None
+                    if row['linked_match_id'] is None
+                    else int(row['linked_match_id'])
+                ),
+            }
+
+    match_ids = sorted(
+        {
+            int(value['match_id'])
+            for value in materials.values()
+            if value['match_id'] is not None
+        }
+    )
+    match_evidence: Dict[int, Dict[str, str]] = {}
+    for offset in range(0, len(match_ids), 350):
+        batch = match_ids[offset : offset + 350]
+        match_placeholders = ','.join('?' for _match_id in batch)
+        hero_placeholders = ','.join('?' for _hero in heroes)
+        rows = conn.execute(
+            'SELECT material.linked_match_id,slot.confirmed_label,'
+            'slot.suggested_label FROM training_review_material_index material '
+            'JOIN training_review_hero_slots slot ON slot.frame_id=material.frame_id '
+            f'WHERE material.linked_match_id IN ({match_placeholders}) AND '
+            "COALESCE(NULLIF(slot.confirmed_label,''),slot.suggested_label) "
+            f'IN ({hero_placeholders})',
+            (*batch, *heroes),
+        ).fetchall()
+        for row in rows:
+            confirmed = str(row['confirmed_label'] or '')
+            label = confirmed or str(row['suggested_label'] or '')
+            evidence = match_evidence.setdefault(int(row['linked_match_id']), {})
+            if label in hero_set and (confirmed or label not in evidence):
+                evidence[label] = 'human' if confirmed else 'model'
+
+    video_ids = sorted({int(value['video_id']) for value in materials.values()})
+    videos_with_matches: set[int] = set()
+    video_evidence: Dict[int, Dict[str, str]] = {}
+    for offset in range(0, len(video_ids), 350):
+        batch = video_ids[offset : offset + 350]
+        video_placeholders = ','.join('?' for _video_id in batch)
+        videos_with_matches.update(
+            int(row['video_id'])
+            for row in conn.execute(
+                'SELECT DISTINCT video_id FROM training_review_material_index '
+                f'WHERE video_id IN ({video_placeholders}) '
+                'AND linked_match_id IS NOT NULL',
+                batch,
+            ).fetchall()
+        )
+        eligible = [value for value in batch if value not in videos_with_matches]
+        if not eligible:
+            continue
+        eligible_placeholders = ','.join('?' for _video_id in eligible)
+        hero_placeholders = ','.join('?' for _hero in heroes)
+        rows = conn.execute(
+            'SELECT material.video_id,slot.confirmed_label,slot.suggested_label '
+            'FROM training_review_material_index material '
+            'JOIN training_review_hero_slots slot ON slot.frame_id=material.frame_id '
+            f'WHERE material.video_id IN ({eligible_placeholders}) AND '
+            "COALESCE(NULLIF(slot.confirmed_label,''),slot.suggested_label) "
+            f'IN ({hero_placeholders})',
+            (*eligible, *heroes),
+        ).fetchall()
+        for row in rows:
+            confirmed = str(row['confirmed_label'] or '')
+            label = confirmed or str(row['suggested_label'] or '')
+            evidence = video_evidence.setdefault(int(row['video_id']), {})
+            if label in hero_set and (confirmed or label not in evidence):
+                evidence[label] = 'human' if confirmed else 'model'
+
+    result: Dict[int, List[Dict[str, Any]]] = {}
+    for frame_id in ordered_ids:
+        material = materials.get(frame_id)
+        if material is None:
+            continue
+        matches = []
+        for hero_label in heroes:
+            reason = direct.get(frame_id, {}).get(hero_label)
+            evidence_source = (
+                'human'
+                if reason == 'direct_confirmed'
+                else 'model' if reason == 'direct_suggested' else None
+            )
+            match_id = material['match_id']
+            if reason is None and match_id is not None:
+                evidence_source = match_evidence.get(int(match_id), {}).get(hero_label)
+                if evidence_source is not None:
+                    reason = 'same_match'
+            if (
+                reason is None
+                and match_id is None
+                and int(material['session_id']) > 0
+                and int(material['part_id']) > 0
+                and int(material['video_id']) not in videos_with_matches
+                and hero_label in video_evidence.get(int(material['video_id']), {})
+            ):
+                reason = 'same_video'
+                evidence_source = video_evidence[int(material['video_id'])][hero_label]
+            if reason is not None:
+                matches.append(
+                    {
+                        'hero_label': hero_label,
+                        'reason': reason,
+                        'evidence_source': evidence_source,
+                        'match_id': match_id,
+                    }
+                )
+        if matches:
+            result[frame_id] = matches
+    return result
+
+
+def _training_review_indexed_attribute_frame_ids(
     conn: sqlite3.Connection,
     *,
     streamer: str = '',
@@ -4302,105 +6015,58 @@ def _training_review_attribute_frame_ids(
         )
         parameters.append(source_type)
     if match_mode:
-        hero_select_mode = f'select_{match_mode}'
-        conditions.append(
-            '(item.match_mode_label = ? OR item.hero_select_label = ? OR EXISTS ('
-            'SELECT 1 FROM training_review_sources source '
-            'WHERE source.frame_id = item.frame_id AND ('
-            "json_extract(source.suggestions_json, '$.match_mode.label') = ? OR "
-            "json_extract(source.suggestions_json, '$.hero_select.label') = ? OR "
-            "json_extract(source.metadata_json, '$.game_mode') = ? OR "
-            "json_extract(source.metadata_json, '$.mode_class') = ? OR "
-            "json_extract(source.metadata_json, "
-            "'$.manual_correction.after.game_mode') = ? OR "
-            "json_extract(source.metadata_json, "
-            "'$.model_outputs[0].mode_class') = ?)))"
-        )
-        parameters.extend(
-            (
-                match_mode,
-                hero_select_mode,
-                match_mode,
-                hero_select_mode,
-                match_mode,
-                match_mode,
-                match_mode,
-                match_mode,
-            )
-        )
+        if match_mode not in {'3v3', 'aram', '5v5'}:
+            raise ValueError('对局模式筛选无效')
+        conditions.append('material.match_mode = ?')
+        parameters.append(match_mode)
     if scene:
-        if scene in _HERO_SCREEN_TYPES:
-            source_screen_types = {
-                'gameplay_hud': ('gameplay', 'gameplay_hud', 'in_match'),
-                'scoreboard': ('scoreboard', 'death_scoreboard'),
-                'result_page': ('result_page',),
-            }[scene]
-            placeholders = ','.join('?' for _value in source_screen_types)
-            model_result_condition = (
-                " OR json_extract(source.suggestions_json, "
-                "'$.result_panel.label') = 'result_panel'"
-                if scene == 'result_page'
-                else ''
-            )
-            conditions.append(
-                '(item.hero_layout_label = ? OR EXISTS ('
-                'SELECT 1 FROM training_review_sources source '
-                'WHERE source.frame_id = item.frame_id AND ('
-                "json_extract(source.metadata_json, "
-                "'$.hero_context_suggestion.screen_type') = ? OR "
-                "json_extract(source.metadata_json, '$.screen_type') "
-                f'IN ({placeholders}) OR '
-                "json_extract(source.metadata_json, '$.stage_class') "
-                f'IN ({placeholders}) OR '
-                "json_extract(source.metadata_json, "
-                "'$.model_outputs[0].stage_class') "
-                f'IN ({placeholders})'
-                f'{model_result_condition})))'
-            )
-            parameters.extend(
-                (
-                    scene,
-                    scene,
-                    *source_screen_types,
-                    *source_screen_types,
-                    *source_screen_types,
-                )
-            )
-        elif scene == 'hero_select':
-            conditions.append(
-                "(item.hero_select_label LIKE 'select_%' OR EXISTS ("
-                'SELECT 1 FROM training_review_sources source '
-                'WHERE source.frame_id = item.frame_id AND '
-                "json_extract(source.suggestions_json, '$.hero_select.label') "
-                "LIKE 'select_%'))"
-            )
-        elif scene == 'other':
-            conditions.append(
-                "COALESCE(item.hero_layout_label, '') NOT IN "
-                "('gameplay_hud', 'scoreboard', 'result_page') AND "
-                "COALESCE(item.hero_select_label, '') NOT LIKE 'select_%' AND "
-                'NOT EXISTS (SELECT 1 FROM training_review_sources source '
-                'WHERE source.frame_id = item.frame_id AND ('
-                "json_extract(source.metadata_json, "
-                "'$.hero_context_suggestion.screen_type') IN "
-                "('gameplay_hud','scoreboard','result_page') OR "
-                "json_extract(source.metadata_json, '$.screen_type') IN "
-                "('gameplay','gameplay_hud','in_match','scoreboard',"
-                "'death_scoreboard','result_page') OR "
-                "json_extract(source.metadata_json, '$.stage_class') IN "
-                "('gameplay','gameplay_hud','in_match','scoreboard',"
-                "'death_scoreboard','result_page') OR "
-                "json_extract(source.metadata_json, "
-                "'$.model_outputs[0].stage_class') IN "
-                "('gameplay','gameplay_hud','in_match','scoreboard',"
-                "'death_scoreboard','result_page') OR "
-                "json_extract(source.suggestions_json, '$.hero_select.label') "
-                "LIKE 'select_%' OR "
-                "json_extract(source.suggestions_json, '$.result_panel.label') "
-                "= 'result_panel'))"
-            )
-        else:
+        if scene not in _HERO_SCREEN_TYPES | {'hero_select', 'other'}:
             raise ValueError('画面类型筛选无效')
+        conditions.append('material.scene = ?')
+        parameters.append(scene)
+    heroes = _normalized_training_review_heroes(hero)
+    if heroes:
+        condition, hero_parameters = _training_review_related_hero_condition(heroes)
+        conditions.append(condition)
+        parameters.extend(hero_parameters)
+    if confidence:
+        confidence_column = {
+            'low': 'has_low_confidence',
+            'boundary': 'has_boundary_confidence',
+            'high': 'has_high_confidence',
+        }[confidence]
+        conditions.append(f'material.{confidence_column} = 1')
+    if not conditions:
+        return None
+    rows = conn.execute(
+        'SELECT DISTINCT item.frame_id FROM training_review_items item '
+        'JOIN training_review_material_index material '
+        'ON material.frame_id=item.frame_id '
+        'JOIN frames frame ON frame.id = item.frame_id '
+        'JOIN videos video ON video.id = frame.video_id WHERE '
+        + ' AND '.join(conditions),
+        parameters,
+    ).fetchall()
+    return {int(row['frame_id']) for row in rows}
+
+
+def _training_review_unindexed_attribute_frame_ids(
+    conn: sqlite3.Connection,
+    *,
+    streamer: str = '',
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: Sequence[str] | str = (),
+    confidence: str = '',
+) -> Optional[set[int]]:
+    """历史索引未完成时保留原始 JSON 语义；回填完成后不再调用。"""
+    if confidence not in {'', 'low', 'boundary', 'high'}:
+        raise ValueError('模型置信度筛选无效')
+    if match_mode and match_mode not in {'3v3', 'aram', '5v5'}:
+        raise ValueError('对局模式筛选无效')
+    if scene and scene not in _HERO_SCREEN_TYPES | {'hero_select', 'other'}:
+        raise ValueError('画面类型筛选无效')
     heroes = (
         [hero.strip()]
         if isinstance(hero, str) and hero.strip()
@@ -4409,52 +6075,138 @@ def _training_review_attribute_frame_ids(
     heroes = list(dict.fromkeys(heroes))
     if len(heroes) > 100:
         raise ValueError('英雄筛选数量过多')
-    if heroes:
-        placeholders = ', '.join('?' for _value in heroes)
-        conditions.append(
-            'EXISTS (SELECT 1 FROM training_review_hero_slots slot '
-            'WHERE slot.frame_id = item.frame_id AND '
-            f'(slot.confirmed_label IN ({placeholders}) OR '
-            f'slot.suggested_label IN ({placeholders})))'
-        )
-        parameters.extend((*heroes, *heroes))
-    if confidence:
-        ranges = {
-            'low': ('<', 0.6),
-            'boundary': ('BETWEEN', (0.6, 0.85)),
-            'high': ('>=', 0.85),
-        }
-        operator, value = ranges[confidence]
-        if operator == 'BETWEEN':
-            confidence_sql = (
-                "CAST(json_extract(suggestion.value, '$.confidence') AS REAL) "
-                'BETWEEN ? AND ?'
-            )
-            assert isinstance(value, tuple)
-            parameters.extend(value)
-        else:
-            confidence_sql = (
-                "CAST(json_extract(suggestion.value, '$.confidence') AS REAL) "
-                f'{operator} ?'
-            )
-            assert isinstance(value, float)
-            parameters.append(value)
-        conditions.append(
-            'EXISTS (SELECT 1 FROM training_review_sources source, '
-            'json_each(source.suggestions_json) suggestion '
-            'WHERE source.frame_id = item.frame_id AND '
-            f'{confidence_sql})'
-        )
-    if not conditions:
+    if not any((streamer, source_type, scene, match_mode, heroes, confidence)):
         return None
-    rows = conn.execute(
-        'SELECT DISTINCT item.frame_id FROM training_review_items item '
-        'JOIN frames frame ON frame.id = item.frame_id '
-        'JOIN videos video ON video.id = frame.video_id WHERE '
-        + ' AND '.join(conditions),
-        parameters,
+
+    item_rows = conn.execute(
+        'SELECT item.*,video.streamer FROM training_review_items item '
+        'JOIN frames frame ON frame.id=item.frame_id '
+        'JOIN videos video ON video.id=frame.video_id'
     ).fetchall()
-    return {int(row['frame_id']) for row in rows}
+    matching = {int(row['frame_id']) for row in item_rows}
+    if streamer:
+        matching &= {
+            int(row['frame_id'])
+            for row in item_rows
+            if str(row['streamer']) == streamer
+        }
+
+    source_rows: Sequence[sqlite3.Row] = ()
+    if source_type or scene or match_mode or confidence:
+        source_rows = conn.execute(
+            'SELECT source.frame_id,source.source_type,'
+            'source.suggestions_json,'
+            "json_extract(source.suggestions_json,'$.hero_select.label') "
+            'AS hero_select_suggestion_label,'
+            "json_extract(source.suggestions_json,'$.hero_select.confidence') "
+            'AS hero_select_suggestion_confidence,'
+            "json_extract(source.suggestions_json,'$.match_mode.label') "
+            'AS match_mode_suggestion_label,'
+            "json_extract(source.suggestions_json,'$.match_mode.confidence') "
+            'AS match_mode_suggestion_confidence,'
+            "json_extract(source.suggestions_json,'$.result_panel.label') "
+            'AS result_panel_suggestion_label,'
+            "json_extract(source.suggestions_json,'$.result_panel.confidence') "
+            'AS result_panel_suggestion_confidence,'
+            "json_extract(source.metadata_json,'$.hero_context_suggestion.screen_type') "
+            'AS hero_context_screen_type,'
+            "json_extract(source.metadata_json,'$.hero_context_suggestion.confidence') "
+            'AS hero_context_confidence,'
+            "json_extract(source.metadata_json,'$.game_mode') AS game_mode,"
+            "json_extract(source.metadata_json,'$.mode_class') AS mode_class,"
+            "json_extract(source.metadata_json,'$.screen_type') "
+            'AS source_screen_type,'
+            "json_extract(source.metadata_json,'$.stage_class') "
+            'AS source_stage_class,'
+            "json_extract(source.metadata_json,'$.model_outputs[0].stage_class') "
+            'AS model_stage_class,'
+            "json_extract(source.metadata_json,'$.model_outputs[0].mode_class') "
+            'AS model_mode_class,'
+            "json_extract(source.metadata_json,'$.manual_correction.after.game_mode') "
+            'AS manual_game_mode FROM training_review_sources source'
+        ).fetchall()
+    if source_type:
+        matching &= {
+            int(row['frame_id'])
+            for row in source_rows
+            if str(row['source_type']) == source_type
+        }
+    if scene or match_mode:
+        signals = _training_review_material_signals(source_rows)
+        matching &= {
+            int(row['frame_id'])
+            for row in item_rows
+            if (
+                not scene
+                or (
+                    _training_review_material_scene(
+                        row, signals.get(int(row['frame_id']), {})
+                    )
+                    or 'other'
+                )
+                == scene
+            )
+            if (
+                not match_mode
+                or _training_review_material_mode(
+                    row, signals.get(int(row['frame_id']), {})
+                )
+                == match_mode
+            )
+        }
+    if confidence:
+        confidence_ids = set()
+        for row in source_rows:
+            suggestions = _training_review_json_object(row['suggestions_json'])
+            values = [
+                _training_review_float(value.get('confidence'))
+                for value in suggestions.values()
+                if isinstance(value, dict)
+            ]
+            matches_confidence = {
+                'low': any(value < 0.6 for value in values),
+                'boundary': any(0.6 <= value <= 0.85 for value in values),
+                'high': any(value >= 0.85 for value in values),
+            }[confidence]
+            if matches_confidence:
+                confidence_ids.add(int(row['frame_id']))
+        matching &= confidence_ids
+    if heroes:
+        placeholders = ','.join('?' for _hero in heroes)
+        hero_rows = conn.execute(
+            'SELECT DISTINCT frame_id FROM training_review_hero_slots WHERE '
+            f'confirmed_label IN ({placeholders}) OR '
+            f'suggested_label IN ({placeholders})',
+            (*heroes, *heroes),
+        ).fetchall()
+        matching &= {int(row['frame_id']) for row in hero_rows}
+    return matching
+
+
+def _training_review_attribute_frame_ids(
+    conn: sqlite3.Connection,
+    *,
+    streamer: str = '',
+    source_type: str = '',
+    scene: str = '',
+    match_mode: str = '',
+    hero: Sequence[str] | str = (),
+    confidence: str = '',
+) -> Optional[set[int]]:
+    implementation = (
+        _training_review_indexed_attribute_frame_ids
+        if training_review_material_index_complete(conn)
+        else _training_review_unindexed_attribute_frame_ids
+    )
+    return implementation(
+        conn,
+        streamer=streamer,
+        source_type=source_type,
+        scene=scene,
+        match_mode=match_mode,
+        hero=hero,
+        confidence=confidence,
+    )
 
 
 def _training_review_visible_frame_ids(
@@ -4468,6 +6220,7 @@ def _training_review_visible_frame_ids(
     match_mode: str = '',
     hero: Sequence[str] | str = (),
     confidence: str = '',
+    prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[List[int], Dict[int, Dict[str, Any]]]:
     if status not in _TRAINING_REVIEW_STATUSES | {
@@ -4489,6 +6242,7 @@ def _training_review_visible_frame_ids(
         hero=hero,
         confidence=confidence,
     )
+    indexed = training_review_material_index_complete(conn)
     base = (
         'SELECT frame_id FROM training_review_items '
         "ORDER BY CASE review_status WHEN 'pending' THEN 0 WHEN 'partial' THEN 1 "
@@ -4496,15 +6250,27 @@ def _training_review_visible_frame_ids(
     )
     parameters: tuple[Any, ...] = ()
     if status == 'needs_review':
-        base = (
-            'SELECT item.frame_id FROM training_review_items item '
-            "WHERE item.review_status IN ('pending', 'partial') "
-            f'ORDER BY {_TRAINING_REVIEW_ARAM_PRIORITY}, '
-            "CASE WHEN item.review_status = 'pending' THEN 0 ELSE 1 END, "
-            f'{_TRAINING_REVIEW_SOURCE_CREATED_AT} DESC, '
-            f'{_TRAINING_REVIEW_SOURCE_OFFSET} DESC, '
-            'item.updated_at DESC, item.frame_id DESC'
-        )
+        if indexed:
+            base = (
+                'SELECT item.frame_id FROM training_review_items item '
+                'JOIN training_review_material_index material '
+                'ON material.frame_id=item.frame_id '
+                "WHERE item.review_status IN ('pending', 'partial') "
+                f'ORDER BY {_TRAINING_REVIEW_INDEXED_ARAM_PRIORITY}, '
+                "CASE WHEN item.review_status = 'pending' THEN 0 ELSE 1 END, "
+                'material.source_created_at DESC,material.source_offset DESC,'
+                'item.updated_at DESC,item.frame_id DESC'
+            )
+        else:
+            base = (
+                'SELECT item.frame_id FROM training_review_items item '
+                "WHERE item.review_status IN ('pending', 'partial') "
+                f'ORDER BY {_TRAINING_REVIEW_ARAM_PRIORITY}, '
+                "CASE WHEN item.review_status = 'pending' THEN 0 ELSE 1 END, "
+                f'{_TRAINING_REVIEW_SOURCE_CREATED_AT} DESC, '
+                f'{_TRAINING_REVIEW_SOURCE_OFFSET} DESC, '
+                'item.updated_at DESC, item.frame_id DESC'
+            )
     elif status == 'missing_player':
         base = (
             'SELECT item.frame_id FROM training_review_items item '
@@ -4512,16 +6278,31 @@ def _training_review_visible_frame_ids(
             'ORDER BY item.updated_at DESC, item.frame_id DESC'
         )
     elif status == 'migration_review':
+        material_join = (
+            'JOIN training_review_material_index material '
+            'ON material.frame_id=item.frame_id '
+            if indexed
+            else ''
+        )
+        legacy_condition = (
+            'material.is_legacy=1'
+            if indexed
+            else 'EXISTS (SELECT 1 FROM training_review_sources source '
+            'WHERE source.frame_id=item.frame_id '
+            "AND source.source_type LIKE 'legacy_%')"
+        )
+        priority = (
+            _TRAINING_REVIEW_INDEXED_ARAM_PRIORITY
+            if indexed
+            else _TRAINING_REVIEW_ARAM_PRIORITY
+        )
         base = (
             'SELECT item.frame_id FROM training_review_items item '
-            "WHERE item.review_status = 'confirmed' "
-            'AND EXISTS ('
-            'SELECT 1 FROM training_review_sources source '
-            'WHERE source.frame_id = item.frame_id '
-            "AND source.source_type LIKE 'legacy_%') "
-            f'AND NOT ({_UNIFIED_MANUAL_REVIEWED}) '
-            f'ORDER BY {_TRAINING_REVIEW_ARAM_PRIORITY}, '
-            'item.updated_at DESC, item.frame_id DESC'
+            + material_join
+            + "WHERE item.review_status='confirmed' AND "
+            + legacy_condition
+            + f' AND NOT ({_UNIFIED_MANUAL_REVIEWED}) '
+            + f'ORDER BY {priority},item.updated_at DESC,item.frame_id DESC'
         )
     elif status == 'human_confirmed':
         base = (
@@ -4531,14 +6312,25 @@ def _training_review_visible_frame_ids(
             'ORDER BY item.reviewed_at DESC, item.frame_id DESC'
         )
     elif status == 'pending':
-        base = (
-            'SELECT item.frame_id FROM training_review_items item '
-            "WHERE item.review_status = 'pending' "
-            f'ORDER BY {_TRAINING_REVIEW_ARAM_PRIORITY}, '
-            f'{_TRAINING_REVIEW_SOURCE_CREATED_AT} DESC, '
-            f'{_TRAINING_REVIEW_SOURCE_OFFSET} DESC, '
-            'item.updated_at DESC, item.frame_id DESC'
-        )
+        if indexed:
+            base = (
+                'SELECT item.frame_id FROM training_review_items item '
+                'JOIN training_review_material_index material '
+                'ON material.frame_id=item.frame_id '
+                "WHERE item.review_status='pending' "
+                f'ORDER BY {_TRAINING_REVIEW_INDEXED_ARAM_PRIORITY},'
+                'material.source_created_at DESC,material.source_offset DESC,'
+                'item.updated_at DESC,item.frame_id DESC'
+            )
+        else:
+            base = (
+                'SELECT item.frame_id FROM training_review_items item '
+                "WHERE item.review_status = 'pending' "
+                f'ORDER BY {_TRAINING_REVIEW_ARAM_PRIORITY}, '
+                f'{_TRAINING_REVIEW_SOURCE_CREATED_AT} DESC, '
+                f'{_TRAINING_REVIEW_SOURCE_OFFSET} DESC, '
+                'item.updated_at DESC, item.frame_id DESC'
+            )
     elif status != 'all':
         base = (
             'SELECT frame_id FROM training_review_items WHERE review_status = ? '
@@ -4546,6 +6338,18 @@ def _training_review_visible_frame_ids(
         )
         parameters = (status,)
     rows = conn.execute(base, parameters).fetchall()
+    prefill_visible_ids: Optional[set[int]] = None
+    if prefill_ready_only:
+        prefill_visible_ids = {
+            int(row['frame_id'])
+            for row in conn.execute(
+                'SELECT material.frame_id FROM training_review_material_index material '
+                'JOIN training_review_items item ON item.frame_id=material.frame_id '
+                "WHERE material.prefill_status='ready' OR "
+                "item.review_status='skipped' OR (item.review_status='confirmed' "
+                f'AND ({_UNIFIED_MANUAL_REVIEWED}))'
+            ).fetchall()
+        }
     groups = (
         training_review_result_groups(conn) if result_groups is None else result_groups
     )
@@ -4554,6 +6358,7 @@ def _training_review_visible_frame_ids(
         for row in rows
         if (source_frame_ids is None or int(row['frame_id']) in source_frame_ids)
         if (attribute_frame_ids is None or int(row['frame_id']) in attribute_frame_ids)
+        if (prefill_visible_ids is None or int(row['frame_id']) in prefill_visible_ids)
         if groups.get(int(row['frame_id']), {}).get(
             'result_group_representative_frame_id', int(row['frame_id'])
         )
@@ -4573,6 +6378,7 @@ def training_review_frame_ids(
     match_mode: str = '',
     hero: Sequence[str] | str = (),
     confidence: str = '',
+    prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> List[int]:
     default_new_queue = (
@@ -4581,6 +6387,25 @@ def training_review_frame_ids(
         and not any((streamer, source_type, scene, match_mode, hero, confidence))
     )
     if default_new_queue:
+        ready_condition = (
+            "AND material.prefill_status='ready' " if prefill_ready_only else ''
+        )
+        rows = conn.execute(
+            'SELECT item.frame_id FROM training_review_items item '
+            'JOIN training_review_material_index material '
+            'ON material.frame_id=item.frame_id '
+            "WHERE item.review_status IN ('pending','partial') "
+            'AND material.is_new=1 '
+            + ready_condition
+            + 'AND material.result_group_representative_frame_id=item.frame_id '
+            f'ORDER BY {_TRAINING_REVIEW_INDEXED_ARAM_PRIORITY},'
+            "CASE WHEN item.review_status='pending' THEN 0 ELSE 1 END,"
+            'material.source_created_at DESC,material.source_offset DESC,'
+            'item.updated_at DESC,item.frame_id DESC'
+        ).fetchall()
+        if rows or training_review_material_index_complete(conn):
+            return [int(row['frame_id']) for row in rows]
+    if default_new_queue and not prefill_ready_only:
         rows = conn.execute(
             """
             WITH source_summary AS (
@@ -4676,6 +6501,7 @@ def training_review_frame_ids(
         match_mode=match_mode,
         hero=hero,
         confidence=confidence,
+        prefill_ready_only=prefill_ready_only,
         result_groups=result_groups,
     )
     return visible
@@ -4695,6 +6521,7 @@ def list_training_review_items(
     match_mode: str = '',
     hero: Sequence[str] | str = (),
     confidence: str = '',
+    prefill_ready_only: bool = False,
 ) -> List[Dict[str, Any]]:
     items, _total = training_review_page(
         conn,
@@ -4709,8 +6536,118 @@ def list_training_review_items(
         match_mode=match_mode,
         hero=hero,
         confidence=confidence,
+        prefill_ready_only=prefill_ready_only,
     )
     return items
+
+
+def _training_review_indexed_page_frame_ids(
+    conn: sqlite3.Connection,
+    *,
+    status: str,
+    source_scope: str,
+    streamer: str,
+    source_type: str,
+    scene: str,
+    match_mode: str,
+    hero: Sequence[str] | str,
+    confidence: str,
+    prefill_ready_only: bool,
+    limit: int,
+    offset: int,
+) -> Tuple[List[int], int]:
+    if source_scope not in _TRAINING_REVIEW_SOURCE_SCOPES:
+        raise ValueError('训练复核数据来源无效')
+    if status not in _TRAINING_REVIEW_STATUSES | {'all', 'needs_review'}:
+        raise ValueError('训练复核状态无效')
+    if scene and scene not in _HERO_SCREEN_TYPES | {'hero_select', 'other'}:
+        raise ValueError('画面类型筛选无效')
+    if match_mode and match_mode not in {'3v3', 'aram', '5v5'}:
+        raise ValueError('对局模式筛选无效')
+    if confidence not in {'', 'low', 'boundary', 'high'}:
+        raise ValueError('模型置信度筛选无效')
+    conditions = ['material.result_group_representative_frame_id=item.frame_id']
+    parameters: List[Any] = []
+    if status == 'needs_review':
+        conditions.append("item.review_status IN ('pending','partial')")
+    elif status != 'all':
+        conditions.append('item.review_status=?')
+        parameters.append(status)
+    if prefill_ready_only:
+        conditions.append(
+            "(material.prefill_status='ready' OR item.review_status='skipped' "
+            "OR (item.review_status='confirmed' AND "
+            f'({_UNIFIED_MANUAL_REVIEWED})))'
+        )
+    if source_scope == 'new':
+        conditions.append('material.is_new=1')
+    elif source_scope == 'legacy':
+        conditions.append('material.is_legacy=1')
+    if streamer:
+        conditions.append('video.streamer=?')
+        parameters.append(streamer)
+    if source_type:
+        conditions.append(
+            'EXISTS (SELECT 1 FROM training_review_sources source '
+            'WHERE source.frame_id=item.frame_id AND source.source_type=?)'
+        )
+        parameters.append(source_type)
+    if scene:
+        conditions.append('material.scene=?')
+        parameters.append(scene)
+    if match_mode:
+        conditions.append('material.match_mode=?')
+        parameters.append(match_mode)
+    heroes = _normalized_training_review_heroes(hero)
+    if heroes:
+        condition, hero_parameters = _training_review_related_hero_condition(heroes)
+        conditions.append(condition)
+        parameters.extend(hero_parameters)
+    if confidence:
+        column = {
+            'low': 'has_low_confidence',
+            'boundary': 'has_boundary_confidence',
+            'high': 'has_high_confidence',
+        }[confidence]
+        conditions.append(f'material.{column}=1')
+    from_sql = (
+        ' FROM training_review_items item '
+        'JOIN training_review_material_index material '
+        'ON material.frame_id=item.frame_id '
+        'JOIN frames frame ON frame.id=item.frame_id '
+        'JOIN videos video ON video.id=frame.video_id '
+    )
+    where_sql = ' WHERE ' + ' AND '.join(conditions)
+    count_row = conn.execute(
+        'SELECT COUNT(*)' + from_sql + where_sql, parameters
+    ).fetchone()
+    total = 0 if count_row is None else int(count_row[0])
+    hero_order_sql = ''
+    hero_order_parameters: List[Any] = []
+    if heroes:
+        hero_order_sql, hero_order_parameters = _training_review_related_hero_order(
+            heroes
+        )
+    if status in {'needs_review', 'pending'}:
+        order_sql = (
+            ' ORDER BY ' + hero_order_sql + f'{_TRAINING_REVIEW_INDEXED_ARAM_PRIORITY},'
+            "CASE WHEN item.review_status='pending' THEN 0 ELSE 1 END,"
+            'material.source_created_at DESC,material.source_offset DESC,'
+            'item.updated_at DESC,item.frame_id DESC'
+        )
+    else:
+        order_sql = (
+            ' ORDER BY '
+            + hero_order_sql
+            + "CASE item.review_status WHEN 'pending' THEN 0 "
+            "WHEN 'partial' THEN 1 WHEN 'confirmed' THEN 2 ELSE 3 END,"
+            'item.updated_at DESC,item.frame_id DESC'
+        )
+    page_rows = conn.execute(
+        'SELECT item.frame_id' + from_sql + where_sql + order_sql + ' LIMIT ? OFFSET ?',
+        (*parameters, *hero_order_parameters, int(limit), int(offset)),
+    ).fetchall()
+    return [int(row['frame_id']) for row in page_rows], total
 
 
 def training_review_page(
@@ -4727,6 +6664,7 @@ def training_review_page(
     match_mode: str = '',
     hero: Sequence[str] | str = (),
     confidence: str = '',
+    prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     if limit < 1 or limit > 10_000 or offset < 0:
@@ -4735,7 +6673,10 @@ def training_review_page(
         if source_scope == 'new':
             return [], 0
         stats = legacy_hero_review_stats(
-            conn, streamer=streamer, screen_type=hero_screen_type
+            conn,
+            streamer=streamer,
+            screen_type=hero_screen_type,
+            prefill_ready_only=prefill_ready_only,
         )
         return (
             list_legacy_hero_review_items(
@@ -4744,9 +6685,37 @@ def training_review_page(
                 screen_type=hero_screen_type,
                 limit=limit,
                 offset=offset,
+                prefill_ready_only=prefill_ready_only,
             ),
             int(stats['remaining_groups']),
         )
+    if training_review_material_index_complete(
+        conn
+    ) and status in _TRAINING_REVIEW_STATUSES | {'all', 'needs_review'}:
+        frame_ids, total = _training_review_indexed_page_frame_ids(
+            conn,
+            status=status,
+            source_scope=source_scope,
+            streamer=streamer,
+            source_type=source_type,
+            scene=scene,
+            match_mode=match_mode,
+            hero=hero,
+            confidence=confidence,
+            prefill_ready_only=prefill_ready_only,
+            limit=limit,
+            offset=offset,
+        )
+        groups = (
+            training_review_result_groups(conn)
+            if result_groups is None
+            else result_groups
+        )
+        items = get_training_review_items(conn, frame_ids, result_groups=groups)
+        hero_matches = training_review_hero_filter_matches(conn, frame_ids, hero)
+        for item in items:
+            item['hero_filter_matches'] = hero_matches.get(int(item['frame_id']), [])
+        return items, total
     visible, result_groups = _training_review_visible_frame_ids(
         conn,
         status=status,
@@ -4757,11 +6726,17 @@ def training_review_page(
         match_mode=match_mode,
         hero=hero,
         confidence=confidence,
+        prefill_ready_only=prefill_ready_only,
         result_groups=result_groups,
     )
     result = get_training_review_items(
         conn, visible[offset : offset + limit], result_groups=result_groups
     )
+    hero_matches = training_review_hero_filter_matches(
+        conn, [int(item['frame_id']) for item in result], hero
+    )
+    for item in result:
+        item['hero_filter_matches'] = hero_matches.get(int(item['frame_id']), [])
     return result, len(visible)
 
 
@@ -5014,6 +6989,7 @@ def save_training_review(
             sort_keys=True,
         ),
     )
+    refresh_training_review_material_index(conn, int(frame_id))
     if not hydrate:
         return {
             'frame_id': int(frame_id),
@@ -5266,6 +7242,7 @@ def replace_training_review_hero_suggestions(
             (int(frame_id), team_size),
         )
         _clear_invalid_training_review_player_slot(conn, int(frame_id))
+    refresh_training_review_material_index(conn, int(frame_id))
     result = get_training_review_hero_lineup(conn, int(frame_id))
     if result is None:
         raise KeyError(frame_id)
@@ -5370,6 +7347,7 @@ def replace_training_review_hero_layout(
             ],
         )
         _clear_invalid_training_review_player_slot(conn, int(frame_id))
+    refresh_training_review_material_index(conn, int(frame_id))
     result = get_training_review_hero_lineup(conn, int(frame_id))
     if result is None:
         raise KeyError(frame_id)
@@ -5598,6 +7576,7 @@ def save_training_review_hero_lineup(
             sort_keys=True,
         ),
     )
+    refresh_training_review_material_index(conn, int(frame_id))
     labels_by_position = {(side, slot): label for label, side, slot in normalized}
     for slot in lineup['slots']:
         slot['confirmed_label'] = labels_by_position[
@@ -5810,6 +7789,12 @@ def training_review_stats(
         'hero_missing': len(legacy_hero_targets) - legacy_hero_complete,
     }
     source_scopes: Dict[str, Dict[str, Any]] = {}
+    prefill_status_by_frame = {
+        int(row['frame_id']): str(row['prefill_status'])
+        for row in conn.execute(
+            'SELECT frame_id,prefill_status FROM training_review_material_index'
+        ).fetchall()
+    }
     scope_ids = {
         'new': {
             frame_id
@@ -5824,6 +7809,12 @@ def training_review_stats(
         for row in scope_rows:
             review_status = str(row['review_status'])
             scope_statuses[review_status] = scope_statuses.get(review_status, 0) + 1
+        scope_prefill_statuses: Dict[str, int] = {}
+        for frame_id in frame_ids:
+            prefill_status = prefill_status_by_frame.get(frame_id, 'pending')
+            scope_prefill_statuses[prefill_status] = (
+                scope_prefill_statuses.get(prefill_status, 0) + 1
+            )
         source_scopes[scope] = {
             'total': len(scope_rows),
             'statuses': scope_statuses,
@@ -5844,6 +7835,13 @@ def training_review_stats(
                 'hero_model_prefill' in categories_by_frame.get(frame_id, set())
                 for frame_id in frame_ids
             ),
+            'prefill_statuses': scope_prefill_statuses,
+            'prefill_ready': int(scope_prefill_statuses.get('ready', 0)),
+            'prefill_waiting': sum(
+                int(scope_prefill_statuses.get(value, 0))
+                for value in ('pending', 'queued', 'running')
+            ),
+            'prefill_failed': int(scope_prefill_statuses.get('failed', 0)),
         }
     return {
         'total': sum(statuses.values()),
@@ -5854,14 +7852,19 @@ def training_review_stats(
         'missing_player_hero': missing_player_hero,
         'source_frames': source_frames,
         'source_scopes': source_scopes,
+        'prefill': training_review_prefill_stats(conn),
         'legacy_data': legacy_data,
         'material_suggestions': (
-            _training_review_material_suggestions(
-                visible_rows,
-                source_rows,
-                categories_by_frame,
-                hero_rows=hero_rows,
-                hero_catalog=hero_catalog,
+            (
+                training_review_material_suggestions(conn, hero_catalog=hero_catalog)
+                if training_review_material_index_complete(conn)
+                else _training_review_material_suggestions(
+                    visible_rows,
+                    source_rows,
+                    categories_by_frame,
+                    hero_rows=hero_rows,
+                    hero_catalog=hero_catalog,
+                )
             )
             if include_material_suggestions
             else None

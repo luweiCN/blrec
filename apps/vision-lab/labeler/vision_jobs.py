@@ -197,6 +197,13 @@ def list_workers(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return [_worker_dict(row) for row in rows]
 
 
+def get_worker(conn: sqlite3.Connection, worker_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        'SELECT * FROM vision_workers WHERE id = ?', (worker_id,)
+    ).fetchone()
+    return _worker_dict(row) if row is not None else None
+
+
 def get_job(conn: sqlite3.Connection, job_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute('SELECT * FROM vision_jobs WHERE id = ?', (job_id,)).fetchone()
     return _job_dict(row) if row is not None else None

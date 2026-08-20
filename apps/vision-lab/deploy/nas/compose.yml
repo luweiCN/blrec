@@ -2,7 +2,7 @@ name: blrec-vision-lab
 
 services:
   vision-lab:
-    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.23}
+    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.24}
     container_name: blrec-vision-lab
     network_mode: host
     restart: unless-stopped
@@ -21,6 +21,7 @@ services:
       VISION_LAB_DATABASE_SCHEMA: ${VISION_LAB_DATABASE_SCHEMA:-vision_lab}
       VISION_LAB_DATABASE_POOL_SIZE: ${VISION_LAB_DATABASE_POOL_SIZE:-8}
       VISION_LAB_CANDIDATE_INDEX_INTERVAL_SECONDS: ${VISION_LAB_CANDIDATE_INDEX_INTERVAL_SECONDS:-900}
+      VISION_LAB_CANDIDATE_RECONCILIATION_ENABLED: ${VISION_LAB_CANDIDATE_RECONCILIATION_ENABLED:-0}
     volumes:
       - /volume1/docker/blrec-next/vision-lab/data:/data
       - /volume1/docker/blrec-next/vision-data/candidates:/candidates

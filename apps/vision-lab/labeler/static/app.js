@@ -55,7 +55,6 @@ let candidateHeroDrawMode = false;
 let candidateHeroEdit = null;
 let candidateFormTouched = false;
 let candidateHeroContextTouched = false;
-const candidatePrefillRequests = new Map();
 const candidateHeroPrefetchRequests = new Map();
 const candidateImagePrefetches = new Map();
 const candidatePreparationRequests = new Map();
@@ -887,7 +886,10 @@ function renderCandidatePrefillStatus(item) {
     parts.push('分类预填等待 Vision Worker');
   }
   if (heroes) {
-    parts.push('头像位置与英雄预填已完成');
+    const metadata = heroes.metadata || {};
+    parts.push(metadata.complete === false
+      ? `头像模型已运行但未找全：${metadata.reason || '请人工修正'}`
+      : '头像位置与英雄预填已完成');
     const models = modelText(heroes);
     if (models) parts.push(models);
   }
@@ -1682,15 +1684,6 @@ async function refreshCandidateHeroAfterWorker(item, context, entry, token) {
   }
 }
 
-function refreshCandidateHeroFromUpdatedModelItem(item) {
-  if (!item || currentCandidate() !== item ||
-      candidateHeroDirty || candidateHeroContextTouched) return;
-  const suggestedDraft = candidateDefaultDraft(item);
-  const context = candidateHeroContext(item, suggestedDraft, false);
-  if (!context) return;
-  loadCandidateHeroLineup(item, context);
-}
-
 function refreshCandidateHeroReview() {
   const item = currentCandidate();
   const context = candidateHeroContext(item);
@@ -2444,7 +2437,7 @@ function applyCandidateMaterialSuggestion(suggestion) {
   $('#candidate-hero-filter-search').value = '';
   const selectedHero = filters.hero && candidateHeroByLabel(filters.hero);
   $('#candidate-hero-filter-summary').textContent = filters.hero
-    ? selectedHero ? selectedHero.name : filters.hero
+    ? `${selectedHero ? selectedHero.name : filters.hero}（含同局）`
     : '全部英雄';
   $('#candidate-hero-filter').open = false;
   renderCandidateHeroFilter();
@@ -2512,11 +2505,18 @@ function renderCandidateMaterialSuggestions() {
     const queueName = suggestion.source_scope === 'legacy'
       ? '历史队列' : 'Worker 队列';
     if (suggestion.kind === 'hero_scene') {
+      const modelPrefill = Number(suggestion.model_prefill_count || 0);
+      const sameMatch = Number(suggestion.same_match_candidate_count || 0);
+      const sameVideo = Number(suggestion.same_video_candidate_count || 0);
+      const missingScene = Number(
+        suggestion.matches_without_scene_candidate || 0);
       counts.append(
         '已确认 ', confirmed,
         ` 个头像 / 建议 ${suggestion.target_count || 0} 个 · `,
-        `${queueName}现有 ${available} 张图、` +
-          `${suggestion.candidate_crop_count || 0} 个候选头像`,
+        `${queueName}可复核 ${available} 张：模型直接认出 ${modelPrefill} 张、` +
+          `同局待排查 ${sameMatch} 张、同视频兜底 ${sameVideo} 张；` +
+          `直接候选头像 ${suggestion.candidate_crop_count || 0} 个` +
+          (missingScene ? ` · 另有 ${missingScene} 局没有${suggestion.scene_label}候选` : ''),
       );
     } else {
       counts.append(
@@ -2591,7 +2591,7 @@ function renderCandidateHeroFilter() {
         renderCandidateHeroFilter();
         const count = candidateHeroFilters.size;
         $('#candidate-hero-filter-summary').textContent = count
-          ? `已选 ${count} 个英雄` : '全部英雄';
+          ? `已选 ${count} 个英雄（含同局）` : '全部英雄';
         loadCandidateReview();
       };
       options.appendChild(button);
@@ -2714,6 +2714,9 @@ function renderCandidateSyncStats(stats) {
       `共 ${scope.total || 0} 张旧图 · 迁移待人工复核 ` +
       `${scope.migration_pending_review || 0} · 新流程人工已确认 ` +
       `${scope.human_confirmed || 0} · 旧标签不完整 ${scope.needs_review || 0} · ` +
+      `可复核 ${scope.prefill_ready || 0} · ` +
+      `后台待预标 ${scope.prefill_waiting || 0} · ` +
+      `预标失败 ${scope.prefill_failed || 0} · ` +
       `头像待补 ${hero.remaining_groups || 0} 组`;
     return;
   }
@@ -2721,8 +2724,9 @@ function renderCandidateSyncStats(stats) {
     `共 ${scope.total || 0} 张新图 · 待确认 ${scope.needs_review || 0} · ` +
     `已确认 ${freshStatuses.confirmed || 0} · ` +
     `待补本人 ${scope.missing_player_hero || 0} · ` +
-    `新模型预填 ${scope.core_model_prefilled || 0}/${scope.total || 0} · ` +
-    `英雄模型预填 ${scope.hero_model_prefilled || 0} · 待回传 ${stats.dirty || 0}`;
+    `可复核 ${scope.prefill_ready || 0} · ` +
+    `后台待预标 ${scope.prefill_waiting || 0} · ` +
+    `预标失败 ${scope.prefill_failed || 0} · 待回传 ${stats.dirty || 0}`;
 }
 
 function candidateImageUrl(item) {
@@ -2754,94 +2758,19 @@ function prefetchCandidateImage(item) {
   return entry.promise;
 }
 
-function candidateCanUseModelPrefill(item) {
-  const historicalConfirmed = item.review_status === 'confirmed' &&
-    (item.source_categories || []).includes('legacy');
-  return historicalConfirmed ||
-    ['pending', 'partial'].includes(String(item.review_status || ''));
-}
-
-function mergeCandidatePrefillItem(previous, updated) {
-  if (!updated) return previous;
-  const merged = {...updated};
-  ['result_group_size', 'result_group_representative_frame_id'].forEach((key) => {
-    if (previous && previous[key] !== undefined) merged[key] = previous[key];
-  });
-  return merged;
-}
-
-function prepareCandidateModelPrefill(item) {
-  const frameId = Number(item && item.frame_id);
-  if (!frameId || !candidateCanUseModelPrefill(item)) {
-    return Promise.resolve({item, skipped: true});
-  }
-  const existing = candidatePrefillRequests.get(frameId);
-  if (existing) return existing;
-  const promise = (async () => {
-    const result = await api(
-      `/api/training-review/items/${frameId}/prefill`, {
-        method: 'POST', body: JSON.stringify({}),
-      });
-    let updatedItem = result.item;
-    if (result.queued && result.job && result.job.id) {
-      if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&
-          !candidateFormTouched) {
-        $('#candidate-save-state').textContent =
-          '已交给 Vision Worker 预填；你可以先人工标注，不必等待';
-        $('#candidate-prefill-status').textContent =
-          '分类预填已排队，正在等待 Vision Worker';
-      }
-      const finished = await waitForVisionJob(result.job.id);
-      if (finished && finished.status === 'succeeded') {
-        updatedItem = (((finished.result || {}).application || {}).item) ||
-          updatedItem;
-      } else {
-        return {
-          item,
-          incomplete: true,
-          message: finished
-            ? `预填未完成：${finished.error || finished.status}`
-            : '预填仍在队列中，结果完成后会保存',
-        };
-      }
-    }
-    if (!updatedItem) {
-      return {
-        item,
-        noModels: !result.queued && !Object.keys(result.models || {}).length,
-      };
-    }
-    const index = candidateQueue.findIndex(
-      (value) => Number(value.frame_id) === frameId);
-    const merged = mergeCandidatePrefillItem(
-      index >= 0 ? candidateQueue[index] : item, updatedItem);
-    if (index >= 0) candidateQueue[index] = merged;
-    return {
-      item: merged,
-      noModels: !result.queued && !Object.keys(result.models || {}).length,
-    };
-  })().catch((error) => {
-    candidatePrefillRequests.delete(frameId);
-    throw error;
-  });
-  candidatePrefillRequests.set(frameId, promise);
-  return promise;
-}
-
 function prepareCandidateForReview(item) {
   const frameId = Number(item && item.frame_id);
   if (!frameId) return Promise.resolve();
   const existing = candidatePreparationRequests.get(frameId);
   if (existing) return existing;
   prefetchCandidateImage(item);
-  const promise = prepareCandidateModelPrefill(item)
-    .then(async (result) => {
-      const prepared = result.item || item;
-      const draft = candidateDefaultDraft(prepared);
-      const context = candidateHeroContext(prepared, draft, false);
+  const promise = Promise.resolve()
+    .then(async () => {
+      const draft = candidateDefaultDraft(item);
+      const context = candidateHeroContext(item, draft, false);
       if (!context) return;
-      const entry = prepareCandidateHeroLineup(prepared, context);
-      await completeCandidateHeroLineupPrefetch(prepared, context, entry);
+      const entry = prepareCandidateHeroLineup(item, context);
+      await completeCandidateHeroLineupPrefetch(item, context, entry);
     })
     .catch(() => undefined);
   candidatePreparationRequests.set(frameId, promise);
@@ -2947,6 +2876,7 @@ function renderCandidateItem() {
     $('#candidate-image-wrap').classList.add('hidden');
     empty.classList.remove('hidden');
     $('#candidate-meta').textContent = '';
+    renderCandidateHeroFilterReasons(null);
     $('#candidate-label-actions').innerHTML = '';
     $('#candidate-suggestion').textContent = '--';
     $('#candidate-prefill-status').textContent = '';
@@ -2991,6 +2921,7 @@ function renderCandidateItem() {
     `${item.streamer || '未知主播'} / ${item.filename || ''} · ` +
     `${(item.timestamp_ms / 1000).toFixed(1)}s · frame #${item.frame_id} · ` +
     `来源：${candidateSourceText(item)}（${item.source_count || 0} 条记录）${legacyMeta}`;
+  renderCandidateHeroFilterReasons(item);
   renderCandidateSuggestions(item);
   renderCandidateChoices();
   $('#btn-candidate-save').disabled = false;
@@ -3015,40 +2946,34 @@ function renderCandidateItem() {
       !item.legacy_migration_needs_review);
   renderCandidateBoxes();
   loadCandidateHeroLineup(item);
-  requestCandidateModelPrefill(item);
   prefetchNextCandidate();
 }
 
-async function requestCandidateModelPrefill(item) {
-  const frameId = Number(item && item.frame_id);
-  if (!frameId || !candidateCanUseModelPrefill(item)) return;
-  try {
-    const result = await prepareCandidateModelPrefill(item);
-    if (result.noModels && currentCandidate() &&
-        Number(currentCandidate().frame_id) === frameId) {
-      $('#candidate-prefill-status').textContent = '没有可用的已发布模型';
-    }
-    if (result.incomplete && currentCandidate() &&
-        Number(currentCandidate().frame_id) === frameId) {
-      $('#candidate-prefill-status').textContent = result.message;
-    }
-    if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&
-        currentCandidate() !== item) {
-      if (!candidateFormTouched) {
-        renderCandidateItem();
-      } else {
-        renderCandidateSuggestions(currentCandidate());
-        refreshCandidateHeroFromUpdatedModelItem(currentCandidate());
-      }
-    }
-  } catch (error) {
-    if (currentCandidate() && Number(currentCandidate().frame_id) === frameId &&
-        !candidateFormTouched) {
-      $('#candidate-save-state').textContent =
-        '新模型预填失败，仍可手工标注：' + error.message;
-      $('#candidate-prefill-status').textContent = '预填失败：' + error.message;
-    }
-  }
+function renderCandidateHeroFilterReasons(item) {
+  const container = $('#candidate-hero-filter-reasons');
+  if (!container) return;
+  const matches = Array.isArray(item && item.hero_filter_matches)
+    ? item.hero_filter_matches : [];
+  container.replaceChildren();
+  container.classList.toggle('hidden', !matches.length);
+  const reasonNames = {
+    direct_confirmed: '本图已人工确认',
+    direct_suggested: '本图模型识别',
+    same_match: '同局阵容包含，本图未识别',
+    same_video: '仅同视频相关',
+  };
+  matches.forEach((match) => {
+    const hero = candidateHeroByLabel(match.hero_label);
+    const evidence = match.evidence_source === 'human' ? '人工' : '模型';
+    const badge = document.createElement('span');
+    badge.className = 'candidate-hero-filter-reason ' +
+      String(match.reason || '').replaceAll('_', '-');
+    const reason = reasonNames[match.reason] || '英雄相关素材';
+    badge.textContent = `${hero ? hero.name : match.hero_label} · ` +
+      `${['same_match', 'same_video'].includes(match.reason) ? evidence : ''}${reason}`;
+    if (match.match_id) badge.title = `关联对局 #${match.match_id}`;
+    container.appendChild(badge);
+  });
 }
 
 async function loadCandidateReview() {
@@ -3068,7 +2993,6 @@ async function loadCandidateReview() {
     candidateFilteredTotal = Number(
       data.filtered_total ?? candidateReviewTotal(data.stats || {}, status));
     candidateSessionCompleted = 0;
-    candidatePrefillRequests.clear();
     candidateHeroPrefetchRequests.clear();
     candidateImagePrefetches.clear();
     candidatePreparationRequests.clear();

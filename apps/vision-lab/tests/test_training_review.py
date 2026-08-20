@@ -806,6 +806,10 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
                 }
             },
         )
+        for frame_id in (pending_select, pending_hud):
+            db.update_training_review_prefill_state(
+                self.conn, frame_id=frame_id, status='ready', stage='complete'
+            )
 
         suggestions = db.training_review_stats(self.conn)['material_suggestions']
         select_5v5 = next(
@@ -862,6 +866,9 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
                     }
                 ],
             },
+        )
+        db.update_training_review_prefill_state(
+            self.conn, frame_id=frame_id, status='ready', stage='complete'
         )
 
         items = db.list_training_review_items(

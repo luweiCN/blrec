@@ -107,6 +107,9 @@ VISION_WORKER_JOB_LIMIT = max(
 CANDIDATE_INDEX_INTERVAL_SECONDS = max(
     15, int(os.environ.get('VISION_LAB_CANDIDATE_INDEX_INTERVAL_SECONDS', '900'))
 )
+CANDIDATE_RECONCILIATION_ENABLED = os.environ.get(
+    'VISION_LAB_CANDIDATE_RECONCILIATION_ENABLED', '0'
+).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 VIDEO_EXTS = {'.flv', '.mp4', '.ts', '.mkv', '.m4s'}
 

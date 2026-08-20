@@ -116,6 +116,7 @@ def _upsert_human_labels(
             timestamp,
         ),
     )
+    db.refresh_training_review_material_index(conn, int(frame_id), commit=False)
 
 
 def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]:

@@ -83,3 +83,38 @@ def test_worker_retries_control_plane_failure_without_exiting(
         '/api/vision-workers/claim',
     ]
     assert sleeps == [1.0, 1.0]
+
+
+def test_prefill_failure_does_not_leave_candidate_image_on_worker(
+    monkeypatch, tmp_path
+) -> None:
+    class Client:
+        @staticmethod
+        def download(_path, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b'candidate')
+
+    worker = vision_worker.VisionWorker(
+        client=Client(),
+        worker_id='worker-1',
+        display_name='Worker 1',
+        work_dir=tmp_path / 'work',
+        base_models_dir=tmp_path / 'models',
+        capabilities=['model_prefill'],
+    )
+    monkeypatch.setattr(worker, '_model_contexts', lambda _models: {})
+    monkeypatch.setattr(
+        vision_worker.model_prefill,
+        'run_core_prefill',
+        lambda _path, _contexts: {
+            'suggestions': {},
+            'errors': {'match_flow': 'broken model'},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match='match_flow'):
+        worker._prefill(
+            {'payload': {'frame_id': 17, 'operation': 'core', 'models': {}}}
+        )
+
+    assert not (tmp_path / 'work/prefill-cache/17.jpg').exists()

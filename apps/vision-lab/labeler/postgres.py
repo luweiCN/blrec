@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-POSTGRES_SCHEMA_VERSION = 2
+POSTGRES_SCHEMA_VERSION = 5
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
 _INSERT_TABLE = re.compile(
     r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
@@ -62,7 +62,227 @@ POSTGRES_SCHEMA_MIGRATIONS = {
             updated_at TEXT NOT NULL
         )
         """,
-    )
+    ),
+    3: (
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_sources_type_frame
+        ON training_review_sources (source_type, frame_id)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS training_review_material_index (
+            frame_id BIGINT PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE,
+            video_id BIGINT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+            review_status TEXT NOT NULL CHECK (
+                review_status IN ('pending','partial','confirmed','skipped')),
+            scene TEXT NOT NULL DEFAULT 'other' CHECK (
+                scene IN ('gameplay_hud','scoreboard','result_page',
+                          'hero_select','other')),
+            match_mode TEXT NOT NULL DEFAULT '' CHECK (
+                match_mode IN ('','3v3','aram','5v5')),
+            is_new BIGINT NOT NULL DEFAULT 0 CHECK (is_new IN (0,1)),
+            is_legacy BIGINT NOT NULL DEFAULT 0 CHECK (is_legacy IN (0,1)),
+            has_worker BIGINT NOT NULL DEFAULT 0 CHECK (has_worker IN (0,1)),
+            has_result_archive BIGINT NOT NULL DEFAULT 0 CHECK (
+                has_result_archive IN (0,1)),
+            has_manual_correction BIGINT NOT NULL DEFAULT 0 CHECK (
+                has_manual_correction IN (0,1)),
+            has_model_prefill BIGINT NOT NULL DEFAULT 0 CHECK (
+                has_model_prefill IN (0,1)),
+            has_hero_model_prefill BIGINT NOT NULL DEFAULT 0 CHECK (
+                has_hero_model_prefill IN (0,1)),
+            has_low_confidence BIGINT NOT NULL DEFAULT 0 CHECK (
+                has_low_confidence IN (0,1)),
+            has_boundary_confidence BIGINT NOT NULL DEFAULT 0 CHECK (
+                has_boundary_confidence IN (0,1)),
+            has_high_confidence BIGINT NOT NULL DEFAULT 0 CHECK (
+                has_high_confidence IN (0,1)),
+            selects_aram BIGINT NOT NULL DEFAULT 0 CHECK (selects_aram IN (0,1)),
+            suggests_aram BIGINT NOT NULL DEFAULT 0 CHECK (
+                suggests_aram IN (0,1)),
+            source_created_at BIGINT NOT NULL DEFAULT 0,
+            source_offset BIGINT NOT NULL DEFAULT 0,
+            result_group_representative_frame_id BIGINT NOT NULL,
+            result_group_size BIGINT NOT NULL DEFAULT 1 CHECK (
+                result_group_size >= 1),
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_material_queue
+        ON training_review_material_index (
+            review_status,is_new,scene,match_mode,
+            source_created_at DESC,source_offset DESC,frame_id DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_material_legacy_queue
+        ON training_review_material_index (
+            review_status,is_legacy,scene,match_mode,
+            source_created_at DESC,frame_id DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_material_video_mode
+        ON training_review_material_index (video_id,review_status,match_mode)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_material_representative
+        ON training_review_material_index (
+            result_group_representative_frame_id,frame_id)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS training_review_material_contributions (
+            frame_id BIGINT NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK (kind IN ('scene_mode','hero_scene')),
+            scene TEXT NOT NULL,
+            match_mode TEXT NOT NULL DEFAULT '',
+            hero_label TEXT NOT NULL DEFAULT '',
+            source_scope TEXT NOT NULL CHECK (
+                source_scope IN ('all','new','legacy')),
+            metric TEXT NOT NULL CHECK (metric IN ('confirmed','candidate')),
+            frame_count BIGINT NOT NULL DEFAULT 0 CHECK (frame_count >= 0),
+            crop_count BIGINT NOT NULL DEFAULT 0 CHECK (crop_count >= 0),
+            PRIMARY KEY (
+                frame_id,kind,scene,match_mode,hero_label,source_scope,metric)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS training_review_material_totals (
+            kind TEXT NOT NULL CHECK (kind IN ('scene_mode','hero_scene')),
+            scene TEXT NOT NULL,
+            match_mode TEXT NOT NULL DEFAULT '',
+            hero_label TEXT NOT NULL DEFAULT '',
+            source_scope TEXT NOT NULL CHECK (
+                source_scope IN ('all','new','legacy')),
+            metric TEXT NOT NULL CHECK (metric IN ('confirmed','candidate')),
+            frame_count BIGINT NOT NULL DEFAULT 0 CHECK (frame_count >= 0),
+            crop_count BIGINT NOT NULL DEFAULT 0 CHECK (crop_count >= 0),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (
+                kind,scene,match_mode,hero_label,source_scope,metric)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_hero_confirmed_label
+        ON training_review_hero_slots (confirmed_label,frame_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_hero_suggested_label
+        ON training_review_hero_slots (suggested_label,frame_id)
+        """,
+    ),
+    4: (
+        """
+        CREATE TABLE IF NOT EXISTS training_review_match_contexts (
+            match_id BIGINT PRIMARY KEY,
+            session_id BIGINT NOT NULL CHECK (session_id > 0),
+            part_id BIGINT NOT NULL CHECK (part_id > 0),
+            started_at_ms BIGINT NOT NULL CHECK (started_at_ms >= 0),
+            result_at_ms BIGINT NOT NULL CHECK (result_at_ms >= started_at_ms),
+            game_mode TEXT NOT NULL DEFAULT '' CHECK (
+                game_mode IN ('','3v3','aram','5v5')),
+            source_type TEXT NOT NULL CHECK (
+                source_type IN ('result_archive','manual_correction')),
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS session_id BIGINT NOT NULL DEFAULT 0
+        CHECK (session_id >= 0)
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS part_id BIGINT NOT NULL DEFAULT 0
+        CHECK (part_id >= 0)
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS at_ms BIGINT NOT NULL DEFAULT 0
+        CHECK (at_ms >= 0)
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS linked_match_id BIGINT
+        REFERENCES training_review_match_contexts(match_id) ON DELETE SET NULL
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS match_link_source TEXT NOT NULL DEFAULT ''
+        CHECK (match_link_source IN ('','result_archive','time_window'))
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_match_context_window
+        ON training_review_match_contexts (
+            session_id,part_id,started_at_ms,result_at_ms,match_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_material_source_time
+        ON training_review_material_index (session_id,part_id,at_ms,frame_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_material_match_scene
+        ON training_review_material_index (
+            linked_match_id,review_status,scene,frame_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_material_video_link_scene
+        ON training_review_material_index (
+            video_id,linked_match_id,review_status,scene,frame_id)
+        """,
+    ),
+    5: (
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS prefill_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (prefill_status IN ('pending','queued','running','ready','failed'))
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS prefill_stage TEXT NOT NULL DEFAULT 'core'
+        CHECK (prefill_stage IN ('core','hero','complete'))
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS prefill_attempts BIGINT NOT NULL DEFAULT 0
+        CHECK (prefill_attempts >= 0)
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS prefill_error TEXT NOT NULL DEFAULT ''
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS prefill_screen_type TEXT NOT NULL DEFAULT ''
+        CHECK (prefill_screen_type IN (
+            '','gameplay_hud','scoreboard','result_page'))
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS prefill_team_size BIGINT
+        CHECK (prefill_team_size IN (3,5))
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS prefill_updated_at TEXT NOT NULL DEFAULT ''
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD COLUMN IF NOT EXISTS prefilled_at TEXT
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_material_prefill_queue
+        ON training_review_material_index (
+            prefill_status,prefill_stage,prefill_attempts,review_status,is_new,
+            source_created_at DESC,frame_id DESC)
+        """,
+        """
+        DELETE FROM training_review_material_contributions
+        WHERE metric='candidate'
+        """,
+        """
+        DELETE FROM training_review_material_totals
+        WHERE metric='candidate'
+        """,
+    ),
 }
 
 
@@ -409,9 +629,7 @@ def _initialize_schema(
     try:
         cursor = connection.cursor()
         if not _schema_exists(cursor, schema):
-            cursor.execute(
-                sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema))
-            )
+            cursor.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
         cursor.execute(
             sql.SQL('SET LOCAL search_path TO {}').format(sql.Identifier(schema))
         )
@@ -452,9 +670,7 @@ def _initialize_schema(
 
 def _schema_exists(cursor: Any, schema: str) -> bool:
     row = cursor.execute(
-        'SELECT EXISTS ('
-        'SELECT 1 FROM pg_namespace WHERE nspname = %s)',
-        (schema,),
+        'SELECT EXISTS (' 'SELECT 1 FROM pg_namespace WHERE nspname = %s)', (schema,)
     ).fetchone()
     return row is not None and bool(row[0])
 

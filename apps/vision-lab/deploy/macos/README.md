@@ -34,3 +34,8 @@ LaunchAgent plist。
 切换顺序：先启动隧道并验证 15433 可连接，再启动 Worker；本地控制面启动完成
 后 Worker 才会注册和领取任务。回滚时恢复上一版 Worker plist/wheel，并把
 `VISION_LAB_SERVER_URL` 改回旧控制面地址。
+
+`model_prefill` Worker 不依赖标注页触发任务：它空闲时会从共享 PostgreSQL 领取
+下一张未预标候选，从 NAS 按帧读取原图，完成核心分类及适用的英雄级联后再领取
+下一张。原图只保留当前任务期间，模型权重可以缓存；不会在本机同步整套候选图片。
+暂停 Worker 后不会继续创建或领取新的预打标任务。

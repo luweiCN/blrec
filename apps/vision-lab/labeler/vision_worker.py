@@ -270,37 +270,47 @@ class VisionWorker:
         frame_id = int(payload['frame_id'])
         operation = str(payload.get('operation') or 'core')
         frame_path = self.work_dir / 'prefill-cache' / f'{frame_id}.jpg'
-        self.client.download(f'/api/vision-workers/frames/{frame_id}/image', frame_path)
-        contexts = self._model_contexts(payload.get('models') or {})
-        if operation == 'core':
+        try:
+            self.client.download(
+                f'/api/vision-workers/frames/{frame_id}/image', frame_path
+            )
+            contexts = self._model_contexts(payload.get('models') or {})
+            if operation == 'core':
+                result = model_prefill.run_core_prefill(frame_path, contexts)
+                errors = result.get('errors') or {}
+                if errors:
+                    raise RuntimeError(
+                        '核心模型预打标失败：'
+                        + '；'.join(
+                            f'{task}: {error}' for task, error in errors.items()
+                        )
+                    )
+                return {'operation': operation, 'frame_id': frame_id, **result}
+            screen_type = str(payload.get('screen_type') or '')
+            team_size = int(payload.get('team_size') or 0)
+            if operation == 'hero_lineup':
+                result = model_prefill.run_hero_lineup_prefill(
+                    frame_path, contexts, screen_type=screen_type, team_size=team_size
+                )
+            elif operation == 'hero_slots':
+                result = model_prefill.run_hero_slots_prefill(
+                    frame_path,
+                    list(payload.get('slots') or []),
+                    contexts,
+                    screen_type=screen_type,
+                    team_size=team_size,
+                )
+            else:
+                raise ValueError(f'未知预填操作: {operation}')
             return {
                 'operation': operation,
                 'frame_id': frame_id,
-                **model_prefill.run_core_prefill(frame_path, contexts),
+                'screen_type': screen_type,
+                'team_size': team_size,
+                **result,
             }
-        screen_type = str(payload.get('screen_type') or '')
-        team_size = int(payload.get('team_size') or 0)
-        if operation == 'hero_lineup':
-            result = model_prefill.run_hero_lineup_prefill(
-                frame_path, contexts, screen_type=screen_type, team_size=team_size
-            )
-        elif operation == 'hero_slots':
-            result = model_prefill.run_hero_slots_prefill(
-                frame_path,
-                list(payload.get('slots') or []),
-                contexts,
-                screen_type=screen_type,
-                team_size=team_size,
-            )
-        else:
-            raise ValueError(f'未知预填操作: {operation}')
-        return {
-            'operation': operation,
-            'frame_id': frame_id,
-            'screen_type': screen_type,
-            'team_size': team_size,
-            **result,
-        }
+        finally:
+            frame_path.unlink(missing_ok=True)
 
     def _heartbeat_once(
         self, job: Dict[str, Any], *, progress: float, stage: str, detail: str
