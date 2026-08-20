@@ -11,6 +11,10 @@ from typing import Any, Dict, Mapping, Optional
 import pytest
 from blrec_dashboard_api.app import create_app
 from blrec_dashboard_api.dashboard import load_dashboard_trends
+from blrec_dashboard_api.dashboard_cache import (
+    PostgresDashboardRepository,
+    publish_dashboard_cache,
+)
 from blrec_dashboard_api.database import (
     _migration_text,
     connect_database,
@@ -217,6 +221,71 @@ def test_repository_rebuilds_only_after_the_source_revision_changes(
 
     assert repository.refresh() is True
     assert repository.get_match(2, rating_scope='3v3', rating_season=None)['id'] == 2
+
+
+def test_public_dataset_reuses_the_owner_rating_index(tmp_path: Path) -> None:
+    repository, _loads = _repository(tmp_path)
+
+    public = repository._current()
+    owner = repository._current(owner_view=True)
+
+    assert public.ratings is owner.ratings
+
+
+def test_repository_retains_dashboard_as_serialized_bytes(tmp_path: Path) -> None:
+    repository, _loads = _repository(tmp_path)
+
+    payload, revision = repository.dashboard_payload()
+
+    assert revision == '1'
+    assert isinstance(payload, bytes)
+    assert json.loads(payload)['snapshot']['sourceMatchCount'] == 1
+    assert not hasattr(repository._current(), 'document')
+
+
+def test_postgres_cache_repository_preserves_the_direct_repository_contract(
+    tmp_path: Path,
+) -> None:
+    direct, _loads = _repository(tmp_path)
+    assert direct._state is not None
+    publish_dashboard_cache(tmp_path / 'public.sqlite3', direct._state, published_at=1)
+    cached = PostgresDashboardRepository(
+        source_target=tmp_path / 'unused.sqlite3',
+        auxiliary_target=tmp_path / 'public.sqlite3',
+        revision_loader=lambda _target: 1,
+    )
+    cached.refresh(force=True)
+
+    assert cached.dashboard_payload() == direct.dashboard_payload()
+    assert cached.dashboard_payload(owner_view=True) == direct.dashboard_payload(
+        owner_view=True
+    )
+    assert cached.live_rooms() == direct.live_rooms()
+    assert cached.match_summary(
+        season=None, mode=None, player_id=None
+    ) == direct.match_summary(season=None, mode=None, player_id=None)
+
+    query = {
+        'page': 1,
+        'page_size': 10,
+        'season': '2026-summer',
+        'mode': '3v3',
+        'player_id': 7,
+        'query': 'zhuboshenye',
+        'heroes': ('剑圣', '猫女'),
+        'rating_scope': '3v3',
+        'rating_season': '2026-summer',
+        'owner_view': True,
+    }
+    assert cached.list_matches(**query) == direct.list_matches(**query)
+    public_query = dict(query)
+    public_query['owner_view'] = False
+    assert cached.list_matches(**public_query) == direct.list_matches(**public_query)
+    assert cached.get_match(
+        1, rating_scope='3v3', rating_season='2026-summer', owner_view=True
+    ) == direct.get_match(
+        1, rating_scope='3v3', rating_season='2026-summer', owner_view=True
+    )
 
 
 def test_dashboard_and_match_queries_are_computed_from_the_runtime_source(

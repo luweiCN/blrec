@@ -58,6 +58,16 @@ def test_database_url_rejects_non_postgresql_servers(tmp_path: Path) -> None:
         )
 
 
+def test_repository_mode_rejects_unknown_cache_backends(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match='repository mode'):
+        ApiSettings(
+            database_path=tmp_path / 'dashboard.sqlite3',
+            ingest_token_sha256=hashlib.sha256(b'token').hexdigest(),
+            cors_origins=('https://vg.luwei.host',),
+            repository_mode='redis',
+        )
+
+
 def test_asset_batch_rejects_overlapping_updates_and_removals() -> None:
     with pytest.raises(ValueError, match='update and remove'):
         AssetBatch.parse_obj(

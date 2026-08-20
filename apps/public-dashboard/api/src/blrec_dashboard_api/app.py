@@ -6,6 +6,8 @@ import hmac
 import json
 import logging
 import re
+import subprocess
+import sys
 from contextlib import suppress
 from functools import partial
 from threading import Lock
@@ -20,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from .assets import IdempotencyConflict, apply_asset_batch
+from .dashboard_cache import PostgresDashboardRepository
 from .database import database_session, initialize_database
 from .direct import DirectDashboardRepository
 from .models import AssetBatch, ReplayVisibilityCompletion, ReplayVisibilityFailure
@@ -36,17 +39,23 @@ LOGGER = logging.getLogger(__name__)
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,128}$')
 
 
+def _rebuild_postgres_cache() -> int:
+    subprocess.run(
+        [sys.executable, '-m', 'blrec_dashboard_api.cache_builder'],
+        check=True,
+        timeout=15 * 60,
+    )
+    return 0
+
+
 class _DashboardResponseCache:
     def __init__(self) -> None:
         self._lock = Lock()
         self._payload: Optional[bytes] = None
         self._revision: Optional[str] = None
 
-    def replace(self, current: Tuple[Mapping[str, Any], str]) -> None:
-        document, revision = current
-        payload = json.dumps(
-            document, ensure_ascii=False, allow_nan=False, separators=(',', ':')
-        ).encode('utf-8')
+    def replace(self, current: Tuple[bytes, str]) -> None:
+        payload, revision = current
         with self._lock:
             self._payload = payload
             self._revision = revision
@@ -126,21 +135,32 @@ def _etag_matches(if_none_match: Optional[str], revision: str) -> bool:
 def create_app(
     settings: Optional[ApiSettings] = None,
     *,
-    repository: Optional[DirectDashboardRepository] = None,
+    repository: Optional[
+        DirectDashboardRepository | PostgresDashboardRepository
+    ] = None,
 ) -> FastAPI:
     active_settings = settings or ApiSettings.from_environment()
     auxiliary_target = active_settings.database_target
     initialize_database(auxiliary_target)
-    active_repository = repository or DirectDashboardRepository(
-        source_target=active_settings.source_database_target,
-        auxiliary_target=auxiliary_target,
-    )
+    if repository is not None:
+        active_repository = repository
+    elif active_settings.repository_mode == 'postgres':
+        active_repository = PostgresDashboardRepository(
+            source_target=active_settings.source_database_target,
+            auxiliary_target=auxiliary_target,
+            cache_builder=_rebuild_postgres_cache,
+        )
+    else:
+        active_repository = DirectDashboardRepository(
+            source_target=active_settings.source_database_target,
+            auxiliary_target=auxiliary_target,
+        )
     if repository is None:
         active_repository.refresh(force=True)
     public_dashboard_cache = _DashboardResponseCache()
     owner_dashboard_cache = _DashboardResponseCache()
-    public_dashboard_cache.replace(active_repository.dashboard_document())
-    owner_dashboard_cache.replace(active_repository.dashboard_document(owner_view=True))
+    public_dashboard_cache.replace(active_repository.dashboard_payload())
+    owner_dashboard_cache.replace(active_repository.dashboard_payload(owner_view=True))
     app = FastAPI(
         title='BLREC Vainglory Dashboard API',
         version='2.0.0',
@@ -171,12 +191,12 @@ def create_app(
                     if not changed:
                         continue
                     public_dashboard_cache.replace(
-                        active_repository.dashboard_document()
+                        active_repository.dashboard_payload()
                     )
                     owner_dashboard_cache.replace(
-                        active_repository.dashboard_document(owner_view=True)
+                        active_repository.dashboard_payload(owner_view=True)
                     )
-                    revision = active_repository.dashboard_document()[1]
+                    revision = active_repository.dashboard_payload()[1]
                     await realtime_broker.publish('dashboard', {'revision': revision})
                     await realtime_broker.publish('live_rooms', {'revision': revision})
                     await realtime_broker.publish('matches', {'revision': revision})

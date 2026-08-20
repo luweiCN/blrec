@@ -7,10 +7,12 @@ API 通过受限 SSH 隧道连接移动云 PostgreSQL：
 
 - `core` 是权威业务数据源。API 账号只对 `grant-core-read.sql` 列出的表拥有
   `SELECT` 权限；
-- `public` 只保存结构化的历史榜单趋势、结算图片元数据和图片批次幂等记录；
-- 当前榜单、对局和直播状态不复制到 `public`，也不保存为 JSON 文件或 JSON blob；
-- API 根据 `core.dashboard_source_state.revision` 刷新进程内缓存，并通过 SSE 通知
-  页面。刷新失败时继续提供上一份成功结果，下一轮自动重试。
+- `public` 保存按 `source_revision` 发布的 public/owner 缓存代次、可分页对局索引、
+  结构化历史趋势、结算图片元数据和幂等记录；
+- API 进程只常驻 public/owner 两份序列化榜单和很小的直播状态，对局、搜索和评分按页
+  从 PostgreSQL 读取；
+- 缓存重建在独立 Python 子进程中完成。public/owner 两套数据写入同一事务，全部成功后
+  才同时切换版本指针；失败时 API 继续提供上一份成功结果。
 
 首次切换前，由 PostgreSQL 管理员执行 `grant-core-read.sql`。部署脚本会逐一验证 API
 角色能读取批准的 `core` 表；任何表缺少权限或 revision 无效都会在切换 release 前
@@ -35,6 +37,22 @@ DASHBOARD_API_OWNER_TOKEN_SHA256=<64 位小写十六进制摘要>
 令牌明文不能进入仓库、静态构建或 URL。Dashboard 只在当前浏览器会话的
 `sessionStorage` 中保存明文；站长响应使用 `private, no-store`，不能进入 CDN
 共享缓存。
+
+## PostgreSQL 缓存切换
+
+新 release 首次部署时保持 `DASHBOARD_API_REPOSITORY_MODE=direct`。数据库备份和迁移
+成功后，用同一 release、同一受限服务账号执行
+`python -m blrec_dashboard_api.cache_builder` 做影子重建。只有以下条件全部满足才能把
+模式改成 `postgres`：
+
+1. `dashboard_cache_state` 恰有 `public`、`owner` 两行且 revision 相同；
+2. 该 revision 等于 `core.dashboard_source_state.revision`；
+3. public/owner 榜单摘要、对局数量、分页/搜索/英雄筛选和回放权限回归全部通过；
+4. API 公共响应字节与影子缓存字节一致，并记录构建耗时和峰值内存。
+
+切换后，revision 变化会启动一次独立缓存构建进程；构建进程退出后内存立即归还给
+系统。回滚时先恢复 `direct` 或上一个 release，不删除缓存表。旧的
+`players`/`matches` 投影停在 2026-08-15，禁止把它们当作本次缓存直接启用。
 
 SSH 隧道需要以下文件：
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 import unicodedata
@@ -31,7 +32,7 @@ RevisionLoader = Callable[[DatabaseTarget], int]
 @dataclass(frozen=True)
 class _Dataset:
     source_revision: int
-    document: Mapping[str, Any]
+    dashboard_payload: bytes
     players: Mapping[int, Mapping[str, Any]]
     matches: Tuple[Mapping[str, Any], ...]
     matches_by_id: Mapping[int, Mapping[str, Any]]
@@ -443,13 +444,18 @@ def _dataset(
     live_rooms.sort(
         key=lambda room: (str(room['startedAt']), int(room['roomId'])), reverse=True
     )
-    ratings = _rating_events(matches)
+    ratings = (
+        shared_owner.ratings if shared_owner is not None else _rating_events(matches)
+    )
+    dashboard_payload = json.dumps(
+        {'snapshot': snapshot, 'trends': _rating_trends(snapshot, matches, ratings)},
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(',', ':'),
+    ).encode('utf-8')
     return _Dataset(
         source_revision=source_revision,
-        document={
-            'snapshot': snapshot,
-            'trends': _rating_trends(snapshot, matches, ratings),
-        },
+        dashboard_payload=dashboard_payload,
         players=players,
         matches=matches,
         matches_by_id={int(match['id']): match for match in matches},
@@ -461,6 +467,18 @@ def _dataset(
             'updatedAt': str(snapshot['generatedAt']),
             'rooms': live_rooms,
         },
+    )
+
+
+def build_repository_state(
+    source_revision: int, runtime: Mapping[str, Any]
+) -> _RepositoryState:
+    owner_dataset = _dataset(source_revision, runtime, owner_view=True)
+    return _RepositoryState(
+        public=_dataset(
+            source_revision, runtime, owner_view=False, shared_owner=owner_dataset
+        ),
+        owner=owner_dataset,
     )
 
 
@@ -496,16 +514,7 @@ class DirectDashboardRepository:
             source_revision, runtime = self._runtime_loader(self._source_target)
             if source_revision < expected_revision:
                 raise RuntimeError('dashboard source changed during refresh')
-            owner_dataset = _dataset(source_revision, runtime, owner_view=True)
-            next_state = _RepositoryState(
-                public=_dataset(
-                    source_revision,
-                    runtime,
-                    owner_view=False,
-                    shared_owner=owner_dataset,
-                ),
-                owner=owner_dataset,
-            )
+            next_state = build_repository_state(source_revision, runtime)
             with self._state_lock:
                 self._state = next_state
             LOGGER.info(
@@ -534,7 +543,11 @@ class DirectDashboardRepository:
         self, *, owner_view: bool = False
     ) -> Tuple[Mapping[str, Any], str]:
         current = self._current(owner_view=owner_view)
-        return current.document, str(current.source_revision)
+        return json.loads(current.dashboard_payload), str(current.source_revision)
+
+    def dashboard_payload(self, *, owner_view: bool = False) -> Tuple[bytes, str]:
+        current = self._current(owner_view=owner_view)
+        return current.dashboard_payload, str(current.source_revision)
 
     def live_rooms(self, *, owner_view: bool = False) -> Tuple[Mapping[str, Any], str]:
         current = self._current(owner_view=owner_view)

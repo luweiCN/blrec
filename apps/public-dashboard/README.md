@@ -7,16 +7,16 @@
 生产数据链路如下：
 
 1. BLREC 和 Analysis Worker 直接写移动云 PostgreSQL 的 `core` schema。
-2. Dashboard API 只读 `core` 中经过批准的业务表，并根据
-   `dashboard_source_state.revision` 刷新内存缓存。
+2. 独立缓存构建进程只读 `core` 中经过批准的业务表，并根据
+   `dashboard_source_state.revision` 原子发布 PostgreSQL 缓存。
 3. 页面通过 API 获取榜单和分页对局；数据库变化后，API 通过 SSE 通知页面刷新。
 4. NAS Publisher 只处理仍位于 NAS 文件系统中的结算图片：上传 OSS 后，把图片 URL、
    尺寸和摘要写入 API 的辅助表。它不再同步玩家、对局或榜单数据。
 
 接口响应仍然使用 JSON 作为 HTTP 传输格式，但生产链路不生成或读取
-`manifest.json`、榜单快照文件或 `trends.json`，也不在数据库中保存当前榜单的
-`snapshot_json`。当前榜单始终从规范化业务表计算；热点结果只在 API 进程内缓存。
-历史趋势和结算图片元数据以结构化表保存。
+`manifest.json`、榜单快照文件或 `trends.json`。PostgreSQL 作为持久缓存层保存
+revision 化的 public/owner 榜单字节和对局查询索引；API 进程只保留当前响应字节，
+列表请求最多读取一页数据。历史趋势和结算图片元数据仍以结构化表保存。
 
 开发与验证：
 

@@ -19,6 +19,7 @@ class ApiSettings:
     source_database_path: Path | None = None
     source_database_url: str = ''
     source_watch_seconds: float = 1.0
+    repository_mode: str = 'direct'
 
     def __post_init__(self) -> None:
         if not _SHA256_PATTERN.fullmatch(self.ingest_token_sha256):
@@ -39,6 +40,8 @@ class ApiSettings:
             raise ValueError('dashboard API source database URL must use PostgreSQL')
         if self.source_watch_seconds <= 0:
             raise ValueError('dashboard API source watch interval must be positive')
+        if self.repository_mode not in {'direct', 'postgres'}:
+            raise ValueError('dashboard API repository mode must be direct or postgres')
 
     @property
     def database_target(self) -> Path | str:
@@ -89,6 +92,9 @@ class ApiSettings:
             source_watch_seconds=float(
                 os.environ.get('DASHBOARD_API_SOURCE_WATCH_SECONDS', '1')
             ),
+            repository_mode=os.environ.get(
+                'DASHBOARD_API_REPOSITORY_MODE', 'direct'
+            ).strip(),
         )
 
 
