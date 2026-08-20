@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import sqlite3
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple, Union
@@ -21,6 +20,7 @@ from blrec.networking.requests_session import RoutedRequestsSession
 from .replay_visibility import BVID_PATTERN
 from .snapshot import build_dashboard_asset_source
 from .source_database import connect_source_database
+from .state_files import atomic_json, canonical_bytes
 
 LOGGER = logging.getLogger(__name__)
 
@@ -141,11 +141,11 @@ class DashboardApiClient:
         return bvid
 
     def complete_replay_visibility(self, bvid: str, *, public_visible: bool) -> None:
-        content = _canonical_bytes({'publicVisible': public_visible})
+        content = canonical_bytes({'publicVisible': public_visible})
         self._post_replay_visibility(bvid, 'complete', content)
 
     def fail_replay_visibility(self, bvid: str, *, error: str) -> None:
-        content = _canonical_bytes({'error': error[:500] or 'unknown error'})
+        content = canonical_bytes({'error': error[:500] or 'unknown error'})
         self._post_replay_visibility(bvid, 'fail', content)
 
     def _post_replay_visibility(self, bvid: str, action: str, content: bytes) -> None:
@@ -174,30 +174,6 @@ class DashboardApiClient:
 
     def close(self) -> None:
         self._session.close()
-
-
-def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-        + '\n'
-    ).encode('utf-8')
-
-
-def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix='.'.join((path.name, 'tmp-')), dir=str(path.parent)
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, 'wb') as target:
-            target.write(_canonical_bytes(value))
-            target.flush()
-            os.fsync(target.fileno())
-        os.replace(str(temporary_path), str(path))
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
 
 
 def _load_state(path: Path) -> Mapping[str, Any]:
@@ -310,8 +286,8 @@ def _send_outbox(
         raise DashboardApiSyncError('排行榜 API outbox 损坏') from exc
     if not isinstance(batch, Mapping) or not isinstance(next_state, Mapping):
         raise DashboardApiSyncError('排行榜 API outbox 字段无效')
-    post_batch(batch_id, _canonical_bytes(batch))
-    _atomic_json(state_path, next_state)
+    post_batch(batch_id, canonical_bytes(batch))
+    atomic_json(state_path, next_state)
     path.unlink()
     images = batch.get('images')
     removed = batch.get('removedMatchIds')
@@ -426,7 +402,7 @@ def sync_dashboard_api_once(
         'images': changed_images,
         'removedMatchIds': removed_match_ids,
     }
-    batch_content = _canonical_bytes(batch)
+    batch_content = canonical_bytes(batch)
     batch_id = 'dashboard-{}'.format(hashlib.sha256(batch_content).hexdigest()[:40])
     next_state = {'schemaVersion': 2, 'matches': next_matches}
     envelope = {
@@ -437,5 +413,5 @@ def sync_dashboard_api_once(
         'uploadedImageBytes': uploaded_image_bytes,
     }
     outbox_path = state_directory / 'api-outbox' / '{}.json'.format(batch_id)
-    _atomic_json(outbox_path, envelope)
+    atomic_json(outbox_path, envelope)
     return _send_outbox(outbox_path, state_path=state_path, post_batch=post_batch)

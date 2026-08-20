@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Union
 
-from .api_sync import _atomic_json, _canonical_bytes
 from .snapshot import build_dashboard_cache_source
 from .source_database import connect_source_database, is_postgres
+from .state_files import atomic_json, canonical_bytes
 
 
 class DashboardCacheSyncError(RuntimeError):
@@ -98,11 +98,11 @@ def _send_outboxes(
             raise DashboardCacheSyncError('排行榜缓存 outbox 损坏') from exc
         if not isinstance(batch, Mapping):
             raise DashboardCacheSyncError('排行榜缓存 outbox 批次无效')
-        post_batch(batch_id, _canonical_bytes(batch))
+        post_batch(batch_id, canonical_bytes(batch))
         if next_state is not None:
             if not isinstance(next_state, Mapping):
                 raise DashboardCacheSyncError('排行榜缓存 outbox 状态无效')
-            _atomic_json(state_path, next_state)
+            atomic_json(state_path, next_state)
         path.unlink()
         batch_count += 1
         matches = batch.get('matches')
@@ -144,9 +144,7 @@ def sync_dashboard_cache_once(
     previous_state = _load_state(state_path)
     previous_matches = previous_state['matches']
     assert isinstance(previous_matches, Mapping)
-    players_revision = hashlib.sha256(
-        _canonical_bytes({'players': players})
-    ).hexdigest()
+    players_revision = hashlib.sha256(canonical_bytes({'players': players})).hexdigest()
     changed_players = players_revision != previous_state['playersRevision']
     next_matches: Dict[str, Mapping[str, str]] = {}
     changed_matches = []
@@ -157,7 +155,7 @@ def sync_dashboard_cache_once(
         ):
             raise DashboardCacheSyncError('排行榜缓存对局字段无效')
         match_id = int(source_match['id'])
-        revision = hashlib.sha256(_canonical_bytes({'match': source_match})).hexdigest()
+        revision = hashlib.sha256(canonical_bytes({'match': source_match})).hexdigest()
         next_matches[str(match_id)] = {'revision': revision}
         previous = previous_matches.get(str(match_id))
         if not isinstance(previous, Mapping) or previous.get('revision') != revision:
@@ -209,7 +207,7 @@ def sync_dashboard_cache_once(
             'matches': matches,
             'removedMatchIds': removed_match_ids if final else [],
         }
-        content = _canonical_bytes(batch)
+        content = canonical_bytes(batch)
         batch_id = 'dashboard-cache-{}'.format(hashlib.sha256(content).hexdigest()[:40])
         envelopes.append(
             {
@@ -223,6 +221,6 @@ def sync_dashboard_cache_once(
     paths = []
     for index, envelope in enumerate(envelopes):
         path = outbox_directory / '{:06d}-{}.json'.format(index, envelope['batchId'])
-        _atomic_json(path, envelope)
+        atomic_json(path, envelope)
         paths.append(path)
     return _send_outboxes(paths, state_path=state_path, post_batch=post_batch)

@@ -21,15 +21,6 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
-.season-correction-banner {
-  width: min(calc(100% - var(--content-gutter)), var(--content-width));
-  margin: 24px auto 0;
-
-  & + .arena-hero {
-    margin-top: 16px;
-  }
-}
-
 .arena-hero {
   position: relative;
   display: grid;

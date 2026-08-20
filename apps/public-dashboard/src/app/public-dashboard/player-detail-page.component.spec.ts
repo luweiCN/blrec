@@ -18,7 +18,6 @@ import { PlayerRatingTrendChartComponent } from './player-rating-trend-chart.com
 import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { DashboardTrends } from './public-dashboard.models';
-import { SeasonCorrectionNoticeComponent } from './season-correction-notice.component';
 import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 import {
   TEST_DASHBOARD_SNAPSHOT,
@@ -54,7 +53,6 @@ describe('PlayerDetailPageComponent', () => {
         PlayerRoomLinksComponent,
         PlayerRatingTrendChartComponent,
         SkillTierBadgeComponent,
-        SeasonCorrectionNoticeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
       providers: [
@@ -91,9 +89,6 @@ describe('PlayerDetailPageComponent', () => {
     expect(component.heroPool.length).toBe(7);
     expect(component.seasonHistory.length).toBeGreaterThan(1);
     expect(page.querySelector('h1')?.textContent).toContain('星河');
-    expect(page.querySelector('.season-correction-notice')?.textContent).toContain(
-      '近期分数与段位可能出现明显变化',
-    );
     expect(page.querySelector('.profile-kda-value')?.textContent).toContain(
       '145 局有效',
     );

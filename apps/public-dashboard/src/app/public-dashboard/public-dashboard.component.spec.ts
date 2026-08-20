@@ -11,7 +11,6 @@ import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardComponent } from './public-dashboard.component';
-import { SeasonCorrectionNoticeComponent } from './season-correction-notice.component';
 import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 import {
   TEST_DASHBOARD_SNAPSHOT,
@@ -29,7 +28,6 @@ describe('PublicDashboardComponent', () => {
         PublicDashboardComponent,
         PlayerAvatarComponent,
         PlayerRoomLinksComponent,
-        SeasonCorrectionNoticeComponent,
         SkillTierBadgeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
@@ -59,15 +57,6 @@ describe('PublicDashboardComponent', () => {
     const page = fixture.nativeElement as HTMLElement;
 
     expect(page.querySelector('h1')?.textContent).toContain('每一局');
-    expect(page.querySelector('.season-correction-notice')?.textContent).toContain(
-      '这是我们的错误',
-    );
-    expect(page.querySelector('.season-correction-notice')?.textContent).toContain(
-      '上赛季成绩还会用于计算新赛季起点',
-    );
-    expect(page.querySelector('.season-correction-notice')?.textContent).not.toContain(
-      '软重置',
-    );
     expect(page.querySelector('.snapshot-note')?.textContent).toContain(
       '真实数据',
     );
