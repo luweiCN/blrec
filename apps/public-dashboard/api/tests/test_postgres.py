@@ -210,11 +210,13 @@ def _ingest_team(role: str) -> dict[str, object]:
     }
 
 
-def _ingest_batch() -> IngestBatch:
+def _ingest_batch(
+    *, source_revision: int = 21, stream_title: str = '深夜排位'
+) -> IngestBatch:
     return IngestBatch.parse_obj(
         {
             'schemaVersion': 2,
-            'sourceRevision': 21,
+            'sourceRevision': source_revision,
             'publish': True,
             'generatedAt': '2026-08-20T00:00:00Z',
             'sourceLastMatchId': 1,
@@ -240,7 +242,7 @@ def _ingest_batch() -> IngestBatch:
                     'playedAt': '2026-08-20T00:00:00Z',
                     'durationSeconds': 900,
                     'result': 'W',
-                    'streamTitle': '深夜排位',
+                    'streamTitle': stream_title,
                     'analysisProvisional': False,
                     'statsEligible': True,
                     'duplicateOfMatchId': None,
@@ -331,10 +333,15 @@ def test_postgres_backend_applies_and_reads_incremental_cache() -> None:
     result = apply_ingest_batch(
         database_url, idempotency_key='postgres-incremental-21', batch=_ingest_batch()
     )
+    updated = apply_ingest_batch(
+        database_url,
+        idempotency_key='postgres-incremental-22',
+        batch=_ingest_batch(source_revision=22, stream_title='黎明排位'),
+    )
     repository = NormalizedDashboardRepository(
         source_target=database_url,
         auxiliary_target=database_url,
-        revision_loader=lambda _target: 21,
+        revision_loader=lambda _target: 22,
     )
     repository.refresh(force=True)
     listed = repository.list_matches(
@@ -343,7 +350,7 @@ def test_postgres_backend_applies_and_reads_incremental_cache() -> None:
         season=None,
         mode=None,
         player_id=None,
-        query='zhubo',
+        query='黎明排位',
         heroes=('剑圣',),
         rating_scope='all',
         rating_season=None,
@@ -351,7 +358,8 @@ def test_postgres_backend_applies_and_reads_incremental_cache() -> None:
     )
 
     assert result['status'] == 'applied'
-    assert repository.dashboard_payload()[1] == '21'
+    assert updated['status'] == 'applied'
+    assert repository.dashboard_payload()[1] == '22'
     assert listed['total'] == 1
     assert listed['items'][0]['rating']['modelVersion'] == 7
 

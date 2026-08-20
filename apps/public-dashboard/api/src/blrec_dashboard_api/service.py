@@ -434,54 +434,86 @@ def _insert_bootstrap_matches(
 
 
 def _rebuild_match_search(connection: Any, match_ids: Iterable[int]) -> None:
-    for match_id in sorted(set(match_ids)):
-        connection.execute('DELETE FROM match_search WHERE match_id=?', (match_id,))
-        match = connection.execute(
-            'SELECT match.player_id,match.stream_title,player.name,'
-            'player.room_label FROM matches match '
-            'JOIN players player ON player.player_id=match.player_id '
-            'WHERE match.source_match_id=?',
-            (match_id,),
-        ).fetchone()
-        if match is None:
-            continue
+    match_ids = tuple(sorted(set(match_ids)))
+    if not match_ids:
+        return
+    match_placeholders = ','.join('?' for _ in match_ids)
+    connection.execute(
+        'DELETE FROM match_search WHERE match_id IN ({})'.format(match_placeholders),
+        match_ids,
+    )
+    matches = connection.execute(
+        'SELECT match.source_match_id AS match_id,match.player_id,'
+        'match.stream_title,player.name,player.room_label FROM matches match '
+        'JOIN players player ON player.player_id=match.player_id '
+        'WHERE match.source_match_id IN ({}) '
+        'ORDER BY match.source_match_id'.format(match_placeholders),
+        match_ids,
+    ).fetchall()
+    if not matches:
+        return
+    player_ids = tuple(sorted({int(match['player_id']) for match in matches}))
+    player_placeholders = ','.join('?' for _ in player_ids)
+    aliases: Dict[int, List[str]] = {}
+    for row in connection.execute(
+        'SELECT player_id,alias FROM player_aliases '
+        'WHERE player_id IN ({}) ORDER BY player_id,alias'.format(player_placeholders),
+        player_ids,
+    ).fetchall():
+        aliases.setdefault(int(row['player_id']), []).append(str(row['alias']))
+    rooms: Dict[int, List[str]] = {}
+    for row in connection.execute(
+        'SELECT player_id,room_id FROM player_rooms '
+        'WHERE player_id IN ({}) ORDER BY player_id,room_id'.format(
+            player_placeholders
+        ),
+        player_ids,
+    ).fetchall():
+        rooms.setdefault(int(row['player_id']), []).append(str(row['room_id']))
+    participants: Dict[int, List[str]] = {}
+    for row in connection.execute(
+        'SELECT match_id,player_name FROM match_participants '
+        'WHERE match_id IN ({}) ORDER BY match_id,team_role,slot'.format(
+            match_placeholders
+        ),
+        match_ids,
+    ).fetchall():
+        participants.setdefault(int(row['match_id']), []).append(
+            str(row['player_name'])
+        )
+
+    search_rows = []
+    for match in matches:
+        match_id = int(match['match_id'])
+        player_id = int(match['player_id'])
         segments: List[Tuple[str, str]] = [
             ('stream_title', str(match['stream_title'])),
             ('player_name', str(match['name'])),
             ('room_label', str(match['room_label'])),
         ]
+        segments.extend(('player_alias', alias) for alias in aliases.get(player_id, ()))
+        segments.extend(('room_id', room_id) for room_id in rooms.get(player_id, ()))
         segments.extend(
-            ('player_alias', str(row['alias']))
-            for row in connection.execute(
-                'SELECT alias FROM player_aliases WHERE player_id=? ORDER BY alias',
-                (int(match['player_id']),),
-            ).fetchall()
-        )
-        segments.extend(
-            ('room_id', str(row['room_id']))
-            for row in connection.execute(
-                'SELECT room_id FROM player_rooms WHERE player_id=? ORDER BY room_id',
-                (int(match['player_id']),),
-            ).fetchall()
-        )
-        segments.extend(
-            ('participant_name', str(row['player_name']))
-            for row in connection.execute(
-                'SELECT player_name FROM match_participants WHERE match_id=? '
-                'ORDER BY team_role,slot',
-                (match_id,),
-            ).fetchall()
+            ('participant_name', name) for name in participants.get(match_id, ())
         )
         for kind, raw_value in segments:
             normalized, pinyin, initials = _search_forms(raw_value)
-            if not normalized:
-                continue
-            connection.execute(
-                'INSERT INTO match_search('
-                'match_id,segment_kind,normalized,pinyin,initials'
-                ') VALUES(?,?,?,?,?)',
-                (match_id, kind, normalized, pinyin, initials),
-            )
+            if normalized:
+                search_rows.append((match_id, kind, normalized, pinyin, initials))
+    if getattr(connection, 'dialect', 'sqlite') == 'postgresql':
+        connection.copy_rows(
+            'COPY match_search('
+            'match_id,segment_kind,normalized,pinyin,initials'
+            ') FROM STDIN',
+            search_rows,
+        )
+    else:
+        connection.executemany(
+            'INSERT INTO match_search('
+            'match_id,segment_kind,normalized,pinyin,initials'
+            ') VALUES(?,?,?,?,?)',
+            search_rows,
+        )
 
 
 def _insert_rating_timeline(

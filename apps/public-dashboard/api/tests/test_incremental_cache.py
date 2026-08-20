@@ -477,6 +477,61 @@ def test_rating_timeline_batches_event_inserts() -> None:
     assert final_evidence is not None
 
 
+def test_incremental_search_rebuild_uses_bounded_database_round_trips(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / 'dashboard.sqlite3'
+    initialize_database(database_path)
+    source = cache_batch(source_revision=8)
+    second = json.loads(json.dumps(source['matches'][0]))
+    second['id'] = 2
+    second['playedAt'] = '2026-08-20T01:00:00Z'
+    source['matches'].append(second)
+    source['sourceLastMatchId'] = 2
+    apply_ingest_batch(
+        database_path,
+        idempotency_key='search-bootstrap',
+        batch=IngestBatch.parse_obj(source),
+    )
+
+    raw_connection = connect_database(database_path)
+
+    class CountingConnection:
+        dialect = 'sqlite'
+
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.executemany_count = 0
+
+        def execute(
+            self, sql: str, parameters: Iterable[object] = ()
+        ) -> sqlite3.Cursor:
+            self.execute_count += 1
+            return raw_connection.execute(sql, tuple(parameters))
+
+        def executemany(
+            self, sql: str, parameters: Iterable[Iterable[object]]
+        ) -> sqlite3.Cursor:
+            self.executemany_count += 1
+            return raw_connection.executemany(sql, parameters)
+
+    counting = CountingConnection()
+    try:
+        raw_connection.execute('DELETE FROM match_search')
+        service_module._rebuild_match_search(counting, (1, 2))
+        raw_connection.commit()
+        rows = raw_connection.execute(
+            'SELECT match_id,COUNT(*) FROM match_search '
+            'GROUP BY match_id ORDER BY match_id'
+        ).fetchall()
+    finally:
+        raw_connection.close()
+
+    assert counting.execute_count == 5
+    assert counting.executemany_count == 1
+    assert [tuple(row) for row in rows] == [(1, 7), (2, 7)]
+
+
 def test_bootstrap_bulk_writes_matches_and_search_rows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
