@@ -69,8 +69,10 @@
             </dd>
           </div>
           <div>
-            <dt>{{ ratingMetricLabel }}</dt>
-            <dd>{{ displayScore(performance.ratingScore) | number: "1.0-0" }}</dd>
+            <dt>{{ latestContextLabel }}排位分</dt>
+            <dd class="accent">
+              {{ currentDisplayScore | number: "1.0-0" }}
+            </dd>
           </div>
           <div>
             <dt>对局</dt>
@@ -99,7 +101,6 @@
 
       <aside
         class="profile-rank-showcase"
-        [attr.aria-label]="profile.name + tierMetricLabel"
       >
         <ng-container *ngIf="profileRank as rank; else noProfileRank">
           <div class="profile-rank-art">
@@ -112,12 +113,16 @@
             />
             <div class="profile-rank-title">
               <span>
-                {{ rank.skillTier.tier }} 段 · {{ tierMetricLabel }}
+                {{ rank.skillTier.tier }} 段 · {{ latestContextLabel }}段位
                 <em *ngIf="performance.provisional">定位中</em>
               </span>
               <strong>
                 {{ rank.skillTier.name }} · {{ rank.skillTier.divisionLabel }}
               </strong>
+              <span *ngIf="seasonPeakDisplayScore as peak" class="profile-season-record">
+                {{ ratingMetricLabel }}
+                <em>{{ peak | number: "1.0-0" }}</em>
+              </span>
             </div>
           </div>
 
@@ -139,6 +144,7 @@
             "
           >
             <output class="profile-rank-score">
+              {{ latestContextLabel }}排位分
               {{ rank.skillTier.displayScore | number: "1.0-0" }}
             </output>
             <span class="profile-rank-pointer" aria-hidden="true"></span>
@@ -329,6 +335,8 @@
           <app-player-rating-trend-chart
             [points]="trendChartPoints"
             [ariaLabel]="trendChartLabel"
+            [latestPointLabel]="latestContextLabel"
+            [seasonPeakDisplayScore]="seasonPeakDisplayScore"
           ></app-player-rating-trend-chart>
           <p *ngIf="playerTrend.points.length === 1" class="trend-start-note">
             已记录今日节点；明日有新数据后会形成日变化曲线。

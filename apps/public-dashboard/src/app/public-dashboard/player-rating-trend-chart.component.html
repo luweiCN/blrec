@@ -10,7 +10,7 @@
 </div>
 
 <table class="trend-chart-data">
-  <caption>{{ ariaLabel }}</caption>
+  <caption>{{ chartAriaLabel }}</caption>
   <thead>
     <tr>
       <th scope="col">日期</th>
@@ -20,15 +20,9 @@
     </tr>
   </thead>
   <tbody>
-    <tr
-      *ngFor="let point of points; trackBy: trackPoint"
-      [class.trend-chart-peak]="isPeakPoint(point)"
-    >
+    <tr *ngFor="let point of points; trackBy: trackPoint">
       <td>{{ formatDate(point.publicationDate) }}</td>
-      <td>
-        {{ point.displayScore | number: "1.0-0" }}
-        <span *ngIf="isPeakPoint(point)">最高点</span>
-      </td>
+      <td>{{ point.displayScore | number: "1.0-0" }}</td>
       <td>第 {{ point.rank }} 名</td>
       <td>{{ deltaText(point) }}</td>
     </tr>

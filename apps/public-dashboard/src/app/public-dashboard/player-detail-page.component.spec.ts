@@ -1,5 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 import { Subject } from 'rxjs';
@@ -116,10 +117,13 @@ describe('PlayerDetailPageComponent', () => {
       '2,058',
     );
     expect(page.querySelector('.player-profile-summary')?.textContent).toContain(
-      '赛季最高排位分',
+      '当前排位分',
     );
     expect(page.querySelector('.profile-rank-showcase')?.textContent).toContain(
-      '赛季最高段位',
+      '当前段位',
+    );
+    expect(page.querySelector('.profile-rank-showcase')?.textContent).toContain(
+      '赛季最高排位分',
     );
     expect(page.querySelector('.next-match-context')?.textContent).toContain(
       '68.6%',
@@ -172,7 +176,7 @@ describe('PlayerDetailPageComponent', () => {
     );
     expect(
       page.querySelector('.trend-chart-shell canvas')?.getAttribute('aria-label'),
-    ).toContain('最高点');
+    ).toContain('当前且为赛季最高：8月3日，2,058 排位分');
     expect(page.querySelector('.season-history-table')?.textContent).toContain(
       '赛季最高',
     );
@@ -192,6 +196,35 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('.proficiency-score')?.textContent).toMatch(
       /大师|精通|熟练|常用|初试/u,
     );
+  });
+
+  it('makes the current score primary while retaining the season record', () => {
+    spyOnProperty(component, 'performance', 'get').and.returnValue({
+      ...component.performance,
+      ratingScore: 940,
+      currentRatingScore: 939.3333333333334,
+    });
+    dashboardData.revision$.next('peak-current-test');
+    fixture.detectChanges();
+
+    const page = fixture.nativeElement as HTMLElement;
+    const showcase = page.querySelector('.profile-rank-showcase');
+    const current = showcase?.querySelector('.profile-rank-score');
+    const record = showcase?.querySelector('.profile-season-record');
+    const chart = fixture.debugElement.query(
+      By.directive(PlayerRatingTrendChartComponent),
+    ).componentInstance as PlayerRatingTrendChartComponent;
+
+    expect(component.profileRank?.skillTier.displayScore).toBe(2_818);
+    expect(current?.textContent).toContain('当前排位分');
+    expect(current?.textContent).toContain('2,818');
+    expect(record?.textContent).toContain('赛季最高排位分');
+    expect(record?.textContent).toContain('2,820');
+    expect(
+      page.querySelector('.profile-rank-progress')?.getAttribute('aria-valuenow'),
+    ).toBe('2818');
+    expect(chart.latestPointLabel).toBe('当前');
+    expect(chart.seasonPeakDisplayScore).toBe(2_820);
   });
 
   it('shows only distinct unfinished goals beyond the season peak', () => {
@@ -371,6 +404,7 @@ describe('PlayerDetailPageComponent', () => {
     expect(component.ratingMetricLabel).toBe('赛季最高排位分');
     expect(component.tierMetricLabel).toBe('赛季最高段位');
     expect(component.latestMetricLabel).toBe('当前段位与排位分');
+    expect(component.latestContextLabel).toBe('当前');
     expect(
       fixture.nativeElement.querySelector('.rating-forecast-section'),
     ).not.toBeNull();
@@ -379,6 +413,10 @@ describe('PlayerDetailPageComponent', () => {
     expect(component.ratingMetricLabel).toBe('赛季最高排位分');
     expect(component.tierMetricLabel).toBe('赛季最高段位');
     expect(component.latestMetricLabel).toBe('赛季末段位与排位分');
+    expect(component.latestContextLabel).toBe('赛季末');
+    expect(
+      fixture.nativeElement.querySelector('.profile-season-record'),
+    ).not.toBeNull();
     expect(
       fixture.nativeElement.querySelector('.rating-forecast-section'),
     ).toBeNull();
@@ -387,6 +425,10 @@ describe('PlayerDetailPageComponent', () => {
     expect(component.ratingMetricLabel).toBe('综合排位分');
     expect(component.tierMetricLabel).toBe('综合段位');
     expect(component.latestMetricLabel).toBe('综合段位与排位分');
+    expect(component.latestContextLabel).toBe('综合');
+    expect(
+      fixture.nativeElement.querySelector('.profile-season-record'),
+    ).toBeNull();
     expect(
       fixture.nativeElement.querySelector('.rating-forecast-section'),
     ).toBeNull();

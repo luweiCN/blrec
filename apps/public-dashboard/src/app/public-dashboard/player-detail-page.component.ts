@@ -185,7 +185,15 @@ export class PlayerDetailPageComponent implements OnDestroy {
   }
 
   get profileRank(): SkillTierProgress | null {
-    return skillTierProgressForRatingScore(this.performance.ratingScore);
+    return skillTierProgressForRatingScore(
+      this.performance.currentRatingScore ?? this.performance.ratingScore,
+    );
+  }
+
+  get seasonPeakDisplayScore(): number | null {
+    return this.activeSeason === 'all-time'
+      ? null
+      : displayScoreForRatingScore(this.performance.ratingScore);
   }
 
   get ratingForecast(): RatingForecast | null {
@@ -280,6 +288,14 @@ export class PlayerDetailPageComponent implements OnDestroy {
 
   get latestMetricLabel(): string {
     return this.ratingTerms.latestCombined;
+  }
+
+  get latestContextLabel(): string {
+    return this.activeSeason === 'all-time'
+      ? '综合'
+      : this.selectedSeason.current
+        ? '当前'
+        : '赛季末';
   }
 
   get kdaSummary(): PlayerKdaSummary | null {

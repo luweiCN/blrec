@@ -100,11 +100,12 @@
 .profile-rank-score {
   position: absolute;
   top: 0;
-  left: clamp(24px, var(--score-position), calc(100% - 24px));
-  color: var(--rank-accent);
-  font-size: var(--type-body);
-  font-weight: 760;
+  left: clamp(52px, var(--score-position), calc(100% - 52px));
+  color: var(--cyan);
+  font-size: var(--type-label);
+  font-weight: 780;
   line-height: 1;
+  white-space: nowrap;
   transform: translateX(-50%);
 }
 

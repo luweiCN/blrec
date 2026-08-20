@@ -7,7 +7,6 @@ import {
   Input,
   OnChanges,
   OnDestroy,
-  SimpleChanges,
   ViewChild,
 } from '@angular/core';
 import type {
@@ -23,26 +22,6 @@ export interface PlayerRatingTrendChartPoint {
   readonly displayScore: number;
   readonly displayDelta: number | null;
   readonly recorded: boolean;
-}
-
-export function highestTrendPointIndex(
-  points: readonly PlayerRatingTrendChartPoint[],
-): number {
-  let highestIndex = -1;
-  for (let index = 0; index < points.length; index += 1) {
-    const point = points[index];
-    const highest = points[highestIndex];
-    if (
-      highest === undefined ||
-      point.displayScore > highest.displayScore ||
-      (point.displayScore === highest.displayScore &&
-        point.recorded &&
-        !highest.recorded)
-    ) {
-      highestIndex = index;
-    }
-  }
-  return highestIndex;
 }
 
 interface ChartColors {
@@ -66,6 +45,8 @@ export class PlayerRatingTrendChartComponent
 {
   @Input() points: readonly PlayerRatingTrendChartPoint[] = [];
   @Input() ariaLabel = '玩家排位分趋势';
+  @Input() latestPointLabel = '当前';
+  @Input() seasonPeakDisplayScore: number | null = null;
 
   @ViewChild('chartCanvas')
   private chartCanvas?: ElementRef<HTMLCanvasElement>;
@@ -87,10 +68,8 @@ export class PlayerRatingTrendChartComponent
     this.scheduleRender();
   }
 
-  ngOnChanges(changes: SimpleChanges): void {
-    if (changes['points'] !== undefined) {
-      this.scheduleRender();
-    }
+  ngOnChanges(): void {
+    this.scheduleRender();
   }
 
   ngOnDestroy(): void {
@@ -104,23 +83,30 @@ export class PlayerRatingTrendChartComponent
     return `${Number(month)}月${Number(day)}日`;
   }
 
-  get peakPointIndex(): number {
-    return highestTrendPointIndex(this.points);
+  get latestPoint(): PlayerRatingTrendChartPoint | null {
+    return this.points[this.points.length - 1] ?? null;
   }
 
-  get peakPoint(): PlayerRatingTrendChartPoint | null {
-    return this.points[this.peakPointIndex] ?? null;
+  get latestMarkerLabel(): string {
+    return this.latestPoint?.displayScore === this.seasonPeakDisplayScore
+      ? `${this.latestPointLabel}且为赛季最高`
+      : this.latestPointLabel;
   }
 
   get chartAriaLabel(): string {
-    const peak = this.peakPoint;
-    return peak === null
-      ? this.ariaLabel
-      : `${this.ariaLabel}；最高点：${this.formatDate(peak.publicationDate)}，${peak.displayScore.toLocaleString('zh-CN')} 排位分`;
-  }
-
-  isPeakPoint(point: PlayerRatingTrendChartPoint): boolean {
-    return point === this.peakPoint;
+    const latest = this.latestPoint;
+    if (latest === null) {
+      return this.ariaLabel;
+    }
+    const peak = this.seasonPeakDisplayScore;
+    return (
+      `${this.ariaLabel}；${this.latestMarkerLabel}：` +
+      `${this.formatDate(latest.publicationDate)}，` +
+      `${latest.displayScore.toLocaleString('zh-CN')} 排位分` +
+      (peak === null || peak === latest.displayScore
+        ? ''
+        : `；赛季最高：${peak.toLocaleString('zh-CN')} 排位分`)
+    );
   }
 
   deltaText(point: PlayerRatingTrendChartPoint): string {
@@ -145,12 +131,12 @@ export class PlayerRatingTrendChartComponent
     if (!this.viewReady || this.destroyed) {
       return;
     }
-    const signature = this.points
+    const signature = `${this.latestPointLabel}:${this.seasonPeakDisplayScore}|${this.points
       .map(
         (point) =>
           `${point.publicationDate}:${point.displayScore}:${point.rank}:${point.displayDelta}:${point.recorded}`,
       )
-      .join('|');
+      .join('|')}`;
     if (signature === this.renderedSignature && this.chart !== null) {
       return;
     }
@@ -161,7 +147,10 @@ export class PlayerRatingTrendChartComponent
 
   private async renderChart(revision: number): Promise<void> {
     try {
-      const chartJs = await import('chart.js');
+      const [chartJs, markerModule] = await Promise.all([
+        import('chart.js'),
+        import('./player-rating-trend-chart-markers'),
+      ]);
       if (this.destroyed || revision !== this.renderRevision) {
         return;
       }
@@ -178,7 +167,17 @@ export class PlayerRatingTrendChartComponent
         return;
       }
       this.chart?.destroy();
-      this.chart = new chartJs.Chart(canvas, this.chartConfiguration());
+      const colors = this.chartColors();
+      const marker = markerModule.playerRatingScoreMarkerPlugin({
+        points: this.points,
+        latestLabel: this.latestMarkerLabel,
+        seasonPeakDisplayScore: this.seasonPeakDisplayScore,
+        colors,
+      });
+      this.chart = new chartJs.Chart(
+        canvas,
+        this.chartConfiguration(colors, marker),
+      );
       this.chartLoadFailed = false;
     } catch (_error: unknown) {
       if (!this.destroyed && revision === this.renderRevision) {
@@ -188,14 +187,16 @@ export class PlayerRatingTrendChartComponent
     }
   }
 
-  private chartConfiguration(): ChartConfiguration<'line', number[], string> {
-    const colors = this.chartColors();
+  private chartConfiguration(
+    colors: ChartColors,
+    marker: Plugin<'line'>,
+  ): ChartConfiguration<'line', number[], string> {
     const points = this.points;
     const lastIndex = points.length - 1;
-    const peakIndex = highestTrendPointIndex(points);
+    const seasonPeak = this.seasonPeakDisplayScore;
     return {
       type: 'line',
-      plugins: [this.peakMarkerPlugin(peakIndex, colors)],
+      plugins: [marker],
       data: {
         labels: points.map((point) => this.formatDate(point.publicationDate)),
         datasets: [
@@ -210,32 +211,16 @@ export class PlayerRatingTrendChartComponent
             fill: false,
             spanGaps: true,
             pointRadius: points.map((_point, index) =>
-              index === peakIndex ? 7 : index === lastIndex ? 6 : 4,
+              index === lastIndex ? 7 : 4,
             ),
             pointHoverRadius: points.map((_point, index) =>
-              index === peakIndex ? 9 : index === lastIndex ? 8 : 7,
+              index === lastIndex ? 9 : 7,
             ),
             pointHitRadius: 14,
             pointBorderWidth: 2,
-            pointBorderColor: points.map((_point, index) =>
-              index === peakIndex || index === lastIndex
-                ? colors.gold
-                : colors.cyan,
-            ),
+            pointBorderColor: colors.cyan,
             pointBackgroundColor: points.map((_point, index) =>
-              index === peakIndex || index === lastIndex
-                ? colors.gold
-                : colors.surface,
-            ),
-            pointHoverBorderColor: points.map((_point, index) =>
-              index === peakIndex || index === lastIndex
-                ? colors.gold
-                : colors.cyan,
-            ),
-            pointHoverBackgroundColor: points.map((_point, index) =>
-              index === peakIndex || index === lastIndex
-                ? colors.gold
-                : colors.cyan,
+              index === lastIndex ? colors.cyan : colors.surface,
             ),
           },
         ],
@@ -305,6 +290,13 @@ export class PlayerRatingTrendChartComponent
           y: {
             border: { display: false },
             grace: '12%',
+            suggestedMax:
+              seasonPeak === null
+                ? undefined
+                : Math.max(
+                    seasonPeak,
+                    ...points.map((point) => point.displayScore),
+                  ),
             grid: {
               color: colors.line,
               drawTicks: false,
@@ -319,66 +311,6 @@ export class PlayerRatingTrendChartComponent
             },
           },
         },
-      },
-    };
-  }
-
-  private peakMarkerPlugin(
-    peakIndex: number,
-    colors: ChartColors,
-  ): Plugin<'line'> {
-    return {
-      id: 'playerRatingPeakMarker',
-      afterDatasetsDraw: (chart) => {
-        const peak = this.points[peakIndex];
-        const element = chart.getDatasetMeta(0).data[peakIndex];
-        if (
-          peak === undefined ||
-          element === undefined ||
-          !('getCenterPoint' in element) ||
-          typeof element.getCenterPoint !== 'function'
-        ) {
-          return;
-        }
-
-        const { x, y } = element.getCenterPoint();
-        const { ctx, chartArea } = chart;
-        const label = `最高 ${peak.displayScore.toLocaleString('zh-CN')}`;
-        const labelHeight = 27;
-        const markerGap = 11;
-
-        ctx.save();
-        ctx.font = '700 12px system-ui, -apple-system, sans-serif';
-        const labelWidth = Math.min(
-          ctx.measureText(label).width + 20,
-          chartArea.width,
-        );
-        const labelX = Math.min(
-          Math.max(x - labelWidth / 2, chartArea.left),
-          chartArea.right - labelWidth,
-        );
-        const labelY = Math.max(2, y - labelHeight - markerGap);
-
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.lineTo(x, labelY + labelHeight);
-        ctx.strokeStyle = colors.gold;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.roundRect(labelX, labelY, labelWidth, labelHeight, 7);
-        ctx.fillStyle = colors.surface;
-        ctx.fill();
-        ctx.strokeStyle = colors.gold;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        ctx.fillStyle = colors.gold;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(label, labelX + labelWidth / 2, labelY + labelHeight / 2);
-        ctx.restore();
       },
     };
   }
