@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from labeler import db
 
@@ -98,6 +99,31 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         assert indexed['source_offset'] == 12_000
         assert indexed['has_boundary_confidence'] == 1
         assert indexed['has_high_confidence'] == 1
+
+    def test_unchanged_source_replay_skips_material_refresh(self) -> None:
+        frame_id = self.frame(2)
+        payload = {
+            'frame_id': frame_id,
+            'source_type': 'worker',
+            'source_id': 'worker-idempotent',
+            'suggestions': {'match_mode': {'label': '3v3', 'confidence': 0.91}},
+            'metadata': {'screen_type': 'gameplay_hud'},
+            'image_path': '/nas/candidates/idempotent.jpg',
+            'source_created_at': 123,
+        }
+        assert db.add_training_review_source(self.conn, **payload)
+
+        with mock.patch.object(
+            db,
+            'refresh_training_review_material_index',
+            wraps=db.refresh_training_review_material_index,
+        ) as refresh:
+            assert not db.add_training_review_source(self.conn, **payload)
+            refresh.assert_not_called()
+
+            changed = {**payload, 'metadata': {'screen_type': 'scoreboard'}}
+            assert not db.add_training_review_source(self.conn, **changed)
+            refresh.assert_called_once_with(self.conn, frame_id, commit=False)
 
     def test_human_correction_replaces_old_statistical_contribution(self) -> None:
         frame_id = self.frame(2)
@@ -454,6 +480,28 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
                 increment_attempt=True,
             )
         assert db.next_training_review_prefill_candidate(self.conn) is None
+
+    def test_autonomous_prefill_lazily_indexes_historical_pending_item(self) -> None:
+        frame_id = self.frame(53)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='worker-unindexed-prefill',
+        )
+        self.conn.execute(
+            'DELETE FROM training_review_material_index WHERE frame_id=?', (frame_id,)
+        )
+        self.conn.commit()
+
+        candidate = db.next_training_review_prefill_candidate(self.conn)
+
+        assert candidate is not None
+        assert candidate['frame_id'] == frame_id
+        assert candidate['prefill_status'] == 'pending'
+        assert self.conn.execute(
+            'SELECT 1 FROM training_review_material_index WHERE frame_id=?', (frame_id,)
+        ).fetchone()
 
     def test_filtered_page_falls_back_while_historical_index_is_incomplete(
         self,

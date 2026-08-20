@@ -3441,12 +3441,38 @@ def add_training_review_source(
     if not normalized_type or not normalized_id:
         raise ValueError('训练复核来源无效')
     normalized_suggestions = validate_training_suggestions(suggestions or {})
+    suggestions_json = json.dumps(
+        normalized_suggestions,
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+    )
+    metadata_json = json.dumps(
+        metadata or {}, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+    )
+    normalized_image_path = image_path[:500]
+    normalized_source_created_at = max(0, int(source_created_at))
     timestamp = now()
     existing = conn.execute(
-        'SELECT id FROM training_review_sources '
-        'WHERE source_type = ? AND source_id = ?',
+        'SELECT source.*,EXISTS('
+        'SELECT 1 FROM training_review_items item '
+        'WHERE item.frame_id=source.frame_id) AS has_item '
+        'FROM training_review_sources source '
+        'WHERE source.source_type = ? AND source.source_id = ?',
         (normalized_type, normalized_id),
     ).fetchone()
+    if existing is not None and all(
+        (
+            int(existing['frame_id']) == int(frame_id),
+            str(existing['image_path']) == normalized_image_path,
+            str(existing['suggestions_json']) == suggestions_json,
+            str(existing['metadata_json']) == metadata_json,
+            int(existing['source_created_at']) == normalized_source_created_at,
+            bool(existing['has_item']),
+        )
+    ):
+        conn.commit()
+        return False
     conn.execute(
         """
         INSERT INTO training_review_items
@@ -3474,20 +3500,10 @@ def add_training_review_source(
             int(frame_id),
             normalized_type,
             normalized_id,
-            image_path[:500],
-            json.dumps(
-                normalized_suggestions,
-                ensure_ascii=False,
-                separators=(',', ':'),
-                sort_keys=True,
-            ),
-            json.dumps(
-                metadata or {},
-                ensure_ascii=False,
-                separators=(',', ':'),
-                sort_keys=True,
-            ),
-            max(0, int(source_created_at)),
+            normalized_image_path,
+            suggestions_json,
+            metadata_json,
+            normalized_source_created_at,
             timestamp,
             timestamp,
         ),
@@ -4717,10 +4733,10 @@ _TRAINING_REVIEW_PREFILL_STAGES = {'core', 'hero', 'complete'}
 def next_training_review_prefill_candidate(
     conn: sqlite3.Connection, *, maximum_attempts: int = 3
 ) -> Optional[Dict[str, Any]]:
-    """返回下一张需要后台预打标的图；不在这里创建任务或改状态。"""
+    """返回下一张需要后台预打标的图，并按需补一条历史派生索引。"""
     if maximum_attempts < 1:
         raise ValueError('预打标最大尝试次数必须大于零')
-    row = conn.execute(
+    candidate_sql = (
         'SELECT material.* FROM training_review_material_index material '
         'JOIN training_review_items item ON item.frame_id=material.frame_id '
         "WHERE material.prefill_status IN ('pending','failed') "
@@ -4733,9 +4749,22 @@ def next_training_review_prefill_candidate(
         'CASE WHEN material.result_group_representative_frame_id='
         'material.frame_id THEN 0 ELSE 1 END,'
         'material.is_new DESC,material.source_created_at DESC,'
-        'material.source_offset DESC,material.frame_id DESC LIMIT 1',
-        (int(maximum_attempts),),
-    ).fetchone()
+        'material.source_offset DESC,material.frame_id DESC LIMIT 1'
+    )
+    parameters = (int(maximum_attempts),)
+    row = conn.execute(candidate_sql, parameters).fetchone()
+    if row is None:
+        missing = conn.execute(
+            'SELECT item.frame_id FROM training_review_items item '
+            'LEFT JOIN training_review_material_index material '
+            'ON material.frame_id=item.frame_id '
+            'WHERE material.frame_id IS NULL '
+            "AND item.review_status IN ('pending','partial') "
+            'ORDER BY item.frame_id DESC LIMIT 1'
+        ).fetchone()
+        if missing is not None:
+            refresh_training_review_material_index(conn, int(missing['frame_id']))
+            row = conn.execute(candidate_sql, parameters).fetchone()
     return None if row is None else dict(row)
 
 
