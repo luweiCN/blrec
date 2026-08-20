@@ -322,6 +322,46 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         assert second['indexed'] == 1
         assert second_totals == first_totals
 
+    def test_rebuild_commits_each_frame_even_when_progress_batch_is_large(self) -> None:
+        frame_ids = [self.frame(index) for index in (401, 402, 403)]
+        for frame_id in frame_ids:
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id=f'worker-short-transaction-{frame_id}',
+                suggestions={'match_mode': {'label': '3v3', 'confidence': 0.9}},
+                metadata={'screen_type': 'gameplay_hud'},
+            )
+
+        class CommitCountingConnection:
+            def __init__(self, connection):
+                self.connection = connection
+                self.commit_count = 0
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def commit(self):
+                self.commit_count += 1
+                return self.connection.commit()
+
+        connection = CommitCountingConnection(self.conn)
+        commit_counts = []
+        original_refresh = db.refresh_training_review_material_index
+
+        def record_refresh(conn, frame_id, *, commit=True):
+            commit_counts.append(conn.commit_count)
+            return original_refresh(conn, frame_id, commit=commit)
+
+        with mock.patch.object(
+            db, 'refresh_training_review_material_index', side_effect=record_refresh
+        ):
+            db.rebuild_training_review_material_index(connection, batch_size=500)
+
+        assert len(commit_counts) == len(frame_ids)
+        assert len(set(commit_counts)) == len(frame_ids)
+
     def test_rebuild_keeps_worker_result_group_across_separate_events(self) -> None:
         frame_ids = [self.frame(40), self.frame(41)]
         for offset, frame_id in enumerate(frame_ids):
