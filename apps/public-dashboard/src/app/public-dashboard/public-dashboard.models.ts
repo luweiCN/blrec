@@ -112,13 +112,18 @@ export interface RatingModelV6 {
   readonly version: 6;
 }
 
+export interface RatingModelV7 {
+  readonly version: 7;
+}
+
 export type RatingModel =
   | RatingModelV1
   | RatingModelV2
   | RatingModelV3
   | RatingModelV4
   | RatingModelV5
-  | RatingModelV6;
+  | RatingModelV6
+  | RatingModelV7;
 
 export interface HeroUsage {
   readonly name: string;

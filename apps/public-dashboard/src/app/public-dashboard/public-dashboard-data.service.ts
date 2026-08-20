@@ -283,7 +283,8 @@ function isRatingModel(value: unknown): value is RatingModel {
   if (
     value['version'] === 4 ||
     value['version'] === 5 ||
-    value['version'] === 6
+    value['version'] === 6 ||
+    value['version'] === 7
   ) {
     return true;
   }

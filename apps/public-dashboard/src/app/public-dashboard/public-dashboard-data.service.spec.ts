@@ -81,14 +81,14 @@ describe('DashboardDataService', () => {
     ]);
   });
 
-  it('accepts the next rating model before the API switches to it', async () => {
+  it('accepts rating model version 7 used by the API', async () => {
     environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
-    const snapshotWithV6 = {
+    const snapshotWithV7 = {
       ...TEST_DASHBOARD_SNAPSHOT,
-      ratingModel: { version: 6 },
+      ratingModel: { version: 7 },
     } as unknown as typeof TEST_DASHBOARD_SNAPSHOT;
     spyOn(window, 'fetch').and.returnValue(
-      Promise.resolve(jsonResponse(apiDocument(snapshotWithV6))),
+      Promise.resolve(jsonResponse(apiDocument(snapshotWithV7))),
     );
     const service = new DashboardDataService();
 
