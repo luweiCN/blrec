@@ -38,6 +38,7 @@ __all__ = (
     'DashboardExportResult',
     'build_dashboard_asset_source',
     'build_dashboard_api_source',
+    'build_dashboard_cache_source',
     'build_dashboard_runtime_source',
     'build_dashboard_snapshot',
     'build_dashboard_snapshot_from_records',
@@ -966,6 +967,57 @@ def build_dashboard_runtime_source(
         ),
         'players': runtime_players,
         'matches': runtime_matches,
+    }
+
+
+def build_dashboard_cache_source(
+    connection: sqlite3.Connection, *, now: Optional[datetime] = None
+) -> Mapping[str, Any]:
+    """Read the normalized incremental-cache source without building snapshots."""
+
+    connection.row_factory = sqlite3.Row
+    _validate_schema(connection)
+    generated_at = now or datetime.now(timezone.utc)
+    if generated_at.tzinfo is None:
+        raise ValueError('dashboard cache source time must include a timezone')
+    players, aliases = _player_metadata(connection)
+    live_rooms = _live_rooms_by_player(connection)
+    rows = _match_rows(connection)
+    lineups = _lineups_by_match(connection, rows)
+    publications = _publications_by_session(connection, rows)
+    publication_parts = _publication_parts(connection, publications)
+    runtime_matches = _public_matches(
+        rows, lineups, publications, publication_parts, include_owner_replays=True
+    )
+    rows_by_id = {int(row['match_id']): row for row in rows}
+    cache_matches = []
+    for match in runtime_matches:
+        value = dict(match)
+        source = rows_by_id[int(value['id'])]
+        value['statsEligible'] = bool(source['stats_eligible'])
+        cache_matches.append(value)
+    cache_players = []
+    for player_id, metadata in sorted(players.items()):
+        name = str(metadata['name'])
+        cache_players.append(
+            {
+                'id': player_id,
+                'name': name,
+                'initial': name[:1],
+                'roomLabel': _room_label(list(metadata['rooms'])),
+                'roomIds': list(metadata['rooms']),
+                'liveRooms': list(live_rooms.get(player_id, ())),
+                'aliases': list(aliases.get(player_id, ())),
+                'avatarUrl': None,
+                'publicVisible': bool(metadata.get('publicVisible', True)),
+            }
+        )
+    return {
+        'schemaVersion': 2,
+        'generatedAt': _utc_iso(generated_at),
+        'sourceLastMatchId': max((int(row['match_id']) for row in rows), default=0),
+        'players': cache_players,
+        'matches': cache_matches,
     }
 
 

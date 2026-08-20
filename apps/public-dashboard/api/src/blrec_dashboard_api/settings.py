@@ -40,8 +40,11 @@ class ApiSettings:
             raise ValueError('dashboard API source database URL must use PostgreSQL')
         if self.source_watch_seconds <= 0:
             raise ValueError('dashboard API source watch interval must be positive')
-        if self.repository_mode not in {'direct', 'postgres'}:
-            raise ValueError('dashboard API repository mode must be direct or postgres')
+        if self.repository_mode not in {'direct', 'postgres', 'incremental'}:
+            raise ValueError(
+                'dashboard API repository mode must be direct, postgres, '
+                'or incremental'
+            )
 
     @property
     def database_target(self) -> Path | str:

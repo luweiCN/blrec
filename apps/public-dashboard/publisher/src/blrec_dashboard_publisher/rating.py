@@ -34,7 +34,7 @@ NEW_PLAYER_DISPLAY_SCORE = 1000
 SEASON_RESET_ANCHOR_DISPLAY_SCORE = 1200
 SEASON_RESET_CARRYOVER_RATE = 0.5
 PROBABILITY_SCALE = 1800
-RATING_MODEL_VERSION = 6
+RATING_MODEL_VERSION = 7
 
 _NEUTRAL_ABILITY = 0.5
 _DISPLAY_SCORE_MULTIPLIER = 3
@@ -45,6 +45,7 @@ _RATING_GAP_OUTCOME_ADJUSTMENT_RATE = 0.02
 _MAXIMUM_WIN_BONUS = 18
 _MAXIMUM_WIN_PENALTY = 6
 _MAXIMUM_LOSS_PENALTY = 6
+_MAXIMUM_TIER_TEN_HIDDEN_BENEFIT = 1
 _STANDARD_MINIMUM_WIN_DELTA = 9
 _MINIMUM_LOSS_DELTA = 3
 _MAXIMUM_LOSS_DELTA = 18
@@ -195,8 +196,8 @@ def _tier_ten_display_deltas(visible_score: int) -> tuple[int, int]:
         )
     progress = visible_score - _TIER_TEN_GOLD_DISPLAY_SCORE
     return (
-        max(1, 3 - _round_display_adjustment(progress / 100)),
-        max(6, 12 - _round_display_adjustment(progress * 6 / 200)),
+        max(1, 2 - _round_display_adjustment(progress / 100)),
+        max(6, 10 - _round_display_adjustment(progress * 4 / 200)),
     )
 
 
@@ -208,13 +209,30 @@ def _internal_outcome_delta(
     *, result: str, hidden_score_before: float, visible_score: float
 ) -> float:
     visible_display_score = round(visible_score * _DISPLAY_SCORE_MULTIPLIER)
+    rating_gap = hidden_score_before - visible_display_score
     if visible_display_score >= _TIER_TEN_BRONZE_DISPLAY_SCORE:
         win_delta, loss_delta = _tier_ten_display_deltas(visible_display_score)
-        display_delta = win_delta if result == 'W' else -loss_delta
+        hidden_benefit = 0
+        if rating_gap > 0.0:
+            hidden_benefit = min(
+                _MAXIMUM_TIER_TEN_HIDDEN_BENEFIT,
+                _round_display_adjustment(
+                    rating_gap
+                    * (
+                        _RATING_GAP_WIN_BONUS_RATE
+                        if result == 'W'
+                        else _RATING_GAP_OUTCOME_ADJUSTMENT_RATE
+                    )
+                ),
+            )
+        display_delta = (
+            win_delta + hidden_benefit
+            if result == 'W'
+            else -(loss_delta - hidden_benefit)
+        )
         return display_delta / _DISPLAY_SCORE_MULTIPLIER
 
     win_delta, loss_delta = _baseline_display_deltas(visible_display_score)
-    rating_gap = hidden_score_before - visible_display_score
     if result == 'W':
         if rating_gap > 0.0:
             win_delta += min(

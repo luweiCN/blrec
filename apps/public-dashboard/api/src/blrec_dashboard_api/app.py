@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -25,7 +26,13 @@ from .assets import IdempotencyConflict, apply_asset_batch
 from .dashboard_cache import PostgresDashboardRepository
 from .database import database_session, initialize_database
 from .direct import DirectDashboardRepository
-from .models import AssetBatch, ReplayVisibilityCompletion, ReplayVisibilityFailure
+from .models import (
+    AssetBatch,
+    IngestBatch,
+    ReplayVisibilityCompletion,
+    ReplayVisibilityFailure,
+)
+from .normalized_repository import NormalizedDashboardRepository
 from .realtime import DashboardRealtimeBroker, event_response
 from .replay_visibility import (
     BVID_PATTERN,
@@ -39,6 +46,10 @@ LOGGER = logging.getLogger(__name__)
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,128}$')
 
 
+class CacheIngestStateError(RuntimeError):
+    pass
+
+
 def _rebuild_postgres_cache() -> int:
     subprocess.run(
         [sys.executable, '-m', 'blrec_dashboard_api.cache_builder'],
@@ -46,6 +57,36 @@ def _rebuild_postgres_cache() -> int:
         timeout=15 * 60,
     )
     return 0
+
+
+def _apply_incremental_cache_batch(
+    database_target: Any, *, idempotency_key: str, batch: IngestBatch
+) -> Mapping[str, Any]:
+    environment = os.environ.copy()
+    environment['DASHBOARD_CACHE_DATABASE_TARGET'] = str(database_target)
+    environment['DASHBOARD_CACHE_IDEMPOTENCY_KEY'] = idempotency_key
+    result = subprocess.run(
+        [sys.executable, '-m', 'blrec_dashboard_api.cache_ingest'],
+        input=batch.json(by_alias=True, exclude_none=False, separators=(',', ':')),
+        text=True,
+        capture_output=True,
+        timeout=15 * 60,
+        env=environment,
+        check=False,
+    )
+    if result.returncode == 3:
+        raise IdempotencyConflict(idempotency_key)
+    if result.returncode == 4:
+        raise CacheIngestStateError(idempotency_key)
+    if result.returncode != 0:
+        raise RuntimeError('dashboard cache ingest child failed')
+    value = json.loads(result.stdout)
+    if not isinstance(value, Mapping) or value.get('status') not in {
+        'applied',
+        'duplicate',
+    }:
+        raise RuntimeError('dashboard cache ingest child returned invalid output')
+    return value
 
 
 class _DashboardResponseCache:
@@ -78,7 +119,7 @@ def _authenticate_write(authorization: Optional[str], settings: ApiSettings) -> 
     ):
         raise HTTPException(
             status_code=401,
-            detail='invalid asset credentials',
+            detail='invalid ingest credentials',
             headers={'WWW-Authenticate': 'Bearer'},
         )
 
@@ -136,7 +177,9 @@ def create_app(
     settings: Optional[ApiSettings] = None,
     *,
     repository: Optional[
-        DirectDashboardRepository | PostgresDashboardRepository
+        DirectDashboardRepository
+        | PostgresDashboardRepository
+        | NormalizedDashboardRepository
     ] = None,
 ) -> FastAPI:
     active_settings = settings or ApiSettings.from_environment()
@@ -144,6 +187,11 @@ def create_app(
     initialize_database(auxiliary_target)
     if repository is not None:
         active_repository = repository
+    elif active_settings.repository_mode == 'incremental':
+        active_repository = NormalizedDashboardRepository(
+            source_target=active_settings.source_database_target,
+            auxiliary_target=auxiliary_target,
+        )
     elif active_settings.repository_mode == 'postgres':
         active_repository = PostgresDashboardRepository(
             source_target=active_settings.source_database_target,
@@ -256,6 +304,54 @@ def create_app(
                 detail='idempotency key was already used for another payload',
             ) from error
         await realtime_broker.publish('matches', {'batchId': str(result['batchId'])})
+        return result
+
+    @app.post('/v1/cache/batches')
+    async def cache_batch(
+        batch: IngestBatch,
+        authorization: Optional[str] = Header(default=None),
+        idempotency_key: Optional[str] = Header(
+            default=None, alias='X-Idempotency-Key'
+        ),
+    ) -> Mapping[str, Any]:
+        _authenticate_write(authorization, active_settings)
+        if idempotency_key is None or not _IDEMPOTENCY_KEY_PATTERN.fullmatch(
+            idempotency_key
+        ):
+            raise HTTPException(status_code=422, detail='invalid idempotency key')
+        try:
+            result = await run_in_threadpool(
+                partial(
+                    _apply_incremental_cache_batch,
+                    auxiliary_target,
+                    idempotency_key=idempotency_key,
+                    batch=batch,
+                )
+            )
+        except IdempotencyConflict as error:
+            raise HTTPException(
+                status_code=409,
+                detail='idempotency key was already used for another payload',
+            ) from error
+        except CacheIngestStateError as error:
+            raise HTTPException(
+                status_code=409, detail='dashboard cache publication state conflict'
+            ) from error
+        if bool(result.get('published')) and isinstance(
+            active_repository, NormalizedDashboardRepository
+        ):
+            changed = await run_in_threadpool(
+                partial(active_repository.refresh, force=True)
+            )
+            if changed:
+                public_dashboard_cache.replace(active_repository.dashboard_payload())
+                owner_dashboard_cache.replace(
+                    active_repository.dashboard_payload(owner_view=True)
+                )
+                revision = active_repository.dashboard_payload()[1]
+                await realtime_broker.publish('dashboard', {'revision': revision})
+                await realtime_broker.publish('live_rooms', {'revision': revision})
+                await realtime_broker.publish('matches', {'revision': revision})
         return result
 
     @app.post('/v1/replay-visibility/claim')

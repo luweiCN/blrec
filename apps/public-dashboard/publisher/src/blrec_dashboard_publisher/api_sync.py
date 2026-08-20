@@ -53,7 +53,8 @@ class DashboardApiClient:
         if not token:
             raise DashboardApiSyncError('排行榜 API 写入密钥不能为空')
         self._base_url = normalized_url
-        self._url = normalized_url + '/v1/assets/batches'
+        self._asset_url = normalized_url + '/v1/assets/batches'
+        self._cache_url = normalized_url + '/v1/cache/batches'
         self._token = token
         self._route_manager = route_manager
         self._affinity_key = 'dashboard-api-assets'
@@ -68,15 +69,35 @@ class DashboardApiClient:
         )
 
     def post_batch(self, idempotency_key: str, content: bytes) -> Mapping[str, Any]:
+        return self._post_batch(
+            self._asset_url,
+            idempotency_key=idempotency_key,
+            content=content,
+            timeout_seconds=120,
+        )
+
+    def post_cache_batch(
+        self, idempotency_key: str, content: bytes
+    ) -> Mapping[str, Any]:
+        return self._post_batch(
+            self._cache_url,
+            idempotency_key=idempotency_key,
+            content=content,
+            timeout_seconds=15 * 60,
+        )
+
+    def _post_batch(
+        self, url: str, *, idempotency_key: str, content: bytes, timeout_seconds: int
+    ) -> Mapping[str, Any]:
         response = self._session.post(
-            self._url,
+            url,
             data=content,
             headers={
                 'Authorization': 'Bearer {}'.format(self._token),
                 'Content-Type': 'application/json',
                 'X-Idempotency-Key': idempotency_key,
             },
-            timeout=(10, 120),
+            timeout=(10, timeout_seconds),
         )
         self._route_manager.traffic_meter.record(
             self.selection.interface_name, 'dashboard_publish', 'up', len(content)

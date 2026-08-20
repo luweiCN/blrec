@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Iterator, Mapping, Sequence, Union, overload
 
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 10
 DatabaseTarget = Union[Path, str]
 _POSTGRES_POOLS: dict[str, Any] = {}
 _POSTGRES_POOLS_LOCK = Lock()

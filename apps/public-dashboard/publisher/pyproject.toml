@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "blrec-dashboard-publisher"
 version = "0.1.0"
-description = "Result-image asset publisher for the BLREC public dashboard"
+description = "Incremental cache and result-image publisher for the BLREC dashboard"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

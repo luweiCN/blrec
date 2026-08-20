@@ -54,7 +54,7 @@ def test_thirteen_wins_and_two_losses_from_2160_gain_one_hundred_eighteen() -> N
 
 @pytest.mark.parametrize(
     ('visible_score', 'win_delta', 'loss_delta'),
-    ((2160, 12, -12), (2499, 5, -12), (2700, 3, -11), (2901, 2, -9)),
+    ((2160, 12, -12), (2499, 5, -12), (2700, 3, -11), (2901, 1, -8)),
 )
 def test_established_rating_uses_visible_tier_baselines(
     visible_score: int, win_delta: int, loss_delta: int
@@ -82,15 +82,15 @@ def test_established_rating_uses_visible_tier_baselines(
         (2600, 4, -12),
         (2700, 3, -11),
         (2799, 2, -10),
-        (2800, 3, -12),
-        (2900, 2, -9),
+        (2800, 2, -10),
+        (2900, 1, -8),
         (2999, 1, -6),
     ),
 )
-def test_tier_ten_deltas_follow_visible_progress_and_ignore_hidden_strength(
+def test_tier_ten_deltas_follow_visible_progress_without_positive_hidden_gap(
     visible_score: int, win_delta: int, loss_delta: int
 ) -> None:
-    for hidden_score in (1800, visible_score, 3000):
+    for hidden_score in (1800, visible_score):
         rating = VirtualMatchRating(
             ability=expected_win_probability(hidden_score),
             evidence=CARRYOVER_MATCH_CAP,
@@ -103,6 +103,44 @@ def test_tier_ten_deltas_follow_visible_progress_and_ignore_hidden_strength(
 
         assert display_score(win) - visible_score == win_delta
         assert display_score(loss) - visible_score == loss_delta
+
+
+@pytest.mark.parametrize(
+    ('hidden_score', 'win_delta', 'loss_delta'),
+    ((1800, 2, -10), (2800, 2, -10), (3000, 3, -9)),
+)
+def test_tier_ten_gold_has_only_a_small_positive_hidden_rating_benefit(
+    hidden_score: int, win_delta: int, loss_delta: int
+) -> None:
+    rating = VirtualMatchRating(
+        ability=expected_win_probability(hidden_score),
+        evidence=CARRYOVER_MATCH_CAP,
+        score=2800 / 3,
+        provisional=False,
+    )
+
+    win = _advance_rating(rating, 'W')
+    loss = _advance_rating(rating, 'L')
+
+    assert display_score(win) - 2800 == win_delta
+    assert display_score(loss) - 2800 == loss_delta
+
+
+def test_tier_ten_gold_promotion_does_not_improve_the_base_result() -> None:
+    def deltas(visible_score: int) -> tuple[int, int]:
+        rating = VirtualMatchRating(
+            ability=expected_win_probability(visible_score),
+            evidence=CARRYOVER_MATCH_CAP,
+            score=visible_score / 3,
+            provisional=False,
+        )
+        return (
+            display_score(_advance_rating(rating, 'W')) - visible_score,
+            display_score(_advance_rating(rating, 'L')) - visible_score,
+        )
+
+    assert deltas(2799) == (2, -10)
+    assert deltas(2800) == deltas(2799)
 
 
 @pytest.mark.parametrize(
@@ -313,9 +351,9 @@ def test_established_players_receive_a_soft_season_reset(
 
 @pytest.mark.parametrize(
     ('previous_score', 'minimum_matches', 'maximum_matches'),
-    ((2400, 25, 35), (2600, 75, 85), (2800, 205, 220)),
+    ((2400, 25, 35), (2600, 65, 75), (2800, 135, 150)),
 )
-def test_hidden_carryover_stops_accelerating_after_tier_ten(
+def test_hidden_carryover_keeps_a_bounded_tier_ten_benefit(
     previous_score: int, minimum_matches: int, maximum_matches: int
 ) -> None:
     results = ['L' if match % 10 == 5 else 'W' for match in range(1, 251)]

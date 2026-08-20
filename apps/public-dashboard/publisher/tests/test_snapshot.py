@@ -11,6 +11,7 @@ from blrec_dashboard_publisher.snapshot import (
     _season_for,
     build_dashboard_api_source,
     build_dashboard_asset_source,
+    build_dashboard_cache_source,
     build_dashboard_runtime_source,
     build_dashboard_snapshot,
     export_dashboard_files,
@@ -310,6 +311,9 @@ async def test_runtime_and_asset_sources_read_the_core_tables_directly(
         runtime = await database.read(
             lambda connection: build_dashboard_runtime_source(connection, now=now)
         )
+        cache = await database.read(
+            lambda connection: build_dashboard_cache_source(connection, now=now)
+        )
         assets = await database.read(
             lambda connection: build_dashboard_asset_source(connection, now=now)
         )
@@ -321,6 +325,9 @@ async def test_runtime_and_asset_sources_read_the_core_tables_directly(
         assert runtime['matches'][0]['duplicateOfMatchId'] == 1
         assert runtime['matches'][0]['duplicateReviewState'] == 'pending'
         assert runtime['matches'][1]['duplicateOfMatchId'] is None
+        assert [match['id'] for match in cache['matches']] == [2, 1]
+        assert cache['matches'][0]['statsEligible'] is False
+        assert cache['matches'][1]['statsEligible'] is True
         assert assets['matches'] == [
             {'id': 1, 'resultFramePath': '1/result.png'},
             {'id': 2, 'resultFramePath': '2/result.png'},
@@ -957,7 +964,7 @@ async def test_historical_backfill_recalculates_every_later_season(
             with_autumn, '2026-summer', 20
         )
         assert rating(with_autumn, '2026-summer', 10) != spring_strong
-        assert with_autumn['ratingModel'] == {'version': 6}
+        assert with_autumn['ratingModel'] == {'version': 7}
     finally:
         await database.close()
 

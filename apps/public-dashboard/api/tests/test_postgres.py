@@ -18,13 +18,33 @@ from blrec_dashboard_api.database import (
     initialize_database,
 )
 from blrec_dashboard_api.migrate_sqlite_to_postgres import migrate
-from blrec_dashboard_api.models import AssetBatch
+from blrec_dashboard_api.models import AssetBatch, IngestBatch
+from blrec_dashboard_api.normalized_repository import NormalizedDashboardRepository
+from blrec_dashboard_api.service import apply_ingest_batch
 
 _DATA_TABLES = (
+    'dashboard_audience_state',
     'dashboard_cache_state',
     'dashboard_cache_generations',
+    'dashboard_cache_match_heroes',
+    'dashboard_cache_match_search',
+    'dashboard_cache_matches',
+    'dashboard_cache_players',
     'dashboard_publication_standings',
     'dashboard_publications',
+    'dashboard_trend_publications',
+    'dashboard_state',
+    'rating_events',
+    'match_search',
+    'match_participants',
+    'match_teams',
+    'matches',
+    'player_live_rooms',
+    'player_aliases',
+    'player_rooms',
+    'players',
+    'removed_matches',
+    'ingestion_batches',
     'match_assets',
     'asset_batches',
     'replay_visibility_checks',
@@ -69,6 +89,19 @@ def test_deployment_backup_is_limited_to_public_schema() -> None:
 
     assert 'pg_dump --schema=public --format=custom' in script
     assert 'for _attempt in {1..120}; do' in script
+
+
+def test_ingest_batch_routes_allow_long_running_children() -> None:
+    config = (
+        Path(__file__).resolve().parents[1] / 'deploy' / 'vg-api.luwei.host.nginx.conf'
+    ).read_text(encoding='utf-8')
+
+    assert 'location ~ ^/v1/(assets|cache)/batches$' in config
+    write_location = config.split(
+        'location ~ ^/v1/(assets|cache)/batches$', maxsplit=1
+    )[1].split('}', maxsplit=1)[0]
+    assert 'proxy_read_timeout 1h;' in write_location
+    assert 'proxy_send_timeout 1h;' in write_location
 
 
 def _empty_postgres(database_url: str) -> None:
@@ -131,6 +164,75 @@ def _cache_state() -> SimpleNamespace:
     return SimpleNamespace(public=dataset, owner=dataset)
 
 
+def _ingest_team(role: str) -> dict[str, object]:
+    return {
+        'role': role,
+        'side': 'left' if role == 'ally' else 'right',
+        'color': 'teal' if role == 'ally' else 'orange',
+        'kills': 10 if role == 'ally' else 8,
+        'economy': 40500 if role == 'ally' else 33000,
+        'players': [
+            {
+                'slot': 1,
+                'name': '主播' if role == 'ally' else '对手',
+                'heroName': '剑圣' if role == 'ally' else '猫女',
+                'kills': 5,
+                'deaths': 2,
+                'assists': 7,
+                'economy': 13500,
+                'lastHits': 100,
+                'isRecordedPlayer': role == 'ally',
+            }
+        ],
+    }
+
+
+def _ingest_batch() -> IngestBatch:
+    return IngestBatch.parse_obj(
+        {
+            'schemaVersion': 2,
+            'sourceRevision': 21,
+            'publish': True,
+            'generatedAt': '2026-08-20T00:00:00Z',
+            'sourceLastMatchId': 1,
+            'players': [
+                {
+                    'id': 7,
+                    'name': '主播',
+                    'initial': '主',
+                    'roomLabel': '直播间 123456',
+                    'roomIds': [123456],
+                    'liveRooms': [],
+                    'aliases': ['Anchor'],
+                    'avatarUrl': None,
+                    'publicVisible': True,
+                }
+            ],
+            'matches': [
+                {
+                    'id': 1,
+                    'playerId': 7,
+                    'seasonKey': '2026-summer',
+                    'mode': '3v3',
+                    'playedAt': '2026-08-20T00:00:00Z',
+                    'durationSeconds': 900,
+                    'result': 'W',
+                    'streamTitle': '深夜排位',
+                    'analysisProvisional': False,
+                    'statsEligible': True,
+                    'duplicateOfMatchId': None,
+                    'duplicateReviewState': 'none',
+                    'ally': _ingest_team('ally'),
+                    'enemy': _ingest_team('enemy'),
+                    'replay': None,
+                    'replayAccess': 'public',
+                }
+            ],
+            'removedMatchIds': [],
+        }
+    )
+
+
 @pytest.mark.skipif(
     not os.environ.get('DASHBOARD_TEST_POSTGRES_URL'),
     reason='DASHBOARD_TEST_POSTGRES_URL is not configured',
@@ -191,6 +293,44 @@ def test_postgres_backend_streams_dashboard_cache_rows_with_copy() -> None:
         )['total']
         == 1
     )
+
+
+@pytest.mark.skipif(
+    not os.environ.get('DASHBOARD_TEST_POSTGRES_URL'),
+    reason='DASHBOARD_TEST_POSTGRES_URL is not configured',
+)
+def test_postgres_backend_applies_and_reads_incremental_cache() -> None:
+    database_url = os.environ['DASHBOARD_TEST_POSTGRES_URL']
+    if not urlsplit(database_url).path.lstrip('/').endswith('_test'):
+        raise AssertionError('PostgreSQL integration tests require a _test database')
+    _empty_postgres(database_url)
+
+    result = apply_ingest_batch(
+        database_url, idempotency_key='postgres-incremental-21', batch=_ingest_batch()
+    )
+    repository = NormalizedDashboardRepository(
+        source_target=database_url,
+        auxiliary_target=database_url,
+        revision_loader=lambda _target: 21,
+    )
+    repository.refresh(force=True)
+    listed = repository.list_matches(
+        page=1,
+        page_size=10,
+        season=None,
+        mode=None,
+        player_id=None,
+        query='zhubo',
+        heroes=('剑圣',),
+        rating_scope='all',
+        rating_season=None,
+        owner_view=True,
+    )
+
+    assert result['status'] == 'applied'
+    assert repository.dashboard_payload()[1] == '21'
+    assert listed['total'] == 1
+    assert listed['items'][0]['rating']['modelVersion'] == 7
 
 
 @pytest.mark.skipif(

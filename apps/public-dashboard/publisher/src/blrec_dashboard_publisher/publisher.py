@@ -19,6 +19,7 @@ from blrec.networking.manager import NetworkRouteManager, RouteSelection
 from blrec.networking.requests_session import RoutedRequestsSession
 
 from .api_sync import DashboardApiClient, sync_dashboard_api_once
+from .cache_sync import sync_dashboard_cache_once
 from .replay_visibility import (
     BilibiliReplayVisibilityChecker,
     ReplayVisibilityCheckError,
@@ -207,23 +208,40 @@ def _required_environment(name: str) -> str:
 def _publish(configuration: _WorkerConfiguration) -> None:
     network_settings = load_network_settings(configuration.settings)
     route_manager = NetworkRouteManager(lambda: network_settings)
-    store = OssDashboardStore(
-        endpoint=configuration.endpoint,
-        bucket_name=configuration.bucket,
-        prefix=configuration.prefix,
-        access_key_id=_required_environment('ALIBABA_CLOUD_ACCESS_KEY_ID'),
-        access_key_secret=_required_environment('ALIBABA_CLOUD_ACCESS_KEY_SECRET'),
-        security_token=os.environ.get('ALIBABA_CLOUD_SECURITY_TOKEN') or None,
-        route_manager=route_manager,
-    )
     api_client: Optional[DashboardApiClient] = None
+    store: Optional[OssDashboardStore] = None
     try:
         api_client = DashboardApiClient(
             base_url=configuration.api_url,
             token=_required_environment('DASHBOARD_API_TOKEN'),
             route_manager=route_manager,
         )
-        result = sync_dashboard_api_once(
+        cache_result = sync_dashboard_cache_once(
+            database_path=configuration.database,
+            state_directory=configuration.state,
+            post_batch=api_client.post_cache_batch,
+        )
+        LOGGER.info(
+            'cache_sync=%s batches=%s matches=%s removed=%s revision=%s '
+            'purpose=dashboard_publish interface=%s source_address=%s',
+            'synced' if cache_result.synced else 'current',
+            cache_result.batch_count,
+            cache_result.match_count,
+            cache_result.removed_match_count,
+            cache_result.source_revision,
+            api_client.selection.interface_name or 'system-default',
+            api_client.selection.source_address or 'system-default',
+        )
+        store = OssDashboardStore(
+            endpoint=configuration.endpoint,
+            bucket_name=configuration.bucket,
+            prefix=configuration.prefix,
+            access_key_id=_required_environment('ALIBABA_CLOUD_ACCESS_KEY_ID'),
+            access_key_secret=_required_environment('ALIBABA_CLOUD_ACCESS_KEY_SECRET'),
+            security_token=os.environ.get('ALIBABA_CLOUD_SECURITY_TOKEN') or None,
+            route_manager=route_manager,
+        )
+        asset_result = sync_dashboard_api_once(
             database_path=configuration.database,
             state_directory=configuration.state,
             result_frame_directory=configuration.result_frames,
@@ -234,18 +252,19 @@ def _publish(configuration: _WorkerConfiguration) -> None:
         LOGGER.info(
             'asset_sync=%s batch=%s images=%s removed=%s image_bytes=%s '
             'purpose=dashboard_publish interface=%s source_address=%s',
-            'synced' if result.synced else 'current',
-            result.batch_id or '-',
-            result.image_count,
-            result.removed_match_count,
-            result.uploaded_image_bytes,
+            'synced' if asset_result.synced else 'current',
+            asset_result.batch_id or '-',
+            asset_result.image_count,
+            asset_result.removed_match_count,
+            asset_result.uploaded_image_bytes,
             api_client.selection.interface_name or 'system-default',
             api_client.selection.source_address or 'system-default',
         )
     finally:
         if api_client is not None:
             api_client.close()
-        store.close()
+        if store is not None:
+            store.close()
 
 
 def _read_source_revision(database: Union[Path, str]) -> int:
@@ -279,7 +298,7 @@ def _worker_loop(configuration: _WorkerConfiguration) -> None:
                 continue
             if revision_changed:
                 LOGGER.info(
-                    '检测到图片数据源变更 revision=%s，等待 %s 秒合并写入',
+                    '检测到排行榜数据源变更 revision=%s，等待 %s 秒合并写入',
                     revision,
                     configuration.debounce_seconds,
                 )
@@ -287,16 +306,14 @@ def _worker_loop(configuration: _WorkerConfiguration) -> None:
                 revision = _read_source_revision(configuration.database)
             _publish(configuration)
         except Exception:
-            LOGGER.exception(
-                '排行榜图片发布失败，%s 秒后重试', configuration.retry_seconds
-            )
+            LOGGER.exception('排行榜发布失败，%s 秒后重试', configuration.retry_seconds)
             time.sleep(configuration.retry_seconds)
             continue
         first_run = False
         last_revision = revision
         last_success_at = time.monotonic()
         LOGGER.info(
-            '排行榜图片已校验 revision=%s；最长 %s 秒后再次完整校验',
+            '排行榜已校验 revision=%s；最长 %s 秒后再次完整校验',
             revision,
             configuration.reconcile_seconds,
         )
@@ -371,7 +388,7 @@ def _environment_int(name: str, default: int) -> int:
 
 
 def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='持续同步虚荣排行榜结算图片')
+    parser = argparse.ArgumentParser(description='持续同步虚荣排行榜缓存与结算图片')
     parser.add_argument('--once', action='store_true', help='只检查并同步一次')
     parser.add_argument(
         '--database',
@@ -451,7 +468,7 @@ def main() -> None:
         if value <= 0:
             raise DashboardPublishError('{}必须大于 0'.format(label))
     if not arguments.api_url:
-        raise DashboardPublishError('必须配置排行榜图片资产 API')
+        raise DashboardPublishError('必须配置排行榜写入 API')
     configuration = _WorkerConfiguration(
         database=(
             arguments.database

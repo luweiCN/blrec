@@ -21,10 +21,13 @@ from blrec_dashboard_api.database import (
     initialize_database,
 )
 from blrec_dashboard_api.direct import DirectDashboardRepository, _rating_trends
+from blrec_dashboard_api.models import IngestBatch
+from blrec_dashboard_api.normalized_repository import NormalizedDashboardRepository
 from blrec_dashboard_api.replay_visibility import (
     complete_replay_visibility,
     resolve_match_replays,
 )
+from blrec_dashboard_api.service import apply_ingest_batch
 from blrec_dashboard_api.settings import ApiSettings
 from blrec_dashboard_publisher.snapshot import build_dashboard_snapshot_from_records
 from fastapi.testclient import TestClient
@@ -282,6 +285,69 @@ def test_postgres_cache_repository_preserves_the_direct_repository_contract(
     public_query['owner_view'] = False
     assert cached.list_matches(**public_query) == direct.list_matches(**public_query)
     assert cached.get_match(
+        1, rating_scope='3v3', rating_season='2026-summer', owner_view=True
+    ) == direct.get_match(
+        1, rating_scope='3v3', rating_season='2026-summer', owner_view=True
+    )
+
+
+def test_incremental_repository_preserves_the_direct_repository_contract(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime_source()
+    direct, _loads = _repository(tmp_path, runtime=runtime)
+    matches = [dict(value, statsEligible=True) for value in runtime['matches']]
+    apply_ingest_batch(
+        tmp_path / 'public.sqlite3',
+        idempotency_key='incremental-parity-1',
+        batch=IngestBatch.parse_obj(
+            {
+                'schemaVersion': 2,
+                'sourceRevision': 1,
+                'publish': True,
+                'generatedAt': runtime['snapshot']['generatedAt'],
+                'sourceLastMatchId': runtime['snapshot']['sourceLastMatchId'],
+                'players': runtime['players'],
+                'matches': matches,
+                'removedMatchIds': [],
+            }
+        ),
+    )
+    incremental = NormalizedDashboardRepository(
+        source_target=tmp_path / 'unused.sqlite3',
+        auxiliary_target=tmp_path / 'public.sqlite3',
+        revision_loader=lambda _target: 1,
+    )
+    incremental.refresh(force=True)
+
+    assert incremental.dashboard_payload() == direct.dashboard_payload()
+    assert incremental.dashboard_payload(owner_view=True) == direct.dashboard_payload(
+        owner_view=True
+    )
+    assert incremental.live_rooms() == direct.live_rooms()
+    assert incremental.match_summary(
+        season=None, mode=None, player_id=None
+    ) == direct.match_summary(season=None, mode=None, player_id=None)
+
+    query = {
+        'page': 1,
+        'page_size': 10,
+        'season': '2026-summer',
+        'mode': '3v3',
+        'player_id': 7,
+        'query': 'zhuboshenye',
+        'heroes': ('剑圣', '猫女'),
+        'rating_scope': '3v3',
+        'rating_season': '2026-summer',
+        'owner_view': True,
+    }
+    assert incremental.list_matches(**query) == direct.list_matches(**query)
+    public_query = dict(query)
+    public_query['owner_view'] = False
+    assert incremental.list_matches(**public_query) == direct.list_matches(
+        **public_query
+    )
+    assert incremental.get_match(
         1, rating_scope='3v3', rating_season='2026-summer', owner_view=True
     ) == direct.get_match(
         1, rating_scope='3v3', rating_season='2026-summer', owner_view=True
