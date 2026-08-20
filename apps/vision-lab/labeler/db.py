@@ -3764,10 +3764,10 @@ def _calculate_training_review_result_groups(
 
 
 def training_review_result_groups(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection, *, allow_partial_index: bool = False
 ) -> Dict[int, Dict[str, Any]]:
     """优先读取已回填的代表图索引；旧库回填前保留兼容计算。"""
-    if training_review_material_index_complete(conn):
+    if allow_partial_index or training_review_material_index_complete(conn):
         rows = conn.execute(
             'SELECT frame_id,result_group_representative_frame_id,'
             'result_group_size FROM training_review_material_index '
@@ -6764,8 +6764,8 @@ def training_review_page(
             ),
             int(stats['remaining_groups']),
         )
-    if training_review_material_index_complete(
-        conn
+    if (
+        prefill_ready_only or training_review_material_index_complete(conn)
     ) and status in _TRAINING_REVIEW_STATUSES | {'all', 'needs_review'}:
         frame_ids, total = _training_review_indexed_page_frame_ids(
             conn,

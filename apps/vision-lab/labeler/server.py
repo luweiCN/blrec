@@ -156,8 +156,6 @@ _training_review_cache: Dict[str, Any] = {
     'groups_expires_at': 0.0,
     'stats': None,
     'stats_expires_at': 0.0,
-    'material_suggestions': None,
-    'material_suggestions_expires_at': 0.0,
     'default_queue': None,
     'default_queue_expires_at': 0.0,
 }
@@ -190,9 +188,13 @@ def _single_training_review_item(conn: Any, frame_id: int) -> Optional[Dict[str,
     )
 
 
-def _cached_training_review_groups(conn: Any) -> Dict[int, Dict[str, Any]]:
-    if db.training_review_material_index_complete(conn):
-        return db.training_review_result_groups(conn)
+def _cached_training_review_groups(
+    conn: Any, *, allow_partial_index: bool = False
+) -> Dict[int, Dict[str, Any]]:
+    if allow_partial_index or db.training_review_material_index_complete(conn):
+        return db.training_review_result_groups(
+            conn, allow_partial_index=allow_partial_index
+        )
     now = time.monotonic()
     with _training_review_cache_lock:
         value = _training_review_cache['groups']
@@ -232,40 +234,9 @@ def _cached_training_review_stats(conn: Any) -> Dict[str, Any]:
 
 
 def _cached_training_review_material_suggestions(conn: Any) -> List[Dict[str, Any]]:
-    if db.training_review_material_index_complete(conn):
-        return db.training_review_material_suggestions(
-            conn, hero_catalog=hero_review.hero_catalog()
-        )
-    now = time.monotonic()
-    with _training_review_cache_lock:
-        value = _training_review_cache['material_suggestions']
-        if (
-            value is not None
-            and now < _training_review_cache['material_suggestions_expires_at']
-        ):
-            return value
-    with _training_review_stats_compute_lock:
-        now = time.monotonic()
-        with _training_review_cache_lock:
-            value = _training_review_cache['material_suggestions']
-            if (
-                value is not None
-                and now < _training_review_cache['material_suggestions_expires_at']
-            ):
-                return value
-        groups = _cached_training_review_groups(conn)
-        value = db.training_review_stats(
-            conn,
-            result_groups=groups,
-            include_material_suggestions=True,
-            hero_catalog=hero_review.hero_catalog(),
-        )['material_suggestions']
-        with _training_review_cache_lock:
-            _training_review_cache['material_suggestions'] = value
-            _training_review_cache['material_suggestions_expires_at'] = (
-                time.monotonic() + _TRAINING_REVIEW_CACHE_SECONDS
-            )
-            return value
+    return db.training_review_material_suggestions(
+        conn, hero_catalog=hero_review.hero_catalog()
+    )
 
 
 def _cached_default_training_review_queue(
@@ -310,11 +281,9 @@ def _invalidate_training_review_cache() -> None:
     with _training_review_cache_lock:
         _training_review_cache['groups'] = None
         _training_review_cache['stats'] = None
-        _training_review_cache['material_suggestions'] = None
         _training_review_cache['default_queue'] = None
         _training_review_cache['groups_expires_at'] = 0.0
         _training_review_cache['stats_expires_at'] = 0.0
-        _training_review_cache['material_suggestions_expires_at'] = 0.0
         _training_review_cache['default_queue_expires_at'] = 0.0
 
 
@@ -327,8 +296,6 @@ def _mark_training_review_saved(frame_id: int) -> None:
             )
         _training_review_cache['stats'] = None
         _training_review_cache['stats_expires_at'] = 0.0
-        _training_review_cache['material_suggestions'] = None
-        _training_review_cache['material_suggestions_expires_at'] = 0.0
 
 
 def _nas() -> NasClient:
@@ -1453,10 +1420,8 @@ def api_training_review_items(
                     )
                 )
                 if default_queue:
-                    with _training_review_cache_lock:
-                        cached_groups = _training_review_cache['groups']
-                    result_groups = (
-                        cached_groups if isinstance(cached_groups, dict) else {}
+                    result_groups = _cached_training_review_groups(
+                        conn, allow_partial_index=True
                     )
                     frame_ids = _cached_default_training_review_queue(
                         conn, result_groups
@@ -1469,7 +1434,9 @@ def api_training_review_items(
                     )
                     filtered_total = len(frame_ids)
                 else:
-                    result_groups = _cached_training_review_groups(conn)
+                    result_groups = _cached_training_review_groups(
+                        conn, allow_partial_index=True
+                    )
                     items, filtered_total = db.training_review_page(
                         conn,
                         status=status,

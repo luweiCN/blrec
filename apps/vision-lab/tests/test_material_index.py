@@ -577,6 +577,93 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         assert total == 1
         assert [item['frame_id'] for item in page] == [frame_id]
 
+    def test_ready_only_page_uses_partial_index_during_historical_backfill(
+        self,
+    ) -> None:
+        ready = self.frame(7)
+        missing = self.frame(8)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=ready,
+            source_type='worker',
+            source_id='worker-ready-partial-index',
+            suggestions={'match_mode': {'label': '5v5', 'confidence': 0.9}},
+            metadata={'screen_type': 'scoreboard'},
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=ready,
+            source_type='new_model_prefill',
+            source_id='prefill-ready-partial-index',
+            suggestions={'match_mode': {'label': '5v5', 'confidence': 0.9}},
+            metadata={'screen_type': 'scoreboard'},
+        )
+        db.update_training_review_prefill_state(
+            self.conn, frame_id=ready, status='ready', stage='complete'
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=missing,
+            source_type='worker',
+            source_id='worker-missing-partial-index',
+            metadata={'screen_type': 'scoreboard'},
+        )
+        self.conn.execute(
+            'DELETE FROM training_review_material_index WHERE frame_id=?', (missing,)
+        )
+        self.conn.commit()
+
+        with mock.patch.object(
+            db,
+            '_training_review_visible_frame_ids',
+            side_effect=AssertionError('已预填队列不应退回全量素材扫描'),
+        ):
+            page, total = db.training_review_page(
+                self.conn,
+                status='needs_review',
+                source_scope='new',
+                source_type='new_model_prefill',
+                scene='scoreboard',
+                match_mode='5v5',
+                prefill_ready_only=True,
+                limit=10,
+                result_groups={},
+            )
+
+        assert total == 1
+        assert [item['frame_id'] for item in page] == [ready]
+
+    def test_prefill_page_reads_result_groups_from_partial_index(self) -> None:
+        indexed = self.frame(9)
+        missing = self.frame(10)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=indexed,
+            source_type='worker',
+            source_id='worker-indexed-result-group',
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=missing,
+            source_type='worker',
+            source_id='worker-missing-result-group',
+        )
+        self.conn.execute(
+            'DELETE FROM training_review_material_index WHERE frame_id=?', (missing,)
+        )
+        self.conn.commit()
+
+        with mock.patch.object(
+            db,
+            '_calculate_training_review_result_groups',
+            side_effect=AssertionError('预填页面不应重算全部历史结算分组'),
+        ):
+            groups = db.training_review_result_groups(
+                self.conn, allow_partial_index=True
+            )
+
+        assert groups == {}
+
     def test_hero_filter_finds_hud_from_same_match_when_current_frame_missed(self):
         hud = self.frame(100)
         direct_hud = self.frame(110)

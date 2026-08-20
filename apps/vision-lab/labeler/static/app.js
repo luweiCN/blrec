@@ -63,9 +63,11 @@ const candidatePreparationRequests = new Map();
 const CANDIDATE_READY_TARGET = 24;
 const CANDIDATE_PAGE_SIZE = 50;
 const CANDIDATE_REFILL_LOW_WATER = CANDIDATE_READY_TARGET;
+const CANDIDATE_DEFAULT_SOURCE_TYPE = 'new_model_prefill';
 let candidateReviewRefillPromise = null;
 let candidatePreparationRunnerPromise = null;
 let candidateReviewLoadToken = 0;
+let candidateReviewAbortController = null;
 let modelTestRuns = [];
 let modelTestSamples = [];
 let modelTestIndex = 0;
@@ -319,6 +321,10 @@ function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true)
   );
   $('#candidate-status-filter').value = selected;
   const historical = candidateSourceScope === 'legacy';
+  const sourceType = $('#candidate-source-type-filter');
+  if (sourceType) {
+    sourceType.value = historical ? '' : CANDIDATE_DEFAULT_SOURCE_TYPE;
+  }
   $('#candidate-page-title').textContent = historical
     ? '历史人工数据' : 'Worker 待复核';
   $('#candidate-queue-metrics').classList.toggle('hidden', historical);
@@ -2483,7 +2489,7 @@ function applyCandidateMaterialSuggestion(suggestion) {
   const filters = suggestion.filters || {};
   setCandidateSourceScope(
     suggestion.source_scope || 'new', filters.status || 'needs_review', true);
-  $('#candidate-source-type-filter').value = '';
+  $('#candidate-source-type-filter').value = CANDIDATE_DEFAULT_SOURCE_TYPE;
   $('#candidate-scene-filter').value = filters.scene || '';
   $('#candidate-mode-filter').value = filters.match_mode || '';
   $('#candidate-confidence-filter').value = '';
@@ -3035,11 +3041,19 @@ async function loadCandidateReview() {
   const status = $('#candidate-status-filter').value;
   const sourceScope = candidateSourceScope;
   const loadToken = ++candidateReviewLoadToken;
+  if (candidateReviewAbortController) candidateReviewAbortController.abort();
+  const controller = new AbortController();
+  candidateReviewAbortController = controller;
+  const filterState = $('#candidate-filter-state');
+  filterState.textContent = '正在筛选素材…';
+  filterState.classList.add('loading');
   candidateReviewStats = {};
   renderCandidateMaterialSuggestionButton();
   void loadCandidateReviewStats(status, sourceScope);
   try {
-    const data = await api(candidateReviewQuery(status));
+    const data = await api(candidateReviewQuery(status), {
+      signal: controller.signal,
+    });
     if (loadToken !== candidateReviewLoadToken ||
         sourceScope !== candidateSourceScope ||
         status !== $('#candidate-status-filter').value) return;
@@ -3056,8 +3070,16 @@ async function loadCandidateReview() {
     candidateQueue = data.items || [];
     candidateIndex = 0;
     renderCandidateItem();
+    filterState.textContent = `筛选完成 · 共 ${candidateFilteredTotal} 张`;
   } catch (error) {
+    if (error.name === 'AbortError') return;
     $('#candidate-save-state').textContent = '加载失败：' + error.message;
+    filterState.textContent = '筛选失败：' + error.message;
+  } finally {
+    if (candidateReviewAbortController === controller) {
+      candidateReviewAbortController = null;
+      filterState.classList.remove('loading');
+    }
   }
 }
 
@@ -3306,6 +3328,9 @@ function bindCandidateReview() {
       '#candidate-mode-filter', '#candidate-confidence-filter',
       '#candidate-streamer-filter',
     ].forEach((selector) => { $(selector).value = ''; });
+    if (candidateSourceScope === 'new') {
+      $('#candidate-source-type-filter').value = CANDIDATE_DEFAULT_SOURCE_TYPE;
+    }
     candidateHeroFilters = new Set();
     $('#candidate-hero-filter-search').value = '';
     $('#candidate-hero-filter-summary').textContent = '全部英雄';

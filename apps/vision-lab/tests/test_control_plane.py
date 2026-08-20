@@ -41,6 +41,7 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'candidate-hero-filter-options' in html
     assert 'btn-candidate-material-suggestions' in html
     assert 'candidate-material-dialog' in html
+    assert 'id="candidate-filter-state"' in html
     assert 'candidate-worker-total' in html
     assert 'candidate-prefill-ready' in html
     assert 'candidate-ready-for-review' in html
@@ -87,6 +88,31 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'requestCandidateModelPrefill(item);' not in script
     assert 'function applyCandidateMaterialSuggestion(suggestion)' in script
     assert 'renderCandidateMaterialSuggestions();' in script
+    assert "const CANDIDATE_DEFAULT_SOURCE_TYPE = 'new_model_prefill';" in script
+    assert 'new AbortController()' in script
+    assert 'signal: controller.signal' in script
+
+
+def test_material_suggestions_never_fall_back_to_full_scan(monkeypatch) -> None:
+    server._invalidate_training_review_cache()
+    conn = mock.Mock()
+    indexed = [{'kind': 'scene_mode', 'scene': 'gameplay_hud'}]
+    monkeypatch.setattr(
+        db, 'training_review_material_index_complete', mock.Mock(return_value=False)
+    )
+    incremental = mock.Mock(return_value=indexed)
+    monkeypatch.setattr(db, 'training_review_material_suggestions', incremental)
+    monkeypatch.setattr(
+        db,
+        'training_review_stats',
+        mock.Mock(side_effect=AssertionError('素材建议不应退回全量统计')),
+    )
+    monkeypatch.setattr(
+        server, '_cached_training_review_groups', mock.Mock(return_value={})
+    )
+
+    assert server._cached_training_review_material_suggestions(conn) == indexed
+    incremental.assert_called_once()
 
 
 def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
