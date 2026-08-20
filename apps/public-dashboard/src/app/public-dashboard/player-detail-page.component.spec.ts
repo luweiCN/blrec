@@ -98,6 +98,9 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('.profile-rank-showcase')?.textContent).toContain(
       '2,058',
     );
+    expect(page.querySelector('.player-profile-summary')?.textContent).toContain(
+      '赛季最高分',
+    );
     expect(page.querySelector('.next-match-context')?.textContent).toContain(
       '68.6%',
     );
@@ -157,6 +160,98 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('.proficiency-score')?.textContent).toMatch(
       /大师|精通|熟练|常用|初试/u,
     );
+  });
+
+  it('shows only distinct unfinished goals beyond the season peak', () => {
+    const goal = (targetDisplayScore: number) => ({
+      targetDisplayScore,
+      allWinMatches: 10,
+      currentWinRateMatches: 20,
+    });
+    const bronzePerformance = {
+      matches: 100,
+      wins: 70,
+      topHero: 'Caine',
+      ratingScore: 833,
+      currentRatingScore: 800,
+      provisional: false,
+      ratingForecast: {
+        nextWinScore: 802,
+        nextLossScore: 796,
+        nextDivision: goal(2600),
+        nextTier: null,
+        ultimate: goal(2800),
+      },
+    } as unknown as typeof component.performance;
+
+    const cases: readonly {
+      readonly performance: typeof component.performance;
+      readonly currentDisplayScore: number;
+      readonly targets: readonly number[];
+    }[] = [
+      {
+        performance: bronzePerformance,
+        currentDisplayScore: 2400,
+        targets: [2600, 2800],
+      },
+      {
+        performance: {
+          ...bronzePerformance,
+          ratingScore: 2755 / 3,
+          currentRatingScore: 900,
+          ratingForecast: {
+            nextWinScore: 902,
+            nextLossScore: 896,
+            nextDivision: goal(2800),
+            nextTier: null,
+            ultimate: goal(2800),
+          },
+        } as unknown as typeof component.performance,
+        currentDisplayScore: 2700,
+        targets: [2800],
+      },
+      {
+        performance: {
+          ...bronzePerformance,
+          ratingScore: 940,
+          currentRatingScore: 900,
+          ratingForecast: {
+            nextWinScore: 902,
+            nextLossScore: 896,
+            nextDivision: null,
+            nextTier: null,
+            ultimate: goal(2800),
+          },
+        } as unknown as typeof component.performance,
+        currentDisplayScore: 2700,
+        targets: [],
+      },
+    ];
+
+    for (const value of cases) {
+      const caseFixture = TestBed.createComponent(PlayerDetailPageComponent);
+      const caseComponent = caseFixture.componentInstance;
+      spyOnProperty(caseComponent, 'performance', 'get').and.returnValue(
+        value.performance,
+      );
+      caseFixture.detectChanges();
+
+      expect(caseComponent.currentDisplayScore).toBe(value.currentDisplayScore);
+      expect(
+        caseComponent.promotionGoals.map(
+          (item) => item.forecast.targetDisplayScore,
+        ),
+      ).toEqual(value.targets);
+      expect(
+        caseFixture.nativeElement.querySelectorAll('.promotion-goal-card')
+          .length,
+      ).toBe(value.targets.length);
+      expect(
+        caseFixture.nativeElement.querySelector('.promotion-goal-grid') ===
+          null,
+      ).toBe(value.targets.length === 0);
+      caseFixture.destroy();
+    }
   });
 
   it('follows the persisted global mode', () => {

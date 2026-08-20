@@ -48,7 +48,7 @@
         (activeSeasonChange)="selectSeason($event)"
       ></app-leaderboard-filters>
 
-      <section class="profile-summary player-profile-summary" aria-label="玩家当前数据">
+      <section class="profile-summary player-profile-summary" aria-label="玩家所选榜单数据">
         <div class="profile-context">
           <span>{{ selectedSeason.shortLabel }}</span>
           <strong>{{ modeLabel() }}</strong>
@@ -56,7 +56,7 @@
         </div>
         <dl>
           <div>
-            <dt>当前排名</dt>
+            <dt>{{ rankMetricLabel }}</dt>
             <dd class="profile-rank-value">
               <span>{{ rank === null ? "未入榜" : "#" + rank }}</span>
               <small
@@ -69,7 +69,7 @@
             </dd>
           </div>
           <div>
-            <dt>排位分</dt>
+            <dt>{{ ratingMetricLabel }}</dt>
             <dd>{{ displayScore(performance.ratingScore) | number: "1.0-0" }}</dd>
           </div>
           <div>
@@ -99,7 +99,7 @@
 
       <aside
         class="profile-rank-showcase"
-        [attr.aria-label]="profile.name + '当前排位等级'"
+        [attr.aria-label]="profile.name + tierMetricLabel"
       >
         <ng-container *ngIf="profileRank as rank; else noProfileRank">
           <div class="profile-rank-art">
@@ -112,7 +112,7 @@
             />
             <div class="profile-rank-title">
               <span>
-                {{ rank.skillTier.tier }} 段 · 排位等级
+                {{ rank.skillTier.tier }} 段 · {{ tierMetricLabel }}
                 <em *ngIf="performance.provisional">定位中</em>
               </span>
               <strong>
@@ -173,7 +173,7 @@
           </div>
         </ng-container>
         <ng-template #noProfileRank>
-          <p class="profile-rank-unavailable">当前模式暂无排位等级</p>
+          <p class="profile-rank-unavailable">所选榜单当前模式暂无排位等级</p>
         </ng-template>
       </aside>
     </div>
@@ -226,66 +226,54 @@
         </dl>
       </div>
 
-      <div class="promotion-goal-grid">
+      <div *ngIf="promotionGoals.length > 0" class="promotion-goal-grid">
         <article
           *ngFor="let goal of promotionGoals; trackBy: trackPromotionGoal"
           class="promotion-goal-card"
-          [class.complete]="goal.kind === 'goal' && goal.remainingScore === 0"
         >
           <header>
             <span>{{ goal.title }}</span>
-            <small *ngIf="goal.kind === 'goal'">
+            <small>
               目标线 {{ goal.forecast.targetDisplayScore | number: "1.0-0" }}
             </small>
           </header>
 
-          <ng-container *ngIf="goal.kind === 'goal'; else maximumGoal">
-            <div class="promotion-goal-tier">
-              <strong>
-                {{ goal.skillTier.tier }} 段 · {{ goal.skillTier.divisionLabel }}
-              </strong>
-              <span>{{ goal.skillTier.name }}</span>
+          <div class="promotion-goal-tier">
+            <strong>
+              {{ goal.skillTier.tier }} 段 · {{ goal.skillTier.divisionLabel }}
+            </strong>
+            <span>{{ goal.skillTier.name }}</span>
+          </div>
+
+          <p class="promotion-goal-gap">
+            还差
+            <strong>{{ goal.remainingScore | number: "1.0-0" }}</strong>
+            分
+          </p>
+
+          <dl class="promotion-match-estimates">
+            <div>
+              <dt>保持全胜</dt>
+              <dd>
+                最快
+                <strong>{{ goal.forecast.allWinMatches | number: "1.0-0" }}</strong>
+                局
+              </dd>
             </div>
-
-            <p *ngIf="goal.remainingScore > 0; else completedGoal" class="promotion-goal-gap">
-              还差
-              <strong>{{ goal.remainingScore | number: "1.0-0" }}</strong>
-              分
-            </p>
-            <ng-template #completedGoal>
-              <p class="promotion-goal-complete">已达成</p>
-            </ng-template>
-
-            <dl *ngIf="goal.remainingScore > 0" class="promotion-match-estimates">
-              <div>
-                <dt>保持全胜</dt>
-                <dd>
-                  最快
-                  <strong>{{ goal.forecast.allWinMatches | number: "1.0-0" }}</strong>
-                  局
-                </dd>
-              </div>
-              <div>
-                <dt>保持当前胜率</dt>
-                <dd *ngIf="goal.forecast.currentWinRateMatches !== null; else difficultGoal">
-                  约
-                  <strong>
-                    {{ goal.forecast.currentWinRateMatches | number: "1.0-0" }}
-                  </strong>
-                  局
-                </dd>
-                <ng-template #difficultGoal>
-                  <dd class="difficult">暂难达到</dd>
-                </ng-template>
-              </div>
-            </dl>
-          </ng-container>
-
-          <ng-template #maximumGoal>
-            <p class="promotion-goal-maximum">
-              {{ maximumGoalMessage(goal) }}
-            </p>
-          </ng-template>
+            <div>
+              <dt>保持当前胜率</dt>
+              <dd *ngIf="goal.forecast.currentWinRateMatches !== null; else difficultGoal">
+                约
+                <strong>
+                  {{ goal.forecast.currentWinRateMatches | number: "1.0-0" }}
+                </strong>
+                局
+              </dd>
+              <ng-template #difficultGoal>
+                <dd class="difficult">暂难达到</dd>
+              </ng-template>
+            </div>
+          </dl>
         </article>
       </div>
 

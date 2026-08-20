@@ -229,18 +229,24 @@ function isPerformance(value: unknown): value is Performance {
   if (!isObject(value)) {
     return false;
   }
+  const currentRatingScore =
+    value['currentRatingScore'] ?? value['ratingScore'];
   return (
     isNonNegativeInteger(value['matches']) &&
     isNonNegativeInteger(value['wins']) &&
     value['wins'] <= value['matches'] &&
     typeof value['topHero'] === 'string' &&
     (value['ratingScore'] === null || isRatingScore(value['ratingScore'])) &&
+    (currentRatingScore === null || isRatingScore(currentRatingScore)) &&
+    (value['ratingScore'] === null ||
+      (currentRatingScore !== null &&
+        Number(currentRatingScore) <= Number(value['ratingScore']))) &&
     typeof value['provisional'] === 'boolean' &&
     (value['matches'] === 0) === (value['ratingScore'] === null) &&
     (value['ratingForecast'] === undefined ||
-      (value['ratingScore'] === null
+      (currentRatingScore === null
         ? value['ratingForecast'] === null
-        : isRatingForecast(value['ratingForecast'], value['ratingScore'])))
+        : isRatingForecast(value['ratingForecast'], currentRatingScore)))
   );
 }
 

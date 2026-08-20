@@ -74,21 +74,13 @@ interface TrendRangeOption {
   readonly limit: number | null;
 }
 
-type PlayerPromotionGoal =
-  | {
-      readonly kind: 'goal';
-      readonly key: 'next-division' | 'next-tier' | 'ultimate';
-      readonly title: string;
-      readonly forecast: RatingGoalForecast;
-      readonly remainingScore: number;
-      readonly skillTier: SkillTier;
-    }
-  | {
-      readonly kind: 'maximum';
-      readonly key: 'next-division' | 'next-tier';
-      readonly title: string;
-      readonly message: string;
-    };
+interface PlayerPromotionGoal {
+  readonly key: 'next-division' | 'next-tier' | 'ultimate';
+  readonly title: string;
+  readonly forecast: RatingGoalForecast;
+  readonly remainingScore: number;
+  readonly skillTier: SkillTier;
+}
 
 const EMPTY_PERFORMANCE: Performance = {
   matches: 0,
@@ -198,7 +190,9 @@ export class PlayerDetailPageComponent implements OnDestroy {
   }
 
   get currentDisplayScore(): number | null {
-    return displayScoreForRatingScore(this.performance.ratingScore);
+    return displayScoreForRatingScore(
+      this.performance.currentRatingScore ?? this.performance.ratingScore,
+    );
   }
 
   get nextWinDisplayScore(): number | null {
@@ -228,32 +222,53 @@ export class PlayerDetailPageComponent implements OnDestroy {
   get promotionGoals(): readonly PlayerPromotionGoal[] {
     const forecast = this.ratingForecast;
     const currentDisplayScore = this.currentDisplayScore;
-    if (forecast === null || currentDisplayScore === null) {
+    const peakDisplayScore = displayScoreForRatingScore(
+      this.performance.ratingScore,
+    );
+    if (
+      forecast === null ||
+      currentDisplayScore === null ||
+      peakDisplayScore === null
+    ) {
       return [];
     }
-    return [
-      this.promotionGoal(
-        'next-division',
-        '下一小段',
-        forecast.nextDivision,
-        currentDisplayScore,
-        '已达最高小段位',
-      ),
-      this.promotionGoal(
-        'next-tier',
-        '下一大段',
-        forecast.nextTier,
-        currentDisplayScore,
-        '已达最高大段位',
-      ),
-      this.promotionGoal(
-        'ultimate',
-        '最终目标',
-        forecast.ultimate,
-        currentDisplayScore,
-        '',
-      ),
+    const candidates: readonly [
+      PlayerPromotionGoal['key'],
+      string,
+      RatingGoalForecast | null,
+    ][] = [
+      ['next-division', '下一小段', forecast.nextDivision],
+      ['next-tier', '下一大段', forecast.nextTier],
+      ['ultimate', '最终目标', forecast.ultimate],
     ];
+    const targets = new Set<number>();
+    const goals: PlayerPromotionGoal[] = [];
+    for (const [key, title, candidate] of candidates) {
+      if (
+        candidate === null ||
+        candidate.targetDisplayScore <= peakDisplayScore ||
+        targets.has(candidate.targetDisplayScore)
+      ) {
+        continue;
+      }
+      targets.add(candidate.targetDisplayScore);
+      goals.push(
+        this.promotionGoal(key, title, candidate, currentDisplayScore),
+      );
+    }
+    return goals;
+  }
+
+  get rankMetricLabel(): string {
+    return this.activeSeason === 'all-time' ? '总榜排名' : '赛季排名';
+  }
+
+  get ratingMetricLabel(): string {
+    return this.activeSeason === 'all-time' ? '综合排位分' : '赛季最高分';
+  }
+
+  get tierMetricLabel(): string {
+    return this.activeSeason === 'all-time' ? '综合排位等级' : '赛季最高段位';
   }
 
   get forecastRecordLabel(): string {
@@ -483,23 +498,12 @@ export class PlayerDetailPageComponent implements OnDestroy {
     return goal.key;
   }
 
-  maximumGoalMessage(goal: PlayerPromotionGoal): string {
-    return goal.kind === 'maximum' ? goal.message : '';
-  }
-
   private promotionGoal(
     key: PlayerPromotionGoal['key'],
     title: string,
-    forecast: RatingGoalForecast | null,
+    forecast: RatingGoalForecast,
     currentDisplayScore: number,
-    maximumMessage: string,
   ): PlayerPromotionGoal {
-    if (forecast === null) {
-      if (key === 'ultimate') {
-        throw new Error('the ultimate promotion goal is required');
-      }
-      return { kind: 'maximum', key, title, message: maximumMessage };
-    }
     const skillTier = skillTierForRatingScore(
       Math.ceil(forecast.targetDisplayScore / 3),
     );
@@ -507,7 +511,6 @@ export class PlayerDetailPageComponent implements OnDestroy {
       throw new Error('promotion goal contains an invalid target score');
     }
     return {
-      kind: 'goal',
       key,
       title,
       forecast,

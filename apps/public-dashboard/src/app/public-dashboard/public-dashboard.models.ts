@@ -51,6 +51,7 @@ export interface Performance {
   readonly wins: number;
   readonly topHero: string;
   readonly ratingScore: number | null;
+  readonly currentRatingScore?: number | null;
   readonly provisional: boolean;
   readonly ratingForecast?: RatingForecast | null;
 }

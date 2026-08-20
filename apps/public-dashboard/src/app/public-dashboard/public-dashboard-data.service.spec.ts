@@ -97,6 +97,50 @@ describe('DashboardDataService', () => {
     expect(service.state.kind).toBe('ready');
   });
 
+  it('validates forecasts against the current score below a season peak', async () => {
+    environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
+    const seasonKey = TEST_DASHBOARD_SNAPSHOT.currentSeasonKey;
+    const standings = TEST_DASHBOARD_SNAPSHOT.standings[seasonKey];
+    const player = standings.players[0];
+    const performance = player.modes['3v3'];
+    const snapshotWithPeak = {
+      ...TEST_DASHBOARD_SNAPSHOT,
+      standings: {
+        ...TEST_DASHBOARD_SNAPSHOT.standings,
+        [seasonKey]: {
+          ...standings,
+          players: [
+            {
+              ...player,
+              modes: {
+                ...player.modes,
+                '3v3': {
+                  ...performance,
+                  ratingScore: 940,
+                  currentRatingScore: 900,
+                  ratingForecast: {
+                    ...performance.ratingForecast,
+                    nextWinScore: 902,
+                    nextLossScore: 896,
+                  },
+                },
+              },
+            },
+            ...standings.players.slice(1),
+          ],
+        },
+      },
+    } as unknown as typeof TEST_DASHBOARD_SNAPSHOT;
+    spyOn(window, 'fetch').and.returnValue(
+      Promise.resolve(jsonResponse(apiDocument(snapshotWithPeak))),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('ready');
+  });
+
   it('does not fall back to a stale static JSON file', async () => {
     environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
     spyOn(console, 'error');
