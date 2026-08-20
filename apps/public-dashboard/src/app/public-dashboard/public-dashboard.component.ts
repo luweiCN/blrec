@@ -20,6 +20,8 @@ import {
   modeLabel,
   OVERVIEW_LIMIT,
   playerKdaForMode,
+  RatingTerms,
+  ratingTermsForSeason,
   RankMovement,
   seasonOption,
   selectedHeroWinRate,
@@ -188,6 +190,12 @@ export class PublicDashboardComponent implements OnDestroy {
 
   get seasonLabel(): string {
     return seasonOption(this.data.snapshot, this.activeSeason).label;
+  }
+
+  get ratingTerms(): RatingTerms {
+    return ratingTermsForSeason(
+      seasonOption(this.data.snapshot, this.activeSeason),
+    );
   }
 
   get seasonPeriod(): string {

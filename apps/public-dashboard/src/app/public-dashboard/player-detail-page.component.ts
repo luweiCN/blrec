@@ -28,6 +28,8 @@ import {
   RankMovement,
   playerForSeason,
   playerKdaForMode,
+  RatingTerms,
+  ratingTermsForSeason,
   seasonOption,
   winRate,
 } from './public-dashboard.data';
@@ -64,6 +66,7 @@ interface PlayerSeasonRecord {
   readonly season: SeasonOption;
   readonly performance: Performance;
   readonly rank: number | null;
+  readonly ratingTerms: RatingTerms;
 }
 
 type TrendRangeKey = 'recent-7' | 'recent-30' | 'all';
@@ -94,7 +97,7 @@ const EMPTY_PERFORMANCE: Performance = {
 const TREND_RANGE_OPTIONS: readonly TrendRangeOption[] = [
   { key: 'recent-7', label: '近 7 天', limit: 7 },
   { key: 'recent-30', label: '近 30 天', limit: 30 },
-  { key: 'all', label: '全部', limit: null },
+  { key: 'all', label: '整个赛季', limit: null },
 ];
 
 @Component({
@@ -115,7 +118,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
   activeHeroSort: PlayerHeroSort = 'proficiency';
-  activeTrendRange: TrendRangeKey = 'recent-30';
+  activeTrendRange: TrendRangeKey = 'all';
   readonly trendRangeOptions = TREND_RANGE_OPTIONS;
   readonly heroGoldPerMinute = heroGoldPerMinute;
   readonly displayScore = displayScoreForRatingScore;
@@ -263,18 +266,20 @@ export class PlayerDetailPageComponent implements OnDestroy {
     return this.activeSeason === 'all-time' ? '总榜排名' : '赛季排名';
   }
 
+  get ratingTerms(): RatingTerms {
+    return ratingTermsForSeason(this.selectedSeason);
+  }
+
   get ratingMetricLabel(): string {
-    return this.activeSeason === 'all-time' ? '综合排位分' : '赛季最高分';
+    return this.ratingTerms.standingScore;
   }
 
   get tierMetricLabel(): string {
-    return this.activeSeason === 'all-time' ? '综合排位等级' : '赛季最高段位';
+    return this.ratingTerms.standingTier;
   }
 
-  get forecastRecordLabel(): string {
-    return this.selectedSeason.current || this.activeSeason === 'all-time'
-      ? '当前已收录战绩'
-      : '所选榜单末尾战绩';
+  get latestMetricLabel(): string {
+    return this.ratingTerms.latestCombined;
   }
 
   get kdaSummary(): PlayerKdaSummary | null {
@@ -387,7 +392,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
   }
 
   get trendChartLabel(): string {
-    return `${this.player?.name ?? '玩家'}在${this.selectedSeason.label}${this.modeLabel()}的排位分趋势`;
+    return `${this.player?.name ?? '玩家'}在${this.selectedSeason.label}${this.modeLabel()}的当日排位分趋势`;
   }
 
   get modeBreakdown(): readonly ModeBreakdown[] {
@@ -438,6 +443,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
         season,
         performance: player.modes[this.activeMode],
         rank: rankIndex < 0 ? null : rankIndex + 1,
+        ratingTerms: ratingTermsForSeason(season),
       });
     }
     return records;
@@ -445,6 +451,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
 
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
+    this.activeTrendRange = 'all';
   }
 
   selectHeroSort(sort: PlayerHeroSort): void {

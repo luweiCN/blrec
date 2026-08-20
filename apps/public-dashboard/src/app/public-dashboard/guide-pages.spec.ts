@@ -29,6 +29,9 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('直播样本榜');
     expect(page.textContent).toContain('不会因此自动进入玩家榜');
     expect(page.textContent).toContain('根据已收录的胜负估算排位分');
+    expect(page.textContent).toContain(
+      '所有段位（1 至 10 段）的榜单与段位徽章都按赛季最高段位和赛季最高排位分展示',
+    );
     expect(page.textContent).toContain('胜利上涨、失败下降');
     expect(page.textContent).toContain('十段铜胜一局约增加 4～6 分');
     expect(page.textContent).toContain('十段金约增加 1～3 分');

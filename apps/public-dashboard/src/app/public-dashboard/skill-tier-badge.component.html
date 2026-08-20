@@ -24,5 +24,8 @@
 </ng-container>
 
 <ng-template #unavailable>
-  <span class="skill-tier-unavailable" aria-label="暂无站内段位">—</span>
+  <span
+    class="skill-tier-unavailable"
+    [attr.aria-label]="'暂无' + metricLabel"
+  >—</span>
 </ng-template>

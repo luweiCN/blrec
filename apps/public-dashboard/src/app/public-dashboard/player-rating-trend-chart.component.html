@@ -2,7 +2,7 @@
   <canvas
     #chartCanvas
     role="img"
-    [attr.aria-label]="ariaLabel"
+    [attr.aria-label]="chartAriaLabel"
   ></canvas>
   <p *ngIf="chartLoadFailed" class="trend-chart-error" role="status">
     趋势图暂时无法加载，请稍后刷新重试。
@@ -14,15 +14,21 @@
   <thead>
     <tr>
       <th scope="col">日期</th>
-      <th scope="col">排位分</th>
+      <th scope="col">当日排位分</th>
       <th scope="col">排名</th>
       <th scope="col">变化</th>
     </tr>
   </thead>
   <tbody>
-    <tr *ngFor="let point of points; trackBy: trackPoint">
+    <tr
+      *ngFor="let point of points; trackBy: trackPoint"
+      [class.trend-chart-peak]="isPeakPoint(point)"
+    >
       <td>{{ formatDate(point.publicationDate) }}</td>
-      <td>{{ point.displayScore | number: "1.0-0" }}</td>
+      <td>
+        {{ point.displayScore | number: "1.0-0" }}
+        <span *ngIf="isPeakPoint(point)">最高点</span>
+      </td>
       <td>第 {{ point.rank }} 名</td>
       <td>{{ deltaText(point) }}</td>
     </tr>

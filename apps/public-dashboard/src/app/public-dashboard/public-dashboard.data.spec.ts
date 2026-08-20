@@ -9,6 +9,7 @@ import {
   heroKda,
   heroPeerComparisonText,
   playerKdaForMode,
+  ratingTermsForSeason,
 } from './public-dashboard.data';
 import {
   DashboardSnapshot,
@@ -29,6 +30,34 @@ function withPerformance(
 }
 
 describe('public dashboard player rankings', () => {
+  it('uses distinct rating terms for current, completed, and all-time standings', () => {
+    const currentSeason = TEST_DASHBOARD_SNAPSHOT.seasons[0];
+    const completedSeason = TEST_DASHBOARD_SNAPSHOT.seasons[1];
+    const allTime = TEST_DASHBOARD_SNAPSHOT.seasons[3];
+
+    expect(ratingTermsForSeason(currentSeason)).toEqual({
+      standingScore: '赛季最高排位分',
+      standingTier: '赛季最高段位',
+      standingCombined: '赛季最高段位与排位分',
+      latestCombined: '当前段位与排位分',
+      historyQualifier: '赛季最高',
+    });
+    expect(ratingTermsForSeason(completedSeason)).toEqual({
+      standingScore: '赛季最高排位分',
+      standingTier: '赛季最高段位',
+      standingCombined: '赛季最高段位与排位分',
+      latestCombined: '赛季末段位与排位分',
+      historyQualifier: '赛季最高',
+    });
+    expect(ratingTermsForSeason(allTime)).toEqual({
+      standingScore: '综合排位分',
+      standingTier: '综合段位',
+      standingCombined: '综合段位与排位分',
+      latestCombined: '综合段位与排位分',
+      historyQualifier: '综合',
+    });
+  });
+
   it('formats match economy in the same compact form as the game', () => {
     expect(formatEconomy(40_900)).toBe('40.9K');
     expect(formatEconomy(33_000)).toBe('33.0K');

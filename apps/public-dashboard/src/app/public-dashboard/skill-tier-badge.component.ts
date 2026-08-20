@@ -19,6 +19,7 @@ export class SkillTierBadgeComponent {
   @Input() ratingScore: number | null = null;
   @Input() provisional = false;
   @Input() variant: SkillTierBadgeVariant = 'compact';
+  @Input() metricLabel = '站内段位与排位分';
 
   get skillTier(): SkillTier | null {
     return skillTierForRatingScore(this.ratingScore);
@@ -26,8 +27,8 @@ export class SkillTierBadgeComponent {
 
   description(skillTier: SkillTier): string {
     return (
-      `站内段位：${skillTier.name}${skillTier.divisionLabel}，` +
-      `${skillTier.tier} 段，${SCORE_FORMATTER.format(skillTier.displayScore)}`
+      `${this.metricLabel}：${skillTier.name}${skillTier.divisionLabel}，` +
+      `${skillTier.tier} 段，${SCORE_FORMATTER.format(skillTier.displayScore)} 排位分`
     );
   }
 }

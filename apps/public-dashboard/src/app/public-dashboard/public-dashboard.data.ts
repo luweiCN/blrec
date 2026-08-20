@@ -65,6 +65,14 @@ export interface PlayerKdaSummary {
   readonly matches: number;
 }
 
+export interface RatingTerms {
+  readonly standingScore: string;
+  readonly standingTier: string;
+  readonly standingCombined: string;
+  readonly latestCombined: string;
+  readonly historyQualifier: string;
+}
+
 export type HeroPeerComparisonKind = 'up' | 'down' | 'same' | 'unavailable';
 
 export function heroPeerComparisonText(comparison: HeroPeerComparison): string {
@@ -653,6 +661,27 @@ export function seasonOption(
     snapshot.seasons.find((option) => option.key === season) ??
     snapshot.seasons[0]
   );
+}
+
+export function ratingTermsForSeason(season: SeasonOption): RatingTerms {
+  if (season.key === 'all-time') {
+    return {
+      standingScore: '综合排位分',
+      standingTier: '综合段位',
+      standingCombined: '综合段位与排位分',
+      latestCombined: '综合段位与排位分',
+      historyQualifier: '综合',
+    };
+  }
+  return {
+    standingScore: '赛季最高排位分',
+    standingTier: '赛季最高段位',
+    standingCombined: '赛季最高段位与排位分',
+    latestCombined: season.current
+      ? '当前段位与排位分'
+      : '赛季末段位与排位分',
+    historyQualifier: '赛季最高',
+  };
 }
 
 export function playersForSeason(

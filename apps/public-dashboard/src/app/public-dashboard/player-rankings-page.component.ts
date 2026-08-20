@@ -17,6 +17,8 @@ import {
   PlayerRankingSort,
   playerMatchesQuery,
   playerKdaForMode,
+  RatingTerms,
+  ratingTermsForSeason,
   RankMovement,
   seasonOption,
   winRate,
@@ -93,7 +95,7 @@ export class PlayerRankingsPageComponent implements OnDestroy {
   get rankingHint(): string {
     switch (this.activeSort) {
       case 'rating':
-        return '按排位分从高到低排列。';
+        return `按${this.ratingTerms.standingScore}从高到低排列。`;
       case 'matches':
         return '按当前模式累计对局数排列。';
       case 'wins':
@@ -106,7 +108,7 @@ export class PlayerRankingsPageComponent implements OnDestroy {
   get rankingCaption(): string {
     switch (this.activeSort) {
       case 'rating':
-        return '排位分排名';
+        return `${this.ratingTerms.standingScore}排名`;
       case 'matches':
         return '对局数排名';
       case 'wins':
@@ -153,6 +155,10 @@ export class PlayerRankingsPageComponent implements OnDestroy {
 
   get selectedSeason(): SeasonOption {
     return seasonOption(this.data.snapshot, this.activeSeason);
+  }
+
+  get ratingTerms(): RatingTerms {
+    return ratingTermsForSeason(this.selectedSeason);
   }
 
   selectSeason(season: SeasonKey): void {

@@ -24,6 +24,23 @@ import {
   TEST_DASHBOARD_TRENDS,
 } from './public-dashboard.test-data';
 
+function selectSeasonFromPage(
+  fixture: ComponentFixture<PlayerDetailPageComponent>,
+  label: string,
+): void {
+  const page = fixture.nativeElement as HTMLElement;
+  const trigger = page.querySelector(
+    '.season-trigger',
+  ) as HTMLButtonElement;
+  trigger.click();
+  fixture.detectChanges();
+  const option = Array.from(
+    page.querySelectorAll<HTMLButtonElement>('.season-options button'),
+  ).find((button) => button.textContent?.includes(label));
+  option?.click();
+  fixture.detectChanges();
+}
+
 describe('PlayerDetailPageComponent', () => {
   let fixture: ComponentFixture<PlayerDetailPageComponent>;
   let component: PlayerDetailPageComponent;
@@ -99,7 +116,10 @@ describe('PlayerDetailPageComponent', () => {
       '2,058',
     );
     expect(page.querySelector('.player-profile-summary')?.textContent).toContain(
-      '赛季最高分',
+      '赛季最高排位分',
+    );
+    expect(page.querySelector('.profile-rank-showcase')?.textContent).toContain(
+      '赛季最高段位',
     );
     expect(page.querySelector('.next-match-context')?.textContent).toContain(
       '68.6%',
@@ -146,6 +166,18 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelectorAll('.trend-range-filter button').length).toBe(3);
     expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
       '+18',
+    );
+    expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
+      '当前段位与排位分',
+    );
+    expect(
+      page.querySelector('.trend-chart-shell canvas')?.getAttribute('aria-label'),
+    ).toContain('最高点');
+    expect(page.querySelector('.season-history-table')?.textContent).toContain(
+      '赛季最高',
+    );
+    expect(page.querySelector('.season-history-table')?.textContent).toContain(
+      '综合',
     );
     expect(page.querySelector('.usage-rank')?.textContent).toContain('/');
     expect(page.querySelector('.peer-comparison')?.textContent).toMatch(
@@ -262,7 +294,7 @@ describe('PlayerDetailPageComponent', () => {
     expect(component.performance.matches).toBe(46);
   });
 
-  it('shows thirty trend points by default and filters long histories', () => {
+  it('shows the whole season by default and still filters long histories', () => {
     const endDate = new Date(Date.UTC(2026, 7, 3));
     dashboardData.trends = {
       schemaVersion: 1,
@@ -301,18 +333,21 @@ describe('PlayerDetailPageComponent', () => {
     component = fixture.componentInstance;
     fixture.detectChanges();
 
-    expect(component.visibleTrendPoints.length).toBe(30);
+    expect(component.activeTrendRange).toBe('all');
+    expect(component.visibleTrendPoints.length).toBe(40);
     expect(
       fixture.nativeElement.querySelectorAll('.trend-chart-data tbody tr').length,
-    ).toBe(30);
+    ).toBe(40);
     expect(
       fixture.nativeElement.querySelector('.rating-trend-heading-actions')
         ?.textContent,
-    ).toContain('显示 30 / 40 天');
+    ).toContain('共 40 个每日节点');
 
     const rangeButtons = fixture.nativeElement.querySelectorAll(
       '.trend-range-filter button',
     ) as NodeListOf<HTMLButtonElement>;
+    expect(rangeButtons[2].textContent).toContain('整个赛季');
+    expect(rangeButtons[2].getAttribute('aria-pressed')).toBe('true');
     rangeButtons[0].click();
     fixture.detectChanges();
     expect(component.visibleTrendPoints.length).toBe(7);
@@ -320,9 +355,45 @@ describe('PlayerDetailPageComponent', () => {
       fixture.nativeElement.querySelectorAll('.trend-chart-data tbody tr').length,
     ).toBe(7);
 
-    rangeButtons[2].click();
+    rangeButtons[1].click();
     fixture.detectChanges();
-    expect(component.visibleTrendPoints.length).toBe(40);
+    expect(component.visibleTrendPoints.length).toBe(30);
+    expect(
+      fixture.nativeElement.querySelector('.rating-trend-heading-actions')
+        ?.textContent,
+    ).toContain('显示 30 / 40 天');
+
+    component.selectSeason('2026-spring');
+    expect(component.activeTrendRange).toBe('all');
+  });
+
+  it('uses scope-specific rating terms and only forecasts the current season', () => {
+    expect(component.ratingMetricLabel).toBe('赛季最高排位分');
+    expect(component.tierMetricLabel).toBe('赛季最高段位');
+    expect(component.latestMetricLabel).toBe('当前段位与排位分');
+    expect(
+      fixture.nativeElement.querySelector('.rating-forecast-section'),
+    ).not.toBeNull();
+
+    selectSeasonFromPage(fixture, '2026 春季赛');
+    expect(component.ratingMetricLabel).toBe('赛季最高排位分');
+    expect(component.tierMetricLabel).toBe('赛季最高段位');
+    expect(component.latestMetricLabel).toBe('赛季末段位与排位分');
+    expect(
+      fixture.nativeElement.querySelector('.rating-forecast-section'),
+    ).toBeNull();
+
+    selectSeasonFromPage(fixture, '跨赛季总榜');
+    expect(component.ratingMetricLabel).toBe('综合排位分');
+    expect(component.tierMetricLabel).toBe('综合段位');
+    expect(component.latestMetricLabel).toBe('综合段位与排位分');
+    expect(
+      fixture.nativeElement.querySelector('.rating-forecast-section'),
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('.trend-range-filter button:last-child')
+        ?.textContent,
+    ).toContain('全部记录');
   });
 
   it('sorts the hero pool by usage, win rate or KDA', () => {

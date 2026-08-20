@@ -10,7 +10,12 @@ import {
   SimpleChanges,
   ViewChild,
 } from '@angular/core';
-import type { Chart, ChartConfiguration, TooltipItem } from 'chart.js';
+import type {
+  Chart,
+  ChartConfiguration,
+  Plugin,
+  TooltipItem,
+} from 'chart.js';
 
 export interface PlayerRatingTrendChartPoint {
   readonly publicationDate: string;
@@ -18,6 +23,26 @@ export interface PlayerRatingTrendChartPoint {
   readonly displayScore: number;
   readonly displayDelta: number | null;
   readonly recorded: boolean;
+}
+
+export function highestTrendPointIndex(
+  points: readonly PlayerRatingTrendChartPoint[],
+): number {
+  let highestIndex = -1;
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index];
+    const highest = points[highestIndex];
+    if (
+      highest === undefined ||
+      point.displayScore > highest.displayScore ||
+      (point.displayScore === highest.displayScore &&
+        point.recorded &&
+        !highest.recorded)
+    ) {
+      highestIndex = index;
+    }
+  }
+  return highestIndex;
 }
 
 interface ChartColors {
@@ -77,6 +102,25 @@ export class PlayerRatingTrendChartComponent
   formatDate(value: string): string {
     const [, month, day] = value.split('-');
     return `${Number(month)}月${Number(day)}日`;
+  }
+
+  get peakPointIndex(): number {
+    return highestTrendPointIndex(this.points);
+  }
+
+  get peakPoint(): PlayerRatingTrendChartPoint | null {
+    return this.points[this.peakPointIndex] ?? null;
+  }
+
+  get chartAriaLabel(): string {
+    const peak = this.peakPoint;
+    return peak === null
+      ? this.ariaLabel
+      : `${this.ariaLabel}；最高点：${this.formatDate(peak.publicationDate)}，${peak.displayScore.toLocaleString('zh-CN')} 排位分`;
+  }
+
+  isPeakPoint(point: PlayerRatingTrendChartPoint): boolean {
+    return point === this.peakPoint;
   }
 
   deltaText(point: PlayerRatingTrendChartPoint): string {
@@ -148,8 +192,10 @@ export class PlayerRatingTrendChartComponent
     const colors = this.chartColors();
     const points = this.points;
     const lastIndex = points.length - 1;
+    const peakIndex = highestTrendPointIndex(points);
     return {
       type: 'line',
+      plugins: [this.peakMarkerPlugin(peakIndex, colors)],
       data: {
         labels: points.map((point) => this.formatDate(point.publicationDate)),
         datasets: [
@@ -164,24 +210,32 @@ export class PlayerRatingTrendChartComponent
             fill: false,
             spanGaps: true,
             pointRadius: points.map((_point, index) =>
-              index === lastIndex ? 6 : 4,
+              index === peakIndex ? 7 : index === lastIndex ? 6 : 4,
             ),
             pointHoverRadius: points.map((_point, index) =>
-              index === lastIndex ? 8 : 7,
+              index === peakIndex ? 9 : index === lastIndex ? 8 : 7,
             ),
             pointHitRadius: 14,
             pointBorderWidth: 2,
             pointBorderColor: points.map((_point, index) =>
-              index === lastIndex ? colors.gold : colors.cyan,
+              index === peakIndex || index === lastIndex
+                ? colors.gold
+                : colors.cyan,
             ),
             pointBackgroundColor: points.map((_point, index) =>
-              index === lastIndex ? colors.gold : colors.surface,
+              index === peakIndex || index === lastIndex
+                ? colors.gold
+                : colors.surface,
             ),
             pointHoverBorderColor: points.map((_point, index) =>
-              index === lastIndex ? colors.gold : colors.cyan,
+              index === peakIndex || index === lastIndex
+                ? colors.gold
+                : colors.cyan,
             ),
             pointHoverBackgroundColor: points.map((_point, index) =>
-              index === lastIndex ? colors.gold : colors.cyan,
+              index === peakIndex || index === lastIndex
+                ? colors.gold
+                : colors.cyan,
             ),
           },
         ],
@@ -199,7 +253,7 @@ export class PlayerRatingTrendChartComponent
           intersect: false,
         },
         layout: {
-          padding: { top: 12, right: 8, bottom: 0, left: 0 },
+          padding: { top: 44, right: 8, bottom: 0, left: 0 },
         },
         plugins: {
           tooltip: {
@@ -265,6 +319,66 @@ export class PlayerRatingTrendChartComponent
             },
           },
         },
+      },
+    };
+  }
+
+  private peakMarkerPlugin(
+    peakIndex: number,
+    colors: ChartColors,
+  ): Plugin<'line'> {
+    return {
+      id: 'playerRatingPeakMarker',
+      afterDatasetsDraw: (chart) => {
+        const peak = this.points[peakIndex];
+        const element = chart.getDatasetMeta(0).data[peakIndex];
+        if (
+          peak === undefined ||
+          element === undefined ||
+          !('getCenterPoint' in element) ||
+          typeof element.getCenterPoint !== 'function'
+        ) {
+          return;
+        }
+
+        const { x, y } = element.getCenterPoint();
+        const { ctx, chartArea } = chart;
+        const label = `最高 ${peak.displayScore.toLocaleString('zh-CN')}`;
+        const labelHeight = 27;
+        const markerGap = 11;
+
+        ctx.save();
+        ctx.font = '700 12px system-ui, -apple-system, sans-serif';
+        const labelWidth = Math.min(
+          ctx.measureText(label).width + 20,
+          chartArea.width,
+        );
+        const labelX = Math.min(
+          Math.max(x - labelWidth / 2, chartArea.left),
+          chartArea.right - labelWidth,
+        );
+        const labelY = Math.max(2, y - labelHeight - markerGap);
+
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, labelY + labelHeight);
+        ctx.strokeStyle = colors.gold;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.roundRect(labelX, labelY, labelWidth, labelHeight, 7);
+        ctx.fillStyle = colors.surface;
+        ctx.fill();
+        ctx.strokeStyle = colors.gold;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = colors.gold;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, labelX + labelWidth / 2, labelY + labelHeight / 2);
+        ctx.restore();
       },
     };
   }

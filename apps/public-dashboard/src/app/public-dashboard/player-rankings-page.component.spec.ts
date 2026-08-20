@@ -19,6 +19,23 @@ import {
   TEST_DASHBOARD_TRENDS,
 } from './public-dashboard.test-data';
 
+function selectSeasonFromPage(
+  fixture: ComponentFixture<PlayerRankingsPageComponent>,
+  label: string,
+): void {
+  const page = fixture.nativeElement as HTMLElement;
+  const trigger = page.querySelector(
+    '.season-trigger',
+  ) as HTMLButtonElement;
+  trigger.click();
+  fixture.detectChanges();
+  const option = Array.from(
+    page.querySelectorAll<HTMLButtonElement>('.season-options button'),
+  ).find((button) => button.textContent?.includes(label));
+  option?.click();
+  fixture.detectChanges();
+}
+
 describe('PlayerRankingsPageComponent', () => {
   let fixture: ComponentFixture<PlayerRankingsPageComponent>;
   let component: PlayerRankingsPageComponent;
@@ -78,6 +95,34 @@ describe('PlayerRankingsPageComponent', () => {
     expect(page.querySelector('.result-status')?.textContent).toContain(
       '11–16',
     );
+  });
+
+  it('labels seasonal peaks and all-time aggregate ratings explicitly', () => {
+    const page = fixture.nativeElement as HTMLElement;
+    const ratingSortButton = page.querySelector(
+      '.ranking-sort-control button',
+    );
+
+    expect(ratingSortButton?.textContent).toContain('赛季最高排位分');
+    expect(page.querySelector('.directory-toolbar')?.textContent).toContain(
+      '按赛季最高排位分从高到低排列',
+    );
+    expect(page.querySelector('caption')?.textContent).toContain(
+      '赛季最高排位分排名',
+    );
+    expect(
+      page.querySelector('.directory-score')?.getAttribute('data-label'),
+    ).toBe('赛季最高段位与排位分');
+
+    selectSeasonFromPage(fixture, '跨赛季总榜');
+
+    expect(ratingSortButton?.textContent).toContain('综合排位分');
+    expect(page.querySelector('.directory-toolbar')?.textContent).toContain(
+      '按综合排位分从高到低排列',
+    );
+    expect(
+      page.querySelector('.directory-score')?.getAttribute('data-label'),
+    ).toBe('综合段位与排位分');
   });
 
   it('searches stable players by game alias without changing their rank', () => {

@@ -179,7 +179,7 @@
     </div>
 
     <section
-      *ngIf="ratingForecast"
+      *ngIf="selectedSeason.current && ratingForecast"
       class="rating-forecast-section"
       aria-labelledby="player-rating-forecast-title"
     >
@@ -199,7 +199,7 @@
             <strong>{{ currentDisplayScore | number: "1.0-0" }}</strong>
             排位分和
             <strong>{{ winRate(performance) | percent: "1.0-1" }}</strong>
-            胜率下，根据{{ forecastRecordLabel }}计算：
+            胜率下，根据当前已收录战绩计算：
           </p>
         </div>
         <dl class="next-match-outcomes">
@@ -300,7 +300,7 @@
               [class.active]="activeTrendRange === option.key"
               [attr.aria-pressed]="activeTrendRange === option.key"
               (click)="selectTrendRange(option.key)"
-            >{{ option.label }}</button>
+            >{{ option.key === "all" && activeSeason === "all-time" ? "全部记录" : option.label }}</button>
           </div>
         </div>
       </header>
@@ -308,10 +308,11 @@
       <div *ngIf="playerTrend.current as current; else noRatingTrend" class="rating-trend-layout">
         <dl class="rating-trend-summary">
           <div>
-            <dt>当前站内段位</dt>
+            <dt>{{ latestMetricLabel }}</dt>
             <dd class="trend-tier-value">
               <app-skill-tier-badge
                 [ratingScore]="current.ratingScore"
+                [metricLabel]="latestMetricLabel"
               ></app-skill-tier-badge>
             </dd>
           </div>
@@ -535,7 +536,7 @@
               <th scope="col">榜单周期</th>
               <th scope="col">排名</th>
               <th scope="col" title="本站排位分的怀旧映射，不是玩家过去的官方段位">
-                站内段位
+                段位 / 排位分
               </th>
               <th scope="col">对局</th>
               <th scope="col">胜 / 负</th>
@@ -546,10 +547,17 @@
             <tr *ngFor="let record of seasonHistory; trackBy: trackSeason">
               <td data-label="榜单周期"><strong>{{ record.season.label }}</strong></td>
               <td data-label="排名">{{ record.rank === null ? "未入榜" : "#" + record.rank }}</td>
-              <td class="season-tier" data-label="站内段位">
+              <td
+                class="season-tier"
+                [attr.data-label]="record.ratingTerms.standingCombined"
+              >
+                <small class="season-tier-context">
+                  {{ record.ratingTerms.historyQualifier }}
+                </small>
                 <app-skill-tier-badge
                   [ratingScore]="record.performance.ratingScore"
                   [provisional]="record.performance.provisional"
+                  [metricLabel]="record.ratingTerms.standingCombined"
                 ></app-skill-tier-badge>
               </td>
               <td data-label="对局">{{ record.performance.matches }}</td>

@@ -11,10 +11,10 @@
       </p>
     </div>
 
-    <aside class="podium-panel" aria-label="当前前三名">
+    <aside class="podium-panel" aria-label="本赛季最高排位分前三名">
       <header>
         <div>
-          <span>本期王座</span>
+          <span>赛季最高王座</span>
           <strong>{{ modeLabel() }} TOP 3</strong>
         </div>
         <span class="season-id">{{ seasonCode }}</span>
@@ -27,7 +27,7 @@
           [routerLink]="['/players', player.id]"
           [class.first]="podiumRank(player) === 1"
           [attr.aria-label]="
-            '查看第 ' + podiumRank(player) + ' 名玩家 ' + player.name + ' 的详情'
+            '查看按赛季最高排位分排名第 ' + podiumRank(player) + ' 名玩家 ' + player.name + ' 的详情'
           "
         >
           <span class="podium-rank">#{{ podiumRank(player) }}</span>
@@ -94,7 +94,7 @@
       <div>
         <p class="section-kicker">本期排名</p>
         <h2 id="players-title">玩家榜</h2>
-        <p>按排位分展示当前模式下的玩家表现。</p>
+        <p>按赛季最高排位分展示当前模式下的玩家表现。</p>
       </div>
       <a class="full-ranking-link" routerLink="/players">
         Top {{ overviewRankings.length }} / 共 {{ rankings.length }} 位
@@ -107,7 +107,7 @@
           <caption>
             {{
               modeLabel()
-            }}玩家综合排行榜前十名
+            }}玩家赛季最高排位分排行榜前十名
           </caption>
           <thead>
             <tr>
@@ -116,8 +116,8 @@
               <th scope="col" class="optional-column">代表英雄</th>
               <th scope="col">近五局</th>
               <th scope="col">对局</th>
-              <th scope="col" title="本站排位分的怀旧映射，不是玩家过去的官方段位">
-                站内段位
+              <th scope="col" title="本站赛季最高排位分的怀旧映射，不是玩家过去的官方段位">
+                赛季最高段位与排位分
               </th>
               <th scope="col" title="仅统计 K / D / A 均识别完整的场次">KDA</th>
               <th scope="col">胜率</th>
@@ -198,10 +198,14 @@
               <td class="overview-matches-cell" data-label="对局">
                 {{ playerPerformance(player).matches }}
               </td>
-              <td class="rating-score-cell overview-tier-cell" data-label="站内段位">
+              <td
+                class="rating-score-cell overview-tier-cell"
+                data-label="赛季最高段位与排位分"
+              >
                 <app-skill-tier-badge
                   [ratingScore]="playerPerformance(player).ratingScore"
                   [provisional]="playerPerformance(player).provisional"
+                  [metricLabel]="ratingTerms.standingCombined"
                 ></app-skill-tier-badge>
               </td>
               <td class="player-kda overview-kda-cell" data-label="KDA">
@@ -262,6 +266,7 @@
           variant="showcase"
           [ratingScore]="selectedPerformance().ratingScore"
           [provisional]="selectedPerformance().provisional"
+          [metricLabel]="ratingTerms.standingCombined"
         ></app-skill-tier-badge>
       </div>
 

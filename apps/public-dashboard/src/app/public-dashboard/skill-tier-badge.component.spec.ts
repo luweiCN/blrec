@@ -104,6 +104,7 @@ describe('SkillTierBadgeComponent', () => {
   it('shows the localized tier, original badge and underlying score', () => {
     fixture.componentInstance.ratingScore = 572;
     fixture.componentInstance.provisional = true;
+    fixture.componentInstance.metricLabel = '赛季最高段位与排位分';
     fixture.detectChanges();
 
     const page = fixture.nativeElement as HTMLElement;
@@ -115,5 +116,11 @@ describe('SkillTierBadgeComponent', () => {
     expect(page.querySelector('img')?.getAttribute('src')).toBe(
       'assets/skill-tiers/tier-07-silver-hd.webp',
     );
+    expect(page.querySelector('.skill-tier-badge')?.getAttribute('title')).toContain(
+      '赛季最高段位与排位分',
+    );
+    expect(
+      page.querySelector('.skill-tier-badge')?.getAttribute('aria-label'),
+    ).toContain('1,716 排位分');
   });
 });

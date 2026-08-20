@@ -296,6 +296,14 @@
   min-width: 166px;
 }
 
+.season-tier-context {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ink-muted);
+  font-size: var(--type-caption);
+  font-weight: 680;
+}
+
 .rating-trend-visual {
   min-width: 0;
 }

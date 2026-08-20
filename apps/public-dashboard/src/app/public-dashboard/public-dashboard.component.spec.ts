@@ -81,6 +81,12 @@ describe('PublicDashboardComponent', () => {
     expect(page.querySelectorAll('.podium-emblem').length).toBe(3);
     expect(page.querySelectorAll('.podium-avatar').length).toBe(3);
     expect(page.querySelector('.detail-tier img')).not.toBeNull();
+    expect(page.querySelector('.podium-panel header')?.textContent).toContain(
+      '赛季最高王座',
+    );
+    expect(page.querySelector('.players-heading')?.textContent).toContain(
+      '按赛季最高排位分',
+    );
     expect(page.textContent).not.toContain('榜单分');
     expect(page.textContent).not.toContain('段位分');
   });
@@ -99,7 +105,7 @@ describe('PublicDashboardComponent', () => {
       '代表英雄',
       '近五局',
       '对局',
-      '站内段位',
+      '赛季最高段位与排位分',
       'KDA',
       '胜率',
     ]);

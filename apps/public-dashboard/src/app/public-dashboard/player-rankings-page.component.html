@@ -9,7 +9,7 @@
     <div>
       <h1>玩家榜</h1>
       <p>
-        查看全部已收录玩家，可切换排位分、对局、胜场或胜率排序，并按名称、拼音或直播间检索。
+        查看全部已收录玩家，可切换{{ ratingTerms.standingScore }}、对局、胜场或胜率排序，并按名称、拼音或直播间检索。
       </p>
     </div>
     <p class="page-context">
@@ -41,7 +41,7 @@
               [attr.aria-pressed]="activeSort === 'rating'"
               (click)="selectSort('rating')"
             >
-              排位分
+              {{ ratingTerms.standingScore }}
             </button>
             <button
               type="button"
@@ -102,8 +102,11 @@
             <th scope="col">近五局</th>
             <th scope="col">对局</th>
             <th scope="col">胜 / 负</th>
-            <th scope="col" title="本站排位分的怀旧映射，不是玩家过去的官方段位">
-              站内段位
+            <th
+              scope="col"
+              [title]="ratingTerms.standingCombined + '是本站排位分的怀旧映射，不是玩家过去的官方段位'"
+            >
+              {{ ratingTerms.standingCombined }}
             </th>
             <th scope="col" title="仅统计 K / D / A 均识别完整的场次">KDA</th>
             <th scope="col">胜率</th>
@@ -186,10 +189,14 @@
                   playerPerformance(row.player).wins
               }}
             </td>
-            <td class="directory-score" data-label="站内段位">
+            <td
+              class="directory-score"
+              [attr.data-label]="ratingTerms.standingCombined"
+            >
               <app-skill-tier-badge
                 [ratingScore]="playerPerformance(row.player).ratingScore"
                 [provisional]="playerPerformance(row.player).provisional"
+                [metricLabel]="ratingTerms.standingCombined"
               ></app-skill-tier-badge>
             </td>
             <td class="directory-kda" data-label="KDA">
