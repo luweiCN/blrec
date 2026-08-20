@@ -111,12 +111,13 @@ jobs:
         run: |
           destination="${SSH_USER}@${SSH_HOST}"
           remote_archive="/tmp/blrec-dashboard-api-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tgz"
-          scp -P "$SSH_PORT" -i ~/.ssh/dashboard-api dashboard-api-release.tgz \
+          ssh_options=(-o ServerAliveInterval=15 -o ServerAliveCountMax=40 -o TCPKeepAlive=yes)
+          scp "${ssh_options[@]}" -P "$SSH_PORT" -i ~/.ssh/dashboard-api dashboard-api-release.tgz \
             "${destination}:${remote_archive}"
-          ssh -p "$SSH_PORT" -i ~/.ssh/dashboard-api "$destination" \
+          ssh "${ssh_options[@]}" -p "$SSH_PORT" -i ~/.ssh/dashboard-api "$destination" \
             "bash -s -- '${remote_archive}' '${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'" \
             < apps/public-dashboard/api/deploy/install-release.sh
-          ssh -p "$SSH_PORT" -i ~/.ssh/dashboard-api "$destination" \
+          ssh "${ssh_options[@]}" -p "$SSH_PORT" -i ~/.ssh/dashboard-api "$destination" \
             "rm -f '${remote_archive}'"
 
       - name: Verify public endpoint

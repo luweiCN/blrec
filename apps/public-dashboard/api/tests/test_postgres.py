@@ -104,6 +104,19 @@ def test_ingest_batch_routes_allow_long_running_children() -> None:
     assert 'proxy_send_timeout 1h;' in write_location
 
 
+def test_api_deployment_ssh_keeps_long_remote_backups_alive() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[4]
+        / '.github'
+        / 'workflows'
+        / 'deploy-public-dashboard-api.yml'
+    ).read_text(encoding='utf-8')
+
+    assert 'ServerAliveInterval=15' in workflow
+    assert 'ServerAliveCountMax=40' in workflow
+    assert workflow.count('"${ssh_options[@]}"') == 3
+
+
 def _empty_postgres(database_url: str) -> None:
     initialize_database(database_url)
     connection = connect_database(database_url)
