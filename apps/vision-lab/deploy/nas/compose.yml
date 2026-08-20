@@ -2,7 +2,7 @@ name: blrec-vision-lab
 
 services:
   vision-lab:
-    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.30}
+    image: ghcr.io/luweicn/blrec-vision-lab:${VISION_LAB_IMAGE_TAG:-vision-lab-v0.3.31}
     container_name: blrec-vision-lab
     network_mode: host
     restart: unless-stopped
