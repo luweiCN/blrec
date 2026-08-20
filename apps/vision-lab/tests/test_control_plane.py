@@ -128,11 +128,18 @@ def test_candidate_hud_prefill_shows_progress_and_preserves_manual_edits() -> No
     assert 'geometryRevision !== candidateHeroGeometryRevision' in refresh
     assert 'candidateHeroPrefillRunning = true;' in script
     assert 'candidateHeroPrefillRunning = false;' in script
+    completion = script[
+        script.index('function completeCandidateHeroLineupPrefetch(') : script.index(
+            'async function loadCandidateHeroLineup('
+        )
+    ]
+    assert 'delete refreshed.prefill_job;' in completion
 
 
 def test_worker_claim_autonomously_runs_core_then_hero_before_review(
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr(config, 'CONTROL_PLANE_ONLY', True)
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         database = root / 'lab.db'
@@ -292,6 +299,12 @@ def test_worker_claim_autonomously_runs_core_then_hero_before_review(
                 },
             },
         )
+
+        lineup = server.api_training_review_hero_lineup(
+            frame_id, screen_type='scoreboard', team_size=3
+        )
+        assert lineup['suggestion_method'] == 'new-model-incomplete-worker-v1'
+        assert 'prefill_job' not in lineup
 
         conn = db.connect(database)
         try:

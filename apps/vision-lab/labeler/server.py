@@ -1913,6 +1913,14 @@ def _remote_training_review_hero_lineup(
             )
             if same_existing and existing and existing['review_status'] == 'confirmed':
                 return _hero_lineup_payload(existing, item=item)
+            if (
+                same_existing
+                and existing
+                and not refresh
+                and existing['review_status'] == 'pending'
+                and existing['suggestion_method'] == 'new-model-incomplete-worker-v1'
+            ):
+                return _hero_lineup_payload(existing, item=item)
 
             source_slots: List[Dict[str, Any]] = []
             if same_existing and existing and existing.get('slots'):

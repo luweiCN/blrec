@@ -1607,7 +1607,9 @@ function completeCandidateHeroLineupPrefetch(item, context, entry) {
       return {lineup, refreshed: false};
     }
     const refreshed = await api(candidateHeroLineupUrl(item, context));
+    delete refreshed.prefill_job;
     entry.initialPromise = Promise.resolve(refreshed);
+    entry.finalPromise = null;
     return {lineup: refreshed, refreshed: true};
   });
   entry.finalPromise.catch(() => {
