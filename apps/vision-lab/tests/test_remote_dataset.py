@@ -124,3 +124,53 @@ def test_materializes_detector_labels() -> None:
         label = (root / 'dataset/labels/val/f00000001.txt').read_text()
         assert label == '0 0.300000 0.500000 0.400000 0.600000\n'
         assert "names: ['result_panel']" in (root / 'dataset/data.yaml').read_text()
+
+
+def test_reuses_shared_frame_cache_between_dataset_versions() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source = root / 'source.jpg'
+        sha256 = _jpeg(source, (40, 50, 60))
+        manifest = root / 'samples.jsonl'
+        _manifest(
+            manifest,
+            [
+                {
+                    'sample_id': 'f00000001',
+                    'frame_id': 1,
+                    'video_id': 10,
+                    'sha256': sha256,
+                    'split': 'train',
+                    'label': 'match_flow',
+                }
+            ],
+        )
+        calls = []
+
+        def fetch(frame_id: int, destination: Path) -> None:
+            calls.append(frame_id)
+            destination.write_bytes(source.read_bytes())
+
+        def unexpected_fetch(_frame_id: int, _destination: Path) -> None:
+            raise AssertionError('第二版数据集不应重复下载同一原图')
+
+        cache = root / 'frame-cache'
+        materialize_dataset(
+            task_id='match_flow',
+            manifest_path=manifest,
+            output_dir=root / 'dataset-v1',
+            fetch_image=fetch,
+            frame_cache_dir=cache,
+            download_workers=2,
+        )
+        materialize_dataset(
+            task_id='match_flow',
+            manifest_path=manifest,
+            output_dir=root / 'dataset-v2',
+            fetch_image=unexpected_fetch,
+            frame_cache_dir=cache,
+            download_workers=2,
+        )
+
+        assert calls == [1]
+        assert (root / 'dataset-v2/images/train/match_flow/f00000001.jpg').is_file()

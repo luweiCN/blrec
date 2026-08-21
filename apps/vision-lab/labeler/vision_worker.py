@@ -561,6 +561,8 @@ class VisionWorker:
                 output_dir=dataset_dir,
                 fetch_image=fetch_image,
                 progress=materialize_progress,
+                frame_cache_dir=self.work_dir / 'frame-cache',
+                download_workers=8,
             )
             if cancelled.is_set():
                 raise RuntimeError('用户取消')

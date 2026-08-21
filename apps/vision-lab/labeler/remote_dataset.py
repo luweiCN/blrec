@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Dict, Iterable, List, Tuple
@@ -46,6 +49,8 @@ def materialize_dataset(
     output_dir: Path,
     fetch_image: ImageFetcher,
     progress: ProgressCallback | None = None,
+    frame_cache_dir: Path | None = None,
+    download_workers: int = 1,
 ) -> Dict[str, Any]:
     if task_id not in CLASSIFICATION_TASKS | DETECTION_TASKS:
         raise ValueError(f'尚不支持远程物化的训练任务: {task_id}')
@@ -54,27 +59,44 @@ def materialize_dataset(
     sources.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    frame_sources: Dict[int, Path] = {}
-    total = len({int(sample['frame_id']) for sample in samples})
-    for index, sample in enumerate(samples, start=1):
+    unique_samples: Dict[int, Dict[str, Any]] = {}
+    for sample in samples:
         frame_id = int(sample['frame_id'])
-        if frame_id in frame_sources:
-            continue
+        unique_samples.setdefault(frame_id, sample)
+    total = len(unique_samples)
+
+    def prepare_source(sample: Dict[str, Any]) -> Tuple[int, Path]:
+        frame_id = int(sample['frame_id'])
         sha256 = str(sample.get('sha256') or '')
         source = sources / f'{frame_id}-{sha256[:16]}.jpg'
-        if not source.is_file() or source.stat().st_size <= 0:
-            temporary = source.with_suffix('.download')
-            temporary.unlink(missing_ok=True)
-            fetch_image(frame_id, temporary)
-            if not temporary.is_file() or temporary.stat().st_size <= 0:
-                raise RuntimeError(f'帧 {frame_id} 下载结果为空')
-            if len(sha256) == 64 and _sha256(temporary) != sha256:
-                temporary.unlink(missing_ok=True)
-                raise RuntimeError(f'帧 {frame_id} 的 SHA-256 校验失败')
-            temporary.replace(source)
-        frame_sources[frame_id] = source
-        if progress is not None:
-            progress(len(frame_sources), total)
+        if source.is_file() and source.stat().st_size > 0:
+            if frame_cache_dir is not None:
+                cached = _cached_frame_path(frame_cache_dir, frame_id, sha256)
+                if not cached.is_file():
+                    _reuse_file(source, cached)
+            return frame_id, source
+
+        if frame_cache_dir is not None:
+            cached = _cached_frame_path(frame_cache_dir, frame_id, sha256)
+            if not cached.is_file() or cached.stat().st_size <= 0:
+                _download_frame(fetch_image, frame_id, sha256, cached)
+            _reuse_file(cached, source)
+        else:
+            _download_frame(fetch_image, frame_id, sha256, source)
+        return frame_id, source
+
+    frame_sources: Dict[int, Path] = {}
+    worker_count = max(1, min(int(download_workers), total))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(prepare_source, sample)
+            for sample in unique_samples.values()
+        ]
+        for future in as_completed(futures):
+            frame_id, source = future.result()
+            frame_sources[frame_id] = source
+            if progress is not None:
+                progress(len(frame_sources), total)
 
     if task_id in CLASSIFICATION_TASKS:
         replicas = _materialize_classification(
@@ -258,3 +280,44 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b''):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _cached_frame_path(cache_dir: Path, frame_id: int, sha256: str) -> Path:
+    return cache_dir / f'{frame_id}-{sha256[:16]}.jpg'
+
+
+def _download_frame(
+    fetch_image: ImageFetcher, frame_id: int, sha256: str, destination: Path
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        f'{destination.name}.download-{os.getpid()}-{threading.get_ident()}'
+    )
+    temporary.unlink(missing_ok=True)
+    try:
+        fetch_image(frame_id, temporary)
+        if not temporary.is_file() or temporary.stat().st_size <= 0:
+            raise RuntimeError(f'帧 {frame_id} 下载结果为空')
+        if len(sha256) == 64 and _sha256(temporary) != sha256:
+            raise RuntimeError(f'帧 {frame_id} 的 SHA-256 校验失败')
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _reuse_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file() and destination.stat().st_size > 0:
+        return
+    temporary = destination.with_name(
+        f'{destination.name}.link-{os.getpid()}-{threading.get_ident()}'
+    )
+    temporary.unlink(missing_ok=True)
+    try:
+        try:
+            os.link(source, temporary)
+        except OSError:
+            shutil.copy2(source, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
