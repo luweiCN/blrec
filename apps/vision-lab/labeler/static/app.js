@@ -1306,10 +1306,14 @@ function renderCandidateHeroLineup() {
   }
   review.classList.remove('hidden');
   tools.classList.remove('hidden');
+  const recognizeButton = $('#btn-candidate-hero-recognize');
   const drawButton = $('#btn-candidate-hero-draw');
   const saveTemplate = $('#btn-candidate-hero-save-template');
   const clearButton = $('#btn-candidate-hero-clear');
   const playerUnreadable = $('#btn-candidate-player-unreadable');
+  recognizeButton.textContent = candidateHeroPrefillRunning
+    ? 'AI 识别中…' : 'AI 识别';
+  recognizeButton.disabled = busy || !context.teamSize;
   if (!candidateHeroLineup) {
     teams.classList.add('hidden');
     drawButton.classList.remove('hidden');
@@ -1337,7 +1341,7 @@ function renderCandidateHeroLineup() {
   playerUnreadable.classList.toggle(
     'selected', marksPlayer && candidateHeroPlayerStatus === 'unreadable');
   playerUnreadable.classList.remove('needs-attention');
-  playerUnreadable.disabled = candidateHeroLoading;
+  playerUnreadable.disabled = busy;
   playerUnreadable.setAttribute(
     'aria-pressed', String(candidateHeroPlayerStatus === 'unreadable'));
   const next = candidateNextHeroPosition();
@@ -1371,14 +1375,14 @@ function renderCandidateHeroLineup() {
   $('#candidate-hero-status').textContent =
     `${screenName} · ${candidateHeroLineup.team_size}V${candidateHeroLineup.team_size} · ` +
     `${status}${drawingHint}${playerHint}${editHint}`;
-  drawButton.disabled = candidateHeroLoading || complete;
+  drawButton.disabled = busy || complete;
   drawButton.classList.toggle('hidden', complete);
   drawButton.classList.toggle('selected', candidateHeroDrawMode);
   drawButton.textContent = candidateHeroDrawMode && next
       ? `正在画${next.side === 'left' ? '左' : '右'}${next.slot}`
       : '补画头像';
-  saveTemplate.disabled = candidateHeroLoading || !complete;
-  clearButton.disabled = candidateHeroLoading || !candidateHeroLineup.slots.length;
+  saveTemplate.disabled = busy || !complete;
+  clearButton.disabled = busy || !candidateHeroLineup.slots.length;
   for (const side of ['left', 'right']) {
     const team = document.createElement('section');
     team.className = 'candidate-hero-team';
@@ -1568,29 +1572,35 @@ function showCandidateMissingPlayerHero() {
   if (buttons[0]) buttons[0].scrollIntoView({block: 'center', inline: 'nearest'});
 }
 
-function candidateHeroPrefetchKey(item, context) {
+function candidateHeroPrefetchKey(item, context, recognize = false) {
   return [
     Number(item && item.frame_id),
     context && context.screenType || '',
     Number(context && context.teamSize || 0),
+    recognize ? 'recognize' : 'read',
   ].join(':');
 }
 
-function candidateHeroLineupUrl(item, context) {
+function candidateHeroLineupUrl(
+  item, context, {recognize = false, refresh = false} = {}) {
   const query = new URLSearchParams({screen_type: context.screenType});
   if (context.teamSize) query.set('team_size', String(context.teamSize));
+  if (recognize) query.set('recognize', 'true');
+  if (refresh) query.set('refresh', 'true');
   return `/api/training-review/items/${item.frame_id}/hero-lineup?${query}`;
 }
 
-function prepareCandidateHeroLineup(item, context) {
-  const key = candidateHeroPrefetchKey(item, context);
+function prepareCandidateHeroLineup(
+  item, context, {recognize = false, refresh = false} = {}) {
+  const key = candidateHeroPrefetchKey(item, context, recognize);
+  if (recognize) candidateHeroPrefetchRequests.delete(key);
   const existing = candidateHeroPrefetchRequests.get(key);
   if (existing) return existing;
   const entry = {
     key,
     initialPromise: Promise.all([
       ensureCandidateHeroCatalog(),
-      api(candidateHeroLineupUrl(item, context)),
+      api(candidateHeroLineupUrl(item, context, {recognize, refresh})),
     ]).then(([, lineup]) => lineup),
     finalPromise: null,
   };
@@ -1626,6 +1636,30 @@ function completeCandidateHeroLineupPrefetch(item, context, entry) {
   return entry.finalPromise;
 }
 
+function applyCandidateHeroLineup(item, context, lineup, previousDraft = null) {
+  lineup.slots ||= [];
+  candidateHeroLineup = lineup;
+  candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(lineup);
+  candidateHeroPlayerSlot = candidateHeroPlayerKey(lineup);
+  if (candidateHeroPlayerStatus === 'pending' && lineup.player_suggestion) {
+    const suggestion = lineup.player_suggestion;
+    const suggestedKey = candidateHeroKey(
+      suggestion.side, Number(suggestion.slot));
+    if (lineup.slots.some((slot) =>
+      candidateHeroKey(slot.side, slot.slot) === suggestedKey)) {
+      candidateHeroPlayerStatus = 'identified';
+      candidateHeroPlayerSlot = suggestedKey;
+    }
+  }
+  if (!context.teamSize && lineup.team_size) {
+    candidateHeroTeamSizeExplicit = true;
+    candidateHeroTeamSizeOverride = lineup.team_size;
+    renderCandidateChoices();
+  }
+  candidateHeroDraft = candidateHeroDraftForLineup(
+    item, lineup, previousDraft || new Map());
+}
+
 async function loadCandidateHeroLineup(item, contextOverride = null) {
   const context = contextOverride || candidateHeroContext(item);
   if (!context) {
@@ -1652,7 +1686,6 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
   $('#btn-candidate-save').disabled = true;
   renderCandidateHeroLineup();
   const entry = prepareCandidateHeroLineup(item, context);
-  let queuedJobId = '';
   try {
     const lineup = await entry.initialPromise;
     if (token !== candidateHeroLoadToken || currentCandidate() !== item) return;
@@ -1661,38 +1694,18 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
       $('#btn-candidate-save').disabled = false;
       return;
     }
-    queuedJobId = String((lineup.prefill_job || {}).id || '');
     if (lineup.needs_team_size) {
       candidateHeroLineup = null;
       renderCandidateHeroLineup();
       return;
     }
-    lineup.slots ||= [];
-    candidateHeroLineup = lineup;
-    candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(lineup);
-    candidateHeroPlayerSlot = candidateHeroPlayerKey(lineup);
-    if (candidateHeroPlayerStatus === 'pending' && lineup.player_suggestion) {
-      const suggestion = lineup.player_suggestion;
-      const suggestedKey = candidateHeroKey(
-        suggestion.side, Number(suggestion.slot));
-      if (lineup.slots.some((slot) =>
-        candidateHeroKey(slot.side, slot.slot) === suggestedKey)) {
-        candidateHeroPlayerStatus = 'identified';
-        candidateHeroPlayerSlot = suggestedKey;
-      }
-    }
-    if (!context.teamSize && lineup.team_size) {
-      candidateHeroTeamSizeExplicit = true;
-      candidateHeroTeamSizeOverride = lineup.team_size;
-      renderCandidateChoices();
-    }
-    candidateHeroDraft = candidateHeroDraftForLineup(item, lineup);
+    applyCandidateHeroLineup(item, context, lineup);
     renderCandidateHeroLineup();
   } catch (error) {
     if (token !== candidateHeroLoadToken || currentCandidate() !== item) return;
     candidateHeroLineup = null;
     $('#candidate-hero-review').classList.remove('hidden');
-    $('#candidate-hero-status').textContent = '英雄预填失败：' + error.message;
+    $('#candidate-hero-status').textContent = '英雄标注读取失败：' + error.message;
   } finally {
     if (token === candidateHeroLoadToken) {
       candidateHeroLoading = false;
@@ -1700,24 +1713,68 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
       renderCandidateHeroLineup();
     }
   }
-  if (queuedJobId) {
-    refreshCandidateHeroAfterWorker(item, context, entry, token);
-  }
 }
 
-async function refreshCandidateHeroAfterWorker(item, context, entry, token) {
+async function recognizeCandidateHeroes() {
+  const item = currentCandidate();
+  const context = candidateHeroContext(item);
+  if (!item || !context || !context.teamSize || candidateHeroPrefillRunning) {
+    if (item && context && !context.teamSize) {
+      $('#candidate-hero-status').textContent =
+        '请先选择每队 3 人或每队 5 人，再使用 AI 识别。';
+    }
+    return;
+  }
   const prefillToken = ++candidateHeroPrefillToken;
+  const loadToken = candidateHeroLoadToken;
+  const geometryRevision = candidateHeroGeometryRevision;
+  const previousDraft = new Map(candidateHeroDraft);
+  const previousPlayerSlot = candidateHeroPlayerSlot;
+  const previousPlayerStatus = candidateHeroPlayerStatus;
+  const previousDirty = candidateHeroDirty;
   candidateHeroPrefillRunning = true;
+  $('#candidate-save-state').classList.remove('error');
+  $('#candidate-save-state').textContent = '正在用 AI 识别头像位置和英雄…';
   renderCandidateHeroLineup();
   try {
+    const entry = prepareCandidateHeroLineup(
+      item, context, {recognize: true, refresh: true});
+    const initial = await entry.initialPromise;
+    const queuedJob = Boolean((initial.prefill_job || {}).id);
     const completed = await completeCandidateHeroLineupPrefetch(
       item, context, entry);
-    if (!completed.refreshed) return;
-    if (token !== candidateHeroLoadToken || currentCandidate() !== item ||
-        candidateHeroDirty) return;
-    await loadCandidateHeroLineup(item, context);
-  } catch (_error) {
-    // Worker 暂停或暂时离线时保留人工标注能力，不打断当前图片。
+    if (queuedJob && !completed.refreshed) {
+      throw new Error('模型任务未成功完成，请稍后重试');
+    }
+    if (prefillToken !== candidateHeroPrefillToken ||
+        loadToken !== candidateHeroLoadToken || currentCandidate() !== item ||
+        geometryRevision !== candidateHeroGeometryRevision) return;
+    const lineup = completed.lineup;
+    if (!lineup || !lineup.applicable || lineup.needs_team_size) return;
+    applyCandidateHeroLineup(item, context, lineup, previousDraft);
+    const previousPlayerStillExists = previousPlayerSlot && lineup.slots.some(
+      (slot) => candidateHeroKey(slot.side, slot.slot) === previousPlayerSlot);
+    if (previousPlayerStatus === 'identified' && previousPlayerStillExists) {
+      candidateHeroPlayerStatus = 'identified';
+      candidateHeroPlayerSlot = previousPlayerSlot;
+    } else if (previousPlayerStatus === 'unreadable') {
+      candidateHeroPlayerStatus = 'unreadable';
+      candidateHeroPlayerSlot = null;
+    }
+    candidateHeroDirty = previousDirty;
+    candidateHeroPrefetchRequests.delete(
+      candidateHeroPrefetchKey(item, context));
+    const found = lineup.slots.length;
+    const expected = Number(lineup.team_size || context.teamSize) * 2;
+    $('#candidate-save-state').textContent = found
+      ? `AI 识别完成，找到 ${found}/${expected} 个头像，请核对或补画。`
+      : 'AI 没有识别到头像，请使用“补画头像”。';
+  } catch (error) {
+    if (currentCandidate() === item) {
+      $('#candidate-save-state').classList.add('error');
+      $('#candidate-save-state').textContent =
+        'AI 识别失败：' + error.message;
+    }
   } finally {
     if (prefillToken === candidateHeroPrefillToken) {
       candidateHeroPrefillRunning = false;
@@ -2829,16 +2886,7 @@ function prepareCandidateForReview(item) {
   if (!frameId) return Promise.resolve();
   const existing = candidatePreparationRequests.get(frameId);
   if (existing) return existing;
-  prefetchCandidateImage(item);
-  const promise = Promise.resolve()
-    .then(async () => {
-      const draft = candidateDefaultDraft(item);
-      const context = candidateHeroContext(item, draft, false);
-      if (!context) return;
-      const entry = prepareCandidateHeroLineup(item, context);
-      await completeCandidateHeroLineupPrefetch(item, context, entry);
-    })
-    .catch(() => undefined);
+  const promise = prefetchCandidateImage(item).then(() => undefined);
   candidatePreparationRequests.set(frameId, promise);
   return promise;
 }
@@ -3361,6 +3409,7 @@ function bindCandidateReview() {
   $('#candidate-hero-search').oninput = renderCandidateHeroOptions;
   $('#btn-candidate-hero-picker-close').onclick = closeCandidateHeroPicker;
   $('#btn-candidate-hero-delete').onclick = deleteCandidateHeroSlot;
+  $('#btn-candidate-hero-recognize').onclick = recognizeCandidateHeroes;
   $('#btn-candidate-hero-draw').onclick = () => {
     if (!candidateHeroLineup || candidateHeroLayoutComplete()) return;
     candidateHeroDrawMode = !candidateHeroDrawMode;
@@ -3395,7 +3444,8 @@ function bindCandidateReview() {
     if (!item || !candidateDraft ||
         event.target.closest('.candidate-box') ||
         event.target.closest('.candidate-hero-circle')) return;
-    const canDrawHero = !candidateHeroLoading && candidateHeroDrawMode &&
+    const canDrawHero = !candidateHeroLoading && !candidateHeroPrefillRunning &&
+      candidateHeroDrawMode &&
       candidateHeroLineup && candidateNextHeroPosition();
     const canDrawResult = !candidateHeroDrawMode &&
       candidateDraft.result_panel_label === 'result_panel';

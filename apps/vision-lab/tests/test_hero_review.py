@@ -502,7 +502,44 @@ class TestHeroReviewStorage(HeroReviewTestCase):
         )
         self.assertIsNotNone(template)
 
-    def test_newer_template_refreshes_pending_automatic_layout(self):
+    def test_control_plane_only_queues_ai_after_explicit_recognition(self):
+        from labeler import server
+
+        models = {
+            task_id: {'run_id': f'{task_id}-run', 'metadata': {}, 'artifact_size': 1}
+            for task_id in server.model_prefill.HERO_PREFILL_TASKS
+        }
+        with (
+            mock.patch.object(config, 'CONTROL_PLANE_ONLY', True),
+            mock.patch.object(
+                server, '_conn', side_effect=lambda: db.connect(self.root / 'lab.db')
+            ),
+            mock.patch.object(
+                server.model_prefill, 'latest_model_specs', return_value=models
+            ) as latest_models,
+            mock.patch.object(
+                server, '_queue_model_prefill', return_value={'id': 'hero-job'}
+            ) as queue_prefill,
+        ):
+            loaded = server.api_training_review_hero_lineup(
+                self.frame_id, screen_type='gameplay_hud', team_size=3, recognize=False
+            )
+            recognized = server.api_training_review_hero_lineup(
+                self.frame_id,
+                screen_type='gameplay_hud',
+                team_size=3,
+                recognize=True,
+                refresh=True,
+            )
+
+        self.assertNotIn('prefill_job', loaded)
+        self.assertEqual(loaded['slots'], [])
+        self.assertEqual(recognized['prefill_job']['id'], 'hero-job')
+        latest_models.assert_called_once()
+        queue_prefill.assert_called_once()
+        self.assertEqual(queue_prefill.call_args.kwargs['operation'], 'hero_lineup')
+
+    def test_explicit_ai_refreshes_pending_layout_from_newer_template(self):
         from labeler import server
 
         old_slots = self.slots()
@@ -556,7 +593,11 @@ class TestHeroReviewStorage(HeroReviewTestCase):
             ),
         ):
             lineup = server.api_training_review_hero_lineup(
-                self.frame_id, screen_type='result_page', team_size=3, refresh=False
+                self.frame_id,
+                screen_type='result_page',
+                team_size=3,
+                recognize=True,
+                refresh=False,
             )
 
         self.assertEqual(lineup['slots'][-1]['crop']['w'], 0.06)

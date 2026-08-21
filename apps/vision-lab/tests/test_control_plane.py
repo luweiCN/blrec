@@ -163,6 +163,34 @@ def test_candidate_hud_prefill_shows_progress_and_preserves_manual_edits() -> No
     assert 'delete refreshed.prefill_job;' in completion
 
 
+def test_candidate_hero_ai_recognition_is_an_explicit_action() -> None:
+    root = Path(__file__).resolve().parent.parent / 'labeler/static'
+    html = (root / 'index.html').read_text(encoding='utf-8')
+    script = (root / 'app.js').read_text(encoding='utf-8')
+
+    recognize_button = html.index('id="btn-candidate-hero-recognize"')
+    draw_button = html.index('id="btn-candidate-hero-draw"')
+    assert recognize_button < draw_button
+
+    recognize = script[
+        script.index('async function recognizeCandidateHeroes(') : script.index(
+            'async function persistCandidateHeroLayout('
+        )
+    ]
+    assert 'recognize: true' in recognize
+    assert 'refresh: true' in recognize
+    assert 'candidateHeroPrefillRunning = true;' in recognize
+    assert 'candidateHeroPrefillRunning = false;' in recognize
+    assert "$('#btn-candidate-hero-recognize').onclick" in script
+
+    prepare = script[
+        script.index('function prepareCandidateForReview(') : script.index(
+            'function nextMatchingCandidate('
+        )
+    ]
+    assert 'prepareCandidateHeroLineup(' not in prepare
+
+
 def test_manual_hero_circle_is_rendered_before_remote_save() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'

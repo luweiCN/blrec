@@ -1845,6 +1845,7 @@ def _remote_training_review_hero_lineup(
     *,
     screen_type: Optional[str],
     team_size: Optional[int],
+    recognize: bool,
     refresh: bool,
 ) -> Dict[str, Any]:
     """NAS 控制面只保存布局并排队，头像推理全部交给 Vision Worker。"""
@@ -1929,6 +1930,19 @@ def _remote_training_review_hero_lineup(
                         slots=source_slots,
                     )
                     same_existing = True
+
+            if not recognize:
+                if same_existing and existing is not None:
+                    return _hero_lineup_payload(existing, item=item)
+                return {
+                    'applicable': True,
+                    'screen_type': inferred_screen,
+                    'team_size': inferred_size,
+                    'review_status': 'pending',
+                    'suggestion_method': 'manual-circle-v1',
+                    'template_found': False,
+                    'slots': [],
+                }
 
             operation = 'hero_slots' if source_slots else 'hero_lineup'
             task_ids = (
@@ -2027,11 +2041,16 @@ def api_training_review_hero_lineup(
     frame_id: int,
     screen_type: Optional[str] = None,
     team_size: Optional[int] = Query(None),
+    recognize: bool = False,
     refresh: bool = False,
 ) -> Dict[str, Any]:
     if config.CONTROL_PLANE_ONLY:
         return _remote_training_review_hero_lineup(
-            frame_id, screen_type=screen_type, team_size=team_size, refresh=refresh
+            frame_id,
+            screen_type=screen_type,
+            team_size=team_size,
+            recognize=recognize,
+            refresh=refresh,
         )
     with _db_lock:
         conn = _conn()
@@ -2063,8 +2082,11 @@ def api_training_review_hero_lineup(
             and existing['review_status'] == 'pending'
             and str(existing['suggestion_method']).startswith('layout-template+')
         )
-        if same_context_existing and not refresh and not refreshes_automatic_layout:
-            return _hero_lineup_payload(existing, item=item)
+        if same_context_existing:
+            if existing['review_status'] == 'confirmed' or not recognize:
+                return _hero_lineup_payload(existing, item=item)
+            if not refresh and not refreshes_automatic_layout:
+                return _hero_lineup_payload(existing, item=item)
     if inferred_size is None:
         return {
             'applicable': True,
@@ -2072,7 +2094,7 @@ def api_training_review_hero_lineup(
             'needs_team_size': True,
             'slots': [],
         }
-    if existing is None or existing['review_status'] != 'confirmed':
+    if recognize and (existing is None or existing['review_status'] != 'confirmed'):
         try:
             with _db_lock:
                 model_conn = _conn()
@@ -2142,6 +2164,26 @@ def api_training_review_hero_lineup(
         and str(template['updated_at']) <= str(existing['updated_at'])
     ):
         return _hero_lineup_payload(existing, item=item)
+    if not recognize:
+        with _db_lock:
+            conn = _conn()
+            try:
+                lineup = db.replace_training_review_hero_layout(
+                    conn,
+                    frame_id=frame_id,
+                    screen_type=inferred_screen,
+                    team_size=inferred_size,
+                    method='layout-template+manual-v1',
+                    slots=template['slots'],
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            finally:
+                conn.close()
+        lineup['template_found'] = True
+        return _hero_lineup_payload(lineup, item=item)
     try:
         with _db_lock:
             conn = _conn()
