@@ -31,6 +31,54 @@ def test_control_plane_rejects_local_heavy_operations(monkeypatch) -> None:
             raise AssertionError('NAS 控制面不应直接执行重任务')
 
 
+def test_postgres_training_snapshot_does_not_hold_global_request_lock(
+    monkeypatch,
+) -> None:
+    class ExplodingLock:
+        def __enter__(self):
+            raise AssertionError('PostgreSQL 快照不应占用全局请求锁')
+
+        def __exit__(self, *_args):
+            return False
+
+    class Connection:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(config, 'DATABASE_URL', 'postgresql://configured')
+    monkeypatch.setattr(server, '_db_lock', ExplodingLock())
+    monkeypatch.setattr(server, '_conn', lambda: Connection())
+    monkeypatch.setattr(
+        server.training,
+        'task_summary',
+        lambda _conn, _task_id: {'id': 'match_flow', 'ready': True},
+    )
+    monkeypatch.setattr(
+        server.training,
+        'export_snapshot',
+        lambda _conn, _task_id, materialize: {'version': 'match-flow-v2'},
+    )
+    monkeypatch.setattr(
+        server.training, 'new_run_id', lambda _task_id: 'match-flow-run-2'
+    )
+    monkeypatch.setattr(
+        server.db, 'create_training_run', lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        server.db, 'get_training_run', lambda *_args: {'id': 'match-flow-run-2'}
+    )
+    monkeypatch.setattr(
+        server.vision_jobs,
+        'create_job',
+        lambda *_args, **_kwargs: {'id': 'train-job-2'},
+    )
+
+    result = server.api_start_training({'task_id': 'match_flow'})
+
+    assert result['id'] == 'match-flow-run-2'
+    assert result['vision_job']['id'] == 'train-job-2'
+
+
 def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     html = (
         Path(__file__).resolve().parent.parent / 'labeler/static/index.html'
@@ -87,7 +135,11 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'prefetchNextCandidate();' in script
     assert '/api/training-review/items/${frameId}/prefill' not in script
     assert 'requestCandidateModelPrefill(item);' not in script
-    assert 'function applyCandidateMaterialSuggestion(suggestion)' in script
+    assert (
+        "function applyCandidateMaterialSuggestion(suggestion, heroScope = 'direct')"
+        in script
+    )
+    assert "query.set('hero_scope', candidateHeroScope)" in script
     assert 'renderCandidateMaterialSuggestions();' in script
     assert "const CANDIDATE_DEFAULT_SOURCE_TYPE = 'new_model_prefill';" in script
     assert 'new AbortController()' in script

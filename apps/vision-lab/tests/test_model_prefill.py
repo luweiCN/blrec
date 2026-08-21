@@ -211,6 +211,119 @@ class TestModelPrefill(unittest.TestCase):
         )
         self.assertEqual(source['metadata']['hero_context_suggestion']['team_size'], 3)
 
+    def test_core_prefill_does_not_run_match_mode_or_avatar_on_hero_select(self):
+        contexts = model_prefill._latest_model_contexts(
+            self.conn, (*model_prefill.CORE_PREFILL_TASKS, 'hero_avatar_detector')
+        )
+        called = []
+
+        def prediction(_artifact, metadata, _image, conf_thr=0.25):
+            task_id = metadata['task_id']
+            called.append(task_id)
+            if task_id == 'match_flow':
+                label, probability = 'not_match_flow', 0.99
+            elif task_id == 'hero_select':
+                label, probability = 'select_5v5', 0.98
+            elif task_id == 'result_detector':
+                return {
+                    'task': 'detect',
+                    'found': False,
+                    'detections': [],
+                    'raw_top_conf': 0.02,
+                }
+            else:
+                raise AssertionError(f'英雄选择画面不应运行 {task_id}')
+            return {
+                'task': 'classify',
+                'top1': {'class': label, 'prob': probability},
+                'top5': [{'class': label, 'prob': probability}],
+            }
+
+        with mock.patch.object(
+            model_prefill.inference, 'run_artifact', side_effect=prediction
+        ):
+            result = model_prefill.run_core_prefill(self.image, contexts)
+
+        self.assertEqual(called, ['match_flow', 'hero_select', 'result_detector'])
+        self.assertNotIn('match_mode', result['suggestions'])
+        self.assertIsNone(result['hero_context_suggestion'])
+        self.assertEqual(result['errors'], {})
+
+    def test_core_prefill_does_not_run_mode_or_avatar_outside_match(self):
+        contexts = model_prefill._latest_model_contexts(
+            self.conn, (*model_prefill.CORE_PREFILL_TASKS, 'hero_avatar_detector')
+        )
+        called = []
+
+        def prediction(_artifact, metadata, _image, conf_thr=0.25):
+            task_id = metadata['task_id']
+            called.append(task_id)
+            if task_id == 'match_flow':
+                label, probability = 'not_match_flow', 0.99
+            elif task_id == 'hero_select':
+                label, probability = 'not_select', 0.97
+            elif task_id == 'result_detector':
+                return {
+                    'task': 'detect',
+                    'found': False,
+                    'detections': [],
+                    'raw_top_conf': 0.01,
+                }
+            else:
+                raise AssertionError(f'非对局画面不应运行 {task_id}')
+            return {
+                'task': 'classify',
+                'top1': {'class': label, 'prob': probability},
+                'top5': [{'class': label, 'prob': probability}],
+            }
+
+        with mock.patch.object(
+            model_prefill.inference, 'run_artifact', side_effect=prediction
+        ):
+            result = model_prefill.run_core_prefill(self.image, contexts)
+
+        self.assertEqual(called, ['match_flow', 'hero_select', 'result_detector'])
+        self.assertNotIn('match_mode', result['suggestions'])
+        self.assertIsNone(result['hero_context_suggestion'])
+        self.assertEqual(result['errors'], {})
+
+    def test_existing_hero_select_suggestion_suppresses_stale_mode_suggestion(self):
+        db.add_training_review_source(
+            self.conn,
+            frame_id=self.frame_id,
+            source_type='new_model_prefill',
+            source_id=f'frame:{self.frame_id}',
+            suggestions={
+                'match_flow': {'label': 'not_match_flow', 'confidence': 0.99},
+                'hero_select': {'label': 'select_5v5', 'confidence': 1.0},
+                'match_mode': {'label': 'aram', 'confidence': 0.965},
+            },
+            metadata={
+                'prefill_pipeline_version': 'legacy-parallel',
+                'hero_context_suggestion': {
+                    'screen_type': 'gameplay_hud',
+                    'team_size': 3,
+                    'confidence': 0.95,
+                },
+            },
+        )
+
+        item = db.get_training_review_item(self.conn, self.frame_id)
+
+        self.assertEqual(item['suggestions']['hero_select']['label'], 'select_5v5')
+        self.assertNotIn('match_mode', item['suggestions'])
+        raw_source = next(
+            source
+            for source in item['sources']
+            if source['source_type'] == 'new_model_prefill'
+        )
+        self.assertEqual(raw_source['suggestions']['match_mode']['label'], 'aram')
+        self.assertNotIn('hero_context_suggestion', raw_source['metadata'])
+        self.assertEqual(
+            raw_source['metadata']['suppressed_hero_context_suggestion']['screen_type'],
+            'gameplay_hud',
+        )
+
     def test_context_prefers_translucent_scoreboard_over_visible_hud(self):
         hud = [
             {'class': 'hero_avatar', 'conf': 0.95, 'xywh_norm': [x, 0.01, 0.05, 0.07]}

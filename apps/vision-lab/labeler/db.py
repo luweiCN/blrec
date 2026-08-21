@@ -3773,6 +3773,25 @@ def _training_review_item_dict(
             if rank > suggestion_ranks.get(task, (-1, -1.0)):
                 suggestions[task] = dict(suggestion)
                 suggestion_ranks[task] = rank
+    selection = suggestions.get('hero_select') or {}
+    flow = suggestions.get('match_flow') or {}
+    selection_applies = (
+        str(selection.get('label') or '').startswith('select_')
+        and _training_review_float(selection.get('confidence')) >= 0.55
+    )
+    outside_match = (
+        str(flow.get('label') or '') == 'not_match_flow'
+        and _training_review_float(flow.get('confidence')) >= 0.55
+    )
+    if selection_applies or outside_match:
+        # 原始来源仍完整保留；这里只隐藏不适用于当前画面的模式建议。
+        suggestions.pop('match_mode', None)
+    if selection_applies:
+        for source in sources:
+            metadata = source.get('metadata') or {}
+            context = metadata.pop('hero_context_suggestion', None)
+            if context is not None:
+                metadata['suppressed_hero_context_suggestion'] = context
     item['suggestions'] = suggestions
     item['sources'] = sources
     item['source_count'] = len(sources)
@@ -5500,27 +5519,30 @@ def training_review_material_suggestions(
             legacy_related = related_heroes.get(
                 (hero_label, scene, 'legacy'), {'same_match': 0, 'same_video': 0}
             )
-            new_available = (
-                new_frames
-                + int(new_related['same_match'])
-                + int(new_related['same_video'])
+            new_related_count = int(new_related['same_match']) + int(
+                new_related['same_video']
             )
-            legacy_available = (
-                legacy_frames
-                + int(legacy_related['same_match'])
-                + int(legacy_related['same_video'])
+            legacy_related_count = int(legacy_related['same_match']) + int(
+                legacy_related['same_video']
             )
-            source_scope = 'new' if new_available >= legacy_available else 'legacy'
+            source_scope = (
+                'new'
+                if (new_frames, new_related_count)
+                >= (legacy_frames, legacy_related_count)
+                else 'legacy'
+            )
             if source_scope == 'new':
-                candidate_count = new_available
+                candidate_count = new_frames
                 candidate_crop_count = new_crops
                 related_counts = new_related
                 model_prefill_count = new_frames
+                related_candidate_count = new_related_count
             else:
-                candidate_count = legacy_available
+                candidate_count = legacy_frames
                 candidate_crop_count = legacy_crops
                 related_counts = legacy_related
                 model_prefill_count = legacy_frames
+                related_candidate_count = legacy_related_count
             target = _MATERIAL_HERO_SCENE_TARGET
             sufficient = count >= target
             ratio = count / target
@@ -5538,6 +5560,7 @@ def training_review_material_suggestions(
                     'target_count': target,
                     'shortage_count': max(0, target - count),
                     'candidate_count': candidate_count,
+                    'related_candidate_count': related_candidate_count,
                     'candidate_crop_count': candidate_crop_count,
                     'model_prefill_count': model_prefill_count,
                     'model_prefill_crop_count': candidate_crop_count,
@@ -5769,6 +5792,12 @@ def _training_review_material_suggestions(
                     'shortage_count': max(0, target - count),
                     'candidate_count': len(selected['frame_ids']),
                     'candidate_crop_count': int(selected['crop_count']),
+                    'model_prefill_count': len(selected['frame_ids']),
+                    'model_prefill_crop_count': int(selected['crop_count']),
+                    'related_candidate_count': 0,
+                    'same_match_candidate_count': 0,
+                    'same_video_candidate_count': 0,
+                    'matches_without_scene_candidate': 0,
                     'source_scope': source_scope,
                     'severity': (
                         'sufficient'
@@ -6288,18 +6317,24 @@ def _normalized_training_review_heroes(hero: Sequence[str] | str) -> List[str]:
 
 
 def _training_review_related_hero_condition(
-    heroes: Sequence[str], *, material_alias: str = 'material'
+    heroes: Sequence[str], *, material_alias: str = 'material', scope: str = 'all'
 ) -> Tuple[str, List[Any]]:
+    if scope not in {'all', 'direct'}:
+        raise ValueError('英雄证据范围无效')
     placeholders = ','.join('?' for _hero in heroes)
     effective_label = (
         "COALESCE(NULLIF({slot}.confirmed_label,''),{slot}.suggested_label)"
     )
-    condition = (
-        '(EXISTS (SELECT 1 FROM training_review_hero_slots direct_slot '
+    direct = (
+        'EXISTS (SELECT 1 FROM training_review_hero_slots direct_slot '
         'WHERE direct_slot.frame_id=item.frame_id AND '
         + effective_label.format(slot='direct_slot')
-        + f' IN ({placeholders})) OR ('
-        + f'{material_alias}.linked_match_id IS NOT NULL AND EXISTS ('
+        + f' IN ({placeholders}))'
+    )
+    if scope == 'direct':
+        return direct, list(heroes)
+    condition = (
+        f'({direct} OR (' + f'{material_alias}.linked_match_id IS NOT NULL AND EXISTS ('
         'SELECT 1 FROM training_review_material_index match_peer '
         'JOIN training_review_hero_slots match_slot '
         'ON match_slot.frame_id=match_peer.frame_id '
@@ -6512,6 +6547,7 @@ def _training_review_indexed_attribute_frame_ids(
     scene: str = '',
     match_mode: str = '',
     hero: Sequence[str] | str = (),
+    hero_scope: str = 'all',
     confidence: str = '',
 ) -> Optional[set[int]]:
     if confidence not in {'', 'low', 'boundary', 'high'}:
@@ -6539,7 +6575,9 @@ def _training_review_indexed_attribute_frame_ids(
         parameters.append(scene)
     heroes = _normalized_training_review_heroes(hero)
     if heroes:
-        condition, hero_parameters = _training_review_related_hero_condition(heroes)
+        condition, hero_parameters = _training_review_related_hero_condition(
+            heroes, scope=hero_scope
+        )
         conditions.append(condition)
         parameters.extend(hero_parameters)
     if confidence:
@@ -6571,6 +6609,7 @@ def _training_review_unindexed_attribute_frame_ids(
     scene: str = '',
     match_mode: str = '',
     hero: Sequence[str] | str = (),
+    hero_scope: str = 'all',
     confidence: str = '',
 ) -> Optional[set[int]]:
     """历史索引未完成时保留原始 JSON 语义；回填完成后不再调用。"""
@@ -6586,6 +6625,8 @@ def _training_review_unindexed_attribute_frame_ids(
         else [str(value).strip() for value in hero if str(value).strip()]
     )
     heroes = list(dict.fromkeys(heroes))
+    if hero_scope not in {'all', 'direct'}:
+        raise ValueError('英雄证据范围无效')
     if len(heroes) > 100:
         raise ValueError('英雄筛选数量过多')
     if not any((streamer, source_type, scene, match_mode, heroes, confidence)):
@@ -6704,6 +6745,7 @@ def _training_review_attribute_frame_ids(
     scene: str = '',
     match_mode: str = '',
     hero: Sequence[str] | str = (),
+    hero_scope: str = 'all',
     confidence: str = '',
 ) -> Optional[set[int]]:
     implementation = (
@@ -6718,6 +6760,7 @@ def _training_review_attribute_frame_ids(
         scene=scene,
         match_mode=match_mode,
         hero=hero,
+        hero_scope=hero_scope,
         confidence=confidence,
     )
 
@@ -6732,6 +6775,7 @@ def _training_review_visible_frame_ids(
     scene: str = '',
     match_mode: str = '',
     hero: Sequence[str] | str = (),
+    hero_scope: str = 'all',
     confidence: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
@@ -6753,6 +6797,7 @@ def _training_review_visible_frame_ids(
         scene=scene,
         match_mode=match_mode,
         hero=hero,
+        hero_scope=hero_scope,
         confidence=confidence,
     )
     indexed = training_review_material_index_complete(conn)
@@ -6890,6 +6935,7 @@ def training_review_frame_ids(
     scene: str = '',
     match_mode: str = '',
     hero: Sequence[str] | str = (),
+    hero_scope: str = 'all',
     confidence: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
@@ -6897,7 +6943,17 @@ def training_review_frame_ids(
     default_new_queue = (
         status == 'needs_review'
         and source_scope == 'new'
-        and not any((streamer, source_type, scene, match_mode, hero, confidence))
+        and not any(
+            (
+                streamer,
+                source_type,
+                scene,
+                match_mode,
+                hero,
+                hero_scope != 'all',
+                confidence,
+            )
+        )
     )
     if default_new_queue:
         ready_condition = (
@@ -7013,6 +7069,7 @@ def training_review_frame_ids(
         scene=scene,
         match_mode=match_mode,
         hero=hero,
+        hero_scope=hero_scope,
         confidence=confidence,
         prefill_ready_only=prefill_ready_only,
         result_groups=result_groups,
@@ -7033,6 +7090,7 @@ def list_training_review_items(
     scene: str = '',
     match_mode: str = '',
     hero: Sequence[str] | str = (),
+    hero_scope: str = 'all',
     confidence: str = '',
     prefill_ready_only: bool = False,
 ) -> List[Dict[str, Any]]:
@@ -7048,6 +7106,7 @@ def list_training_review_items(
         scene=scene,
         match_mode=match_mode,
         hero=hero,
+        hero_scope=hero_scope,
         confidence=confidence,
         prefill_ready_only=prefill_ready_only,
     )
@@ -7064,6 +7123,7 @@ def _training_review_indexed_page_frame_ids(
     scene: str,
     match_mode: str,
     hero: Sequence[str] | str,
+    hero_scope: str,
     confidence: str,
     prefill_ready_only: bool,
     limit: int,
@@ -7113,7 +7173,9 @@ def _training_review_indexed_page_frame_ids(
         parameters.append(match_mode)
     heroes = _normalized_training_review_heroes(hero)
     if heroes:
-        condition, hero_parameters = _training_review_related_hero_condition(heroes)
+        condition, hero_parameters = _training_review_related_hero_condition(
+            heroes, scope=hero_scope
+        )
         conditions.append(condition)
         parameters.extend(hero_parameters)
     if confidence:
@@ -7137,7 +7199,7 @@ def _training_review_indexed_page_frame_ids(
     total = 0 if count_row is None else int(count_row[0])
     hero_order_sql = ''
     hero_order_parameters: List[Any] = []
-    if heroes:
+    if heroes and hero_scope == 'all':
         hero_order_sql, hero_order_parameters = _training_review_related_hero_order(
             heroes
         )
@@ -7185,6 +7247,7 @@ def training_review_page(
     scene: str = '',
     match_mode: str = '',
     hero: Sequence[str] | str = (),
+    hero_scope: str = 'all',
     confidence: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
@@ -7223,6 +7286,7 @@ def training_review_page(
             scene=scene,
             match_mode=match_mode,
             hero=hero,
+            hero_scope=hero_scope,
             confidence=confidence,
             prefill_ready_only=prefill_ready_only,
             limit=limit,
@@ -7247,6 +7311,7 @@ def training_review_page(
         scene=scene,
         match_mode=match_mode,
         hero=hero,
+        hero_scope=hero_scope,
         confidence=confidence,
         prefill_ready_only=prefill_ready_only,
         result_groups=result_groups,
@@ -7273,6 +7338,7 @@ def count_training_review_items(
     scene: str = '',
     match_mode: str = '',
     hero: Sequence[str] | str = (),
+    hero_scope: str = 'all',
     confidence: str = '',
 ) -> int:
     if status == 'legacy_hero':
@@ -7292,6 +7358,7 @@ def count_training_review_items(
         scene=scene,
         match_mode=match_mode,
         hero=hero,
+        hero_scope=hero_scope,
         confidence=confidence,
     )
     return len(visible)

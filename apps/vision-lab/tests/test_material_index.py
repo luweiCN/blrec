@@ -937,6 +937,21 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         ]
         assert items[1]['hero_filter_matches'][0]['reason'] == 'direct_suggested'
 
+        direct_items, direct_total = db.training_review_page(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            scene='gameplay_hud',
+            hero=['Adagio'],
+            hero_scope='direct',
+            limit=20,
+            result_groups={},
+        )
+
+        assert direct_total == 1
+        assert [item['frame_id'] for item in direct_items] == [direct_hud]
+        assert direct_items[0]['hero_filter_matches'][0]['reason'] == 'direct_suggested'
+
     def test_hero_filter_uses_video_fallback_only_without_match_windows(self):
         evidence = self.frame(300)
         hud = self.frame(310)
@@ -1094,7 +1109,8 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         assert suggestion['model_prefill_count'] == 0
         assert suggestion['same_match_candidate_count'] == 1
         assert suggestion['same_video_candidate_count'] == 0
-        assert suggestion['candidate_count'] == 1
+        assert suggestion['candidate_count'] == 0
+        assert suggestion['related_candidate_count'] == 1
         assert suggestion['matches_without_scene_candidate'] == 0
 
     def test_material_suggestions_do_not_query_once_per_hero(self):

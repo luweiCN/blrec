@@ -13,6 +13,8 @@ from . import db, inference, managed_assets
 
 CORE_PREFILL_TASKS = ('match_flow', 'hero_select', 'match_mode', 'result_detector')
 HERO_PREFILL_TASKS = ('hero_avatar_detector', 'hero_identity', 'player_position')
+PREFILL_PIPELINE_VERSION = 'cascade-v2'
+PREFILL_APPLICABILITY_THRESHOLD = 0.55
 
 
 def _latest_model_contexts(
@@ -138,9 +140,11 @@ def run_core_prefill(
     model_outputs = []
     suggested_boxes = []
     errors: Dict[str, str] = {}
-    for task_id, context in contexts.items():
-        if task_id == 'hero_avatar_detector':
-            continue
+
+    def run_classification(task_id: str) -> None:
+        context = contexts.get(task_id)
+        if context is None:
+            return
         try:
             output = inference.run_artifact(
                 Path(context['artifact']),
@@ -148,48 +152,87 @@ def run_core_prefill(
                 frame_path,
                 conf_thr=0.25,
             )
-            if task_id == 'result_detector':
-                suggestion = _result_suggestion(context, output)
-                suggestions['result_panel'] = suggestion
-                if suggestion['label'] == 'result_panel':
-                    for detection in output.get('detections') or []:
-                        xywh = detection.get('xywh_norm')
-                        if not isinstance(xywh, list) or len(xywh) != 4:
-                            continue
-                        suggested_boxes.append(
-                            {
-                                'type': 'result_panel',
-                                'x': float(xywh[0]),
-                                'y': float(xywh[1]),
-                                'w': float(xywh[2]),
-                                'h': float(xywh[3]),
-                                'confidence': float(detection.get('conf') or 0),
-                            }
-                        )
-                model_outputs.append(
-                    {
-                        'task_id': task_id,
-                        'run_id': context['run_id'],
-                        'found': bool(output.get('found')),
-                        'raw_top_conf': float(output.get('raw_top_conf') or 0),
-                    }
-                )
-            else:
-                suggestion = _classification_suggestion(task_id, context, output)
-                suggestions[task_id] = suggestion
-                model_outputs.append(
-                    {
-                        'task_id': task_id,
-                        'run_id': context['run_id'],
-                        'top1': output.get('top1'),
-                        'top5': output.get('top5'),
-                    }
-                )
+            suggestion = _classification_suggestion(task_id, context, output)
+            suggestions[task_id] = suggestion
+            model_outputs.append(
+                {
+                    'task_id': task_id,
+                    'run_id': context['run_id'],
+                    'top1': output.get('top1'),
+                    'top5': output.get('top5'),
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             errors[task_id] = str(exc)[:300]
+
+    def run_result_detector() -> None:
+        task_id = 'result_detector'
+        context = contexts.get(task_id)
+        if context is None:
+            return
+        try:
+            output = inference.run_artifact(
+                Path(context['artifact']),
+                context['metadata'],
+                frame_path,
+                conf_thr=0.25,
+            )
+            suggestion = _result_suggestion(context, output)
+            suggestions['result_panel'] = suggestion
+            if suggestion['label'] == 'result_panel':
+                for detection in output.get('detections') or []:
+                    xywh = detection.get('xywh_norm')
+                    if not isinstance(xywh, list) or len(xywh) != 4:
+                        continue
+                    suggested_boxes.append(
+                        {
+                            'type': 'result_panel',
+                            'x': float(xywh[0]),
+                            'y': float(xywh[1]),
+                            'w': float(xywh[2]),
+                            'h': float(xywh[3]),
+                            'confidence': float(detection.get('conf') or 0),
+                        }
+                    )
+            model_outputs.append(
+                {
+                    'task_id': task_id,
+                    'run_id': context['run_id'],
+                    'found': bool(output.get('found')),
+                    'raw_top_conf': float(output.get('raw_top_conf') or 0),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors[task_id] = str(exc)[:300]
+
+    # 路由模型先执行；结算检测有明确的“无框”负结果，可以安全独立运行。
+    run_classification('match_flow')
+    run_classification('hero_select')
+    run_result_detector()
+
+    selection = suggestions.get('hero_select') or {}
+    selection_label = str(selection.get('label') or '')
+    selection_found = (
+        selection_label.startswith('select_')
+        and float(selection.get('confidence') or 0) >= PREFILL_APPLICABILITY_THRESHOLD
+    )
+    flow = suggestions.get('match_flow') or {}
+    in_match = (
+        str(flow.get('label') or '') == 'match_flow'
+        and float(flow.get('confidence') or 0) >= PREFILL_APPLICABILITY_THRESHOLD
+    )
+    result_found = (
+        str((suggestions.get('result_panel') or {}).get('label') or '')
+        == 'result_panel'
+    )
+
+    # 英雄选择本身已经给出模式；其他非对局画面没有对局模式可供判断。
+    if not selection_found and in_match:
+        run_classification('match_mode')
+
     hero_context_suggestion = None
     hero_detector = contexts.get('hero_avatar_detector')
-    if hero_detector is not None:
+    if hero_detector is not None and not selection_found and (in_match or result_found):
         try:
             hero_output = inference.run_artifact(
                 Path(hero_detector['artifact']),
@@ -216,6 +259,7 @@ def run_core_prefill(
         except Exception as exc:  # noqa: BLE001
             errors['hero_avatar_detector'] = str(exc)[:300]
     return {
+        'prefill_pipeline_version': PREFILL_PIPELINE_VERSION,
         'suggestions': suggestions,
         'model_outputs': model_outputs,
         'suggested_boxes': suggested_boxes,
@@ -252,6 +296,8 @@ def apply_core_prefill(
         source_id=f'frame:{int(frame_id)}',
         suggestions=result.get('suggestions') or {},
         metadata={
+            'prefill_pipeline_version': result.get('prefill_pipeline_version')
+            or PREFILL_PIPELINE_VERSION,
             'model_runs': result.get('model_runs') or {},
             'model_outputs': result.get('model_outputs') or [],
             'suggested_boxes': result.get('suggested_boxes') or [],
@@ -293,7 +339,11 @@ def prefill_training_review_item(
     ).fetchone()
     if previous is not None and not force:
         metadata = json.loads(previous['metadata_json'] or '{}')
-        if metadata.get('model_runs') == model_runs and not metadata.get('errors'):
+        if (
+            metadata.get('model_runs') == model_runs
+            and metadata.get('prefill_pipeline_version') == PREFILL_PIPELINE_VERSION
+            and not metadata.get('errors')
+        ):
             return {
                 'applied': False,
                 'cached': True,

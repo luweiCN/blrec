@@ -87,12 +87,46 @@ def next_version_id(conn: Any, task_id: str) -> str:
 # ---------- 样本收集 ----------
 
 
-def _frame_sample(conn: Any, f: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _frame_sample_metadata(
+    conn: Any,
+) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, Dict[str, float]]]]:
+    """批量读取帧标注与框，避免远程数据库逐帧往返。"""
+    annotations: Dict[int, Dict[str, Any]] = {}
+    for row in conn.execute('SELECT * FROM annotations').fetchall():
+        annotation = dict(row)
+        annotation['quality_flags'] = json.loads(annotation['quality_flags'] or '[]')
+        annotation['occluder_types'] = json.loads(annotation['occluder_types'] or '[]')
+        annotations[int(annotation['frame_id'])] = annotation
+
+    boxes: Dict[int, Dict[str, Dict[str, float]]] = {}
+    for row in conn.execute(
+        'SELECT frame_id, box_type, x, y, w, h FROM boxes'
+    ).fetchall():
+        box = dict(row)
+        frame_id = int(box.pop('frame_id'))
+        boxes.setdefault(frame_id, {})[str(box['box_type'])] = box
+    return annotations, boxes
+
+
+def _frame_sample(
+    conn: Any,
+    f: Dict[str, Any],
+    *,
+    annotations: Optional[Dict[int, Dict[str, Any]]] = None,
+    boxes: Optional[Dict[int, Dict[str, Dict[str, float]]]] = None,
+) -> Optional[Dict[str, Any]]:
     """组装单帧的 JSONL 样本;缺原始文件返回 None。"""
     if not managed_assets.frame_available(f['frame_path']):
         return None
-    ann = db.get_annotation(conn, f['id']) or {}
-    boxes = db.get_boxes(conn, f['id'])
+    frame_id = int(f['id'])
+    ann = (
+        annotations.get(frame_id, {})
+        if annotations is not None
+        else (db.get_annotation(conn, frame_id) or {})
+    )
+    frame_boxes = (
+        boxes.get(frame_id, {}) if boxes is not None else db.get_boxes(conn, frame_id)
+    )
     return {
         'sample_id': f'f{f["id"]:08d}',
         'frame_id': int(f['id']),
@@ -125,7 +159,7 @@ def _frame_sample(conn: Any, f: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             'ocr_usable': ann.get('ocr_usable'),
             'notes': ann.get('notes', ''),
         },
-        'boxes': boxes,
+        'boxes': frame_boxes,
         'label_version': ann.get('label_version', 'v1'),
     }
 
@@ -490,12 +524,13 @@ def export_result_detector(
     materialize: bool = True,
 ) -> Dict[str, Any]:
     """导出 result_detector 数据集(JSONL + YOLO + COCO),创建不可变版本。"""
+    annotations, boxes = _frame_sample_metadata(conn)
     frames = _labeled_frames(conn)
     samples_by_frame: Dict[int, Dict[str, Any]] = {}
     result_without_bbox = 0
     for frame in frames:
-        annotation = db.get_annotation(conn, frame['id']) or {}
-        sample = _frame_sample(conn, frame)
+        annotation = annotations.get(int(frame['id']), {})
+        sample = _frame_sample(conn, frame, annotations=annotations, boxes=boxes)
         if sample is None:
             continue
         if annotation.get('screen_type') == 'result_page':
@@ -522,7 +557,7 @@ def export_result_detector(
     for row in reviewed:
         frame = dict(row)
         frame['id'] = int(row['frame_id'])
-        sample = _frame_sample(conn, frame)
+        sample = _frame_sample(conn, frame, annotations=annotations, boxes=boxes)
         label = str(frame['confirmed_label'])
         if sample is None or (label == 'no_result_panel' and not include_negatives):
             continue
@@ -563,7 +598,7 @@ def export_result_detector(
         if label == 'no_result_panel' and not include_negatives:
             samples_by_frame.pop(frame_id, None)
             continue
-        sample = _frame_sample(conn, frame)
+        sample = _frame_sample(conn, frame, annotations=annotations, boxes=boxes)
         if sample is None:
             samples_by_frame.pop(frame_id, None)
             continue
@@ -803,6 +838,7 @@ def _write_classification_images(
 
 def _confirmed_hero_lineup_samples(conn: Any) -> List[Dict[str, Any]]:
     """返回完整人工确认阵容；头像位置与英雄真值仍分别保留。"""
+    annotations, boxes = _frame_sample_metadata(conn)
     rows = conn.execute(
         'SELECT f.*, v.streamer, v.remote_path, lineup.screen_type, '
         'lineup.team_size FROM training_review_hero_lineups lineup '
@@ -811,19 +847,21 @@ def _confirmed_hero_lineup_samples(conn: Any) -> List[Dict[str, Any]]:
         "WHERE lineup.review_status = 'confirmed' "
         'ORDER BY f.video_id, f.timestamp_ms, f.id'
     ).fetchall()
+    slots_by_frame: Dict[int, List[Dict[str, Any]]] = {}
+    for slot_row in conn.execute(
+        'SELECT frame_id, side, slot, crop_x, crop_y, crop_w, crop_h, '
+        'confirmed_label FROM training_review_hero_slots '
+        "ORDER BY frame_id, CASE side WHEN 'left' THEN 0 ELSE 1 END, slot"
+    ).fetchall():
+        slot = dict(slot_row)
+        slots_by_frame.setdefault(int(slot.pop('frame_id')), []).append(slot)
     samples = []
     for row in rows:
         frame = dict(row)
-        sample = _frame_sample(conn, frame)
+        sample = _frame_sample(conn, frame, annotations=annotations, boxes=boxes)
         if sample is None:
             continue
-        slots = conn.execute(
-            'SELECT side, slot, crop_x, crop_y, crop_w, crop_h, '
-            'confirmed_label FROM training_review_hero_slots '
-            'WHERE frame_id = ? '
-            "ORDER BY CASE side WHEN 'left' THEN 0 ELSE 1 END, slot",
-            (int(frame['id']),),
-        ).fetchall()
+        slots = slots_by_frame.get(int(frame['id']), [])
         team_size = int(frame['team_size'])
         if len(slots) != team_size * 2:
             continue
@@ -850,6 +888,7 @@ def _confirmed_hero_lineup_samples(conn: Any) -> List[Dict[str, Any]]:
 
 def confirmed_player_position_samples(conn: Any) -> List[Dict[str, Any]]:
     """返回积分板／结算图中人工明确确认的主播位置整图样本。"""
+    annotations, boxes = _frame_sample_metadata(conn)
     rows = conn.execute(
         'SELECT f.*, v.streamer, v.remote_path, lineup.screen_type, '
         'lineup.team_size, lineup.player_side, lineup.player_slot, '
@@ -879,7 +918,7 @@ def confirmed_player_position_samples(conn: Any) -> List[Dict[str, Any]]:
         label = '{}{}'.format(frame['player_side'], int(frame['player_slot']))
         if label not in PLAYER_POSITION_LABELS:
             continue
-        sample = _frame_sample(conn, frame)
+        sample = _frame_sample(conn, frame, annotations=annotations, boxes=boxes)
         if sample is None:
             continue
         sample.update(
@@ -1316,6 +1355,7 @@ def export_training_review_classifier(
     conn: Any, task_id: str, *, materialize: bool = True
 ) -> Dict[str, Any]:
     """从一图多标签人工复核中冻结一个分类任务的数据快照。"""
+    annotations, boxes = _frame_sample_metadata(conn)
     labels = UNIFIED_CLASSIFICATION_LABELS.get(task_id)
     if labels is None:
         raise ValueError(f'未知统一分类任务: {task_id}')
@@ -1350,7 +1390,7 @@ def export_training_review_classifier(
         label = str(frame['label'])
         if label not in labels:
             continue
-        sample = _frame_sample(conn, frame)
+        sample = _frame_sample(conn, frame, annotations=annotations, boxes=boxes)
         if sample is None:
             continue
         sample['label'] = label

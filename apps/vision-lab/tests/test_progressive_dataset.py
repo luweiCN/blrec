@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -471,6 +472,30 @@ class TestUnifiedTrainingSnapshots(unittest.TestCase):
             },
             {'translucent'},
         )
+
+    def test_classifier_snapshot_bulk_loads_frame_metadata(self):
+        video_id = db.upsert_video(
+            self.conn,
+            remote_path='/nas/bulk-metadata.flv',
+            streamer='bulk',
+            room_id='bulk',
+            filename='bulk-metadata.flv',
+            duration_seconds=100,
+            size_bytes=1,
+        )
+        frame_id = self._frame(video_id, 900)
+        self._save(frame_id, 'match_flow', '3v3', 'not_select')
+
+        with mock.patch.object(
+            db, 'get_annotation', side_effect=AssertionError('不应逐帧查询 annotation')
+        ), mock.patch.object(
+            db, 'get_boxes', side_effect=AssertionError('不应逐帧查询 boxes')
+        ):
+            snapshot = export.export_training_review_classifier(
+                self.conn, 'match_flow', materialize=False
+            )
+
+        self.assertEqual(snapshot['total'], 1)
 
     def test_same_result_event_exports_one_representative(self):
         index = 100

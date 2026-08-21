@@ -12,7 +12,7 @@ import secrets
 import threading
 import time
 import urllib.request
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1496,6 +1496,7 @@ def api_training_review_items(
     scene: str = '',
     match_mode: str = '',
     hero: Optional[List[str]] = Query(None),
+    hero_scope: str = 'all',
     confidence: str = '',
     include_stats: bool = True,
 ) -> Dict[str, Any]:
@@ -1515,6 +1516,7 @@ def api_training_review_items(
                             scene,
                             match_mode,
                             hero_values,
+                            hero_scope != 'all',
                             confidence,
                         )
                     )
@@ -1549,6 +1551,7 @@ def api_training_review_items(
                         scene=scene,
                         match_mode=match_mode,
                         hero=hero_values,
+                        hero_scope=hero_scope,
                         confidence=confidence,
                         prefill_ready_only=True,
                         result_groups=result_groups,
@@ -4619,8 +4622,9 @@ def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
     epochs = int(body.get('epochs') or definition['epochs'])
     if not 1 <= epochs <= 500:
         raise HTTPException(400, 'epochs 必须在 1 到 500 之间')
+    database_guard = nullcontext() if config.DATABASE_URL else _db_lock
     with _training_start_lock:
-        with _db_lock:
+        with database_guard:
             conn = _conn()
             try:
                 summary = training.task_summary(conn, task_id)

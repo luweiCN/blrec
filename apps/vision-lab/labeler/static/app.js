@@ -39,6 +39,7 @@ let candidateHeroCatalogPromise = null;
 let candidateFilterOptionsLoadedScope = '';
 let candidateFilterOptionsPromise = null;
 let candidateHeroFilters = new Set();
+let candidateHeroScope = 'all';
 let candidateHeroLineup = null;
 let candidateHeroDraft = new Map();
 let candidateHeroCachedSlots = new Set();
@@ -2479,6 +2480,9 @@ function candidateReviewQuery(status, offset = null) {
     if (value) query.set(key, value);
   });
   [...candidateHeroFilters].sort().forEach((hero) => query.append('hero', hero));
+  if (candidateHeroFilters.size && candidateHeroScope !== 'all') {
+    query.set('hero_scope', candidateHeroScope);
+  }
   return `/api/training-review/items?${query}`;
 }
 
@@ -2545,7 +2549,7 @@ function candidateMaterialSeverity(value) {
   }[value] || '建议补充';
 }
 
-function applyCandidateMaterialSuggestion(suggestion) {
+function applyCandidateMaterialSuggestion(suggestion, heroScope = 'direct') {
   const filters = suggestion.filters || {};
   setCandidateSourceScope(
     suggestion.source_scope || 'new', filters.status || 'needs_review', true);
@@ -2555,10 +2559,12 @@ function applyCandidateMaterialSuggestion(suggestion) {
   $('#candidate-confidence-filter').value = '';
   $('#candidate-streamer-filter').value = '';
   candidateHeroFilters = new Set(filters.hero ? [filters.hero] : []);
+  candidateHeroScope = filters.hero ? heroScope : 'all';
   $('#candidate-hero-filter-search').value = '';
   const selectedHero = filters.hero && candidateHeroByLabel(filters.hero);
   $('#candidate-hero-filter-summary').textContent = filters.hero
-    ? `${selectedHero ? selectedHero.name : filters.hero}（含同局）`
+    ? `${selectedHero ? selectedHero.name : filters.hero}（${
+      candidateHeroScope === 'direct' ? '本图直接命中' : '含同局／同视频待排查'}）`
     : '全部英雄';
   $('#candidate-hero-filter').open = false;
   renderCandidateHeroFilter();
@@ -2632,6 +2638,7 @@ function renderCandidateMaterialSuggestions() {
     const confirmedBreakdown = '（' + confirmedSources.map((source) =>
       `${source.label} ${Number(suggestion[source.key] || 0)}`).join(' · ') + '）';
     const available = Number(suggestion.candidate_count || 0);
+    const relatedAvailable = Number(suggestion.related_candidate_count || 0);
     const queueName = suggestion.source_scope === 'legacy'
       ? '历史队列' : 'Worker 队列';
     if (suggestion.kind === 'hero_scene') {
@@ -2643,7 +2650,7 @@ function renderCandidateMaterialSuggestions() {
       counts.append(
         '已确认 ', confirmed,
         ` 个头像${confirmedBreakdown} / 建议 ${suggestion.target_count || 0} 个 · `,
-        `${queueName}可复核 ${available} 张：模型直接认出 ${modelPrefill} 张、` +
+        `${queueName}直接候选 ${available} 张：模型直接认出 ${modelPrefill} 张；` +
           `同局待排查 ${sameMatch} 张、同视频兜底 ${sameVideo} 张；` +
           `直接候选头像 ${suggestion.candidate_crop_count || 0} 个` +
           (missingScene ? ` · 另有 ${missingScene} 局没有${suggestion.scene_label}候选` : ''),
@@ -2656,6 +2663,8 @@ function renderCandidateMaterialSuggestions() {
       );
     }
 
+    const actions = document.createElement('div');
+    actions.className = 'candidate-material-actions';
     const action = document.createElement('button');
     action.type = 'button';
     action.disabled = available <= 0;
@@ -2667,9 +2676,19 @@ function renderCandidateMaterialSuggestions() {
     action.title = available > 0
       ? '打开对应待确认素材'
       : '当前候选库没有这类图片，需要等待 Worker 后续采集';
-    action.onclick = () => applyCandidateMaterialSuggestion(suggestion);
+    action.onclick = () => applyCandidateMaterialSuggestion(suggestion, 'direct');
+    actions.appendChild(action);
+    if (suggestion.kind === 'hero_scene' && relatedAvailable > 0) {
+      const relatedAction = document.createElement('button');
+      relatedAction.type = 'button';
+      relatedAction.textContent = `排查关联（${available + relatedAvailable}）`;
+      relatedAction.title = '包含同局和同视频兜底素材，不代表本图已经识别出该英雄';
+      relatedAction.onclick = () => applyCandidateMaterialSuggestion(
+        suggestion, 'all');
+      actions.appendChild(relatedAction);
+    }
 
-    row.append(name, counts, action);
+    row.append(name, counts, actions);
     list.appendChild(row);
   });
 }
@@ -2713,6 +2732,7 @@ function renderCandidateHeroFilter() {
       name.textContent = hero.name;
       button.append(image, name);
       button.onclick = () => {
+        candidateHeroScope = 'all';
         if (candidateHeroFilters.has(hero.label)) {
           candidateHeroFilters.delete(hero.label);
         } else {
@@ -3445,6 +3465,7 @@ function bindCandidateReview() {
       $('#candidate-source-type-filter').value = CANDIDATE_DEFAULT_SOURCE_TYPE;
     }
     candidateHeroFilters = new Set();
+    candidateHeroScope = 'all';
     $('#candidate-hero-filter-search').value = '';
     $('#candidate-hero-filter-summary').textContent = '全部英雄';
     renderCandidateHeroFilter();
