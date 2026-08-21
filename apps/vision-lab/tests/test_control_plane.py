@@ -536,6 +536,87 @@ def test_training_review_stats_coalesces_concurrent_cold_requests() -> None:
     assert 'with _training_review_stats_compute_lock:' in cached
 
 
+def test_training_tasks_reuse_persisted_summary(monkeypatch) -> None:
+    connection = mock.Mock()
+    summaries = [{'id': 'match_flow', 'counts': {'total': 10}}]
+    load = mock.Mock(return_value={'summaries': summaries})
+    monkeypatch.setattr(config, 'DATABASE_URL', 'postgresql://vision')
+    monkeypatch.setattr(server.db, 'load_service_runtime_state', load)
+    monkeypatch.setitem(server._training_tasks_cache, 'value', None)
+    monkeypatch.setitem(server._training_tasks_cache, 'dirty', False)
+    monkeypatch.setitem(server._training_tasks_cache, 'refreshing', False)
+    monkeypatch.setitem(server._training_tasks_cache, 'error', '')
+
+    first = server._cached_training_tasks(connection)
+    second = server._cached_training_tasks(connection)
+
+    assert first == second
+    assert first[0]['counts']['total'] == 10
+    assert first[0]['stats_refreshing'] is False
+    load.assert_called_once_with(connection, server._TRAINING_TASKS_STATE_KEY)
+
+
+def test_cold_training_tasks_start_one_background_refresh(monkeypatch) -> None:
+    connection = mock.Mock()
+    starts = []
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            assert target is server._refresh_training_tasks_cache
+            assert daemon is True
+            assert name == 'vision-training-stats'
+            self.args = args
+
+        def start(self):
+            starts.append(self.args)
+
+    monkeypatch.setattr(config, 'DATABASE_URL', 'postgresql://vision')
+    monkeypatch.setattr(
+        server.db, 'load_service_runtime_state', mock.Mock(return_value={})
+    )
+    monkeypatch.setattr(server.threading, 'Thread', FakeThread)
+    monkeypatch.setitem(server._training_tasks_cache, 'value', None)
+    monkeypatch.setitem(server._training_tasks_cache, 'dirty', True)
+    monkeypatch.setitem(server._training_tasks_cache, 'refreshing', False)
+    monkeypatch.setitem(server._training_tasks_cache, 'generation', 8)
+    monkeypatch.setitem(server._training_tasks_cache, 'error', '')
+    monkeypatch.setitem(server._training_tasks_cache, 'retry_at', 0.0)
+
+    first = server._cached_training_tasks(connection)
+    second = server._cached_training_tasks(connection)
+
+    expected = sum(
+        definition.get('active', True)
+        for definition in server.training.TRAINING_TASKS.values()
+    )
+    assert len(first) == len(second) == expected
+    assert all(item['stats_refreshing'] for item in first)
+    assert starts == [(8,)]
+
+
+def test_postgres_training_tasks_does_not_hold_process_database_lock(
+    monkeypatch,
+) -> None:
+    class FailingLock:
+        def __enter__(self):
+            raise AssertionError('PostgreSQL 训练统计不应持有进程级数据库锁')
+
+        def __exit__(self, *_args):
+            return False
+
+    connection = mock.Mock()
+    summaries = [{'id': 'match_flow'}]
+    monkeypatch.setattr(config, 'DATABASE_URL', 'postgresql://vision')
+    monkeypatch.setattr(server, '_db_lock', FailingLock())
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(
+        server, '_cached_training_tasks', mock.Mock(return_value=summaries)
+    )
+
+    assert server.api_training_tasks() == summaries
+    connection.close.assert_called_once()
+
+
 def test_material_suggestions_are_loaded_only_when_dialog_opens() -> None:
     root = Path(__file__).resolve().parent.parent
     server = (root / 'labeler/server.py').read_text(encoding='utf-8')
@@ -723,6 +804,9 @@ def test_saving_one_review_updates_queue_without_immediate_full_refresh(
     )
     monkeypatch.setitem(server._training_review_cache, 'groups_expires_at', 400.0)
     monkeypatch.setitem(server._training_review_cache, 'stats_expires_at', 400.0)
+    monkeypatch.setitem(server._training_tasks_cache, 'value', [{'id': 'match_flow'}])
+    monkeypatch.setitem(server._training_tasks_cache, 'dirty', False)
+    monkeypatch.setitem(server._training_tasks_cache, 'generation', 3)
 
     server._mark_training_review_saved(2)
 
@@ -731,6 +815,9 @@ def test_saving_one_review_updates_queue_without_immediate_full_refresh(
     assert server._training_review_cache['groups_expires_at'] == 400.0
     assert server._training_review_cache['stats'] is None
     assert server._training_review_cache['stats_expires_at'] == 0.0
+    assert server._training_tasks_cache['value'] == [{'id': 'match_flow'}]
+    assert server._training_tasks_cache['dirty'] is True
+    assert server._training_tasks_cache['generation'] == 4
 
 
 def test_review_save_returns_lightweight_ack(monkeypatch) -> None:

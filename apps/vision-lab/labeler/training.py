@@ -269,34 +269,40 @@ def _classification_summary(
     return {'total': len(labels), 'by_label': counts}
 
 
+def _frame_videos(conn: Any, frame_ids: List[int]) -> Dict[int, int]:
+    """只读取目标帧所属视频，避免为几千个样本反复全表扫描。"""
+
+    selected = sorted(set(int(frame_id) for frame_id in frame_ids))
+    result: Dict[int, int] = {}
+    for offset in range(0, len(selected), 800):
+        chunk = selected[offset : offset + 800]
+        placeholders = ','.join('?' for _ in chunk)
+        for row in conn.execute(
+            f'SELECT id, video_id FROM frames WHERE id IN ({placeholders})',
+            tuple(chunk),
+        ).fetchall():
+            result[int(row['id'])] = int(row['video_id'])
+    return result
+
+
 def _video_count_for_frames(conn: Any, frame_ids: List[int]) -> int:
-    if not frame_ids:
-        return 0
-    selected = set(frame_ids)
-    return len(
-        {
-            int(row['video_id'])
-            for row in conn.execute('SELECT id, video_id FROM frames').fetchall()
-            if int(row['id']) in selected
-        }
-    )
+    return len(set(_frame_videos(conn, frame_ids).values()))
 
 
 def _videos_by_label(
-    conn: Any, labels: Dict[int, str], required: List[str]
+    conn: Any,
+    labels: Dict[int, str],
+    required: List[str],
+    *,
+    frame_videos: Optional[Dict[int, int]] = None,
 ) -> Dict[str, int]:
-    selected = set(labels)
-    frame_videos = {
-        int(row['id']): int(row['video_id'])
-        for row in conn.execute('SELECT id, video_id FROM frames').fetchall()
-        if int(row['id']) in selected
-    }
+    videos = frame_videos or _frame_videos(conn, list(labels))
     return {
         label: len(
             {
-                frame_videos[frame_id]
+                videos[frame_id]
                 for frame_id, value in labels.items()
-                if value == label and frame_id in frame_videos
+                if value == label and frame_id in videos
             }
         )
         for label in required
@@ -338,8 +344,11 @@ def _result_detector_member_samples(
     members: Dict[int, Dict[str, Any]] = {}
     rows = conn.execute(
         'SELECT a.frame_id, a.screen_type, a.game_mode, f.video_id, '
-        'f.sha256, f.frame_path '
+        'f.sha256, f.frame_path, b.x AS result_x, b.y AS result_y, '
+        'b.w AS result_w, b.h AS result_h '
         'FROM annotations a JOIN frames f ON f.id = a.frame_id '
+        "LEFT JOIN boxes b ON b.frame_id = a.frame_id "
+        "AND b.box_type = 'result_panel' "
         "WHERE a.annotation_status = 'complete'"
     ).fetchall()
     for raw_row in rows:
@@ -347,7 +356,7 @@ def _result_detector_member_samples(
         if not managed_assets.frame_available(row['frame_path']):
             continue
         frame_id = int(row['frame_id'])
-        box = db.get_boxes(conn, frame_id).get('result_panel')
+        box = _result_box_from_row(row)
         if row['screen_type'] == 'result_page':
             if not isinstance(box, dict):
                 continue
@@ -407,10 +416,13 @@ def _result_detector_member_samples(
     unified_rows = conn.execute(
         'SELECT r.frame_id, r.result_panel_label, r.hero_layout_label, '
         'r.match_mode_label, f.video_id, f.sha256, f.frame_path, '
-        'a.screen_type, a.game_mode '
+        'a.screen_type, a.game_mode, b.x AS result_x, b.y AS result_y, '
+        'b.w AS result_w, b.h AS result_h '
         'FROM training_review_items r '
         'JOIN frames f ON f.id = r.frame_id '
         'LEFT JOIN annotations a ON a.frame_id = f.id '
+        "LEFT JOIN boxes b ON b.frame_id = r.frame_id "
+        "AND b.box_type = 'result_panel' "
         "WHERE r.review_status = 'confirmed' "
         'AND r.result_panel_label IS NOT NULL'
     ).fetchall()
@@ -423,7 +435,7 @@ def _result_detector_member_samples(
         ):
             members.pop(frame_id, None)
             continue
-        box = db.get_boxes(conn, frame_id).get('result_panel')
+        box = _result_box_from_row(row)
         if label == 'result_panel' and not isinstance(box, dict):
             members.pop(frame_id, None)
             continue
@@ -468,6 +480,108 @@ def _result_detector_member_samples(
     return positives + negatives
 
 
+def _result_box_from_row(row: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    if row.get('result_x') is None:
+        return None
+    return {
+        'x': float(row['result_x']),
+        'y': float(row['result_y']),
+        'w': float(row['result_w']),
+        'h': float(row['result_h']),
+    }
+
+
+def _confirmed_hero_member_lineups(conn: Any) -> List[Dict[str, Any]]:
+    """一次查询组装完整英雄阵容，避免每帧再查标注、框和头像槽位。"""
+
+    rows = conn.execute(
+        'SELECT lineup.frame_id, lineup.screen_type, lineup.team_size, '
+        'f.video_id, f.frame_path, slot.side, slot.slot, slot.crop_x, '
+        'slot.crop_y, slot.crop_w, slot.crop_h, slot.confirmed_label '
+        'FROM training_review_hero_lineups lineup '
+        'JOIN frames f ON f.id = lineup.frame_id '
+        'JOIN training_review_hero_slots slot ON slot.frame_id = lineup.frame_id '
+        "WHERE lineup.review_status = 'confirmed' "
+        "ORDER BY lineup.frame_id, CASE slot.side WHEN 'left' THEN 0 ELSE 1 END, "
+        'slot.slot'
+    ).fetchall()
+    by_frame: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        frame_id = int(row['frame_id'])
+        lineup = by_frame.setdefault(
+            frame_id,
+            {
+                'sample_id': f'f{frame_id:08d}',
+                'frame_id': frame_id,
+                'video_id': int(row['video_id']),
+                'frame_path': str(row['frame_path']),
+                'hero_screen_type': str(row['screen_type']),
+                'team_size': int(row['team_size']),
+                'hero_slots': [],
+            },
+        )
+        lineup['hero_slots'].append(
+            {
+                'side': str(row['side']),
+                'slot': int(row['slot']),
+                'crop': {
+                    'x': float(row['crop_x']),
+                    'y': float(row['crop_y']),
+                    'w': float(row['crop_w']),
+                    'h': float(row['crop_h']),
+                },
+                'confirmed_label': str(row['confirmed_label'] or ''),
+            }
+        )
+    return [
+        lineup
+        for lineup in by_frame.values()
+        if len(lineup['hero_slots']) == int(lineup['team_size']) * 2
+        and managed_assets.frame_available(lineup['frame_path'])
+    ]
+
+
+def _confirmed_player_position_members(conn: Any) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        'SELECT lineup.frame_id, lineup.screen_type, lineup.team_size, '
+        'lineup.player_side, lineup.player_slot, f.video_id, f.frame_path '
+        'FROM training_review_hero_lineups lineup '
+        'JOIN frames f ON f.id = lineup.frame_id '
+        "WHERE lineup.review_status = 'confirmed' "
+        "AND lineup.player_status = 'identified' "
+        "AND lineup.screen_type IN ('scoreboard', 'result_page') "
+        "AND lineup.player_side IN ('left', 'right') "
+        'AND lineup.player_slot BETWEEN 1 AND lineup.team_size '
+        'AND EXISTS ('
+        'SELECT 1 FROM training_review_hero_slots slot '
+        'WHERE slot.frame_id = lineup.frame_id '
+        'AND slot.side = lineup.player_side '
+        'AND slot.slot = lineup.player_slot)'
+    ).fetchall()
+    duplicate_results = db.training_review_duplicate_result_frame_ids(conn)
+    samples = []
+    for row in rows:
+        frame_id = int(row['frame_id'])
+        label = '{}{}'.format(row['player_side'], int(row['player_slot']))
+        if (
+            frame_id in duplicate_results
+            or label not in export.PLAYER_POSITION_LABELS
+            or not managed_assets.frame_available(row['frame_path'])
+        ):
+            continue
+        samples.append(
+            {
+                'sample_id': f'f{frame_id:08d}',
+                'frame_id': frame_id,
+                'video_id': int(row['video_id']),
+                'label': label,
+                'hero_screen_type': str(row['screen_type']),
+                'team_size': int(row['team_size']),
+            }
+        )
+    return samples
+
+
 def _current_task_members(conn: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
     samples: List[Dict[str, Any]] = []
     if task_id in export.UNIFIED_CLASSIFICATION_LABELS:
@@ -481,24 +595,19 @@ def _current_task_members(conn: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
             allowed=list(export.UNIFIED_CLASSIFICATION_LABELS[task_id]),
         )
         if labels:
-            placeholders = ','.join('?' for _ in labels)
-            rows = conn.execute(
-                f'SELECT id AS frame_id, video_id FROM frames '
-                f'WHERE id IN ({placeholders})',
-                tuple(labels),
-            ).fetchall()
+            frame_videos = _frame_videos(conn, list(labels))
             samples = [
                 {
-                    'sample_id': f'f{int(row["frame_id"]):08d}',
-                    'video_id': int(row['video_id']),
-                    'label': labels[int(row['frame_id'])],
+                    'sample_id': f'f{frame_id:08d}',
+                    'video_id': video_id,
+                    'label': labels[frame_id],
                 }
-                for row in rows
+                for frame_id, video_id in frame_videos.items()
             ]
     elif task_id == 'result_detector':
         samples = _result_detector_member_samples(conn)
     elif task_id in {'hero_avatar_detector', 'hero_identity'}:
-        lineups = export._confirmed_hero_lineup_samples(conn)
+        lineups = _confirmed_hero_member_lineups(conn)
         if task_id == 'hero_avatar_detector':
             samples = [
                 {
@@ -526,7 +635,7 @@ def _current_task_members(conn: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
                         }
                     )
     elif task_id == 'player_position':
-        samples = export.confirmed_player_position_samples(conn)
+        samples = _confirmed_player_position_members(conn)
     else:
         return {}
     return {
@@ -648,27 +757,39 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             'hero_select': 'hero_select_label',
         }[task_id]
         labels = _training_review_labels(conn, column=column, allowed=required)
+        frame_videos = _frame_videos(conn, list(labels))
         counts = _classification_summary(labels, required)
-        counts['videos_by_label'] = _videos_by_label(conn, labels, required)
-        video_count = _video_count_for_frames(conn, list(labels))
+        counts['videos_by_label'] = _videos_by_label(
+            conn, labels, required, frame_videos=frame_videos
+        )
+        video_count = len(set(frame_videos.values()))
     elif task_id == 'screen_state':
         labels = _existing_screen_state_labels(conn)
         required = list(export.SCREEN_STATE_LABELS)
+        frame_videos = _frame_videos(conn, list(labels))
         counts = _classification_summary(labels, required)
-        counts['videos_by_label'] = _videos_by_label(conn, labels, required)
-        video_count = _video_count_for_frames(conn, list(labels))
+        counts['videos_by_label'] = _videos_by_label(
+            conn, labels, required, frame_videos=frame_videos
+        )
+        video_count = len(set(frame_videos.values()))
     elif task_id == 'bp_review':
         labels = _existing_bp_labels(conn)
         required = ['bp_3v3', 'bp_aram', 'bp_5v5', 'not_bp']
+        frame_videos = _frame_videos(conn, list(labels))
         counts = _classification_summary(labels, required)
-        counts['videos_by_label'] = _videos_by_label(conn, labels, required)
-        video_count = _video_count_for_frames(conn, list(labels))
+        counts['videos_by_label'] = _videos_by_label(
+            conn, labels, required, frame_videos=frame_videos
+        )
+        video_count = len(set(frame_videos.values()))
     elif task_id == 'key_screen_review':
         labels = _existing_key_screen_labels(conn)
         required = ['result_page', 'scoreboard', 'other']
+        frame_videos = _frame_videos(conn, list(labels))
         counts = _classification_summary(labels, required)
-        counts['videos_by_label'] = _videos_by_label(conn, labels, required)
-        video_count = _video_count_for_frames(conn, list(labels))
+        counts['videos_by_label'] = _videos_by_label(
+            conn, labels, required, frame_videos=frame_videos
+        )
+        video_count = len(set(frame_videos.values()))
     elif task_id == 'mode_gate':
         evidence_by_frame = {
             int(row['frame_id']): str(row['evidence'])
@@ -700,69 +821,9 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
         }
         video_count = _video_count_for_frames(conn, list(evidence_by_frame))
     elif task_id == 'result_detector':
-        detector_labels = {
-            int(row['frame_id']): str(row['label'])
-            for row in conn.execute(
-                """
-                SELECT a.frame_id,
-                       CASE WHEN a.screen_type = 'result_page'
-                                  AND EXISTS (
-                                      SELECT 1 FROM boxes b
-                                      WHERE b.frame_id = a.frame_id
-                                        AND b.box_type = 'result_panel')
-                            THEN 'result_panel'
-                            WHEN COALESCE(a.screen_type, '') != 'result_page'
-                            THEN 'no_result_panel' END AS label,
-                       f.frame_path
-                FROM annotations a JOIN frames f ON f.id = a.frame_id
-                WHERE a.annotation_status = 'complete'
-                """
-            ).fetchall()
-            if row['label'] and managed_assets.frame_available(row['frame_path'])
-        }
-        for row in conn.execute(
-            'SELECT c.frame_id, c.confirmed_label, f.frame_path '
-            'FROM worker_candidate_items c JOIN frames f ON f.id = c.frame_id '
-            "WHERE c.task = 'result_detector' "
-            "AND c.review_status = 'confirmed' "
-            'AND c.confirmed_label IS NOT NULL '
-            "AND c.visual_condition != 'unreadable'"
-        ).fetchall():
-            if managed_assets.frame_available(row['frame_path']):
-                detector_labels[int(row['frame_id'])] = str(row['confirmed_label'])
-        for row in conn.execute(
-            'SELECT r.frame_id, r.result_panel_label, f.frame_path '
-            'FROM training_review_items r '
-            'JOIN frames f ON f.id = r.frame_id '
-            "WHERE r.review_status = 'confirmed' "
-            'AND r.result_panel_label IS NOT NULL'
-        ).fetchall():
-            frame_id = int(row['frame_id'])
-            label = str(row['result_panel_label'])
-            if label == 'unreadable' or not managed_assets.frame_available(
-                row['frame_path']
-            ):
-                detector_labels.pop(frame_id, None)
-            elif (
-                label == 'result_panel'
-                and not conn.execute(
-                    'SELECT 1 FROM boxes WHERE frame_id = ? '
-                    "AND box_type = 'result_panel'",
-                    (frame_id,),
-                ).fetchone()
-            ):
-                detector_labels.pop(frame_id, None)
-            else:
-                detector_labels[frame_id] = label
-        for frame_id in db.training_review_duplicate_result_frame_ids(conn):
-            if detector_labels.get(frame_id) == 'result_panel':
-                detector_labels.pop(frame_id, None)
-        positive = sum(
-            1 for value in detector_labels.values() if value == 'result_panel'
-        )
-        negative = sum(
-            1 for value in detector_labels.values() if value == 'no_result_panel'
-        )
+        samples = _result_detector_member_samples(conn, max_negatives=0)
+        positive = sum(sample['label'] == 'result_panel' for sample in samples)
+        negative = sum(sample['label'] == 'no_result_panel' for sample in samples)
         hard_negative = int(
             conn.execute(
                 'SELECT COUNT(*) FROM annotations a '
@@ -778,7 +839,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             'negative': negative,
             'hard_negative': hard_negative,
         }
-        video_count = _video_count_for_frames(conn, list(detector_labels))
+        video_count = len({int(sample['video_id']) for sample in samples})
     elif task_id == 'hero_avatar_detector':
         rows = [
             dict(row)
@@ -866,7 +927,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
         }
         video_count = len({int(row['video_id']) for row in rows})
     elif task_id == 'player_position':
-        rows = export.confirmed_player_position_samples(conn)
+        rows = _confirmed_player_position_members(conn)
         counts = {
             'total': len(rows),
             'classes': len({str(row['label']) for row in rows}),
@@ -1099,26 +1160,29 @@ def _quality_warnings(task_id: str, counts: Dict[str, Any]) -> List[str]:
     ]
 
 
+def task_summary(conn: Any, task_id: str) -> Dict[str, Any]:
+    definition = TRAINING_TASKS.get(task_id)
+    if definition is None:
+        raise ValueError(f'未知训练任务: {task_id}')
+    counts = _task_counts(conn, task_id)
+    reasons = _blocking_reasons(task_id, counts)
+    return {
+        'id': task_id,
+        **definition,
+        'counts': counts,
+        'dataset_delta': _latest_dataset_delta(conn, task_id),
+        'ready': not reasons,
+        'blocking_reasons': reasons,
+        'quality_warnings': _quality_warnings(task_id, counts),
+    }
+
+
 def task_summaries(conn: Any, *, include_legacy: bool = False) -> List[Dict[str, Any]]:
-    summaries = []
-    for task_id, definition in TRAINING_TASKS.items():
-        if not include_legacy and not definition.get('active', True):
-            continue
-        counts = _task_counts(conn, task_id)
-        reasons = _blocking_reasons(task_id, counts)
-        warnings = _quality_warnings(task_id, counts)
-        summaries.append(
-            {
-                'id': task_id,
-                **definition,
-                'counts': counts,
-                'dataset_delta': _latest_dataset_delta(conn, task_id),
-                'ready': not reasons,
-                'blocking_reasons': reasons,
-                'quality_warnings': warnings,
-            }
-        )
-    return summaries
+    return [
+        task_summary(conn, task_id)
+        for task_id, definition in TRAINING_TASKS.items()
+        if include_legacy or definition.get('active', True)
+    ]
 
 
 def export_snapshot(

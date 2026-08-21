@@ -160,6 +160,16 @@ _training_review_cache: Dict[str, Any] = {
     'default_queue_expires_at': 0.0,
 }
 _TRAINING_REVIEW_CACHE_SECONDS = 300.0
+_training_tasks_cache_lock = threading.RLock()
+_training_tasks_cache: Dict[str, Any] = {
+    'value': None,
+    'dirty': True,
+    'refreshing': False,
+    'generation': 0,
+    'error': '',
+    'retry_at': 0.0,
+}
+_TRAINING_TASKS_STATE_KEY = 'training_task_summaries'
 _worker_candidate_state_response_lock = threading.Lock()
 _worker_candidate_state_response: Dict[str, Any] = {'value': None, 'expires_at': 0.0}
 _WORKER_CANDIDATE_STATE_CACHE_SECONDS = 10.0
@@ -296,6 +306,96 @@ def _mark_training_review_saved(frame_id: int) -> None:
             )
         _training_review_cache['stats'] = None
         _training_review_cache['stats_expires_at'] = 0.0
+    _invalidate_training_tasks_cache()
+
+
+def _training_task_placeholders() -> List[Dict[str, Any]]:
+    return [
+        {
+            'id': task_id,
+            **definition,
+            'counts': {},
+            'dataset_delta': None,
+            'ready': False,
+            'blocking_reasons': ['正在统计当前训练数据'],
+            'quality_warnings': [],
+        }
+        for task_id, definition in training.TRAINING_TASKS.items()
+        if definition.get('active', True)
+    ]
+
+
+def _refresh_training_tasks_cache(generation: int) -> None:
+    conn = None
+    summaries: Optional[List[Dict[str, Any]]] = None
+    error = ''
+    try:
+        conn = _conn()
+        summaries = training.task_summaries(conn)
+        db.save_service_runtime_state(
+            conn,
+            _TRAINING_TASKS_STATE_KEY,
+            {'summaries': summaries, 'updated_at': db.now()},
+        )
+    except Exception as exc:
+        error = str(exc)[:500]
+    finally:
+        if conn is not None:
+            conn.close()
+    with _training_tasks_cache_lock:
+        if summaries is not None:
+            _training_tasks_cache['value'] = summaries
+            _training_tasks_cache['error'] = ''
+        else:
+            _training_tasks_cache['error'] = error or '训练数据统计失败'
+            _training_tasks_cache['retry_at'] = time.monotonic() + 60.0
+        _training_tasks_cache['refreshing'] = False
+        _training_tasks_cache['dirty'] = (
+            _training_tasks_cache['generation'] != generation or summaries is None
+        )
+
+
+def _cached_training_tasks(conn: Any) -> List[Dict[str, Any]]:
+    if not config.DATABASE_URL:
+        return training.task_summaries(conn)
+    should_start = False
+    with _training_tasks_cache_lock:
+        if _training_tasks_cache['value'] is None:
+            persisted = db.load_service_runtime_state(conn, _TRAINING_TASKS_STATE_KEY)
+            summaries = persisted.get('summaries')
+            _training_tasks_cache['value'] = (
+                summaries if isinstance(summaries, list) else []
+            )
+        now = time.monotonic()
+        if (
+            _training_tasks_cache['dirty']
+            and not _training_tasks_cache['refreshing']
+            and now >= _training_tasks_cache['retry_at']
+        ):
+            _training_tasks_cache['refreshing'] = True
+            should_start = True
+        generation = int(_training_tasks_cache['generation'])
+        value = _training_tasks_cache['value'] or _training_task_placeholders()
+        refreshing = bool(_training_tasks_cache['refreshing'])
+        error = str(_training_tasks_cache['error'] or '')
+    if should_start:
+        threading.Thread(
+            target=_refresh_training_tasks_cache,
+            args=(generation,),
+            daemon=True,
+            name='vision-training-stats',
+        ).start()
+    return [
+        {**item, 'stats_refreshing': refreshing, 'stats_error': error} for item in value
+    ]
+
+
+def _invalidate_training_tasks_cache() -> None:
+    with _training_tasks_cache_lock:
+        _training_tasks_cache['dirty'] = True
+        _training_tasks_cache['generation'] += 1
+        _training_tasks_cache['error'] = ''
+        _training_tasks_cache['retry_at'] = 0.0
 
 
 def _nas() -> NasClient:
@@ -4368,6 +4468,7 @@ def api_complete_vision_job(
                     artifact_path=str(artifact),
                     finished_at=db.now(),
                 )
+                _invalidate_training_tasks_cache()
             elif leased['kind'] == 'model_prefill':
                 application = _apply_remote_model_prefill(conn, leased, result)
                 _update_autonomous_prefill_after_result(conn, leased, result)
@@ -4483,10 +4584,10 @@ def api_cancel_vision_job(job_id: str) -> Dict[str, Any]:
 
 @app.get('/api/training/tasks')
 def api_training_tasks() -> List[Dict[str, Any]]:
-    with _db_lock:
+    with _training_review_read_guard():
         conn = _conn()
         try:
-            return training.task_summaries(conn)
+            return _cached_training_tasks(conn)
         finally:
             conn.close()
 
@@ -4522,11 +4623,7 @@ def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
         with _db_lock:
             conn = _conn()
             try:
-                summary = next(
-                    item
-                    for item in training.task_summaries(conn)
-                    if item['id'] == task_id
-                )
+                summary = training.task_summary(conn, task_id)
                 if not summary['ready']:
                     raise HTTPException(
                         400,

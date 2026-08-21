@@ -7209,6 +7209,11 @@ function trainingInputText(task) {
 function trainingDatasetDelta(task) {
   const delta = task.dataset_delta;
   if (!delta) {
+    if (task.stats_refreshing) {
+      return '<div class="training-dataset-delta empty">' +
+        '<span>训练数据变化</span><b>正在更新</b>' +
+        '<small>后台统计完成后自动刷新</small></div>';
+    }
     return '<div class="training-dataset-delta empty">' +
       '<span>训练数据变化</span><b>尚无成功版本</b>' +
       '<small>首次训练后开始显示新增数据</small></div>';
@@ -7274,12 +7279,16 @@ function trainingTaskCard(task) {
   const warnings = task.quality_warnings || [];
   const metrics = trainingCountMetrics(task);
   const supplemental = trainingSupplementalText(task);
+  const waitingForStats = task.stats_refreshing &&
+    !Object.keys(task.counts || {}).length;
+  const readinessLabel = waitingForStats
+    ? '统计中' : (task.ready ? '可训练' : '数据不足');
   return `
     <article class="training-task-card ${task.ready ? 'ready' : ''}"
       data-task-id="${esc(task.id)}">
       <div class="training-task-heading">
         <div><h3>${esc(task.name)}</h3><span>${esc(trainingInputText(task))}</span></div>
-        <span class="training-readiness ${task.ready ? 'ready' : 'blocked'}">${task.ready ? '可训练' : '数据不足'}</span>
+        <span class="training-readiness ${task.ready ? 'ready' : 'blocked'}">${readinessLabel}</span>
       </div>
       <p class="training-task-description">${esc(task.description)}</p>
       <div class="training-data-grid">${metrics.map(([label, value]) => `
@@ -7474,9 +7483,16 @@ async function loadTrainingDashboard() {
     renderVisionWorkers(workers);
     renderTrainingTasks(tasks);
     renderTrainingRuns(runs);
-    if (runs.active_run_id && !trainingPollTimer) {
+    const statsRefreshing = tasks.some((task) => task.stats_refreshing);
+    const statsError = tasks.find((task) => task.stats_error)?.stats_error;
+    if (!runs.active_run_id && statsRefreshing) {
+      $('#training-global-state').textContent = '正在后台更新训练数据统计…';
+    } else if (!runs.active_run_id && statsError) {
+      $('#training-global-state').textContent = '训练数据统计失败：' + statsError;
+    }
+    if ((runs.active_run_id || statsRefreshing) && !trainingPollTimer) {
       trainingPollTimer = setInterval(loadTrainingDashboard, 2000);
-    } else if (!runs.active_run_id && trainingPollTimer) {
+    } else if (!runs.active_run_id && !statsRefreshing && trainingPollTimer) {
       clearInterval(trainingPollTimer);
       trainingPollTimer = null;
     }
