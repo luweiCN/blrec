@@ -4095,6 +4095,11 @@ def _training_review_material_scene(
         return hero_layout
     if str(row['result_panel_label'] or '') == 'result_panel':
         return 'result_page'
+    if str(row['match_flow_label'] or '') in {
+        'not_match_flow',
+        'unreadable',
+    } or hero_layout in {'none', 'unreadable'}:
+        return None
 
     suggestions = signal.get('suggestions') or {}
     select_suggestion = suggestions.get('hero_select') or {}
@@ -4143,6 +4148,11 @@ def _training_review_material_mode(
     select_mode = _training_review_mode_from_select(row['hero_select_label'])
     if select_mode is not None:
         return select_mode
+    if (
+        str(row['match_flow_label'] or '') in {'not_match_flow', 'unreadable'}
+        or str(row['match_mode_label'] or '') == 'unreadable'
+    ):
+        return None
 
     suggestions = signal.get('suggestions') or {}
     mode_suggestion = str((suggestions.get('match_mode') or {}).get('label') or '')
@@ -7041,8 +7051,17 @@ def _training_review_indexed_page_frame_ids(
             heroes
         )
     if status in {'needs_review', 'pending'}:
+        direct_scene_order = (
+            'CASE WHEN material.prefill_screen_type=material.scene '
+            'THEN 0 ELSE 1 END,'
+            if scene in _HERO_SCREEN_TYPES
+            else ''
+        )
         order_sql = (
-            ' ORDER BY ' + hero_order_sql + f'{_TRAINING_REVIEW_INDEXED_ARAM_PRIORITY},'
+            ' ORDER BY '
+            + hero_order_sql
+            + direct_scene_order
+            + f'{_TRAINING_REVIEW_INDEXED_ARAM_PRIORITY},'
             "CASE WHEN item.review_status='pending' THEN 0 ELSE 1 END,"
             'material.source_created_at DESC,material.source_offset DESC,'
             'item.updated_at DESC,item.frame_id DESC'
@@ -7437,6 +7456,25 @@ def hero_layout_key(width: int, height: int) -> str:
     return f'{width / height:.3f}'
 
 
+def update_frame_dimensions(
+    conn: sqlite3.Connection,
+    frame_id: int,
+    width: int,
+    height: int,
+    *,
+    commit: bool = True,
+) -> bool:
+    if width <= 0 or height <= 0:
+        raise ValueError('图片尺寸必须为正数')
+    cursor = conn.execute(
+        'UPDATE frames SET width=?,height=? WHERE id=? ' 'AND (width<=0 OR height<=0)',
+        (int(width), int(height), int(frame_id)),
+    )
+    if commit:
+        conn.commit()
+    return cursor.rowcount == 1
+
+
 def get_training_review_hero_lineup(
     conn: sqlite3.Connection, frame_id: int
 ) -> Optional[Dict[str, Any]]:
@@ -7673,6 +7711,7 @@ def replace_training_review_hero_layout(
     team_size: int,
     method: str,
     slots: List[Dict[str, Any]],
+    refresh_material_index: bool = True,
 ) -> Dict[str, Any]:
     """保存本帧人工圆框草稿；允许尚未画满，且不会冒充人工英雄真值。"""
     if screen_type not in _HERO_SCREEN_TYPES:
@@ -7763,7 +7802,8 @@ def replace_training_review_hero_layout(
             ],
         )
         _clear_invalid_training_review_player_slot(conn, int(frame_id))
-    refresh_training_review_material_index(conn, int(frame_id))
+    if refresh_material_index:
+        refresh_training_review_material_index(conn, int(frame_id))
     result = get_training_review_hero_lineup(conn, int(frame_id))
     if result is None:
         raise KeyError(frame_id)

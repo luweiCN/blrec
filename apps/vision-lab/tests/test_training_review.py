@@ -887,6 +887,76 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
         self.assertEqual([item['frame_id'] for item in items], [frame_id])
         self.assertEqual(suggestion['candidate_count'], 1)
 
+        db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='not_match_flow',
+            match_mode_label=None,
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label='none',
+            status='confirmed',
+            result_groups={},
+        )
+        indexed = self.conn.execute(
+            'SELECT scene,match_mode FROM training_review_material_index '
+            'WHERE frame_id=?',
+            (frame_id,),
+        ).fetchone()
+        self.assertEqual(indexed['scene'], 'other')
+        self.assertEqual(indexed['match_mode'], '')
+
+    def test_direct_hud_detection_is_reviewed_before_gameplay_fallback(self):
+        weak = self.frame(17)
+        strong = self.frame(18)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=weak,
+            source_type='worker',
+            source_id='newer-gameplay-fallback',
+            suggestions={'match_mode': {'label': '5v5', 'confidence': 0.9}},
+            metadata={
+                'model_outputs': [{'task': 'match_flow', 'stage_class': 'gameplay'}]
+            },
+            source_created_at=200,
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=strong,
+            source_type='worker',
+            source_id='older-direct-hud',
+            suggestions={'match_mode': {'label': '5v5', 'confidence': 0.9}},
+            metadata={
+                'hero_context_suggestion': {
+                    'screen_type': 'gameplay_hud',
+                    'team_size': 5,
+                    'confidence': 0.9,
+                }
+            },
+            source_created_at=100,
+        )
+        db.update_training_review_prefill_state(
+            self.conn, frame_id=weak, status='ready', stage='complete'
+        )
+        db.update_training_review_prefill_state(
+            self.conn,
+            frame_id=strong,
+            status='ready',
+            stage='complete',
+            screen_type='gameplay_hud',
+            team_size=5,
+        )
+
+        items = db.list_training_review_items(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            scene='gameplay_hud',
+            match_mode='5v5',
+        )
+
+        self.assertEqual([item['frame_id'] for item in items], [strong, weak])
+
     def test_material_suggestions_include_sufficient_and_hero_scene_rows(self):
         frames = []
         for index in range(100, 150):

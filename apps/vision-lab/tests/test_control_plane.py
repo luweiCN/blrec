@@ -163,6 +163,24 @@ def test_candidate_hud_prefill_shows_progress_and_preserves_manual_edits() -> No
     assert 'delete refreshed.prefill_job;' in completion
 
 
+def test_manual_hero_circle_is_rendered_before_remote_save() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    addition = script[
+        script.index('async function addCandidateHeroCircle(') : script.index(
+            'async function deleteCandidateHeroSlot('
+        )
+    ]
+
+    local_update = addition.index('candidateHeroLineup.slots = slots;')
+    remote_save = addition.index('await persistCandidateHeroLayout(')
+    assert local_update < remote_save
+    assert addition.index('renderCandidateHeroLineup();') < remote_save
+    assert 'image_width:' in script
+    assert 'image_height:' in script
+
+
 def test_worker_claim_autonomously_runs_core_then_hero_before_review(
     monkeypatch,
 ) -> None:

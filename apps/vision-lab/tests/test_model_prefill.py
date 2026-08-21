@@ -254,7 +254,7 @@ class TestModelPrefill(unittest.TestCase):
         self.assertEqual(partial_context['screen_type'], 'unreadable')
         self.assertFalse(partial_context['complete_detection'])
 
-    def test_hud_slots_do_not_fill_missing_top_avatar_from_kill_feed(self):
+    def test_hud_slots_keep_partial_top_row_without_using_kill_feed(self):
         hud = []
         for x in (0.30, 0.36, 0.42, 0.56, 0.62):
             hud.append(
@@ -274,7 +274,45 @@ class TestModelPrefill(unittest.TestCase):
             hud + [kill_feed], screen_type='gameplay_hud', team_size=3
         )
 
-        self.assertEqual(slots, [])
+        self.assertEqual(len(slots), 5)
+        self.assertTrue(all(slot['crop']['y'] < 0.2 for slot in slots))
+        self.assertNotIn(
+            kill_feed['xywh_norm'][0], [slot['crop']['x'] for slot in slots]
+        )
+
+    def test_partial_hud_prefill_classifies_every_detected_avatar(self):
+        Image.new('RGB', (1280, 720), (20, 30, 40)).save(self.image)
+        boxes = [
+            {'class': 'hero_avatar', 'conf': 0.9, 'xywh_norm': [x, 0.04, 0.05, 0.08]}
+            for x in (0.30, 0.36, 0.42, 0.56, 0.62)
+        ]
+        heroes = iter(('adagio', 'alpha', 'ardan', 'baron', 'blackfeather'))
+
+        def prediction(_artifact, metadata, _image, conf_thr=0.25):
+            task_id = metadata['task_id']
+            if task_id == 'hero_avatar_detector':
+                return {'task': 'detect', 'found': True, 'detections': boxes}
+            if task_id == 'hero_identity':
+                return {
+                    'task': 'classify',
+                    'top1': {'class': next(heroes), 'prob': 0.8},
+                }
+            raise AssertionError(f'不应运行 {task_id}')
+
+        with mock.patch.object(
+            model_prefill.inference, 'run_artifact', side_effect=prediction
+        ):
+            result = model_prefill.prefill_hero_lineup(
+                self.conn, self.image, screen_type='gameplay_hud', team_size=3
+            )
+
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['detected'], 5)
+        self.assertEqual(len(result['slots']), 5)
+        self.assertEqual(
+            [slot['suggested_label'] for slot in result['slots']],
+            ['adagio', 'alpha', 'ardan', 'baron', 'blackfeather'],
+        )
 
     def test_hero_prefill_orders_detector_boxes_and_classifies_each_crop(self):
         Image.new('RGB', (1280, 720), (20, 30, 40)).save(self.image)

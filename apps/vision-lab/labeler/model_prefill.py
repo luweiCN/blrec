@@ -434,21 +434,28 @@ def _ordered_avatar_slots(
                     -sum(value['center_y'] for value in row) / len(row),
                 ),
             )
-        if len(usable) < expected:
-            return []
     elif screen_type in {'scoreboard', 'result_page'}:
         panel = [value for value in usable if value['center_y'] >= 0.10]
-        if len(panel) >= expected:
+        if panel:
             usable = panel
-    if len(usable) < expected:
+    if not usable:
         return []
     if len(usable) > expected:
         usable = sorted(usable, key=lambda value: value['confidence'], reverse=True)[
             :expected
         ]
     by_x = sorted(usable, key=lambda value: value['center_x'])
-    left = by_x[:team_size]
-    right = by_x[team_size:]
+    if len(by_x) == 1:
+        split = 1 if by_x[0]['center_x'] <= 0.5 else 0
+    else:
+        minimum_split = max(1, len(by_x) - team_size)
+        maximum_split = min(team_size, len(by_x) - 1)
+        split = max(
+            range(minimum_split, maximum_split + 1),
+            key=lambda index: by_x[index]['center_x'] - by_x[index - 1]['center_x'],
+        )
+    left = by_x[:split]
+    right = by_x[split:]
     if screen_type == 'gameplay_hud':
         left.sort(key=lambda value: value['center_x'], reverse=True)
         right.sort(key=lambda value: value['center_x'])
@@ -624,10 +631,11 @@ def run_hero_lineup_prefill(
         screen_type=screen_type,
         team_size=team_size,
     )
-    if len(slots) != team_size * 2:
+    complete = len(slots) == team_size * 2
+    if not slots:
         return {
             'complete': False,
-            'reason': '头像位置模型没有找全 {} 个头像'.format(team_size * 2),
+            'reason': '头像位置模型没有找到可用头像',
             'slots': [],
             'model_runs': model_runs,
             'detected': len(detection.get('detections') or []),
@@ -655,7 +663,14 @@ def run_hero_lineup_prefill(
         team_size=team_size,
     )
     return {
-        'complete': True,
+        'complete': complete,
+        'reason': (
+            ''
+            if complete
+            else '头像位置模型找到 {}/{} 个头像，可人工补齐'.format(
+                len(slots), team_size * 2
+            )
+        ),
         'slots': slots,
         'player_suggestion': player_suggestion,
         'model_runs': model_runs,

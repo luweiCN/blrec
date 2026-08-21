@@ -2214,11 +2214,29 @@ def api_save_training_review_hero_layout(
         raise HTTPException(400, '英雄头像框必须是列表')
     recognize = bool(body.get('recognize'))
     save_template = bool(body.get('save_template'))
+    try:
+        image_width = int(body.get('image_width') or 0)
+        image_height = int(body.get('image_height') or 0)
+    except (TypeError, ValueError):
+        image_width = 0
+        image_height = 0
+    if image_width <= 0 or image_height <= 0:
+        image_width = 0
+        image_height = 0
     with _db_lock:
         conn = _conn()
         try:
             item = _single_training_review_item(conn, frame_id)
             existing = db.get_training_review_hero_lineup(conn, frame_id)
+            if (
+                item is not None
+                and (int(item['width'] or 0) <= 0 or int(item['height'] or 0) <= 0)
+                and image_width > 0
+                and image_height > 0
+            ):
+                db.update_frame_dimensions(conn, frame_id, image_width, image_height)
+                item['width'] = image_width
+                item['height'] = image_height
         finally:
             conn.close()
     if item is None:
@@ -2235,6 +2253,7 @@ def api_save_training_review_hero_layout(
     ]
     model_result: Optional[Dict[str, Any]] = None
     queued_job: Optional[Dict[str, Any]] = None
+    template_saved = False
     try:
         if recognize and not config.CONTROL_PLANE_ONLY:
             with _db_lock:
@@ -2281,6 +2300,7 @@ def api_save_training_review_hero_layout(
                         )
                     ),
                     slots=slots,
+                    refresh_material_index=False,
                 )
                 if model_result and model_result.get('complete'):
                     _save_new_model_hero_prefill_source(
@@ -2292,7 +2312,12 @@ def api_save_training_review_hero_layout(
                         result=model_result,
                     )
                     item = _single_training_review_item(conn, frame_id) or item
-                if save_template and template_streamer:
+                if (
+                    save_template
+                    and template_streamer
+                    and int(item['width'] or 0) > 0
+                    and int(item['height'] or 0) > 0
+                ):
                     db.save_training_review_hero_template(
                         conn,
                         streamer=template_streamer,
@@ -2303,6 +2328,7 @@ def api_save_training_review_hero_layout(
                         ),
                         slots=slots,
                     )
+                    template_saved = True
                 if recognize and config.CONTROL_PLANE_ONLY and slots:
                     models = model_prefill.latest_model_specs(
                         conn, ('hero_identity', 'player_position')
@@ -2330,7 +2356,7 @@ def api_save_training_review_hero_layout(
                 raise HTTPException(400, str(exc)) from exc
         finally:
             conn.close()
-    lineup['template_saved'] = save_template and bool(template_streamer)
+    lineup['template_saved'] = template_saved
     payload = _hero_lineup_payload(lineup, item=item)
     if queued_job is not None:
         payload['prefill_job'] = queued_job
@@ -4142,6 +4168,16 @@ def _apply_remote_model_prefill(
     operation = str(payload.get('operation') or result.get('operation') or 'core')
     if frame_id <= 0:
         raise ValueError('预填任务缺少 frame_id')
+    try:
+        image_width = int(result.get('image_width') or 0)
+        image_height = int(result.get('image_height') or 0)
+    except (TypeError, ValueError):
+        image_width = 0
+        image_height = 0
+    if image_width > 0 and image_height > 0:
+        db.update_frame_dimensions(
+            conn, frame_id, image_width, image_height, commit=False
+        )
     if operation == 'core':
         errors = result.get('errors') if isinstance(result.get('errors'), dict) else {}
         if errors:

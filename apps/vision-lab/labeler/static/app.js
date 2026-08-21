@@ -1763,6 +1763,7 @@ async function persistCandidateHeroLayout(
   const previousDraft = new Map(candidateHeroDraft);
   const previousPlayerSlot = candidateHeroPlayerSlot;
   const previousPlayerStatus = candidateHeroPlayerStatus;
+  const image = $('#candidate-image');
   candidateHeroLoading = true;
   $('#btn-candidate-save').disabled = true;
   renderCandidateHeroLineup();
@@ -1776,6 +1777,8 @@ async function persistCandidateHeroLayout(
           slots: candidateHeroSlotsPayload(slots),
           recognize: recognize,
           save_template: saveTemplate,
+          image_width: Number(image && image.naturalWidth || item.width || 0),
+          image_height: Number(image && image.naturalHeight || item.height || 0),
         }),
       });
     candidateHeroLineup = lineup;
@@ -1870,6 +1873,8 @@ async function addCandidateHeroCircle(crop) {
   );
   const complete = slots.length === candidateHeroLineup.team_size * 2;
   markCandidateHeroGeometryEdited();
+  candidateHeroLineup.slots = slots;
+  renderCandidateHeroLineup();
   const saved = await persistCandidateHeroLayout(slots, {
     recognize: complete,
     saveTemplate: complete,

@@ -92,7 +92,9 @@ def test_prefill_failure_does_not_leave_candidate_image_on_worker(
         @staticmethod
         def download(_path, destination):
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(b'candidate')
+            from PIL import Image
+
+            Image.new('RGB', (64, 36), '#222222').save(destination)
 
     worker = vision_worker.VisionWorker(
         client=Client(),
@@ -118,3 +120,35 @@ def test_prefill_failure_does_not_leave_candidate_image_on_worker(
         )
 
     assert not (tmp_path / 'work/prefill-cache/17.jpg').exists()
+
+
+def test_prefill_reports_downloaded_image_dimensions(monkeypatch, tmp_path) -> None:
+    class Client:
+        @staticmethod
+        def download(_path, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            from PIL import Image
+
+            Image.new('RGB', (1280, 720), '#222222').save(destination)
+
+    worker = vision_worker.VisionWorker(
+        client=Client(),
+        worker_id='worker-1',
+        display_name='Worker 1',
+        work_dir=tmp_path / 'work',
+        base_models_dir=tmp_path / 'models',
+        capabilities=['model_prefill'],
+    )
+    monkeypatch.setattr(worker, '_model_contexts', lambda _models: {})
+    monkeypatch.setattr(
+        vision_worker.model_prefill,
+        'run_core_prefill',
+        lambda _path, _contexts: {'suggestions': {}, 'errors': {}},
+    )
+
+    result = worker._prefill(
+        {'payload': {'frame_id': 18, 'operation': 'core', 'models': {}}}
+    )
+
+    assert result['image_width'] == 1280
+    assert result['image_height'] == 720

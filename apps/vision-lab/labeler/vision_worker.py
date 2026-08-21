@@ -274,6 +274,8 @@ class VisionWorker:
             self.client.download(
                 f'/api/vision-workers/frames/{frame_id}/image', frame_path
             )
+            with Image.open(frame_path) as image:
+                image_width, image_height = image.size
             contexts = self._model_contexts(payload.get('models') or {})
             if operation == 'core':
                 result = model_prefill.run_core_prefill(frame_path, contexts)
@@ -285,7 +287,13 @@ class VisionWorker:
                             f'{task}: {error}' for task, error in errors.items()
                         )
                     )
-                return {'operation': operation, 'frame_id': frame_id, **result}
+                return {
+                    'operation': operation,
+                    'frame_id': frame_id,
+                    'image_width': image_width,
+                    'image_height': image_height,
+                    **result,
+                }
             screen_type = str(payload.get('screen_type') or '')
             team_size = int(payload.get('team_size') or 0)
             if operation == 'hero_lineup':
@@ -307,6 +315,8 @@ class VisionWorker:
                 'frame_id': frame_id,
                 'screen_type': screen_type,
                 'team_size': team_size,
+                'image_width': image_width,
+                'image_height': image_height,
                 **result,
             }
         finally:

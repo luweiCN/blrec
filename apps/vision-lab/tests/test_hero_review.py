@@ -444,6 +444,64 @@ class TestHeroReviewStorage(HeroReviewTestCase):
         saved = db.get_training_review_hero_lineup(self.conn, self.frame_id)
         self.assertEqual(len(saved['slots']), 6)
 
+    def test_complete_layout_repairs_missing_dimensions_from_loaded_image(self):
+        from labeler import server
+
+        with self.conn:
+            self.conn.execute(
+                'UPDATE frames SET width=0,height=0 WHERE id=?', (self.frame_id,)
+            )
+
+        with (
+            mock.patch.object(config, 'CONTROL_PLANE_ONLY', True),
+            mock.patch.object(
+                server, '_conn', side_effect=lambda: db.connect(self.root / 'lab.db')
+            ),
+            mock.patch.object(
+                server.model_prefill,
+                'latest_model_specs',
+                return_value={
+                    'hero_identity': {
+                        'run_id': 'hero-identity-run',
+                        'metadata': {},
+                        'artifact_size': 1,
+                    },
+                    'player_position': {
+                        'run_id': 'player-position-run',
+                        'metadata': {},
+                        'artifact_size': 1,
+                    },
+                },
+            ),
+        ):
+            lineup = server.api_save_training_review_hero_layout(
+                self.frame_id,
+                {
+                    'screen_type': 'gameplay_hud',
+                    'team_size': 3,
+                    'slots': self.slots(),
+                    'recognize': True,
+                    'save_template': True,
+                    'image_width': 1280,
+                    'image_height': 720,
+                },
+            )
+
+        self.assertTrue(lineup['template_saved'])
+        self.assertEqual(lineup['prefill_job']['payload']['operation'], 'hero_slots')
+        dimensions = self.conn.execute(
+            'SELECT width,height FROM frames WHERE id=?', (self.frame_id,)
+        ).fetchone()
+        self.assertEqual((dimensions['width'], dimensions['height']), (1280, 720))
+        template = db.get_training_review_hero_template(
+            self.conn,
+            streamer='测试主播',
+            screen_type='gameplay_hud',
+            team_size=3,
+            layout_key=db.hero_layout_key(1280, 720),
+        )
+        self.assertIsNotNone(template)
+
     def test_newer_template_refreshes_pending_automatic_layout(self):
         from labeler import server
 
