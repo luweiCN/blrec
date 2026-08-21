@@ -190,6 +190,14 @@ def test_candidate_hero_ai_recognition_is_an_explicit_action() -> None:
     ]
     assert 'prepareCandidateHeroLineup(' not in prepare
 
+    manual_layout = script[
+        script.index('async function addCandidateHeroCircle(') : script.index(
+            'function renderCandidateHeroContextControls('
+        )
+    ]
+    assert 'recognize: true' not in manual_layout
+    assert 'recognize: complete' not in manual_layout
+
 
 def test_manual_hero_circle_is_rendered_before_remote_save() -> None:
     script = (

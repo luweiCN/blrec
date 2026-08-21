@@ -1933,7 +1933,6 @@ async function addCandidateHeroCircle(crop) {
   candidateHeroLineup.slots = slots;
   renderCandidateHeroLineup();
   const saved = await persistCandidateHeroLayout(slots, {
-    recognize: complete,
     saveTemplate: complete,
   });
   if (saved && complete) {
@@ -1941,7 +1940,7 @@ async function addCandidateHeroCircle(crop) {
     const automaticallyAdded = slots.length - manuallyAdded.length;
     if (automaticallyAdded > 0) {
       $('#candidate-save-state').textContent =
-        `已自动补齐 ${automaticallyAdded} 个英雄圆框，并完成识别`;
+        `已自动补齐 ${automaticallyAdded} 个英雄圆框；需要识别英雄时请点“AI 识别”`;
     }
   }
   renderCandidateHeroLineup();
@@ -1981,7 +1980,6 @@ async function clearCandidateHeroLayout() {
 async function saveCandidateHeroTemplate() {
   if (!candidateHeroLayoutComplete()) return;
   await persistCandidateHeroLayout(candidateHeroLineup.slots, {
-    recognize: true,
     saveTemplate: true,
   });
 }
