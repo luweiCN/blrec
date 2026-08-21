@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -81,6 +82,38 @@ class TestTrainingRuns(unittest.TestCase):
             db.update_training_run(
                 self.conn, 'bp-train-1', unsafe_sql_fragment='DROP TABLE'
             )
+
+    def test_hero_avatar_summary_uses_postgres_complete_grouping(self):
+        class Cursor:
+            def fetchall(self):
+                return [
+                    {
+                        'frame_id': 1,
+                        'screen_type': 'gameplay_hud',
+                        'team_size': 3,
+                        'video_id': 2,
+                        'frame_path': '/candidates/frame.jpg',
+                        'slot_count': 6,
+                    }
+                ]
+
+        class PostgresLikeConnection:
+            def execute(self, statement, _parameters=()):
+                assert (
+                    'GROUP BY lineup.frame_id, lineup.screen_type, '
+                    'lineup.team_size, f.video_id, f.frame_path' in statement
+                )
+                return Cursor()
+
+        with mock.patch.object(
+            training.managed_assets, 'frame_available', return_value=True
+        ):
+            counts = training._task_counts(
+                PostgresLikeConnection(), 'hero_avatar_detector'
+            )
+
+        self.assertEqual(counts['total'], 1)
+        self.assertEqual(counts['boxes'], 6)
 
     def test_detector_artifact_metadata_does_not_require_classification_size(self):
         metadata = training_runner._artifact_input_metadata(

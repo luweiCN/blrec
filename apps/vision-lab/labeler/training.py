@@ -790,7 +790,8 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
                 'ON slot.frame_id = lineup.frame_id '
                 'JOIN frames f ON f.id = lineup.frame_id '
                 "WHERE lineup.review_status = 'confirmed' "
-                'GROUP BY lineup.frame_id '
+                'GROUP BY lineup.frame_id, lineup.screen_type, '
+                'lineup.team_size, f.video_id, f.frame_path '
                 'HAVING COUNT(slot.slot) = lineup.team_size * 2'
             ).fetchall()
             if managed_assets.frame_available(row['frame_path'])
