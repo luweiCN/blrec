@@ -188,7 +188,8 @@ def test_candidate_hero_ai_recognition_is_an_explicit_action() -> None:
             'function nextMatchingCandidate('
         )
     ]
-    assert 'prepareCandidateHeroLineup(' not in prepare
+    assert 'prepareCandidateHeroLineup(' in prepare
+    assert 'recognize: true' not in prepare
 
     manual_layout = script[
         script.index('async function addCandidateHeroCircle(') : script.index(
@@ -813,6 +814,40 @@ def test_candidate_save_posts_hero_lineup_with_review_in_one_request() -> None:
 
     assert '/hero-lineup' not in save
     assert 'hero_lineup:' in save
+
+
+def test_candidate_save_prepares_next_item_while_current_item_is_saving() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    save = script[
+        script.index('async function saveCandidateReview(') : script.index(
+            'function candidatePoint('
+        )
+    ]
+
+    start_save = save.index('const savePromise = api(')
+    start_next = save.index('const nextPreparation = prepareCandidateAfterSave(')
+    await_save = save.index('const saved = await savePromise;')
+    assert start_save < await_save
+    assert start_next < await_save
+    assert 'await nextPreparation;' in save
+
+
+def test_material_suggestions_show_historical_and_new_confirmed_breakdown() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    render = script[
+        script.index('function renderCandidateMaterialSuggestions()') : script.index(
+            'async function openCandidateMaterialSuggestions()'
+        )
+    ]
+
+    assert 'legacy_confirmed_count' in render
+    assert 'new_confirmed_count' in render
+    assert "'历史'" in render
+    assert "'新素材'" in render
 
 
 def test_worker_control_plane_redirects_only_frame_media_to_nas(monkeypatch) -> None:

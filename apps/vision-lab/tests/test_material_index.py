@@ -215,6 +215,100 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
 
         assert suggestion['confirmed_count'] == 1
 
+    def test_material_suggestions_split_historical_and_new_confirmed_truth(
+        self,
+    ) -> None:
+        historical_without_heroes = self.frame(211)
+        historical_with_heroes = self.frame(212)
+        new_with_heroes = self.frame(213)
+        for frame_id, source_type in (
+            (historical_without_heroes, 'legacy_annotation'),
+            (historical_with_heroes, 'legacy_annotation'),
+            (new_with_heroes, 'worker'),
+        ):
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type=source_type,
+                source_id=f'{source_type}-{frame_id}',
+            )
+
+        for frame_id in (historical_with_heroes, new_with_heroes):
+            slots = self.hero_slots('Adagio')
+            db.replace_training_review_hero_suggestions(
+                self.conn,
+                frame_id=frame_id,
+                screen_type='gameplay_hud',
+                team_size=3,
+                method='model-v1',
+                slots=slots,
+            )
+            db.save_training_review_hero_lineup(
+                self.conn,
+                frame_id=frame_id,
+                labels=[
+                    {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
+                    for slot in slots
+                ],
+                allowed_labels={'Adagio'},
+            )
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='match_flow',
+                match_mode_label='3v3',
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+                hero_layout_label='gameplay_hud',
+                status='confirmed',
+                result_groups={},
+            )
+
+        db.save_training_review(
+            self.conn,
+            frame_id=historical_without_heroes,
+            match_flow_label='match_flow',
+            match_mode_label='3v3',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label=None,
+            status='confirmed',
+            result_groups={},
+        )
+        # 旧格式迁移数据允许保留“这是 HUD”的人工分类，但没有新流程英雄框。
+        self.conn.execute(
+            'UPDATE training_review_items SET hero_layout_label=? WHERE frame_id=?',
+            ('gameplay_hud', historical_without_heroes),
+        )
+        self.conn.commit()
+
+        suggestions = db.training_review_material_suggestions(
+            self.conn, hero_catalog=({'label': 'Adagio', 'name': '奥达基'},)
+        )
+        scene = next(
+            value
+            for value in suggestions
+            if value['kind'] == 'scene_mode'
+            and value['scene'] == 'gameplay_hud'
+            and value['match_mode'] == '3v3'
+        )
+        hero = next(
+            value
+            for value in suggestions
+            if value['kind'] == 'hero_scene'
+            and value['scene'] == 'gameplay_hud'
+            and value['hero_label'] == 'Adagio'
+        )
+
+        assert scene['confirmed_count'] == 3
+        assert scene['legacy_confirmed_count'] == 2
+        assert scene['new_confirmed_count'] == 1
+        assert scene['other_confirmed_count'] == 0
+        assert hero['confirmed_count'] == 12
+        assert hero['legacy_confirmed_count'] == 6
+        assert hero['new_confirmed_count'] == 6
+        assert hero['other_confirmed_count'] == 0
+
     def test_material_contribution_delta_does_not_select_every_total_row(self) -> None:
         frame_id = self.frame(202)
         key = ('scene_mode', 'gameplay_hud', '3v3', '', 'all', 'confirmed')

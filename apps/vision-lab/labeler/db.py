@@ -5309,39 +5309,73 @@ def training_review_material_suggestions(
 
     confirmed_scene_rows = conn.execute(
         """
-        SELECT scene,match_mode,COUNT(*) AS frame_count FROM (
+        SELECT scene,match_mode,source_scope,COUNT(*) AS frame_count FROM (
             SELECT
                 CASE
-                    WHEN hero_select_label LIKE 'select_%' THEN 'hero_select'
-                    WHEN hero_layout_label IN
+                    WHEN item.hero_select_label LIKE 'select_%' THEN 'hero_select'
+                    WHEN item.hero_layout_label IN
                          ('gameplay_hud','scoreboard','result_page')
-                    THEN hero_layout_label
-                    WHEN result_panel_label='result_panel' THEN 'result_page'
+                    THEN item.hero_layout_label
+                    WHEN item.result_panel_label='result_panel' THEN 'result_page'
                     ELSE ''
                 END AS scene,
                 CASE
-                    WHEN match_mode_label IN ('3v3','aram','5v5')
-                    THEN match_mode_label
-                    WHEN hero_select_label='select_3v3' THEN '3v3'
-                    WHEN hero_select_label='select_aram' THEN 'aram'
-                    WHEN hero_select_label='select_5v5' THEN '5v5'
+                    WHEN item.match_mode_label IN ('3v3','aram','5v5')
+                    THEN item.match_mode_label
+                    WHEN item.hero_select_label='select_3v3' THEN '3v3'
+                    WHEN item.hero_select_label='select_aram' THEN 'aram'
+                    WHEN item.hero_select_label='select_5v5' THEN '5v5'
                     ELSE ''
-                END AS match_mode
-            FROM training_review_items
-            WHERE review_status='confirmed'
+                END AS match_mode,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM training_review_sources source
+                        WHERE source.frame_id=item.frame_id
+                          AND (source.source_type='legacy_annotation'
+                               OR source.source_type LIKE 'legacy_%')
+                    ) THEN 'legacy'
+                    WHEN EXISTS (
+                        SELECT 1 FROM training_review_sources source
+                        WHERE source.frame_id=item.frame_id
+                          AND source.source_type IN
+                              ('worker','result_archive','manual_correction')
+                    ) THEN 'new'
+                    ELSE 'other'
+                END AS source_scope
+            FROM training_review_items item
+            WHERE item.review_status='confirmed'
         ) truth
         WHERE scene IN ('gameplay_hud','scoreboard','result_page','hero_select')
           AND match_mode IN ('3v3','aram','5v5')
-        GROUP BY scene,match_mode
+        GROUP BY scene,match_mode,source_scope
         """
     ).fetchall()
-    confirmed_scenes = {
-        (str(row['scene']), str(row['match_mode'])): int(row['frame_count'])
-        for row in confirmed_scene_rows
-    }
+    confirmed_scenes: Dict[Tuple[str, str], int] = {}
+    confirmed_scene_scopes: Dict[Tuple[str, str, str], int] = {}
+    for row in confirmed_scene_rows:
+        key = (str(row['scene']), str(row['match_mode']))
+        scope = str(row['source_scope'])
+        count = int(row['frame_count'])
+        confirmed_scenes[key] = confirmed_scenes.get(key, 0) + count
+        confirmed_scene_scopes[(*key, scope)] = count
     confirmed_hero_rows = conn.execute(
         """
         SELECT lineup.screen_type AS scene,slot.confirmed_label AS hero_label,
+               CASE
+                   WHEN EXISTS (
+                       SELECT 1 FROM training_review_sources source
+                       WHERE source.frame_id=lineup.frame_id
+                         AND (source.source_type='legacy_annotation'
+                              OR source.source_type LIKE 'legacy_%')
+                   ) THEN 'legacy'
+                   WHEN EXISTS (
+                       SELECT 1 FROM training_review_sources source
+                       WHERE source.frame_id=lineup.frame_id
+                         AND source.source_type IN
+                             ('worker','result_archive','manual_correction')
+                   ) THEN 'new'
+                   ELSE 'other'
+               END AS source_scope,
                COUNT(DISTINCT lineup.frame_id) AS frame_count,
                COUNT(*) AS crop_count
         FROM training_review_hero_lineups lineup
@@ -5349,16 +5383,22 @@ def training_review_material_suggestions(
         WHERE lineup.review_status='confirmed'
           AND lineup.screen_type IN ('gameplay_hud','scoreboard','result_page')
           AND COALESCE(slot.confirmed_label,'') NOT IN ('','unreadable')
-        GROUP BY lineup.screen_type,slot.confirmed_label
+        GROUP BY lineup.screen_type,slot.confirmed_label,source_scope
         """
     ).fetchall()
-    confirmed_heroes = {
-        (str(row['scene']), str(row['hero_label'])): (
-            int(row['frame_count']),
-            int(row['crop_count']),
+    confirmed_heroes: Dict[Tuple[str, str], Tuple[int, int]] = {}
+    confirmed_hero_scopes: Dict[Tuple[str, str, str], Tuple[int, int]] = {}
+    for row in confirmed_hero_rows:
+        key = (str(row['scene']), str(row['hero_label']))
+        scope = str(row['source_scope'])
+        frame_count = int(row['frame_count'])
+        crop_count = int(row['crop_count'])
+        previous_frames, previous_crops = confirmed_heroes.get(key, (0, 0))
+        confirmed_heroes[key] = (
+            previous_frames + frame_count,
+            previous_crops + crop_count,
         )
-        for row in confirmed_hero_rows
-    }
+        confirmed_hero_scopes[(*key, scope)] = (frame_count, crop_count)
 
     def total(
         kind: str,
@@ -5387,6 +5427,10 @@ def training_review_material_suggestions(
         target = max(minimum, math.ceil(strongest * 0.6))
         for mode, mode_label in _MATERIAL_SUGGESTION_MODES:
             count = total('scene_mode', scene, mode, '', 'all', 'confirmed')[0]
+            confirmed_breakdown = {
+                scope: confirmed_scene_scopes.get((scene, mode, scope), 0)
+                for scope in ('legacy', 'new', 'other')
+            }
             new_count = total('scene_mode', scene, mode, '', 'new', 'candidate')[0]
             legacy_count = total('scene_mode', scene, mode, '', 'legacy', 'candidate')[
                 0
@@ -5408,6 +5452,9 @@ def training_review_material_suggestions(
                     'match_mode': mode,
                     'mode_label': mode_label,
                     'confirmed_count': count,
+                    'legacy_confirmed_count': confirmed_breakdown['legacy'],
+                    'new_confirmed_count': confirmed_breakdown['new'],
+                    'other_confirmed_count': confirmed_breakdown['other'],
                     'target_count': target,
                     'shortage_count': max(0, target - count),
                     'candidate_count': available,
@@ -5437,6 +5484,10 @@ def training_review_material_suggestions(
     ):
         for scene, scene_label, _minimum in _MATERIAL_SUGGESTION_SCENES[:3]:
             count = total('hero_scene', scene, '', hero_label, 'all', 'confirmed')[1]
+            confirmed_breakdown = {
+                scope: confirmed_hero_scopes.get((scene, hero_label, scope), (0, 0))[1]
+                for scope in ('legacy', 'new', 'other')
+            }
             new_frames, new_crops = total(
                 'hero_scene', scene, '', hero_label, 'new', 'candidate'
             )
@@ -5481,6 +5532,9 @@ def training_review_material_suggestions(
                     'hero_label': hero_label,
                     'hero_name': hero_name,
                     'confirmed_count': count,
+                    'legacy_confirmed_count': confirmed_breakdown['legacy'],
+                    'new_confirmed_count': confirmed_breakdown['new'],
+                    'other_confirmed_count': confirmed_breakdown['other'],
                     'target_count': target,
                     'shortage_count': max(0, target - count),
                     'candidate_count': candidate_count,
@@ -5537,6 +5591,9 @@ def _training_review_material_suggestions(
         for scene, _scene_label, _minimum in _MATERIAL_SUGGESTION_SCENES
         for mode, _mode_label in _MATERIAL_SUGGESTION_MODES
     }
+    confirmed_scopes = {
+        scope: {key: 0 for key in confirmed} for scope in ('legacy', 'new', 'other')
+    }
     candidates = {scope: {key: 0 for key in confirmed} for scope in ('new', 'legacy')}
     for row in visible_rows:
         frame_id = int(row['frame_id'])
@@ -5549,6 +5606,17 @@ def _training_review_material_suggestions(
         status = str(row['review_status'])
         if status == 'confirmed':
             confirmed[key] += 1
+            categories = categories_by_frame.get(frame_id, set())
+            scope = (
+                'legacy'
+                if 'legacy' in categories
+                else (
+                    'new'
+                    if categories & {'worker', 'result_archive', 'manual_correction'}
+                    else 'other'
+                )
+            )
+            confirmed_scopes[scope][key] += 1
             continue
         if status not in {'pending', 'partial'}:
             continue
@@ -5586,6 +5654,9 @@ def _training_review_material_suggestions(
                     'match_mode': mode,
                     'mode_label': mode_label,
                     'confirmed_count': count,
+                    'legacy_confirmed_count': confirmed_scopes['legacy'][key],
+                    'new_confirmed_count': confirmed_scopes['new'][key],
+                    'other_confirmed_count': confirmed_scopes['other'][key],
                     'target_count': target,
                     'shortage_count': max(0, target - count),
                     'candidate_count': available,
@@ -5606,6 +5677,9 @@ def _training_review_material_suggestions(
         if str(hero.get('label') or '')
     }
     confirmed_heroes: Dict[Tuple[str, str], int] = {}
+    confirmed_hero_scopes: Dict[str, Dict[Tuple[str, str], int]] = {
+        scope: {} for scope in ('legacy', 'new', 'other')
+    }
     candidate_heroes: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {
         'new': {},
         'legacy': {},
@@ -5623,6 +5697,18 @@ def _training_review_material_suggestions(
         if lineup_status == 'confirmed' and confirmed_label not in {'', 'unreadable'}:
             key = (confirmed_label, screen_type)
             confirmed_heroes[key] = confirmed_heroes.get(key, 0) + 1
+            categories = categories_by_frame.get(frame_id, set())
+            scope = (
+                'legacy'
+                if 'legacy' in categories
+                else (
+                    'new'
+                    if categories & {'worker', 'result_archive', 'manual_correction'}
+                    else 'other'
+                )
+            )
+            scoped = confirmed_hero_scopes[scope]
+            scoped[key] = scoped.get(key, 0) + 1
             catalog_by_label.setdefault(confirmed_label, confirmed_label)
             continue
         if str(row['item_review_status'] or '') not in {'pending', 'partial'}:
@@ -5674,6 +5760,11 @@ def _training_review_material_suggestions(
                     'hero_label': hero_label,
                     'hero_name': hero_name,
                     'confirmed_count': count,
+                    'legacy_confirmed_count': confirmed_hero_scopes['legacy'].get(
+                        key, 0
+                    ),
+                    'new_confirmed_count': confirmed_hero_scopes['new'].get(key, 0),
+                    'other_confirmed_count': confirmed_hero_scopes['other'].get(key, 0),
                     'target_count': target,
                     'shortage_count': max(0, target - count),
                     'candidate_count': len(selected['frame_ids']),

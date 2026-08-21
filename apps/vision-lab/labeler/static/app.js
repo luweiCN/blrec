@@ -2622,6 +2622,15 @@ function renderCandidateMaterialSuggestions() {
     counts.className = 'candidate-material-counts';
     const confirmed = document.createElement('strong');
     confirmed.textContent = String(suggestion.confirmed_count || 0);
+    const confirmedSources = [
+      {key: 'legacy_confirmed_count', label: '历史'},
+      {key: 'new_confirmed_count', label: '新素材'},
+    ];
+    if (Number(suggestion.other_confirmed_count || 0) > 0) {
+      confirmedSources.push({key: 'other_confirmed_count', label: '其他来源'});
+    }
+    const confirmedBreakdown = '（' + confirmedSources.map((source) =>
+      `${source.label} ${Number(suggestion[source.key] || 0)}`).join(' · ') + '）';
     const available = Number(suggestion.candidate_count || 0);
     const queueName = suggestion.source_scope === 'legacy'
       ? '历史队列' : 'Worker 队列';
@@ -2633,7 +2642,7 @@ function renderCandidateMaterialSuggestions() {
         suggestion.matches_without_scene_candidate || 0);
       counts.append(
         '已确认 ', confirmed,
-        ` 个头像 / 建议 ${suggestion.target_count || 0} 个 · `,
+        ` 个头像${confirmedBreakdown} / 建议 ${suggestion.target_count || 0} 个 · `,
         `${queueName}可复核 ${available} 张：模型直接认出 ${modelPrefill} 张、` +
           `同局待排查 ${sameMatch} 张、同视频兜底 ${sameVideo} 张；` +
           `直接候选头像 ${suggestion.candidate_crop_count || 0} 个` +
@@ -2642,7 +2651,7 @@ function renderCandidateMaterialSuggestions() {
     } else {
       counts.append(
         '已确认 ', confirmed,
-        ` 张 / 建议 ${suggestion.target_count || 0} 张 · `,
+        ` 张${confirmedBreakdown} / 建议 ${suggestion.target_count || 0} 张 · `,
         `${queueName}现有 ${available} 张待复核`,
       );
     }
@@ -2884,7 +2893,20 @@ function prepareCandidateForReview(item) {
   if (!frameId) return Promise.resolve();
   const existing = candidatePreparationRequests.get(frameId);
   if (existing) return existing;
-  const promise = prefetchCandidateImage(item).then(() => undefined);
+  const promise = Promise.all([
+    prefetchCandidateImage(item),
+    Promise.resolve().then(() => {
+      const draft = candidateDefaultDraft(item);
+      const context = candidateHeroContext(item, draft, false);
+      if (!context) return undefined;
+      return prepareCandidateHeroLineup(item, context).initialPromise;
+    }),
+  ]).then(() => undefined);
+  promise.catch(() => {
+    if (candidatePreparationRequests.get(frameId) === promise) {
+      candidatePreparationRequests.delete(frameId);
+    }
+  });
   candidatePreparationRequests.set(frameId, promise);
   return promise;
 }
@@ -2928,10 +2950,10 @@ async function warmCandidateReviewQueue(loadToken) {
       upcoming = nextMatchingCandidates();
     }
     upcoming.forEach((item) => prefetchCandidateImage(item));
-    const item = upcoming.find((value) =>
-      !candidatePreparationRequests.has(Number(value.frame_id)));
+    const item = upcoming[0];
     if (!item) return;
     await prepareCandidateForReview(item);
+    return;
   }
 }
 
@@ -3167,6 +3189,23 @@ function showCandidateSaveError(message) {
   saveState.textContent = message;
 }
 
+function candidateAfterSaveHint(loadedStatus) {
+  const forward = nextMatchingCandidate();
+  if (forward || !candidateStatusIsReviewQueue(loadedStatus)) return forward;
+  return candidateQueue.find((value, index) =>
+    index !== candidateIndex &&
+    candidateItemMatchesStatus(value, loadedStatus)) || null;
+}
+
+async function prepareCandidateAfterSave(item) {
+  if (!item) return;
+  try {
+    await prepareCandidateForReview(item);
+  } catch (_error) {
+    // 当前标注仍应正常保存；切换后会按普通加载流程重试下一张。
+  }
+}
+
 async function saveCandidateReview(skip = false) {
   const item = currentCandidate();
   if (!item || !candidateDraft) return;
@@ -3221,7 +3260,7 @@ async function saveCandidateReview(skip = false) {
     showCandidateMissingPlayerHero();
     return;
   }
-  $('#candidate-save-state').textContent = '正在保存…';
+  $('#candidate-save-state').textContent = '正在保存，同时准备下一张…';
   try {
     const heroLineupPayload = heroLabels && (
       candidateHeroDirty || candidateHeroLineup.review_status !== 'confirmed'
@@ -3238,7 +3277,7 @@ async function saveCandidateReview(skip = false) {
       result_panel_label: null,
       hero_layout_label: null,
     } : candidateDraft;
-    const saved = await api(`/api/training-review/items/${item.frame_id}`, {
+    const savePromise = api(`/api/training-review/items/${item.frame_id}`, {
       method: 'PUT',
       body: JSON.stringify({
         ...labels,
@@ -3249,6 +3288,17 @@ async function saveCandidateReview(skip = false) {
         notes: $('#candidate-notes').value,
       }),
     });
+    const nextHint = candidateAfterSaveHint(loadedStatus);
+    const nextPreparation = prepareCandidateAfterSave(nextHint);
+    const knownBeforeSave = candidateQueue.filter(
+      (value) => candidateItemMatchesStatus(value, loadedStatus)).length;
+    const refillPreparation = !nextHint &&
+        candidateFilteredTotal > knownBeforeSave
+      ? ensureCandidateReviewQueueRefill()
+        .then(() => null)
+        .catch((error) => error)
+      : Promise.resolve(null);
+    const saved = await savePromise;
     if (saved.hero_lineup) {
       candidateHeroLineup = saved.hero_lineup;
       candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(
@@ -3276,10 +3326,16 @@ async function saveCandidateReview(skip = false) {
     const knownRemaining = candidateQueue.filter(
       (value) => candidateItemMatchesStatus(value, loadedStatus)).length;
     if (nextIndex < 0 && candidateFilteredTotal > knownRemaining) {
-      try {
-        await ensureCandidateReviewQueueRefill();
-      } catch (error) {
-        refillError = error;
+      refillError = await refillPreparation;
+      if (!refillError && !nextHint) {
+        const preparedAfterRefill = candidateAfterSaveHint(loadedStatus);
+        await prepareCandidateAfterSave(preparedAfterRefill);
+      } else if (!refillError && nextHint) {
+        try {
+          await ensureCandidateReviewQueueRefill();
+        } catch (error) {
+          refillError = error;
+        }
       }
       nextIndex = nextMatchingIndex();
     }
@@ -3287,7 +3343,15 @@ async function saveCandidateReview(skip = false) {
       nextIndex = candidateQueue.findIndex(
         (value) => candidateItemMatchesStatus(value, loadedStatus));
     }
-    if (nextIndex >= 0) candidateIndex = nextIndex;
+    if (nextIndex >= 0) {
+      candidateIndex = nextIndex;
+      const nextItem = candidateQueue[nextIndex];
+      if (nextHint && Number(nextHint.frame_id) === Number(nextItem.frame_id)) {
+        await nextPreparation;
+      } else {
+        await prepareCandidateAfterSave(nextItem);
+      }
+    }
     renderCandidateItem();
     void loadCandidateReviewStats(loadedStatus, candidateLoadedSourceScope);
     if (refillError) {
