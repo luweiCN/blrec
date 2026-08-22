@@ -659,8 +659,8 @@
                 <div class="candidate-hero-help-panel">
                   <p id="candidate-hero-status" class="hint small"></p>
                   <p class="hint small">
-                    拖圆框可移动，拖黄色圆点可统一缩放。保存位置只缓存该主播、
-                    当前画面类型和人数的圆框位置；重画本图不会删除结算面板框。
+                    拖圆框可移动，拖黄色圆点可统一缩放。圆框和英雄只使用本图的
+                    模型结果或人工标注；重画本图不会删除结算面板框。
                   </p>
                 </div>
               </details>
@@ -672,10 +672,8 @@
                         title="按当前头像来源和人数，用模型重新查找头像并识别英雄">AI 识别</button>
                 <button id="btn-candidate-hero-draw" type="button"
                         title="缺少头像框时，按左队到右队的顺序继续补画">补画头像</button>
-                <button id="btn-candidate-hero-save-template" type="button"
-                        title="保存本主播、当前画面类型和人数的圆框位置，供后续同类图片复用">保存位置</button>
                 <button id="btn-candidate-hero-clear" type="button"
-                        title="只清空当前图片的英雄头像框与选择，保留结算面板框和位置缓存">重画本图</button>
+                        title="只清空当前图片的英雄头像框与选择，保留结算面板框">重画本图</button>
               </div>
             </div>
             <div id="candidate-hero-teams" class="candidate-hero-teams"></div>

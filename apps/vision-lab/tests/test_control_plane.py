@@ -215,7 +215,7 @@ def test_candidate_hud_prefill_shows_progress_and_preserves_manual_edits() -> No
     assert 'delete refreshed.prefill_job;' in completion
 
 
-def test_candidate_hero_ai_recognition_is_an_explicit_action() -> None:
+def test_candidate_hero_ai_recognition_has_no_cross_frame_cache() -> None:
     root = Path(__file__).resolve().parent.parent / 'labeler/static'
     html = (root / 'index.html').read_text(encoding='utf-8')
     script = (root / 'app.js').read_text(encoding='utf-8')
@@ -234,6 +234,10 @@ def test_candidate_hero_ai_recognition_is_an_explicit_action() -> None:
     assert 'candidateHeroPrefillRunning = true;' in recognize
     assert 'candidateHeroPrefillRunning = false;' in recognize
     assert "$('#btn-candidate-hero-recognize').onclick" in script
+    assert 'CANDIDATE_HERO_LINEUP_CACHE_STORAGE_KEY' not in script
+    assert 'candidateCachedHeroLineup' not in script
+    assert 'cacheCandidateHeroLineup' not in script
+    assert 'btn-candidate-hero-save-template' not in html
 
     prepare = script[
         script.index('function prepareCandidateForReview(') : script.index(
@@ -243,13 +247,18 @@ def test_candidate_hero_ai_recognition_is_an_explicit_action() -> None:
     assert 'prepareCandidateHeroLineup(' in prepare
     assert 'recognize: true' not in prepare
 
-    manual_layout = script[
+    addition = script[
         script.index('async function addCandidateHeroCircle(') : script.index(
-            'function renderCandidateHeroContextControls('
+            'async function deleteCandidateHeroSlot('
         )
     ]
-    assert 'recognize: true' not in manual_layout
-    assert 'recognize: complete' not in manual_layout
+    assert 'recognizeSlots: addedSlots' in addition
+    edit = script[
+        script.index('async function finishCandidateHeroEdit(') : script.index(
+            'function cancelCandidateHeroEdit('
+        )
+    ]
+    assert 'recognizeSlots: changedSlots' in edit
 
 
 def test_manual_hero_circle_is_rendered_before_remote_save() -> None:
@@ -497,6 +506,69 @@ def test_failed_core_prefill_never_promotes_candidate(monkeypatch) -> None:
     apply_core.assert_not_called()
 
 
+def test_partial_hero_slot_result_merges_without_deleting_other_slots(
+    monkeypatch,
+) -> None:
+    slots = [
+        {
+            'side': side,
+            'slot': slot,
+            'crop': {
+                'x': 0.30 + (0.20 if side == 'right' else 0),
+                'y': 0.10 + slot * 0.10,
+                'w': 0.06,
+                'h': 0.08,
+            },
+            'suggested_label': 'Adagio',
+            'suggestion_confidence': 0.8,
+        }
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    ]
+    changed = {**slots[1], 'suggested_label': '', 'suggestion_confidence': 0.0}
+    predicted = {**changed, 'suggested_label': 'Caine', 'suggestion_confidence': 0.93}
+    existing = {
+        'frame_id': 12,
+        'screen_type': 'gameplay_hud',
+        'team_size': 3,
+        'review_status': 'pending',
+        'suggestion_method': 'manual-circle-v1',
+        'slots': slots,
+    }
+    monkeypatch.setattr(
+        server, '_single_training_review_item', mock.Mock(return_value={'sources': []})
+    )
+    monkeypatch.setattr(
+        server.db, 'get_training_review_hero_lineup', mock.Mock(return_value=existing)
+    )
+    replace = mock.Mock(
+        side_effect=lambda _conn, **kwargs: {**existing, 'slots': kwargs['slots']}
+    )
+    monkeypatch.setattr(server.db, 'replace_training_review_hero_layout', replace)
+    monkeypatch.setattr(server, '_save_new_model_hero_prefill_source', mock.Mock())
+
+    applied = server._apply_remote_model_prefill(
+        mock.Mock(),
+        {
+            'payload': {
+                'frame_id': 12,
+                'operation': 'hero_slots',
+                'screen_type': 'gameplay_hud',
+                'team_size': 3,
+                'slots': [changed],
+            }
+        },
+        {'complete': True, 'slots': [predicted], 'model_runs': {}},
+    )
+
+    merged = replace.call_args.kwargs['slots']
+    assert applied['applied'] is True
+    assert len(merged) == 6
+    assert merged[1]['suggested_label'] == 'Caine'
+    assert merged[1]['suggestion_confidence'] == pytest.approx(0.93)
+    assert merged[0]['suggested_label'] == 'Adagio'
+
+
 def test_paused_worker_does_not_create_autonomous_prefill(monkeypatch) -> None:
     connection = mock.Mock()
     monkeypatch.setattr(server, '_require_vision_worker', lambda _request: None)
@@ -606,6 +678,22 @@ def test_training_tasks_reuse_persisted_summary(monkeypatch) -> None:
     assert first[0]['counts']['total'] == 10
     assert first[0]['stats_refreshing'] is False
     load.assert_called_once_with(connection, server._TRAINING_TASKS_STATE_KEY)
+
+
+def test_training_ui_hides_stale_model_baseline_while_stats_refresh() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    renderer = script[
+        script.index('function trainingDatasetDelta(task)') : script.index(
+            'function trainingSnapshotNote(taskId)'
+        )
+    ]
+
+    assert renderer.index('if (task.stats_refreshing)') < renderer.index(
+        'const delta = task.dataset_delta;'
+    )
+    assert '正在按最新成功模型重新计算基线' in renderer
 
 
 def test_cold_training_tasks_start_one_background_refresh(monkeypatch) -> None:
@@ -1068,14 +1156,12 @@ def test_worker_control_plane_serves_remote_model_test_crop(monkeypatch) -> None
     crop.assert_called_once_with(b'full-frame', crop_box)
 
 
-def test_zero_sized_historical_frame_skips_layout_template_without_500(
-    monkeypatch,
-) -> None:
+def test_loading_frame_never_reads_cross_frame_layout_template(monkeypatch) -> None:
     connection = mock.Mock()
     item = {
         'frame_id': 18,
-        'width': 0,
-        'height': 0,
+        'width': 1280,
+        'height': 720,
         'streamer': 'legacy-streamer',
         'sources': [],
     }

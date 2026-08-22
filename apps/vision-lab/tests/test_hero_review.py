@@ -440,11 +440,11 @@ class TestHeroReviewStorage(HeroReviewTestCase):
             )
 
         self.assertEqual(len(lineup['slots']), 6)
-        self.assertFalse(lineup['template_saved'])
+        self.assertNotIn('template_saved', lineup)
         saved = db.get_training_review_hero_lineup(self.conn, self.frame_id)
         self.assertEqual(len(saved['slots']), 6)
 
-    def test_complete_layout_repairs_missing_dimensions_from_loaded_image(self):
+    def test_complete_layout_does_not_save_cross_frame_template(self):
         from labeler import server
 
         with self.conn:
@@ -487,7 +487,7 @@ class TestHeroReviewStorage(HeroReviewTestCase):
                 },
             )
 
-        self.assertTrue(lineup['template_saved'])
+        self.assertFalse(lineup.get('template_saved', False))
         self.assertEqual(lineup['prefill_job']['payload']['operation'], 'hero_slots')
         dimensions = self.conn.execute(
             'SELECT width,height FROM frames WHERE id=?', (self.frame_id,)
@@ -500,7 +500,7 @@ class TestHeroReviewStorage(HeroReviewTestCase):
             team_size=3,
             layout_key=db.hero_layout_key(1280, 720),
         )
-        self.assertIsNotNone(template)
+        self.assertIsNone(template)
 
     def test_control_plane_only_queues_ai_after_explicit_recognition(self):
         from labeler import server
@@ -539,7 +539,7 @@ class TestHeroReviewStorage(HeroReviewTestCase):
         queue_prefill.assert_called_once()
         self.assertEqual(queue_prefill.call_args.kwargs['operation'], 'hero_lineup')
 
-    def test_explicit_ai_refreshes_pending_layout_from_newer_template(self):
+    def test_explicit_ai_ignores_saved_template_and_runs_detector(self):
         from labeler import server
 
         old_slots = self.slots()
@@ -573,15 +573,19 @@ class TestHeroReviewStorage(HeroReviewTestCase):
                 "'2026-08-09T12:01:00' WHERE streamer = '测试主播'"
             )
 
-        def recognize(_conn, _path, slots, **_kwargs):
+        detected_slots = self.slots()
+        detected_slots[-1]['crop']['w'] = 0.07
+
+        def recognize(_conn, _path, **_kwargs):
             return {
                 'complete': True,
                 'slots': [
                     {**slot, 'suggested_label': 'Adagio', 'suggestion_confidence': 0.8}
-                    for slot in slots
+                    for slot in detected_slots
                 ],
                 'model_runs': {'hero_identity': 'hero-identity-run'},
                 'player_suggestion': None,
+                'detected': 6,
             }
 
         with (
@@ -589,18 +593,21 @@ class TestHeroReviewStorage(HeroReviewTestCase):
                 server, '_conn', side_effect=lambda: db.connect(self.root / 'lab.db')
             ),
             mock.patch.object(
-                server.model_prefill, 'prefill_hero_slots', side_effect=recognize
-            ),
+                server.model_prefill, 'prefill_hero_lineup', side_effect=recognize
+            ) as detect,
+            mock.patch.object(server.model_prefill, 'prefill_hero_slots') as classify,
         ):
             lineup = server.api_training_review_hero_lineup(
                 self.frame_id,
                 screen_type='result_page',
                 team_size=3,
                 recognize=True,
-                refresh=False,
+                refresh=True,
             )
 
-        self.assertEqual(lineup['slots'][-1]['crop']['w'], 0.06)
+        self.assertEqual(lineup['slots'][-1]['crop']['w'], 0.07)
+        detect.assert_called_once()
+        classify.assert_not_called()
 
     def test_newer_template_does_not_replace_pending_manual_layout(self):
         from labeler import server

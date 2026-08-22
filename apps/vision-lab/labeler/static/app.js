@@ -42,7 +42,7 @@ let candidateHeroFilters = new Set();
 let candidateHeroScope = 'all';
 let candidateHeroLineup = null;
 let candidateHeroDraft = new Map();
-let candidateHeroCachedSlots = new Set();
+let candidateHeroManualSlots = new Set();
 let candidateHeroDirty = false;
 let candidateHeroLoading = false;
 let candidateHeroPrefillRunning = false;
@@ -232,9 +232,6 @@ const TRAINING_REVIEW_LABEL_TEXT = Object.fromEntries(
   TRAINING_REVIEW_FIELDS.map((field) => [field.suggestion, field.labels]));
 const CANDIDATE_REVIEW_DEFAULTS_STORAGE_KEY =
   'vainglory-vision-lab.training-review-defaults.v1';
-const CANDIDATE_HERO_LINEUP_CACHE_STORAGE_KEY =
-  'vainglory-vision-lab.hero-lineup-cache.v1';
-const CANDIDATE_HERO_LINEUP_CACHE_LIMIT = 100;
 
 const CANDIDATE_SUGGESTION_TITLES = {
   match_flow: '对局流程',
@@ -289,9 +286,6 @@ const CANDIDATE_HERO_LAYOUT_SHORT_LABELS = {
 
 const CANDIDATE_HERO_SCREEN_TYPES = new Set([
   'gameplay_hud', 'scoreboard', 'result_page',
-]);
-const CANDIDATE_HERO_LINEUP_CACHE_SCREEN_TYPES = new Set([
-  'gameplay_hud', 'scoreboard',
 ]);
 
 const CANDIDATE_HERO_SELECT_VARIANTS = {
@@ -717,18 +711,19 @@ async function finishCandidateHeroEdit(event, node) {
     return;
   }
   markCandidateHeroGeometryEdited();
-  const saveTemplate = candidateHeroLayoutComplete();
+  const changedSlots = candidateHeroChangedSlots(
+    edit.originalSlots, candidateHeroLineup.slots);
+  clearCandidateHeroRecognition(changedSlots);
   const saved = await persistCandidateHeroLayout(candidateHeroLineup.slots, {
-    saveTemplate: saveTemplate,
+    recognizeSlots: changedSlots,
   });
   if (!saved) {
     candidateHeroLineup.slots = edit.originalSlots;
     renderCandidateHeroLineup();
     return;
   }
-  $('#candidate-save-state').textContent = saveTemplate
-    ? '英雄圆框的位置和大小已更新，并同步到该主播的布局缓存'
-    : '英雄圆框的位置和大小已更新';
+  $('#candidate-save-state').textContent =
+    '英雄圆框的位置和大小已更新，正在重新识别受影响的头像';
 }
 
 function cancelCandidateHeroEdit(event) {
@@ -938,88 +933,15 @@ function candidateHeroByLabel(label) {
   return candidateHeroCatalog.find((hero) => hero.label === label) || null;
 }
 
-function candidateHeroLineupCacheEntries() {
-  try {
-    const stored = JSON.parse(
-      window.localStorage.getItem(CANDIDATE_HERO_LINEUP_CACHE_STORAGE_KEY) ||
-      '{}');
-    return stored && typeof stored === 'object' && !Array.isArray(stored)
-      ? stored : {};
-  } catch (_error) {
-    return {};
-  }
-}
-
-function candidateHeroLineupCacheKey(item, screenType, teamSize) {
-  const streamer = String(item && item.streamer || '').trim();
-  const size = Number(teamSize);
-  if (!streamer || !CANDIDATE_HERO_LINEUP_CACHE_SCREEN_TYPES.has(screenType) ||
-      ![3, 5].includes(size)) return null;
-  return JSON.stringify([streamer, screenType, size]);
-}
-
-function candidateCachedHeroLineup(item, screenType, teamSize) {
-  const cacheKey = candidateHeroLineupCacheKey(item, screenType, teamSize);
-  if (!cacheKey) return new Map();
-  const entry = candidateHeroLineupCacheEntries()[cacheKey];
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
-      !entry.heroes || typeof entry.heroes !== 'object' ||
-      Array.isArray(entry.heroes)) return new Map();
-  const expected = new Set(candidateHeroExpectedPositions(Number(teamSize))
-    .map((position) => candidateHeroKey(position.side, position.slot)));
-  return new Map(Object.entries(entry.heroes).flatMap(([key, label]) =>
-    expected.has(key) && typeof label === 'string' && candidateHeroByLabel(label)
-      ? [[key, label]] : []));
-}
-
-function cacheCandidateHeroLineup(item, lineup, draft) {
-  if (!lineup || !draft) return;
-  const cacheKey = candidateHeroLineupCacheKey(
-    item, lineup.screen_type, lineup.team_size);
-  if (!cacheKey) return;
-  const expectedCount = Number(lineup.team_size) * 2;
-  const slotKeys = new Set((lineup.slots || []).map((slot) =>
-    candidateHeroKey(slot.side, slot.slot)));
-  if (slotKeys.size !== expectedCount) return;
-  const heroes = {};
-  slotKeys.forEach((key) => {
-    const label = draft.get(key) || '';
-    if (candidateHeroByLabel(label)) heroes[key] = label;
-  });
-  try {
-    const entries = candidateHeroLineupCacheEntries();
-    entries[cacheKey] = {heroes, updated_at: Date.now()};
-    const retained = Object.fromEntries(Object.entries(entries)
-      .sort((left, right) =>
-        Number(right[1] && right[1].updated_at || 0) -
-        Number(left[1] && left[1].updated_at || 0))
-      .slice(0, CANDIDATE_HERO_LINEUP_CACHE_LIMIT));
-    window.localStorage.setItem(
-      CANDIDATE_HERO_LINEUP_CACHE_STORAGE_KEY, JSON.stringify(retained));
-  } catch (_error) {
-    // 浏览器禁止本地存储时仍可继续打标，只是不跨图片沿用阵容。
-  }
-}
-
 function candidateHeroDraftForLineup(item, lineup, previousDraft = new Map()) {
-  const previousCachedSlots = new Set(candidateHeroCachedSlots);
-  const cached = item.legacy_hero_needs_review
-    ? new Map()
-    : candidateCachedHeroLineup(item, lineup.screen_type, lineup.team_size);
-  const nextCachedSlots = new Set();
-  const draft = new Map((lineup.slots || []).map((slot) => {
+  return new Map((lineup.slots || []).map((slot) => {
     const key = candidateHeroKey(slot.side, slot.slot);
     const previous = previousDraft.get(key) || '';
-    if (previous && !previousCachedSlots.has(key)) return [key, previous];
+    if (previous && candidateHeroManualSlots.has(key)) return [key, previous];
     const recognized = slot.confirmed_label || slot.suggested_label || '';
     if (recognized) return [key, recognized];
-    const reused = cached.get(key) ||
-      (previousCachedSlots.has(key) ? previous : '');
-    if (reused) nextCachedSlots.add(key);
-    return [key, reused];
+    return [key, previous];
   }));
-  candidateHeroCachedSlots = nextCachedSlots;
-  return draft;
 }
 
 function candidateHeroKnownTeamSize(item, draft = candidateDraft) {
@@ -1073,7 +995,7 @@ function resetCandidateHeroReview() {
   candidateHeroPrefillToken += 1;
   candidateHeroLineup = null;
   candidateHeroDraft = new Map();
-  candidateHeroCachedSlots = new Set();
+  candidateHeroManualSlots = new Set();
   candidateHeroPlayerSlot = null;
   candidateHeroPlayerStatus = 'pending';
   candidateHeroDirty = false;
@@ -1128,6 +1050,31 @@ function candidateHeroLayoutComplete() {
 function markCandidateHeroGeometryEdited() {
   candidateHeroGeometryRevision += 1;
   candidateHeroDirty = true;
+}
+
+function candidateHeroSameCrop(left, right) {
+  return ['x', 'y', 'w', 'h'].every((name) =>
+    Math.abs(Number(left && left[name]) - Number(right && right[name])) < 0.000001);
+}
+
+function candidateHeroChangedSlots(previousSlots, nextSlots) {
+  const previous = new Map((previousSlots || []).map((slot) => [
+    candidateHeroKey(slot.side, slot.slot), slot,
+  ]));
+  return (nextSlots || []).filter((slot) => {
+    const old = previous.get(candidateHeroKey(slot.side, slot.slot));
+    return !old || !candidateHeroSameCrop(old.crop, slot.crop);
+  });
+}
+
+function clearCandidateHeroRecognition(slots) {
+  (slots || []).forEach((slot) => {
+    const key = candidateHeroKey(slot.side, slot.slot);
+    candidateHeroDraft.delete(key);
+    candidateHeroManualSlots.delete(key);
+    slot.suggested_label = '';
+    slot.suggestion_confidence = 0;
+  });
 }
 
 function candidateHeroCropCenter(crop) {
@@ -1309,7 +1256,6 @@ function renderCandidateHeroLineup() {
   tools.classList.remove('hidden');
   const recognizeButton = $('#btn-candidate-hero-recognize');
   const drawButton = $('#btn-candidate-hero-draw');
-  const saveTemplate = $('#btn-candidate-hero-save-template');
   const clearButton = $('#btn-candidate-hero-clear');
   const playerUnreadable = $('#btn-candidate-player-unreadable');
   recognizeButton.textContent = candidateHeroPrefillRunning
@@ -1319,11 +1265,10 @@ function renderCandidateHeroLineup() {
     teams.classList.add('hidden');
     drawButton.classList.remove('hidden');
     drawButton.disabled = true;
-    saveTemplate.disabled = true;
     clearButton.disabled = true;
     playerUnreadable.classList.add('hidden');
     $('#candidate-hero-status').textContent = candidateHeroLoading
-      ? '正在读取本图或该主播缓存的英雄框…'
+      ? '正在读取本图的模型结果和人工标注…'
       : '请先选择每队 3 人或每队 5 人。';
     renderCandidateBoxes();
     return;
@@ -1331,7 +1276,6 @@ function renderCandidateHeroLineup() {
   teams.classList.remove('hidden');
   const recognized = candidateHeroLineup.slots.filter(
     (slot) => slot.suggested_label).length;
-  const reused = candidateHeroCachedSlots.size;
   const screenName = CANDIDATE_HERO_LAYOUTS[candidateHeroLineup.screen_type]
     || candidateHeroLineup.screen_type;
   const complete = candidateHeroLayoutComplete();
@@ -1350,7 +1294,6 @@ function renderCandidateHeroLineup() {
     ? '阵容已经人工确认；修改任意下拉框后会更新。'
     : complete
       ? `算法预填 ${recognized}/${candidateHeroLineup.slots.length} 个；` +
-        (reused ? `上次同类画面补齐 ${reused} 个；` : '') +
         '正确的不用改，只修改错误或空白的位置。'
       : next
         ? `已画 ${candidateHeroLineup.slots.length}/` +
@@ -1382,7 +1325,6 @@ function renderCandidateHeroLineup() {
   drawButton.textContent = candidateHeroDrawMode && next
       ? `正在画${next.side === 'left' ? '左' : '右'}${next.slot}`
       : '补画头像';
-  saveTemplate.disabled = busy || !complete;
   clearButton.disabled = busy || !candidateHeroLineup.slots.length;
   for (const side of ['left', 'right']) {
     const team = document.createElement('section');
@@ -1517,7 +1459,7 @@ function renderCandidateHeroOptions() {
     button.appendChild(names);
     button.onclick = () => {
       candidateHeroDraft.set(candidateHeroPickerSlot, hero.label);
-      candidateHeroCachedSlots.delete(candidateHeroPickerSlot);
+      candidateHeroManualSlots.add(candidateHeroPickerSlot);
       candidateHeroDirty = true;
       $('#candidate-save-state').classList.remove('error');
       $('#candidate-save-state').textContent = '';
@@ -1675,7 +1617,7 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
   candidateHeroLoading = true;
   candidateHeroLineup = null;
   candidateHeroDraft = new Map();
-  candidateHeroCachedSlots = new Set();
+  candidateHeroManualSlots = new Set();
   candidateHeroPlayerSlot = null;
   candidateHeroPlayerStatus = 'pending';
   candidateHeroDirty = false;
@@ -1683,7 +1625,7 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
   closeCandidateHeroPicker();
   $('#candidate-hero-review').classList.remove('hidden');
   $('#candidate-hero-teams').innerHTML = '';
-  $('#candidate-hero-status').textContent = '正在读取本图或该主播缓存的英雄框…';
+  $('#candidate-hero-status').textContent = '正在读取本图的模型结果和人工标注…';
   $('#btn-candidate-save').disabled = true;
   renderCandidateHeroLineup();
   const entry = prepareCandidateHeroLineup(item, context);
@@ -1752,6 +1694,7 @@ async function recognizeCandidateHeroes() {
         geometryRevision !== candidateHeroGeometryRevision) return;
     const lineup = completed.lineup;
     if (!lineup || !lineup.applicable || lineup.needs_team_size) return;
+    candidateHeroManualSlots.clear();
     applyCandidateHeroLineup(item, context, lineup, previousDraft);
     const previousPlayerStillExists = previousPlayerSlot && lineup.slots.some(
       (slot) => candidateHeroKey(slot.side, slot.slot) === previousPlayerSlot);
@@ -1814,7 +1757,7 @@ function candidateHeroSlotsPayload(slots = null) {
 }
 
 async function persistCandidateHeroLayout(
-  slots, {recognize = false, saveTemplate = false} = {}) {
+  slots, {recognizeSlots = []} = {}) {
   const item = currentCandidate();
   const context = candidateHeroContext(item);
   if (!item || !context || !context.teamSize || candidateHeroLoading) return false;
@@ -1833,8 +1776,8 @@ async function persistCandidateHeroLayout(
           screen_type: context.screenType,
           team_size: context.teamSize,
           slots: candidateHeroSlotsPayload(slots),
-          recognize: recognize,
-          save_template: saveTemplate,
+          recognize: recognizeSlots.length > 0,
+          recognize_slots: candidateHeroSlotsPayload(recognizeSlots),
           image_width: Number(image && image.naturalWidth || item.width || 0),
           image_height: Number(image && image.naturalHeight || item.height || 0),
         }),
@@ -1867,10 +1810,6 @@ async function persistCandidateHeroLayout(
     if (queuedJobId) {
       refreshCandidateHeroLayoutAfterWorker(
         item, queuedJobId, candidateHeroGeometryRevision);
-    }
-    if (lineup.template_saved) {
-      $('#candidate-save-state').textContent =
-        '英雄圆框已识别，并缓存为该主播的同类画面布局';
     }
     return true;
   } catch (error) {
@@ -1920,6 +1859,9 @@ async function refreshCandidateHeroLayoutAfterWorker(
 async function addCandidateHeroCircle(crop) {
   const next = candidateNextHeroPosition();
   if (!next || !candidateHeroLineup) return;
+  const previousSlots = candidateHeroLineup.slots.map((slot) => ({
+    ...slot, crop: {...slot.crop},
+  }));
   const manuallyAdded = [
     ...candidateHeroLineup.slots,
     {...next, crop},
@@ -1930,18 +1872,20 @@ async function addCandidateHeroCircle(crop) {
     candidateHeroLineup.team_size,
   );
   const complete = slots.length === candidateHeroLineup.team_size * 2;
+  const addedSlots = candidateHeroChangedSlots(previousSlots, slots);
+  clearCandidateHeroRecognition(addedSlots);
   markCandidateHeroGeometryEdited();
   candidateHeroLineup.slots = slots;
   renderCandidateHeroLineup();
   const saved = await persistCandidateHeroLayout(slots, {
-    saveTemplate: complete,
+    recognizeSlots: addedSlots,
   });
   if (saved && complete) {
     candidateHeroDrawMode = false;
     const automaticallyAdded = slots.length - manuallyAdded.length;
     if (automaticallyAdded > 0) {
       $('#candidate-save-state').textContent =
-        `已自动补齐 ${automaticallyAdded} 个英雄圆框；需要识别英雄时请点“AI 识别”`;
+        `已自动补齐 ${automaticallyAdded} 个英雄圆框，正在识别新增头像`;
     }
   }
   renderCandidateHeroLineup();
@@ -1953,7 +1897,7 @@ async function deleteCandidateHeroSlot() {
   const slots = candidateHeroLineup.slots.filter((slot) =>
     candidateHeroKey(slot.side, slot.slot) !== key);
   candidateHeroDraft.delete(key);
-  candidateHeroCachedSlots.delete(key);
+  candidateHeroManualSlots.delete(key);
   if (candidateHeroPlayerSlot === key) {
     candidateHeroPlayerSlot = null;
     candidateHeroPlayerStatus = 'pending';
@@ -1968,7 +1912,7 @@ async function deleteCandidateHeroSlot() {
 async function clearCandidateHeroLayout() {
   if (!candidateHeroLineup || !candidateHeroLineup.slots.length) return;
   candidateHeroDraft = new Map();
-  candidateHeroCachedSlots = new Set();
+  candidateHeroManualSlots = new Set();
   candidateHeroPlayerSlot = null;
   candidateHeroPlayerStatus = 'pending';
   closeCandidateHeroPicker();
@@ -1976,13 +1920,6 @@ async function clearCandidateHeroLayout() {
   const saved = await persistCandidateHeroLayout([]);
   if (saved) candidateHeroDrawMode = true;
   renderCandidateHeroLineup();
-}
-
-async function saveCandidateHeroTemplate() {
-  if (!candidateHeroLayoutComplete()) return;
-  await persistCandidateHeroLayout(candidateHeroLineup.slots, {
-    saveTemplate: true,
-  });
 }
 
 function renderCandidateHeroContextControls() {
@@ -3329,9 +3266,7 @@ async function saveCandidateReview(skip = false) {
     const updated = {...item, ...saved};
     if (!skip) {
       cacheCandidateReviewLabels(candidateDraft);
-      if (heroLabels) {
-        cacheCandidateHeroLineup(item, candidateHeroLineup, candidateHeroDraft);
-      }
+      candidateHeroManualSlots.clear();
     }
     candidateQueue[candidateIndex] = updated;
     if (matchedBeforeSave && !candidateItemMatchesStatus(updated, loadedStatus)) {
@@ -3499,7 +3434,6 @@ function bindCandidateReview() {
     renderCandidateHeroLineup();
     renderCandidateChoices();
   };
-  $('#btn-candidate-hero-save-template').onclick = saveCandidateHeroTemplate;
   $('#btn-candidate-hero-clear').onclick = clearCandidateHeroLayout;
   $('#btn-candidate-player-unreadable').onclick = () => {
     candidateHeroPlayerStatus = 'unreadable';
@@ -7228,13 +7162,13 @@ function trainingInputText(task) {
 }
 
 function trainingDatasetDelta(task) {
+  if (task.stats_refreshing) {
+    return '<div class="training-dataset-delta empty">' +
+      '<span>训练数据变化</span><b>正在更新</b>' +
+      '<small>正在按最新成功模型重新计算基线</small></div>';
+  }
   const delta = task.dataset_delta;
   if (!delta) {
-    if (task.stats_refreshing) {
-      return '<div class="training-dataset-delta empty">' +
-        '<span>训练数据变化</span><b>正在更新</b>' +
-        '<small>后台统计完成后自动刷新</small></div>';
-    }
     return '<div class="training-dataset-delta empty">' +
       '<span>训练数据变化</span><b>尚无成功版本</b>' +
       '<small>首次训练后开始显示新增数据</small></div>';

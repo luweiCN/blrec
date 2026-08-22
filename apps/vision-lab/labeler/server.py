@@ -1993,47 +1993,6 @@ def _remote_training_review_hero_lineup(
             ):
                 return _hero_lineup_payload(existing, item=item)
 
-            source_slots: List[Dict[str, Any]] = []
-            if same_existing and existing and existing.get('slots'):
-                source_slots = [
-                    {
-                        'side': value['side'],
-                        'slot': int(value['slot']),
-                        'crop': dict(value['crop']),
-                    }
-                    for value in existing['slots']
-                ]
-            if not source_slots:
-                width = int(item['width'] or 0)
-                height = int(item['height'] or 0)
-                template = None
-                if width > 0 and height > 0:
-                    template = db.get_training_review_hero_template(
-                        conn,
-                        streamer=str(item['streamer'] or ''),
-                        screen_type=inferred_screen,
-                        team_size=inferred_size,
-                        layout_key=db.hero_layout_key(width, height),
-                    )
-                if template is not None:
-                    source_slots = [
-                        {
-                            'side': value['side'],
-                            'slot': int(value['slot']),
-                            'crop': dict(value['crop']),
-                        }
-                        for value in template['slots']
-                    ]
-                    existing = db.replace_training_review_hero_layout(
-                        conn,
-                        frame_id=frame_id,
-                        screen_type=inferred_screen,
-                        team_size=inferred_size,
-                        method='layout-template+worker-pending-v1',
-                        slots=source_slots,
-                    )
-                    same_existing = True
-
             if not recognize:
                 if same_existing and existing is not None:
                     return _hero_lineup_payload(existing, item=item)
@@ -2047,13 +2006,9 @@ def _remote_training_review_hero_lineup(
                     'slots': [],
                 }
 
-            operation = 'hero_slots' if source_slots else 'hero_lineup'
-            task_ids = (
-                ('hero_identity', 'player_position')
-                if operation == 'hero_slots'
-                else model_prefill.HERO_PREFILL_TASKS
+            models = model_prefill.latest_model_specs(
+                conn, model_prefill.HERO_PREFILL_TASKS
             )
-            models = model_prefill.latest_model_specs(conn, task_ids)
             if not models:
                 if same_existing and existing is not None:
                     return _hero_lineup_payload(existing, item=item)
@@ -2080,11 +2035,10 @@ def _remote_training_review_hero_lineup(
             job = _queue_model_prefill(
                 conn,
                 frame_id=frame_id,
-                operation=operation,
+                operation='hero_lineup',
                 models=models,
                 screen_type=inferred_screen,
                 team_size=inferred_size,
-                slots=source_slots if source_slots else None,
                 force=refresh,
             )
             if same_existing and existing is not None:
@@ -2180,15 +2134,10 @@ def api_training_review_hero_lineup(
         same_screen = existing['screen_type'] == inferred_screen
         same_size = inferred_size is None or int(existing['team_size']) == inferred_size
         same_context_existing = same_screen and same_size
-        refreshes_automatic_layout = (
-            inferred_size is not None
-            and existing['review_status'] == 'pending'
-            and str(existing['suggestion_method']).startswith('layout-template+')
-        )
         if same_context_existing:
             if existing['review_status'] == 'confirmed' or not recognize:
                 return _hero_lineup_payload(existing, item=item)
-            if not refresh and not refreshes_automatic_layout:
+            if not refresh:
                 return _hero_lineup_payload(existing, item=item)
     if inferred_size is None:
         return {
@@ -2236,106 +2185,17 @@ def api_training_review_hero_lineup(
                 finally:
                     conn.close()
             return _hero_lineup_payload(lineup, item=item)
-    with _db_lock:
-        conn = _conn()
-        try:
-            template = db.get_training_review_hero_template(
-                conn,
-                streamer=str(item['streamer'] or ''),
-                screen_type=inferred_screen,
-                team_size=inferred_size,
-                layout_key=db.hero_layout_key(int(item['width']), int(item['height'])),
-            )
-        finally:
-            conn.close()
-    if template is None:
-        if same_context_existing and existing is not None:
-            return _hero_lineup_payload(existing, item=item)
-        return {
-            'applicable': True,
-            'screen_type': inferred_screen,
-            'team_size': inferred_size,
-            'review_status': 'pending',
-            'suggestion_method': 'manual-circle-v1',
-            'template_found': False,
-            'slots': [],
-        }
-    if (
-        same_context_existing
-        and existing is not None
-        and not refresh
-        and str(template['updated_at']) <= str(existing['updated_at'])
-    ):
+    if same_context_existing and existing is not None:
         return _hero_lineup_payload(existing, item=item)
-    if not recognize:
-        with _db_lock:
-            conn = _conn()
-            try:
-                lineup = db.replace_training_review_hero_layout(
-                    conn,
-                    frame_id=frame_id,
-                    screen_type=inferred_screen,
-                    team_size=inferred_size,
-                    method='layout-template+manual-v1',
-                    slots=template['slots'],
-                )
-            except KeyError as exc:
-                raise HTTPException(404, str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
-            finally:
-                conn.close()
-        lineup['template_found'] = True
-        return _hero_lineup_payload(lineup, item=item)
-    try:
-        with _db_lock:
-            conn = _conn()
-            try:
-                model_result = model_prefill.prefill_hero_slots(
-                    conn,
-                    Path(str(item['frame_path'])),
-                    template['slots'],
-                    screen_type=inferred_screen,
-                    team_size=inferred_size,
-                )
-            finally:
-                conn.close()
-    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise HTTPException(422, f'英雄预填失败：{exc}') from exc
-    slots = model_result['slots']
-    with _db_lock:
-        conn = _conn()
-        try:
-            lineup = db.replace_training_review_hero_layout(
-                conn,
-                frame_id=frame_id,
-                screen_type=inferred_screen,
-                team_size=inferred_size,
-                method=(
-                    'layout-template+hero-identity-v1'
-                    if model_result.get('complete')
-                    else 'layout-template+manual-v1'
-                ),
-                slots=slots,
-            )
-            if model_result.get('complete'):
-                _save_new_model_hero_prefill_source(
-                    conn,
-                    frame_id=frame_id,
-                    item=item,
-                    screen_type=inferred_screen,
-                    team_size=inferred_size,
-                    result=model_result,
-                )
-                item = _single_training_review_item(conn, frame_id) or item
-        except KeyError as exc:
-            raise HTTPException(404, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        finally:
-            conn.close()
-    lineup['template_found'] = True
-    return _hero_lineup_payload(lineup, item=item)
+    return {
+        'applicable': True,
+        'screen_type': inferred_screen,
+        'team_size': inferred_size,
+        'review_status': 'pending',
+        'suggestion_method': 'manual-circle-v1',
+        'template_found': False,
+        'slots': [],
+    }
 
 
 def _same_hero_crop(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
@@ -2343,6 +2203,45 @@ def _same_hero_crop(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
         abs(float(left[name]) - float(right[name])) < 0.000001
         for name in ('x', 'y', 'w', 'h')
     )
+
+
+def _hero_slot_key(value: Dict[str, Any]) -> tuple[str, int]:
+    return str(value.get('side') or ''), int(value.get('slot') or 0)
+
+
+def _merge_hero_slot_predictions(
+    slots: List[Dict[str, Any]], predictions: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    predicted_by_key = {_hero_slot_key(value): value for value in predictions}
+    merged = []
+    for slot in slots:
+        value = dict(slot)
+        prediction = predicted_by_key.get(_hero_slot_key(slot))
+        if prediction is not None:
+            value['suggested_label'] = str(prediction.get('suggested_label') or '')
+            value['suggestion_confidence'] = float(
+                prediction.get('suggestion_confidence') or 0
+            )
+        merged.append(value)
+    return merged
+
+
+def _requested_hero_slots(
+    values: List[Any], slots_by_key: Dict[tuple[str, int], Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    result = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        try:
+            slot = slots_by_key.get(_hero_slot_key(value))
+            if slot is not None and _same_hero_crop(
+                dict(value.get('crop') or {}), dict(slot.get('crop') or {})
+            ):
+                result.append(slot)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return result
 
 
 @app.put('/api/training-review/items/{frame_id}/hero-layout')
@@ -2358,7 +2257,9 @@ def api_save_training_review_hero_layout(
     if not isinstance(raw_slots, list):
         raise HTTPException(400, '英雄头像框必须是列表')
     recognize = bool(body.get('recognize'))
-    save_template = bool(body.get('save_template'))
+    raw_recognize_slots = body.get('recognize_slots')
+    if raw_recognize_slots is not None and not isinstance(raw_recognize_slots, list):
+        raise HTTPException(400, '待识别的英雄头像框必须是列表')
     try:
         image_width = int(body.get('image_width') or 0)
         image_height = int(body.get('image_height') or 0)
@@ -2386,7 +2287,6 @@ def api_save_training_review_hero_layout(
             conn.close()
     if item is None:
         raise HTTPException(404, '训练复核图片不存在')
-    template_streamer = str(item['streamer'] or '').strip()
     slots = [
         {
             'side': value.get('side'),
@@ -2396,34 +2296,43 @@ def api_save_training_review_hero_layout(
         for value in raw_slots
         if isinstance(value, dict)
     ]
+    slots_by_key = {_hero_slot_key(value): value for value in slots}
+    requested_slots = (
+        slots
+        if raw_recognize_slots is None
+        else _requested_hero_slots(raw_recognize_slots, slots_by_key)
+    )
     model_result: Optional[Dict[str, Any]] = None
     queued_job: Optional[Dict[str, Any]] = None
-    template_saved = False
     try:
-        if recognize and not config.CONTROL_PLANE_ONLY:
+        if recognize and requested_slots and not config.CONTROL_PLANE_ONLY:
             with _db_lock:
                 conn = _conn()
                 try:
                     model_result = model_prefill.prefill_hero_slots(
                         conn,
                         Path(str(item['frame_path'])),
-                        slots,
+                        requested_slots,
                         screen_type=screen_type,
                         team_size=team_size,
                     )
                 finally:
                     conn.close()
-            slots = model_result['slots']
-        else:
-            existing_slots = {
-                (slot['side'], int(slot['slot'])): slot
-                for slot in (existing or {}).get('slots', [])
-            }
-            for slot in slots:
-                previous = existing_slots.get((str(slot['side']), int(slot['slot'])))
-                if previous and _same_hero_crop(previous['crop'], slot['crop'] or {}):
-                    slot['suggested_label'] = previous['suggested_label']
-                    slot['suggestion_confidence'] = previous['suggestion_confidence']
+            slots = _merge_hero_slot_predictions(slots, model_result['slots'])
+        existing_slots = {
+            (slot['side'], int(slot['slot'])): slot
+            for slot in (existing or {}).get('slots', [])
+        }
+        predicted_keys = {
+            _hero_slot_key(value) for value in (model_result or {}).get('slots', [])
+        }
+        for slot in slots:
+            if _hero_slot_key(slot) in predicted_keys:
+                continue
+            previous = existing_slots.get((str(slot['side']), int(slot['slot'])))
+            if previous and _same_hero_crop(previous['crop'], slot['crop'] or {}):
+                slot['suggested_label'] = previous['suggested_label']
+                slot['suggestion_confidence'] = previous['suggestion_confidence']
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HTTPException(422, f'英雄头像识别失败：{exc}') from exc
     with _db_lock:
@@ -2457,24 +2366,7 @@ def api_save_training_review_hero_layout(
                         result=model_result,
                     )
                     item = _single_training_review_item(conn, frame_id) or item
-                if (
-                    save_template
-                    and template_streamer
-                    and int(item['width'] or 0) > 0
-                    and int(item['height'] or 0) > 0
-                ):
-                    db.save_training_review_hero_template(
-                        conn,
-                        streamer=template_streamer,
-                        screen_type=screen_type,
-                        team_size=team_size,
-                        layout_key=db.hero_layout_key(
-                            int(item['width']), int(item['height'])
-                        ),
-                        slots=slots,
-                    )
-                    template_saved = True
-                if recognize and config.CONTROL_PLANE_ONLY and slots:
+                if recognize and config.CONTROL_PLANE_ONLY and requested_slots:
                     models = model_prefill.latest_model_specs(
                         conn, ('hero_identity', 'player_position')
                     )
@@ -2492,7 +2384,7 @@ def api_save_training_review_hero_layout(
                                     'slot': int(value['slot']),
                                     'crop': dict(value['crop']),
                                 }
-                                for value in slots
+                                for value in requested_slots
                             ],
                         )
             except KeyError as exc:
@@ -2501,7 +2393,6 @@ def api_save_training_review_hero_layout(
                 raise HTTPException(400, str(exc)) from exc
         finally:
             conn.close()
-    lineup['template_saved'] = template_saved
     payload = _hero_lineup_payload(lineup, item=item)
     if queued_job is not None:
         payload['prefill_job'] = queued_job
@@ -4343,30 +4234,6 @@ def _apply_remote_model_prefill(
     screen_type = str(payload.get('screen_type') or result.get('screen_type') or '')
     team_size = int(payload.get('team_size') or result.get('team_size') or 0)
     result_slots = result.get('slots') if isinstance(result.get('slots'), list) else []
-    if not result.get('complete') or len(result_slots) != team_size * 2:
-        lineup = db.replace_training_review_hero_layout(
-            conn,
-            frame_id=frame_id,
-            screen_type=screen_type,
-            team_size=team_size,
-            method='new-model-incomplete-worker-v1',
-            slots=result_slots,
-        )
-        _save_new_model_hero_prefill_source(
-            conn,
-            frame_id=frame_id,
-            item=item,
-            screen_type=screen_type,
-            team_size=team_size,
-            result=result,
-        )
-        return {
-            'applied': True,
-            'frame_id': frame_id,
-            'complete': False,
-            'reason': str(result.get('reason') or '模型没有找全头像'),
-            'lineup': lineup,
-        }
     if operation == 'hero_slots':
         expected_slots = (
             payload.get('slots') if isinstance(payload.get('slots'), list) else []
@@ -4375,7 +4242,9 @@ def _apply_remote_model_prefill(
             (str(value['side']), int(value['slot'])): value
             for value in (existing or {}).get('slots', [])
         }
-        unchanged = len(expected_slots) == len(existing_by_key) and all(
+        expected_keys = {_hero_slot_key(value) for value in expected_slots}
+        result_keys = {_hero_slot_key(value) for value in result_slots}
+        unchanged = bool(expected_slots) and all(
             (key := (str(value.get('side')), int(value.get('slot') or 0)))
             in existing_by_key
             and _same_hero_crop(
@@ -4383,21 +4252,58 @@ def _apply_remote_model_prefill(
             )
             for value in expected_slots
         )
+        if (
+            not result.get('complete')
+            or len(result_slots) != len(expected_slots)
+            or result_keys != expected_keys
+        ):
+            return {
+                'applied': False,
+                'frame_id': frame_id,
+                'reason': str(result.get('reason') or '部分头像识别结果不完整'),
+            }
         if not unchanged:
             return {
                 'applied': False,
                 'frame_id': frame_id,
                 'reason': '等待期间头像框已被人工修改',
             }
+        merged_slots = _merge_hero_slot_predictions(
+            list((existing or {}).get('slots', [])), result_slots
+        )
         lineup = db.replace_training_review_hero_layout(
             conn,
             frame_id=frame_id,
             screen_type=screen_type,
             team_size=team_size,
             method='manual-circle+hero-identity-worker-v1',
-            slots=result_slots,
+            slots=merged_slots,
         )
     elif operation == 'hero_lineup':
+        if not result.get('complete') or len(result_slots) != team_size * 2:
+            lineup = db.replace_training_review_hero_layout(
+                conn,
+                frame_id=frame_id,
+                screen_type=screen_type,
+                team_size=team_size,
+                method='new-model-incomplete-worker-v1',
+                slots=result_slots,
+            )
+            _save_new_model_hero_prefill_source(
+                conn,
+                frame_id=frame_id,
+                item=item,
+                screen_type=screen_type,
+                team_size=team_size,
+                result=result,
+            )
+            return {
+                'applied': True,
+                'frame_id': frame_id,
+                'complete': False,
+                'reason': str(result.get('reason') or '模型没有找全头像'),
+                'lineup': lineup,
+            }
         if (
             existing is not None
             and existing.get('slots')
