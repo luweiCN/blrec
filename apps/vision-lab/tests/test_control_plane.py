@@ -1006,6 +1006,32 @@ def test_candidate_ui_supports_rare_modes_and_video_scoped_context_cache() -> No
     assert 'candidate-view-context-filter' in page
 
 
+def test_candidate_match_context_and_hero_layout_do_not_overwrite_each_other() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    defaults = script[
+        script.index('function applyCandidateMatchContextDefaults(') : script.index(
+            'function candidateResultHeroCountMode('
+        )
+    ]
+    select_context = script[
+        script.index('function selectCandidateMatchContext(') : script.index(
+            'function appendCandidateMatchContext('
+        )
+    ]
+
+    assert "if (!CANDIDATE_MATCH_KINDS[draft.match_kind_label])" in defaults
+    assert "if (!CANDIDATE_VIEW_CONTEXTS[draft.view_context_label])" in defaults
+    practice = select_context[
+        select_context.index("value === 'practice'") : select_context.index(
+            "if (field === 'view_context_label'"
+        )
+    ]
+    assert "hero_layout_label = 'none'" not in practice
+    assert 'resetCandidateHeroReview()' not in practice
+
+
 def test_review_save_bundles_dirty_hero_lineup_into_one_transaction(
     monkeypatch,
 ) -> None:

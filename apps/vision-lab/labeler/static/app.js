@@ -443,10 +443,14 @@ function applyCandidateMatchContextDefaults(draft, item) {
     return;
   }
   const cached = candidateCachedMatchContext(item) || {};
-  draft.match_kind_label = item.match_kind_label ||
-    cached.match_kind_label || 'pvp';
-  draft.view_context_label = item.view_context_label ||
-    cached.view_context_label || 'played';
+  if (!CANDIDATE_MATCH_KINDS[draft.match_kind_label]) {
+    draft.match_kind_label = item.match_kind_label ||
+      cached.match_kind_label || 'pvp';
+  }
+  if (!CANDIDATE_VIEW_CONTEXTS[draft.view_context_label]) {
+    draft.view_context_label = item.view_context_label ||
+      cached.view_context_label || 'played';
+  }
 }
 
 function candidateResultHeroCountMode(item) {
@@ -2260,10 +2264,8 @@ function selectCandidateMatchContext(field, value) {
     candidateDraft.match_flow_label = 'match_flow';
     candidateDraft.match_mode_label = '5v5';
     candidateDraft.hero_select_label = 'not_select';
-    candidateDraft.hero_layout_label = 'none';
     candidateHeroTeamSizeExplicit = false;
     candidateHeroTeamSizeOverride = null;
-    resetCandidateHeroReview();
   }
   if (field === 'view_context_label' && value !== 'played') {
     candidateHeroPlayerStatus = 'pending';
