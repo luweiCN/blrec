@@ -680,7 +680,7 @@ def test_training_tasks_reuse_persisted_summary(monkeypatch) -> None:
     load.assert_called_once_with(connection, server._TRAINING_TASKS_STATE_KEY)
 
 
-def test_training_ui_hides_stale_model_baseline_while_stats_refresh() -> None:
+def test_training_ui_hides_only_stale_model_baseline_while_stats_refresh() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
     ).read_text(encoding='utf-8')
@@ -690,9 +690,10 @@ def test_training_ui_hides_stale_model_baseline_while_stats_refresh() -> None:
         )
     ]
 
-    assert renderer.index('if (task.stats_refreshing)') < renderer.index(
-        'const delta = task.dataset_delta;'
-    )
+    assert 'task.latest_successful_run_id' in renderer
+    assert 'delta.run_id' in renderer
+    assert 'task.stats_refreshing && (!delta || baselineStale)' in renderer
+    assert "details.push('新标注统计中')" in renderer
     assert '正在按最新成功模型重新计算基线' in renderer
 
 

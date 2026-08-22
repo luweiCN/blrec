@@ -7162,12 +7162,15 @@ function trainingInputText(task) {
 }
 
 function trainingDatasetDelta(task) {
-  if (task.stats_refreshing) {
+  const delta = task.dataset_delta;
+  const latestRunId = String(task.latest_successful_run_id || '');
+  const baselineStale = Boolean(
+    delta && latestRunId && String(delta.run_id || '') !== latestRunId);
+  if (task.stats_refreshing && (!delta || baselineStale)) {
     return '<div class="training-dataset-delta empty">' +
       '<span>训练数据变化</span><b>正在更新</b>' +
       '<small>正在按最新成功模型重新计算基线</small></div>';
   }
-  const delta = task.dataset_delta;
   if (!delta) {
     return '<div class="training-dataset-delta empty">' +
       '<span>训练数据变化</span><b>尚无成功版本</b>' +
@@ -7183,6 +7186,7 @@ function trainingDatasetDelta(task) {
   ];
   if (corrections) details.push(`改标 ${trainingNumber(corrections)}`);
   if (removed) details.push(`移除 ${trainingNumber(removed)}`);
+  if (task.stats_refreshing) details.push('新标注统计中');
   const byLabel = Object.entries(delta.new_by_label || {})
     .map(([label, count]) =>
       `${modelLabel(task.id, label)} ${trainingNumber(count)}`)
@@ -7434,6 +7438,15 @@ async function loadTrainingDashboard() {
       api('/api/training/runs'),
       api('/api/vision-workers'),
     ]);
+    const latestSuccessfulRuns = new Map();
+    (runs.runs || []).forEach((run) => {
+      if (run.status === 'succeeded' && !latestSuccessfulRuns.has(run.task_id)) {
+        latestSuccessfulRuns.set(run.task_id, run.id);
+      }
+    });
+    tasks.forEach((task) => {
+      task.latest_successful_run_id = latestSuccessfulRuns.get(task.id) || '';
+    });
     renderTrainingOverview(tasks, runs);
     renderVisionWorkers(workers);
     renderTrainingTasks(tasks);
