@@ -975,6 +975,8 @@ def test_review_save_returns_lightweight_ack(monkeypatch) -> None:
         {
             'match_flow_label': 'not_match_flow',
             'match_mode_label': None,
+            'match_kind_label': None,
+            'view_context_label': None,
             'hero_select_label': 'not_select',
             'result_panel_label': 'no_result_panel',
             'hero_layout_label': 'none',
@@ -984,7 +986,24 @@ def test_review_save_returns_lightweight_ack(monkeypatch) -> None:
 
     assert result == {'frame_id': 7, 'review_status': 'confirmed'}
     assert save.call_args.kwargs['hydrate'] is False
+    assert save.call_args.kwargs['match_kind_label'] is None
+    assert save.call_args.kwargs['view_context_label'] is None
     mark_saved.assert_called_once_with(7)
+
+
+def test_candidate_ui_supports_rare_modes_and_video_scoped_context_cache() -> None:
+    root = Path(__file__).resolve().parent.parent / 'labeler/static'
+    script = (root / 'app.js').read_text(encoding='utf-8')
+    page = (root / 'index.html').read_text(encoding='utf-8')
+
+    assert "blitz: '闪电战'" in script or "'blitz': '闪电战'" in script
+    assert 'CANDIDATE_MATCH_KINDS' in script
+    assert 'CANDIDATE_VIEW_CONTEXTS' in script
+    assert 'candidateMatchContextCache' in script
+    assert 'CANDIDATE_CONTEXT_CACHE_MAX_GAP_MS' in script
+    assert 'item.video_id' in script
+    assert 'candidate-match-kind-filter' in page
+    assert 'candidate-view-context-filter' in page
 
 
 def test_review_save_bundles_dirty_hero_lineup_into_one_transaction(

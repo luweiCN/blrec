@@ -355,11 +355,17 @@ CREATE TABLE IF NOT EXISTS training_review_items (
             'match_flow', 'not_match_flow', 'unreadable')),
     match_mode_label TEXT CHECK (
         match_mode_label IS NULL OR match_mode_label IN (
-            '3v3', 'aram', '5v5', 'unreadable')),
+            '3v3', 'aram', '5v5', 'blitz', 'unreadable')),
+    match_kind_label TEXT CHECK (
+        match_kind_label IS NULL OR match_kind_label IN (
+            'pvp', 'bot', 'practice', 'unreadable')),
+    view_context_label TEXT CHECK (
+        view_context_label IS NULL OR view_context_label IN (
+            'played', 'spectated', 'replay', 'unreadable')),
     hero_select_label TEXT CHECK (
         hero_select_label IS NULL OR hero_select_label IN (
             'not_select', 'select_3v3', 'select_aram', 'select_5v5',
-            'unreadable')),
+            'select_blitz', 'unreadable')),
     hero_select_variant TEXT CHECK (
         hero_select_variant IS NULL OR hero_select_variant IN (
             'bp', 'blind', 'random', 'unreadable')),
@@ -389,6 +395,9 @@ CREATE TABLE IF NOT EXISTS training_review_items (
 );
 CREATE INDEX IF NOT EXISTS idx_training_review_status
     ON training_review_items (review_status, updated_at DESC, frame_id);
+CREATE INDEX IF NOT EXISTS idx_training_review_context
+    ON training_review_items (
+        match_kind_label, view_context_label, review_status, frame_id);
 
 -- 同一张图片可同时来自旧人工标注、Worker 多个模型和历史结算图。来源与预标
 -- 一对多保存，图片和人工标签都只保留一份。
@@ -458,7 +467,7 @@ CREATE TABLE IF NOT EXISTS training_review_material_index (
         scene IN ('gameplay_hud', 'scoreboard', 'result_page',
                   'hero_select', 'other')),
     match_mode TEXT NOT NULL DEFAULT '' CHECK (
-        match_mode IN ('', '3v3', 'aram', '5v5')),
+        match_mode IN ('', '3v3', 'aram', '5v5', 'blitz')),
     is_new INTEGER NOT NULL DEFAULT 0 CHECK (is_new IN (0, 1)),
     is_legacy INTEGER NOT NULL DEFAULT 0 CHECK (is_legacy IN (0, 1)),
     has_worker INTEGER NOT NULL DEFAULT 0 CHECK (has_worker IN (0, 1)),
@@ -531,7 +540,7 @@ CREATE TABLE IF NOT EXISTS training_review_match_contexts (
     started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
     result_at_ms INTEGER NOT NULL CHECK (result_at_ms >= started_at_ms),
     game_mode TEXT NOT NULL DEFAULT '' CHECK (
-        game_mode IN ('', '3v3', 'aram', '5v5')),
+        game_mode IN ('', '3v3', 'aram', '5v5', 'blitz')),
     source_type TEXT NOT NULL CHECK (
         source_type IN ('result_archive', 'manual_correction')),
     updated_at TEXT NOT NULL
@@ -771,6 +780,7 @@ def connect_sqlite(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     _prepare_training_review_match_columns(conn)
     _prepare_training_review_prefill_columns(conn)
+    _migrate_training_review_context_labels(conn)
     conn.executescript(_SCHEMA)
     conn.executemany(
         'INSERT OR IGNORE INTO annotation_tasks (id, name, description) '
@@ -926,6 +936,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             'hero_select_visibility IS NULL OR '
             "hero_select_visibility IN ('clear', 'occluded', 'unknown'))"
         )
+    _migrate_training_review_context_labels(conn)
     conn.execute(
         "UPDATE training_review_items SET hero_select_variant = 'random' "
         "WHERE hero_select_label = 'select_aram' "
@@ -961,6 +972,139 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _prepare_training_review_match_columns(conn)
     _prepare_training_review_prefill_columns(conn)
     repair_managed_paths(conn)
+
+
+def _migrate_training_review_context_labels(conn: sqlite3.Connection) -> None:
+    """扩展统一复核真值枚举，并原样保留旧人工标签。"""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        ('training_review_items',),
+    ).fetchone()
+    if row is None:
+        return
+    table_sql = str(row['sql'] or '')
+    columns = {
+        str(value['name'])
+        for value in conn.execute('PRAGMA table_info(training_review_items)')
+    }
+    if (
+        'match_kind_label' in columns
+        and 'view_context_label' in columns
+        and "'blitz'" in table_sql
+        and "'select_blitz'" in table_sql
+    ):
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_training_review_context '
+            'ON training_review_items ('
+            'match_kind_label, view_context_label, review_status, frame_id)'
+        )
+        return
+
+    target_columns = (
+        'frame_id',
+        'match_flow_label',
+        'match_mode_label',
+        'match_kind_label',
+        'view_context_label',
+        'hero_select_label',
+        'hero_select_variant',
+        'hero_select_visibility',
+        'result_panel_label',
+        'hero_layout_label',
+        'panel_render_state',
+        'ocr_usable',
+        'result_occlusion',
+        'occluder_types',
+        'review_status',
+        'notes',
+        'created_at',
+        'updated_at',
+        'reviewed_at',
+    )
+    conn.execute('DROP TABLE IF EXISTS training_review_items_new')
+    conn.execute(
+        """
+        CREATE TABLE training_review_items_new (
+            frame_id INTEGER PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE,
+            match_flow_label TEXT CHECK (
+                match_flow_label IS NULL OR match_flow_label IN (
+                    'match_flow', 'not_match_flow', 'unreadable')),
+            match_mode_label TEXT CHECK (
+                match_mode_label IS NULL OR match_mode_label IN (
+                    '3v3', 'aram', '5v5', 'blitz', 'unreadable')),
+            match_kind_label TEXT CHECK (
+                match_kind_label IS NULL OR match_kind_label IN (
+                    'pvp', 'bot', 'practice', 'unreadable')),
+            view_context_label TEXT CHECK (
+                view_context_label IS NULL OR view_context_label IN (
+                    'played', 'spectated', 'replay', 'unreadable')),
+            hero_select_label TEXT CHECK (
+                hero_select_label IS NULL OR hero_select_label IN (
+                    'not_select', 'select_3v3', 'select_aram', 'select_5v5',
+                    'select_blitz', 'unreadable')),
+            hero_select_variant TEXT CHECK (
+                hero_select_variant IS NULL OR hero_select_variant IN (
+                    'bp', 'blind', 'random', 'unreadable')),
+            hero_select_visibility TEXT CHECK (
+                hero_select_visibility IS NULL OR hero_select_visibility IN (
+                    'clear', 'occluded', 'unknown')),
+            result_panel_label TEXT CHECK (
+                result_panel_label IS NULL OR result_panel_label IN (
+                    'result_panel', 'no_result_panel', 'unreadable')),
+            hero_layout_label TEXT CHECK (
+                hero_layout_label IS NULL OR hero_layout_label IN (
+                    'gameplay_hud', 'scoreboard', 'result_page', 'none',
+                    'unreadable')),
+            panel_render_state TEXT NOT NULL DEFAULT 'clear' CHECK (
+                panel_render_state IN ('clear', 'translucent', 'unknown')),
+            ocr_usable TEXT NOT NULL DEFAULT 'yes' CHECK (
+                ocr_usable IN ('yes', 'no', 'unknown')),
+            result_occlusion TEXT NOT NULL DEFAULT 'none' CHECK (
+                result_occlusion IN ('none', 'occluded', 'unknown')),
+            occluder_types TEXT NOT NULL DEFAULT '[]',
+            review_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                review_status IN ('pending', 'partial', 'confirmed', 'skipped')),
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            reviewed_at TEXT
+        )
+        """
+    )
+    missing_defaults = {
+        'panel_render_state': "'clear'",
+        'ocr_usable': "'yes'",
+        'result_occlusion': "'none'",
+        'occluder_types': "'[]'",
+        'review_status': "'pending'",
+        'notes': "''",
+        'created_at': "datetime('now')",
+        'updated_at': "datetime('now')",
+    }
+    select_columns = [
+        column if column in columns else missing_defaults.get(column, 'NULL')
+        for column in target_columns
+    ]
+    conn.execute(
+        'INSERT INTO training_review_items_new ('
+        + ','.join(target_columns)
+        + ') SELECT '
+        + ','.join(select_columns)
+        + ' FROM training_review_items'
+    )
+    conn.execute('DROP TABLE training_review_items')
+    conn.execute(
+        'ALTER TABLE training_review_items_new RENAME TO training_review_items'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_training_review_status '
+        'ON training_review_items (review_status, updated_at DESC, frame_id)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_training_review_context '
+        'ON training_review_items ('
+        'match_kind_label, view_context_label, review_status, frame_id)'
+    )
 
 
 def _prepare_training_review_match_columns(conn: sqlite3.Connection) -> None:
@@ -2755,7 +2899,7 @@ def bp_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         WHERE a.annotation_status = 'complete'
           AND a.screen_type IN ('hero_select_bp', 'hero_select_blind',
                                 'hero_select_aram')
-          AND a.game_mode IN ('3v3', 'aram', '5v5')
+          AND a.game_mode IN ('3v3', 'aram', '5v5', 'blitz')
         GROUP BY a.game_mode
         """
     ).fetchall()
@@ -3285,18 +3429,24 @@ def worker_candidate_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 _TRAINING_REVIEW_LABELS = {
     'match_flow': {'match_flow', 'not_match_flow', 'unreadable'},
-    'match_mode': {'3v3', 'aram', '5v5', 'unreadable'},
+    'match_mode': {'3v3', 'aram', '5v5', 'blitz', 'unreadable'},
+    'match_kind': {'pvp', 'bot', 'practice', 'unreadable'},
+    'view_context': {'played', 'spectated', 'replay', 'unreadable'},
     'hero_select': {
         'not_select',
         'select_3v3',
         'select_aram',
         'select_5v5',
+        'select_blitz',
         'unreadable',
     },
     'result_panel': {'result_panel', 'no_result_panel', 'unreadable'},
 }
 _TRAINING_REVIEW_STATUSES = {'pending', 'partial', 'confirmed', 'skipped'}
 _TRAINING_REVIEW_SOURCE_SCOPES = {'all', 'new', 'legacy'}
+_TRAINING_REVIEW_MODE_FILTERS = {'3v3', 'aram', '5v5', 'blitz', 'unreadable'}
+_TRAINING_REVIEW_KIND_FILTERS = {'pvp', 'bot', 'practice', 'unreadable'}
+_TRAINING_REVIEW_VIEW_FILTERS = {'played', 'spectated', 'replay', 'unreadable'}
 _HERO_SCREEN_TYPES = {'gameplay_hud', 'scoreboard', 'result_page'}
 _HERO_LAYOUT_LABELS = _HERO_SCREEN_TYPES | {'none', 'unreadable'}
 _HERO_SELECT_VARIANTS = {'bp', 'blind', 'random', 'unreadable'}
@@ -3310,6 +3460,7 @@ _MATERIAL_SUGGESTION_MODES = (('3v3', '3V3'), ('aram', '大乱斗'), ('5v5', '5V
 _MATERIAL_HERO_SCENE_TARGET = 20
 _MISSING_PLAYER_HERO_REVIEW = """
 item.review_status = 'confirmed'
+AND COALESCE(item.view_context_label, 'played') = 'played'
 AND (
     (
         item.result_panel_label = 'result_panel'
@@ -4154,7 +4305,12 @@ def _training_review_material_scene(
 
 
 def _training_review_mode_from_select(value: Any) -> Optional[str]:
-    labels = {'select_3v3': '3v3', 'select_aram': 'aram', 'select_5v5': '5v5'}
+    labels = {
+        'select_3v3': '3v3',
+        'select_aram': 'aram',
+        'select_5v5': '5v5',
+        'select_blitz': 'blitz',
+    }
     return labels.get(str(value or ''))
 
 
@@ -4162,7 +4318,7 @@ def _training_review_material_mode(
     row: sqlite3.Row, signal: Dict[str, Any]
 ) -> Optional[str]:
     match_mode = str(row['match_mode_label'] or '')
-    if match_mode in {'3v3', 'aram', '5v5'}:
+    if match_mode in {'3v3', 'aram', '5v5', 'blitz'}:
         return match_mode
     select_mode = _training_review_mode_from_select(row['hero_select_label'])
     if select_mode is not None:
@@ -4175,7 +4331,7 @@ def _training_review_material_mode(
 
     suggestions = signal.get('suggestions') or {}
     mode_suggestion = str((suggestions.get('match_mode') or {}).get('label') or '')
-    if mode_suggestion in {'3v3', 'aram', '5v5'}:
+    if mode_suggestion in {'3v3', 'aram', '5v5', 'blitz'}:
         return mode_suggestion
     select_mode = _training_review_mode_from_select(
         (suggestions.get('hero_select') or {}).get('label')
@@ -4188,14 +4344,14 @@ def _training_review_material_mode(
             metadata.get('mode_class'),
             metadata.get('model_mode_class'),
         ):
-            if str(value or '') in {'3v3', 'aram', '5v5'}:
+            if str(value or '') in {'3v3', 'aram', '5v5', 'blitz'}:
                 return str(value)
         correction = metadata.get('manual_correction')
         if isinstance(correction, dict):
             after = correction.get('after')
             if isinstance(after, dict):
                 value = str(after.get('game_mode') or '')
-                if value in {'3v3', 'aram', '5v5'}:
+                if value in {'3v3', 'aram', '5v5', 'blitz'}:
                     return value
     return None
 
@@ -4273,7 +4429,7 @@ def _training_review_material_source_facts(
         ):
             mode = str(metadata.get('game_mode') or '')
             after = correction.get('after')
-            if mode not in {'3v3', 'aram', '5v5'} and isinstance(after, dict):
+            if mode not in {'3v3', 'aram', '5v5', 'blitz'} and isinstance(after, dict):
                 mode = str(after.get('game_mode') or '')
             match_contexts[match_id] = {
                 'match_id': match_id,
@@ -4281,7 +4437,7 @@ def _training_review_material_source_facts(
                 'part_id': context_part_id,
                 'started_at_ms': started_at_ms,
                 'result_at_ms': result_at_ms,
-                'game_mode': mode if mode in {'3v3', 'aram', '5v5'} else '',
+                'game_mode': (mode if mode in {'3v3', 'aram', '5v5', 'blitz'} else ''),
                 'source_type': context_source,
             }
         signal_metadata = dict(metadata)
@@ -4391,12 +4547,20 @@ def _upsert_training_review_match_context(
     conn: sqlite3.Connection, context: Mapping[str, Any]
 ) -> bool:
     match_id = int(context['match_id'])
+    game_mode = str(context['game_mode'])
+    if game_mode == 'blitz' and getattr(conn, 'dialect', 'sqlite') == 'sqlite':
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            ('training_review_match_contexts',),
+        ).fetchone()
+        if schema is not None and "'blitz'" not in str(schema['sql'] or ''):
+            game_mode = ''
     values = (
         int(context['session_id']),
         int(context['part_id']),
         int(context['started_at_ms']),
         int(context['result_at_ms']),
-        str(context['game_mode']),
+        game_mode,
         str(context['source_type']),
     )
     current = conn.execute(
@@ -4744,6 +4908,13 @@ def refresh_training_review_material_index(
     categories = source_facts['categories']
     scene = _training_review_material_scene(item, signal) or 'other'
     match_mode = _training_review_material_mode(item, signal) or ''
+    if match_mode == 'blitz' and getattr(conn, 'dialect', 'sqlite') == 'sqlite':
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            ('training_review_material_index',),
+        ).fetchone()
+        if schema is not None and "'blitz'" not in str(schema['sql'] or ''):
+            match_mode = ''
     session_id = int(source_facts['session_id'])
     part_id = int(source_facts['part_id'])
     at_ms = int(source_facts['at_ms'] or item['frame_timestamp_ms'] or 0)
@@ -5339,11 +5510,12 @@ def training_review_material_suggestions(
                     ELSE ''
                 END AS scene,
                 CASE
-                    WHEN item.match_mode_label IN ('3v3','aram','5v5')
+                    WHEN item.match_mode_label IN ('3v3','aram','5v5','blitz')
                     THEN item.match_mode_label
                     WHEN item.hero_select_label='select_3v3' THEN '3v3'
                     WHEN item.hero_select_label='select_aram' THEN 'aram'
                     WHEN item.hero_select_label='select_5v5' THEN '5v5'
+                    WHEN item.hero_select_label='select_blitz' THEN 'blitz'
                     ELSE ''
                 END AS match_mode,
                 CASE
@@ -5365,7 +5537,7 @@ def training_review_material_suggestions(
             WHERE item.review_status='confirmed'
         ) truth
         WHERE scene IN ('gameplay_hud','scoreboard','result_page','hero_select')
-          AND match_mode IN ('3v3','aram','5v5')
+          AND match_mode IN ('3v3','aram','5v5','blitz')
         GROUP BY scene,match_mode,source_scope
         """
     ).fetchall()
@@ -6546,6 +6718,8 @@ def _training_review_indexed_attribute_frame_ids(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
+    match_kind: str = '',
+    view_context: str = '',
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
@@ -6564,10 +6738,27 @@ def _training_review_indexed_attribute_frame_ids(
         )
         parameters.append(source_type)
     if match_mode:
-        if match_mode not in {'3v3', 'aram', '5v5'}:
+        if match_mode not in _TRAINING_REVIEW_MODE_FILTERS:
             raise ValueError('对局模式筛选无效')
-        conditions.append('material.match_mode = ?')
-        parameters.append(match_mode)
+        if match_mode == 'unreadable':
+            conditions.append('item.match_mode_label = ?')
+            parameters.append(match_mode)
+        elif match_mode == 'blitz':
+            conditions.append('(item.match_mode_label = ? OR material.match_mode = ?)')
+            parameters.extend((match_mode, match_mode))
+        else:
+            conditions.append('material.match_mode = ?')
+            parameters.append(match_mode)
+    if match_kind:
+        if match_kind not in _TRAINING_REVIEW_KIND_FILTERS:
+            raise ValueError('对局性质筛选无效')
+        conditions.append('item.match_kind_label = ?')
+        parameters.append(match_kind)
+    if view_context:
+        if view_context not in _TRAINING_REVIEW_VIEW_FILTERS:
+            raise ValueError('观看方式筛选无效')
+        conditions.append('item.view_context_label = ?')
+        parameters.append(view_context)
     if scene:
         if scene not in _HERO_SCREEN_TYPES | {'hero_select', 'other'}:
             raise ValueError('画面类型筛选无效')
@@ -6608,6 +6799,8 @@ def _training_review_unindexed_attribute_frame_ids(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
+    match_kind: str = '',
+    view_context: str = '',
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
@@ -6615,8 +6808,12 @@ def _training_review_unindexed_attribute_frame_ids(
     """历史索引未完成时保留原始 JSON 语义；回填完成后不再调用。"""
     if confidence not in {'', 'low', 'boundary', 'high'}:
         raise ValueError('模型置信度筛选无效')
-    if match_mode and match_mode not in {'3v3', 'aram', '5v5'}:
+    if match_mode and match_mode not in _TRAINING_REVIEW_MODE_FILTERS:
         raise ValueError('对局模式筛选无效')
+    if match_kind and match_kind not in _TRAINING_REVIEW_KIND_FILTERS:
+        raise ValueError('对局性质筛选无效')
+    if view_context and view_context not in _TRAINING_REVIEW_VIEW_FILTERS:
+        raise ValueError('观看方式筛选无效')
     if scene and scene not in _HERO_SCREEN_TYPES | {'hero_select', 'other'}:
         raise ValueError('画面类型筛选无效')
     heroes = (
@@ -6629,7 +6826,18 @@ def _training_review_unindexed_attribute_frame_ids(
         raise ValueError('英雄证据范围无效')
     if len(heroes) > 100:
         raise ValueError('英雄筛选数量过多')
-    if not any((streamer, source_type, scene, match_mode, heroes, confidence)):
+    if not any(
+        (
+            streamer,
+            source_type,
+            scene,
+            match_mode,
+            match_kind,
+            view_context,
+            heroes,
+            confidence,
+        )
+    ):
         return None
 
     item_rows = conn.execute(
@@ -6643,6 +6851,18 @@ def _training_review_unindexed_attribute_frame_ids(
             int(row['frame_id'])
             for row in item_rows
             if str(row['streamer']) == streamer
+        }
+    if match_kind:
+        matching &= {
+            int(row['frame_id'])
+            for row in item_rows
+            if str(row['match_kind_label'] or '') == match_kind
+        }
+    if view_context:
+        matching &= {
+            int(row['frame_id'])
+            for row in item_rows
+            if str(row['view_context_label'] or '') == view_context
         }
 
     source_rows: Sequence[sqlite3.Row] = ()
@@ -6702,10 +6922,14 @@ def _training_review_unindexed_attribute_frame_ids(
             )
             if (
                 not match_mode
-                or _training_review_material_mode(
-                    row, signals.get(int(row['frame_id']), {})
+                or (
+                    str(row['match_mode_label'] or '') == 'unreadable'
+                    if match_mode == 'unreadable'
+                    else _training_review_material_mode(
+                        row, signals.get(int(row['frame_id']), {})
+                    )
+                    == match_mode
                 )
-                == match_mode
             )
         }
     if confidence:
@@ -6744,6 +6968,8 @@ def _training_review_attribute_frame_ids(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
+    match_kind: str = '',
+    view_context: str = '',
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
@@ -6759,6 +6985,8 @@ def _training_review_attribute_frame_ids(
         source_type=source_type,
         scene=scene,
         match_mode=match_mode,
+        match_kind=match_kind,
+        view_context=view_context,
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
@@ -6774,6 +7002,8 @@ def _training_review_visible_frame_ids(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
+    match_kind: str = '',
+    view_context: str = '',
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
@@ -6796,6 +7026,8 @@ def _training_review_visible_frame_ids(
         source_type=source_type,
         scene=scene,
         match_mode=match_mode,
+        match_kind=match_kind,
+        view_context=view_context,
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
@@ -6934,6 +7166,8 @@ def training_review_frame_ids(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
+    match_kind: str = '',
+    view_context: str = '',
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
@@ -6949,6 +7183,8 @@ def training_review_frame_ids(
                 source_type,
                 scene,
                 match_mode,
+                match_kind,
+                view_context,
                 hero,
                 hero_scope != 'all',
                 confidence,
@@ -7068,6 +7304,8 @@ def training_review_frame_ids(
         source_type=source_type,
         scene=scene,
         match_mode=match_mode,
+        match_kind=match_kind,
+        view_context=view_context,
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
@@ -7089,6 +7327,8 @@ def list_training_review_items(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
+    match_kind: str = '',
+    view_context: str = '',
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
@@ -7105,6 +7345,8 @@ def list_training_review_items(
         source_type=source_type,
         scene=scene,
         match_mode=match_mode,
+        match_kind=match_kind,
+        view_context=view_context,
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
@@ -7122,6 +7364,8 @@ def _training_review_indexed_page_frame_ids(
     source_type: str,
     scene: str,
     match_mode: str,
+    match_kind: str,
+    view_context: str,
     hero: Sequence[str] | str,
     hero_scope: str,
     confidence: str,
@@ -7135,8 +7379,12 @@ def _training_review_indexed_page_frame_ids(
         raise ValueError('训练复核状态无效')
     if scene and scene not in _HERO_SCREEN_TYPES | {'hero_select', 'other'}:
         raise ValueError('画面类型筛选无效')
-    if match_mode and match_mode not in {'3v3', 'aram', '5v5'}:
+    if match_mode and match_mode not in _TRAINING_REVIEW_MODE_FILTERS:
         raise ValueError('对局模式筛选无效')
+    if match_kind and match_kind not in _TRAINING_REVIEW_KIND_FILTERS:
+        raise ValueError('对局性质筛选无效')
+    if view_context and view_context not in _TRAINING_REVIEW_VIEW_FILTERS:
+        raise ValueError('观看方式筛选无效')
     if confidence not in {'', 'low', 'boundary', 'high'}:
         raise ValueError('模型置信度筛选无效')
     conditions = ['material.result_group_representative_frame_id=item.frame_id']
@@ -7169,8 +7417,21 @@ def _training_review_indexed_page_frame_ids(
         conditions.append('material.scene=?')
         parameters.append(scene)
     if match_mode:
-        conditions.append('material.match_mode=?')
-        parameters.append(match_mode)
+        if match_mode == 'unreadable':
+            conditions.append('item.match_mode_label=?')
+            parameters.append(match_mode)
+        elif match_mode == 'blitz':
+            conditions.append('(item.match_mode_label=? OR material.match_mode=?)')
+            parameters.extend((match_mode, match_mode))
+        else:
+            conditions.append('material.match_mode=?')
+            parameters.append(match_mode)
+    if match_kind:
+        conditions.append('item.match_kind_label=?')
+        parameters.append(match_kind)
+    if view_context:
+        conditions.append('item.view_context_label=?')
+        parameters.append(view_context)
     heroes = _normalized_training_review_heroes(hero)
     if heroes:
         condition, hero_parameters = _training_review_related_hero_condition(
@@ -7246,6 +7507,8 @@ def training_review_page(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
+    match_kind: str = '',
+    view_context: str = '',
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
@@ -7285,6 +7548,8 @@ def training_review_page(
             source_type=source_type,
             scene=scene,
             match_mode=match_mode,
+            match_kind=match_kind,
+            view_context=view_context,
             hero=hero,
             hero_scope=hero_scope,
             confidence=confidence,
@@ -7310,6 +7575,8 @@ def training_review_page(
         source_type=source_type,
         scene=scene,
         match_mode=match_mode,
+        match_kind=match_kind,
+        view_context=view_context,
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
@@ -7337,6 +7604,8 @@ def count_training_review_items(
     source_type: str = '',
     scene: str = '',
     match_mode: str = '',
+    match_kind: str = '',
+    view_context: str = '',
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
@@ -7357,6 +7626,8 @@ def count_training_review_items(
         source_type=source_type,
         scene=scene,
         match_mode=match_mode,
+        match_kind=match_kind,
+        view_context=view_context,
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
@@ -7372,6 +7643,8 @@ def save_training_review(
     match_mode_label: Optional[str],
     hero_select_label: Optional[str],
     result_panel_label: Optional[str],
+    match_kind_label: Optional[str] = None,
+    view_context_label: Optional[str] = None,
     hero_select_variant: Optional[str] = None,
     hero_select_visibility: Optional[str] = None,
     hero_layout_label: Optional[str] = None,
@@ -7388,11 +7661,17 @@ def save_training_review(
     labels = {
         'match_flow': match_flow_label,
         'match_mode': match_mode_label,
+        'match_kind': match_kind_label,
+        'view_context': view_context_label,
         'hero_select': hero_select_label,
         'result_panel': result_panel_label,
     }
     for task, label in labels.items():
         if label is not None and label not in _TRAINING_REVIEW_LABELS[task]:
+            if task == 'match_kind':
+                raise ValueError('对局性质标签无效')
+            if task == 'view_context':
+                raise ValueError('观看方式标签无效')
             raise ValueError(f'{task} 标签无效')
     if (
         hero_select_variant is not None
@@ -7402,7 +7681,7 @@ def save_training_review(
     if hero_select_label == 'select_aram':
         if hero_select_variant not in (None, 'random'):
             raise ValueError('大乱斗英雄选择只能标记为随机选英雄')
-    elif hero_select_label in ('select_3v3', 'select_5v5'):
+    elif hero_select_label in ('select_3v3', 'select_5v5', 'select_blitz'):
         if hero_select_variant not in (None, 'bp', 'blind', 'unreadable'):
             raise ValueError('3V3/5V5 英雄选择类型无效')
     elif hero_select_variant is not None:
@@ -7423,6 +7702,10 @@ def save_training_review(
         raise ValueError('英雄头像画面类型无效')
     if status not in _TRAINING_REVIEW_STATUSES:
         raise ValueError('训练复核状态无效')
+    if match_flow_label != 'match_flow' and (
+        match_kind_label is not None or view_context_label is not None
+    ):
+        raise ValueError('非对局画面不能填写对局性质或观看方式')
     normalized_render_state = str(panel_render_state or 'clear')
     normalized_ocr = str(ocr_usable or 'yes')
     normalized_occlusion = str(result_occlusion or 'none')
@@ -7507,15 +7790,17 @@ def save_training_review(
     conn.execute(
         """
         INSERT INTO training_review_items
-            (frame_id, match_flow_label, match_mode_label, hero_select_label,
-             hero_select_variant, hero_select_visibility, result_panel_label,
-             hero_layout_label,
+            (frame_id, match_flow_label, match_mode_label, match_kind_label,
+             view_context_label, hero_select_label, hero_select_variant,
+             hero_select_visibility, result_panel_label, hero_layout_label,
              panel_render_state, ocr_usable, result_occlusion, occluder_types,
              review_status, notes, created_at, updated_at, reviewed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(frame_id) DO UPDATE SET
             match_flow_label=excluded.match_flow_label,
             match_mode_label=excluded.match_mode_label,
+            match_kind_label=excluded.match_kind_label,
+            view_context_label=excluded.view_context_label,
             hero_select_label=excluded.hero_select_label,
             hero_select_variant=excluded.hero_select_variant,
             hero_select_visibility=excluded.hero_select_visibility,
@@ -7534,6 +7819,8 @@ def save_training_review(
             int(frame_id),
             match_flow_label,
             match_mode_label,
+            match_kind_label,
+            view_context_label,
             hero_select_label,
             hero_select_variant,
             normalized_select_visibility,
@@ -8319,13 +8606,14 @@ def training_review_stats(
             'JOIN training_review_items item ON item.frame_id=source.frame_id '
             "WHERE item.review_status IN ('pending','partial') AND (("
             "COALESCE(item.hero_select_label,'') NOT IN "
-            "('select_3v3','select_aram','select_5v5') AND "
+            "('select_3v3','select_aram','select_5v5','select_blitz') AND "
             "COALESCE(item.hero_layout_label,'') NOT IN "
             "('gameplay_hud','scoreboard','result_page') AND "
             "COALESCE(item.result_panel_label,'')!='result_panel') OR ("
-            "COALESCE(item.match_mode_label,'') NOT IN ('3v3','aram','5v5') AND "
+            "COALESCE(item.match_mode_label,'') NOT IN "
+            "('3v3','aram','5v5','blitz') AND "
             "COALESCE(item.hero_select_label,'') NOT IN "
-            "('select_3v3','select_aram','select_5v5')))"
+            "('select_3v3','select_aram','select_5v5','select_blitz')))"
         ).fetchall()
     hero_rows = []
     if include_material_suggestions and hero_catalog:

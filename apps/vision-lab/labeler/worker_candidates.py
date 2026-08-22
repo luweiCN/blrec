@@ -122,7 +122,7 @@ def _legacy_suggestions(item: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
             else 'unreadable' if label == 'transition' else 'not_match_flow'
         )
         result['match_flow'] = {'label': flow, 'confidence': confidence}
-        if flow == 'match_flow' and mode in ('3v3', 'aram', '5v5'):
+        if flow == 'match_flow' and mode in ('3v3', 'aram', '5v5', 'blitz'):
             result['match_mode'] = {
                 'label': mode,
                 'confidence': float(item.get('mode_confidence', 0)),
@@ -161,7 +161,7 @@ def _legacy_suggestions(item: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
     elif task == 'result_detector':
         result['result_panel'] = {'label': label, 'confidence': confidence}
     elif task == 'mode_gate':
-        if mode in ('3v3', 'aram', '5v5'):
+        if mode in ('3v3', 'aram', '5v5', 'blitz'):
             result['match_flow'] = {'label': 'match_flow', 'confidence': confidence}
             result['match_mode'] = {'label': mode, 'confidence': confidence}
             result['hero_select'] = {'label': 'not_select', 'confidence': confidence}
@@ -740,6 +740,8 @@ def pull_training_review_reviews(
                 frame_id=frame_id,
                 match_flow_label=labels.get('match_flow_label'),
                 match_mode_label=labels.get('match_mode_label'),
+                match_kind_label=labels.get('match_kind_label'),
+                view_context_label=labels.get('view_context_label'),
                 hero_select_label=labels.get('hero_select_label'),
                 hero_select_variant=labels.get('hero_select_variant'),
                 hero_select_visibility=labels.get('hero_select_visibility'),
@@ -849,6 +851,8 @@ def push_training_review_reviews(conn: Any, nas: NasClient) -> Dict[str, int]:
                 for name in (
                     'match_flow_label',
                     'match_mode_label',
+                    'match_kind_label',
+                    'view_context_label',
                     'hero_select_label',
                     'hero_select_variant',
                     'hero_select_visibility',

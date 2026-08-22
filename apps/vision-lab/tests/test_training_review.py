@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from labeler import (  # noqa: E402
     config,
     db,
+    export,
     result_archive,
     training_review,
     worker_candidates,
@@ -86,6 +87,180 @@ class TrainingReviewTestCase(unittest.TestCase):
                 }
             ],
         )[0]
+
+
+class TestMatchContextLabels(TrainingReviewTestCase):
+    def test_blitz_practice_and_spectator_labels_round_trip_and_filter(self):
+        spectator = self.frame(1)
+        practice = self.frame(2)
+        db.save_training_review(
+            self.conn,
+            frame_id=spectator,
+            match_flow_label='match_flow',
+            match_mode_label='blitz',
+            match_kind_label='pvp',
+            view_context_label='spectated',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            status='confirmed',
+        )
+        db.save_training_review(
+            self.conn,
+            frame_id=practice,
+            match_flow_label='match_flow',
+            match_mode_label='5v5',
+            match_kind_label='practice',
+            view_context_label='played',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            status='confirmed',
+        )
+
+        item = db.get_training_review_item(self.conn, spectator)
+        self.assertEqual(item['match_mode_label'], 'blitz')
+        self.assertEqual(item['match_kind_label'], 'pvp')
+        self.assertEqual(item['view_context_label'], 'spectated')
+        filtered = db.list_training_review_items(
+            self.conn,
+            status='confirmed',
+            match_mode='blitz',
+            match_kind='pvp',
+            view_context='spectated',
+        )
+        self.assertEqual([row['frame_id'] for row in filtered], [spectator])
+
+    def test_invalid_match_kind_and_view_context_are_rejected(self):
+        frame_id = self.frame(3)
+        with self.assertRaisesRegex(ValueError, '对局性质标签无效'):
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='match_flow',
+                match_mode_label='5v5',
+                match_kind_label='ranked',
+                view_context_label='played',
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+            )
+        with self.assertRaisesRegex(ValueError, '观看方式标签无效'):
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='match_flow',
+                match_mode_label='5v5',
+                match_kind_label='pvp',
+                view_context_label='streaming',
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+            )
+
+    def test_non_match_frame_cannot_keep_match_context(self):
+        frame_id = self.frame(4)
+        with self.assertRaisesRegex(ValueError, '非对局画面不能填写对局性质或观看方式'):
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='not_match_flow',
+                match_mode_label=None,
+                match_kind_label='pvp',
+                view_context_label='played',
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+            )
+
+    def test_business_context_does_not_expand_visual_model_classes(self):
+        self.assertEqual(
+            export.UNIFIED_CLASSIFICATION_LABELS['match_mode'], ('3v3', 'aram', '5v5')
+        )
+        self.assertNotIn('pvp', export.UNIFIED_CLASSIFICATION_LABELS)
+        self.assertNotIn('bot', export.UNIFIED_CLASSIFICATION_LABELS)
+        self.assertNotIn('practice', export.UNIFIED_CLASSIFICATION_LABELS)
+        self.assertNotIn('spectated', export.UNIFIED_CLASSIFICATION_LABELS)
+
+    def test_spectator_lineup_does_not_require_or_train_player_identity(self):
+        frame_id = self.frame(7)
+        db.add_training_review_source(
+            self.conn, frame_id=frame_id, source_type='worker', source_id='spectator:7'
+        )
+        slots = [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.1 + (0.4 if side == 'right' else 0),
+                    'y': 0.1 + slot * 0.1,
+                    'w': 0.05,
+                    'h': 0.08,
+                },
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+        db.replace_training_review_hero_layout(
+            self.conn,
+            frame_id=frame_id,
+            screen_type='scoreboard',
+            team_size=3,
+            method='manual-circle-v1',
+            slots=slots,
+        )
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=[
+                {'side': row['side'], 'slot': row['slot'], 'hero_label': 'Adagio'}
+                for row in slots
+            ],
+            allowed_labels={'Adagio'},
+            player_status='pending',
+        )
+        db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='3v3',
+            match_kind_label='pvp',
+            view_context_label='spectated',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label='scoreboard',
+            status='confirmed',
+        )
+
+        self.assertEqual(
+            db.list_training_review_items(self.conn, status='missing_player'), []
+        )
+        self.assertEqual(export._confirmed_hero_lineup_samples(self.conn), [])
+
+    def test_legacy_explicit_context_is_preserved_without_guessing_unknowns(self):
+        explicit = self.frame(5)
+        unknown = self.frame(6)
+        for frame_id, match_kind, view_context in (
+            (explicit, 'bot', 'spectated'),
+            (unknown, 'unknown', 'unknown'),
+        ):
+            db.save_annotation(
+                self.conn,
+                frame_id,
+                {
+                    'content_family': 'vainglory',
+                    'game_context': 'in_match',
+                    'screen_type': 'gameplay',
+                    'game_mode': '3v3',
+                    'match_kind': match_kind,
+                    'view_context': view_context,
+                },
+                status='complete',
+            )
+
+        training_review.migrate_legacy_training_reviews(self.conn)
+
+        explicit_item = db.get_training_review_item(self.conn, explicit)
+        unknown_item = db.get_training_review_item(self.conn, unknown)
+        self.assertEqual(explicit_item['match_kind_label'], 'bot')
+        self.assertEqual(explicit_item['view_context_label'], 'spectated')
+        self.assertIsNone(unknown_item['match_kind_label'])
+        self.assertIsNone(unknown_item['view_context_label'])
 
 
 class TestLegacyMigration(TrainingReviewTestCase):

@@ -247,6 +247,68 @@ class PostgresCompatibilityTests(unittest.TestCase):
             finally:
                 migrated.close()
 
+    def test_existing_sqlite_review_table_keeps_truth_when_contexts_are_added(
+        self,
+    ) -> None:
+        connection = sqlite3.connect(':memory:')
+        connection.row_factory = sqlite3.Row
+        connection.execute('CREATE TABLE frames (id INTEGER PRIMARY KEY)')
+        connection.execute('INSERT INTO frames (id) VALUES (1)')
+        connection.execute(
+            """
+            CREATE TABLE training_review_items (
+                frame_id INTEGER PRIMARY KEY REFERENCES frames(id),
+                match_flow_label TEXT,
+                match_mode_label TEXT CHECK (
+                    match_mode_label IS NULL OR match_mode_label IN (
+                        '3v3','aram','5v5','unreadable')),
+                hero_select_label TEXT CHECK (
+                    hero_select_label IS NULL OR hero_select_label IN (
+                        'not_select','select_3v3','select_aram','select_5v5',
+                        'unreadable')),
+                hero_select_variant TEXT,
+                hero_select_visibility TEXT,
+                result_panel_label TEXT,
+                hero_layout_label TEXT,
+                panel_render_state TEXT NOT NULL DEFAULT 'clear',
+                ocr_usable TEXT NOT NULL DEFAULT 'yes',
+                result_occlusion TEXT NOT NULL DEFAULT 'none',
+                occluder_types TEXT NOT NULL DEFAULT '[]',
+                review_status TEXT NOT NULL DEFAULT 'pending',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                reviewed_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO training_review_items ("
+            "frame_id,match_flow_label,match_mode_label,hero_select_label,"
+            "result_panel_label,review_status,created_at,updated_at) VALUES ("
+            "1,'match_flow','3v3','not_select','no_result_panel','confirmed',"
+            "'old-created','old-updated')"
+        )
+
+        db._migrate_training_review_context_labels(connection)
+
+        row = connection.execute(
+            'SELECT * FROM training_review_items WHERE frame_id=1'
+        ).fetchone()
+        self.assertEqual(row['match_mode_label'], '3v3')
+        self.assertEqual(row['created_at'], 'old-created')
+        self.assertIsNone(row['match_kind_label'])
+        connection.execute(
+            "UPDATE training_review_items SET match_mode_label='blitz',"
+            "match_kind_label='bot',view_context_label='spectated' WHERE frame_id=1"
+        )
+        migrated = connection.execute(
+            'SELECT match_mode_label,match_kind_label,view_context_label '
+            'FROM training_review_items WHERE frame_id=1'
+        ).fetchone()
+        self.assertEqual(tuple(migrated), ('blitz', 'bot', 'spectated'))
+        connection.close()
+
     def test_existing_schema_does_not_require_database_create_privilege(self) -> None:
         class Cursor:
             def __init__(self) -> None:
@@ -312,7 +374,26 @@ class PostgresCompatibilityTests(unittest.TestCase):
                 for value in statements
             )
         )
-        self.assertEqual(cursor.calls[-1][1], (6,))
+        self.assertTrue(
+            any(
+                'ADD COLUMN IF NOT EXISTS match_kind_label' in value
+                for value in statements
+            )
+        )
+        self.assertTrue(
+            any(
+                'ADD COLUMN IF NOT EXISTS view_context_label' in value
+                for value in statements
+            )
+        )
+        self.assertTrue(
+            any(
+                'training_review_items_match_mode_label_check' in value
+                and "'blitz'" in value
+                for value in statements
+            )
+        )
+        self.assertEqual(cursor.calls[-1][1], (7,))
 
 
 if __name__ == '__main__':

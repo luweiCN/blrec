@@ -208,7 +208,10 @@ const TRAINING_REVIEW_FIELDS = [
   {
     key: 'match_mode_label', suggestion: 'match_mode', title: '2. 对局模式',
     help: '只在对局画面中判断。商店或其他无法看出地图模式的画面选“看不出模式”。',
-    labels: { '3v3': '3V3', aram: '大乱斗', '5v5': '5V5', unreadable: '看不出模式' },
+    labels: {
+      '3v3': '3V3', aram: '大乱斗', '5v5': '5V5', blitz: '闪电战',
+      unreadable: '看不出模式',
+    },
   },
   {
     key: 'hero_select_label', suggestion: 'hero_select', title: '3. 是否是英雄选择界面',
@@ -216,6 +219,7 @@ const TRAINING_REVIEW_FIELDS = [
     labels: {
       not_select: '不是英雄选择', select_3v3: '3V3 英雄选择',
       select_aram: '大乱斗英雄选择', select_5v5: '5V5 英雄选择',
+      select_blitz: '闪电战英雄选择',
       unreadable: '看不清',
     },
   },
@@ -232,6 +236,22 @@ const TRAINING_REVIEW_LABEL_TEXT = Object.fromEntries(
   TRAINING_REVIEW_FIELDS.map((field) => [field.suggestion, field.labels]));
 const CANDIDATE_REVIEW_DEFAULTS_STORAGE_KEY =
   'vainglory-vision-lab.training-review-defaults.v1';
+const CANDIDATE_CONTEXT_CACHE_MAX_GAP_MS = 10 * 60 * 1000;
+const candidateMatchContextCache = new Map();
+
+const CANDIDATE_MATCH_KINDS = {
+  pvp: '真人对战',
+  bot: '人机对战',
+  practice: '单人练习',
+  unreadable: '看不清',
+};
+
+const CANDIDATE_VIEW_CONTEXTS = {
+  played: '本人操作',
+  spectated: '观战',
+  replay: '回放',
+  unreadable: '看不清',
+};
 
 const CANDIDATE_SUGGESTION_TITLES = {
   match_flow: '对局流程',
@@ -392,6 +412,43 @@ function cacheCandidateReviewLabels(draft) {
   }
 }
 
+function candidateCachedMatchContext(item) {
+  const videoId = Number(item && item.video_id);
+  const timestampMs = Number(item && item.timestamp_ms);
+  if (!videoId || !Number.isFinite(timestampMs)) return null;
+  const cached = candidateMatchContextCache.get(videoId);
+  if (!cached || Math.abs(timestampMs - cached.timestampMs) >
+      CANDIDATE_CONTEXT_CACHE_MAX_GAP_MS) return null;
+  return cached;
+}
+
+function cacheCandidateMatchContext(item, draft) {
+  const videoId = Number(item && item.video_id);
+  const timestampMs = Number(item && item.timestamp_ms);
+  if (!videoId || !Number.isFinite(timestampMs) ||
+      draft.match_flow_label !== 'match_flow') return;
+  if (!CANDIDATE_MATCH_KINDS[draft.match_kind_label] ||
+      !CANDIDATE_VIEW_CONTEXTS[draft.view_context_label]) return;
+  candidateMatchContextCache.set(videoId, {
+    timestampMs,
+    match_kind_label: draft.match_kind_label,
+    view_context_label: draft.view_context_label,
+  });
+}
+
+function applyCandidateMatchContextDefaults(draft, item) {
+  if (draft.match_flow_label !== 'match_flow') {
+    draft.match_kind_label = null;
+    draft.view_context_label = null;
+    return;
+  }
+  const cached = candidateCachedMatchContext(item) || {};
+  draft.match_kind_label = item.match_kind_label ||
+    cached.match_kind_label || 'pvp';
+  draft.view_context_label = item.view_context_label ||
+    cached.view_context_label || 'played';
+}
+
 function candidateResultHeroCountMode(item) {
   for (const source of item.sources || []) {
     if (source.source_type !== 'result_archive') continue;
@@ -529,6 +586,7 @@ function candidateDefaultDraft(item) {
   draft.result_occlusion = item.result_occlusion || 'none';
   draft.occluder_types = Array.isArray(item.occluder_types)
     ? [...item.occluder_types] : [];
+  applyCandidateMatchContextDefaults(draft, item);
   return draft;
 }
 
@@ -539,7 +597,7 @@ function normalizeCandidateHeroSelectVariant(draft) {
     draft.hero_select_visibility ||= 'clear';
     return;
   }
-  if (['select_3v3', 'select_5v5'].includes(label)) {
+  if (['select_3v3', 'select_5v5', 'select_blitz'].includes(label)) {
     if (!['bp', 'blind', 'unreadable'].includes(draft.hero_select_variant)) {
       draft.hero_select_variant = null;
     }
@@ -947,7 +1005,7 @@ function candidateHeroDraftForLineup(item, lineup, previousDraft = new Map()) {
 function candidateHeroKnownTeamSize(item, draft = candidateDraft) {
   const selectedMode = draft && draft.match_mode_label || '';
   if (selectedMode === '5v5') return 5;
-  if (['3v3', 'aram'].includes(selectedMode)) return 3;
+  if (['3v3', 'aram', 'blitz'].includes(selectedMode)) return 3;
   const legacySize = Number(item && item.legacy_hero_team_size);
   if ([3, 5].includes(legacySize)) return legacySize;
   const suggestion = candidateHeroContextSuggestion(item || {});
@@ -1279,8 +1337,8 @@ function renderCandidateHeroLineup() {
   const screenName = CANDIDATE_HERO_LAYOUTS[candidateHeroLineup.screen_type]
     || candidateHeroLineup.screen_type;
   const complete = candidateHeroLayoutComplete();
-  const marksPlayer = ['scoreboard', 'result_page'].includes(
-    candidateHeroLineup.screen_type);
+  const marksPlayer = candidateDraft.view_context_label === 'played' &&
+    ['scoreboard', 'result_page'].includes(candidateHeroLineup.screen_type);
   const playerPosition = candidateHeroPlayerPosition();
   playerUnreadable.classList.toggle('hidden', !marksPlayer);
   playerUnreadable.classList.toggle(
@@ -2183,6 +2241,74 @@ function appendCandidateHeroSelectVariant(group) {
   group.appendChild(visibilityHelp);
 }
 
+function selectCandidateMatchContext(field, value) {
+  if (!candidateDraft) return;
+  candidateDraft[field] = value;
+  if (field === 'match_kind_label' && value === 'practice') {
+    candidateDraft.match_flow_label = 'match_flow';
+    candidateDraft.match_mode_label = '5v5';
+    candidateDraft.hero_select_label = 'not_select';
+    candidateDraft.hero_layout_label = 'none';
+    candidateHeroTeamSizeExplicit = false;
+    candidateHeroTeamSizeOverride = null;
+    resetCandidateHeroReview();
+  }
+  if (field === 'view_context_label' && value !== 'played') {
+    candidateHeroPlayerStatus = 'pending';
+    candidateHeroPlayerSlot = null;
+    candidateHeroDirty = true;
+  }
+  renderCandidateChoices();
+  refreshCandidateHeroReview();
+}
+
+function appendCandidateMatchContext(actions) {
+  if (!candidateDraft || candidateDraft.match_flow_label !== 'match_flow') return;
+  const details = document.createElement('details');
+  details.className = 'candidate-match-context';
+  details.open = candidateDraft.match_kind_label !== 'pvp' ||
+    candidateDraft.view_context_label !== 'played';
+  const summary = document.createElement('summary');
+  summary.textContent = `对局性质：${
+    CANDIDATE_MATCH_KINDS[candidateDraft.match_kind_label] || '未填写'} · ` +
+    `观看方式：${
+      CANDIDATE_VIEW_CONTEXTS[candidateDraft.view_context_label] || '未填写'}`;
+  details.appendChild(summary);
+  const panel = document.createElement('div');
+  panel.className = 'candidate-match-context-panel';
+  [
+    ['match_kind_label', '对局性质', CANDIDATE_MATCH_KINDS],
+    ['view_context_label', '观看方式', CANDIDATE_VIEW_CONTEXTS],
+  ].forEach(([field, title, values]) => {
+    const row = document.createElement('div');
+    row.className = 'candidate-match-context-row';
+    const label = document.createElement('strong');
+    label.textContent = title;
+    row.appendChild(label);
+    const buttons = document.createElement('div');
+    buttons.className = 'candidate-review-buttons compact';
+    Object.entries(values).forEach(([value, text]) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = text;
+      const selected = candidateDraft[field] === value;
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-pressed', String(selected));
+      button.onclick = () => selectCandidateMatchContext(field, value);
+      buttons.appendChild(button);
+    });
+    row.appendChild(buttons);
+    panel.appendChild(row);
+  });
+  const help = document.createElement('p');
+  help.className = 'hint small';
+  help.textContent =
+    '真人／人机不会交给画面模型猜；新素材默认真人。观战和回放没有“主播本人英雄”。';
+  panel.appendChild(help);
+  details.appendChild(panel);
+  actions.appendChild(details);
+}
+
 function renderCandidateChoices() {
   const item = currentCandidate();
   const actions = $('#candidate-label-actions');
@@ -2225,6 +2351,9 @@ function renderCandidateChoices() {
     help.textContent = field.help;
     group.appendChild(help);
     actions.appendChild(group);
+    if (field.key === 'match_mode_label') {
+      appendCandidateMatchContext(actions);
+    }
   });
   const needsBox = candidateDraft.result_panel_label === 'result_panel';
   $('#candidate-draw-hint').textContent = candidateHeroDrawMode
@@ -2245,6 +2374,7 @@ function selectCandidateHeroLayout(value) {
   if (CANDIDATE_HERO_SCREEN_TYPES.has(value)) {
     candidateDraft.match_flow_label = 'match_flow';
     candidateDraft.match_mode_label ||= 'unreadable';
+    applyCandidateMatchContextDefaults(candidateDraft, currentCandidate() || {});
     candidateDraft.hero_select_label = 'not_select';
     if (value === 'result_page') {
       candidateDraft.result_panel_label = 'result_panel';
@@ -2279,8 +2409,11 @@ function selectCandidateReviewLabel(field, value) {
     if (value === 'match_flow') {
       candidateDraft.match_mode_label ||= 'unreadable';
       candidateDraft.hero_select_label = 'not_select';
+      applyCandidateMatchContextDefaults(candidateDraft, currentCandidate() || {});
     } else {
       candidateDraft.match_mode_label = null;
+      candidateDraft.match_kind_label = null;
+      candidateDraft.view_context_label = null;
       if (value === 'unreadable') candidateDraft.hero_select_label = 'unreadable';
       else candidateDraft.hero_select_label ||= 'not_select';
       candidateDraft.result_panel_label = value === 'unreadable'
@@ -2293,6 +2426,7 @@ function selectCandidateReviewLabel(field, value) {
   } else if (field === 'match_mode_label') {
     candidateDraft.match_flow_label = 'match_flow';
     candidateDraft.hero_select_label = 'not_select';
+    applyCandidateMatchContextDefaults(candidateDraft, currentCandidate() || {});
     candidateHeroTeamSizeExplicit = false;
     candidateHeroTeamSizeOverride = null;
   } else if (field === 'hero_select_label' && value.startsWith('select_')) {
@@ -2305,6 +2439,8 @@ function selectCandidateReviewLabel(field, value) {
     }
     candidateDraft.match_flow_label = 'not_match_flow';
     candidateDraft.match_mode_label = null;
+    candidateDraft.match_kind_label = null;
+    candidateDraft.view_context_label = null;
     candidateHeroTeamSizeExplicit = false;
     candidateHeroTeamSizeOverride = null;
     candidateDraft.result_panel_label = 'no_result_panel';
@@ -2323,6 +2459,7 @@ function selectCandidateReviewLabel(field, value) {
     candidateDraft.match_mode_label ||= 'unreadable';
     candidateDraft.hero_select_label = 'not_select';
     candidateDraft.hero_layout_label = 'result_page';
+    applyCandidateMatchContextDefaults(candidateDraft, currentCandidate() || {});
   } else if (field === 'result_panel_label' && value !== 'result_panel') {
     candidateDraft.ocr_usable = 'yes';
     candidateDraft.result_occlusion = 'none';
@@ -2410,6 +2547,8 @@ function candidateReviewQuery(status, offset = null) {
     source_type: $('#candidate-source-type-filter').value,
     scene: $('#candidate-scene-filter').value,
     match_mode: $('#candidate-mode-filter').value,
+    match_kind: $('#candidate-match-kind-filter').value,
+    view_context: $('#candidate-view-context-filter').value,
     confidence: $('#candidate-confidence-filter').value,
     streamer: $('#candidate-streamer-filter').value,
   };
@@ -2493,6 +2632,8 @@ function applyCandidateMaterialSuggestion(suggestion, heroScope = 'direct') {
   $('#candidate-source-type-filter').value = CANDIDATE_DEFAULT_SOURCE_TYPE;
   $('#candidate-scene-filter').value = filters.scene || '';
   $('#candidate-mode-filter').value = filters.match_mode || '';
+  $('#candidate-match-kind-filter').value = '';
+  $('#candidate-view-context-filter').value = '';
   $('#candidate-confidence-filter').value = '';
   $('#candidate-streamer-filter').value = '';
   candidateHeroFilters = new Set(filters.hero ? [filters.hero] : []);
@@ -3178,9 +3319,15 @@ async function saveCandidateReview(skip = false) {
     showCandidateSaveError('请先在左侧框出完整结算面板');
     return;
   }
-  if (!skip && ['select_3v3', 'select_5v5'].includes(
+  if (!skip && ['select_3v3', 'select_5v5', 'select_blitz'].includes(
     candidateDraft.hero_select_label) && !candidateDraft.hero_select_variant) {
     showCandidateSaveError('请再选择这个英雄选择界面是 BP、盲选还是看不清');
+    return;
+  }
+  if (!skip && candidateDraft.match_flow_label === 'match_flow' &&
+      (!CANDIDATE_MATCH_KINDS[candidateDraft.match_kind_label] ||
+       !CANDIDATE_VIEW_CONTEXTS[candidateDraft.view_context_label])) {
+    showCandidateSaveError('请补充对局性质和观看方式');
     return;
   }
   const heroContext = candidateHeroContext(item);
@@ -3209,6 +3356,7 @@ async function saveCandidateReview(skip = false) {
   }
   const playerPosition = candidateHeroPlayerPosition();
   const marksPlayer = !skip && heroContext &&
+    candidateDraft.view_context_label === 'played' &&
     ['scoreboard', 'result_page'].includes(heroContext.screenType);
   if (marksPlayer && (
     candidateHeroPlayerStatus === 'pending' ||
@@ -3229,6 +3377,7 @@ async function saveCandidateReview(skip = false) {
     } : null;
     const labels = skip ? {
       match_flow_label: null, match_mode_label: null,
+      match_kind_label: null, view_context_label: null,
       hero_select_label: null, hero_select_variant: null,
       hero_select_visibility: null,
       result_panel_label: null,
@@ -3266,6 +3415,7 @@ async function saveCandidateReview(skip = false) {
     const updated = {...item, ...saved};
     if (!skip) {
       cacheCandidateReviewLabels(candidateDraft);
+      cacheCandidateMatchContext(item, candidateDraft);
       candidateHeroManualSlots.clear();
     }
     candidateQueue[candidateIndex] = updated;
@@ -3385,7 +3535,8 @@ function bindCandidateReview() {
   $('#candidate-legacy-screen').onchange = loadCandidateReview;
   [
     '#candidate-source-type-filter', '#candidate-scene-filter',
-    '#candidate-mode-filter', '#candidate-confidence-filter',
+    '#candidate-mode-filter', '#candidate-match-kind-filter',
+    '#candidate-view-context-filter', '#candidate-confidence-filter',
     '#candidate-streamer-filter',
   ].forEach((selector) => {
     $(selector).onchange = loadCandidateReview;
@@ -3393,7 +3544,8 @@ function bindCandidateReview() {
   $('#btn-candidate-clear-filters').onclick = () => {
     [
       '#candidate-source-type-filter', '#candidate-scene-filter',
-      '#candidate-mode-filter', '#candidate-confidence-filter',
+      '#candidate-mode-filter', '#candidate-match-kind-filter',
+      '#candidate-view-context-filter', '#candidate-confidence-filter',
       '#candidate-streamer-filter',
     ].forEach((selector) => { $(selector).value = ''; });
     if (candidateSourceScope === 'new') {

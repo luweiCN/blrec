@@ -1197,6 +1197,62 @@ tr:hover td { background: var(--panel2); }
   background: rgb(70 132 255 / 18%);
 }
 
+.candidate-match-context {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.candidate-match-context > summary {
+  width: fit-content;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.candidate-match-context > summary::-webkit-details-marker {
+  display: none;
+}
+
+.candidate-match-context > summary::before {
+  content: '▸';
+  margin-right: 4px;
+}
+
+.candidate-match-context[open] > summary::before {
+  content: '▾';
+}
+
+.candidate-match-context-panel {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgb(10 15 24 / 45%);
+}
+
+.candidate-match-context-row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.candidate-match-context-row .candidate-review-buttons button {
+  min-height: 26px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+.candidate-match-context-panel p {
+  margin: 0;
+}
+
 .candidate-suggestion-line {
   max-width: 100%;
   overflow: hidden;

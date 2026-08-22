@@ -500,8 +500,11 @@ def _confirmed_hero_member_lineups(conn: Any) -> List[Dict[str, Any]]:
         'slot.crop_y, slot.crop_w, slot.crop_h, slot.confirmed_label '
         'FROM training_review_hero_lineups lineup '
         'JOIN frames f ON f.id = lineup.frame_id '
+        'JOIN training_review_items review ON review.frame_id = lineup.frame_id '
         'JOIN training_review_hero_slots slot ON slot.frame_id = lineup.frame_id '
         "WHERE lineup.review_status = 'confirmed' "
+        "AND COALESCE(review.view_context_label, 'played') = 'played' "
+        "AND COALESCE(review.match_kind_label, 'pvp') != 'practice' "
         "ORDER BY lineup.frame_id, CASE slot.side WHEN 'left' THEN 0 ELSE 1 END, "
         'slot.slot'
     ).fetchall()
@@ -547,8 +550,10 @@ def _confirmed_player_position_members(conn: Any) -> List[Dict[str, Any]]:
         'lineup.player_side, lineup.player_slot, f.video_id, f.frame_path '
         'FROM training_review_hero_lineups lineup '
         'JOIN frames f ON f.id = lineup.frame_id '
+        'JOIN training_review_items review ON review.frame_id = lineup.frame_id '
         "WHERE lineup.review_status = 'confirmed' "
         "AND lineup.player_status = 'identified' "
+        "AND COALESCE(review.view_context_label, 'played') = 'played' "
         "AND lineup.screen_type IN ('scoreboard', 'result_page') "
         "AND lineup.player_side IN ('left', 'right') "
         'AND lineup.player_slot BETWEEN 1 AND lineup.team_size '

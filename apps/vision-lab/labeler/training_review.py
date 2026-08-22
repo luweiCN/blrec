@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from . import db
 
 _MIGRATION_ID = 'training-review-labels-v1'
+_CONTEXT_MIGRATION_ID = 'training-review-context-labels-v1'
 _HERO_SELECT_TYPES = {'hero_select_bp', 'hero_select_blind', 'hero_select_aram'}
 
 
@@ -46,6 +47,8 @@ def _upsert_human_labels(
     values: Dict[str, Optional[str]] = {
         'match_flow_label': None,
         'match_mode_label': None,
+        'match_kind_label': None,
+        'view_context_label': None,
         'hero_select_label': None,
         'hero_select_variant': None,
         'result_panel_label': None,
@@ -66,14 +69,16 @@ def _upsert_human_labels(
     conn.execute(
         """
         INSERT INTO training_review_items
-            (frame_id, match_flow_label, match_mode_label, hero_select_label,
-             hero_select_variant, result_panel_label, review_status,
-             created_at, updated_at,
+            (frame_id, match_flow_label, match_mode_label, match_kind_label,
+             view_context_label, hero_select_label, hero_select_variant,
+             result_panel_label, review_status, created_at, updated_at,
              reviewed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(frame_id) DO UPDATE SET
             match_flow_label=excluded.match_flow_label,
             match_mode_label=excluded.match_mode_label,
+            match_kind_label=excluded.match_kind_label,
+            view_context_label=excluded.view_context_label,
             hero_select_label=excluded.hero_select_label,
             hero_select_variant=excluded.hero_select_variant,
             result_panel_label=excluded.result_panel_label,
@@ -85,6 +90,8 @@ def _upsert_human_labels(
             int(frame_id),
             values['match_flow_label'],
             values['match_mode_label'],
+            values['match_kind_label'],
+            values['view_context_label'],
             values['hero_select_label'],
             values['hero_select_variant'],
             values['result_panel_label'],
@@ -124,6 +131,8 @@ def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]
     context = str(row['game_context'] or '')
     screen_type = str(row['screen_type'] or '')
     game_mode = str(row['game_mode'] or '')
+    match_kind = str(row['match_kind'] or '')
+    view_context = str(row['view_context'] or '')
     if content == 'not_vainglory' or context in ('out_of_match', 'pre_match'):
         flow: Optional[str] = 'not_match_flow'
     elif context in ('in_match', 'post_match'):
@@ -136,7 +145,11 @@ def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]
     mode: Optional[str] = None
     if flow == 'match_flow':
         if context == 'in_match' and screen_type == 'gameplay':
-            mode = game_mode if game_mode in ('3v3', 'aram', '5v5') else 'unreadable'
+            mode = (
+                game_mode
+                if game_mode in ('3v3', 'aram', '5v5', 'blitz')
+                else 'unreadable'
+            )
         elif context == 'in_match' and screen_type == 'talent_select':
             mode = 'aram'
         else:
@@ -152,10 +165,11 @@ def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]
                 '3v3': 'select_3v3',
                 'aram': 'select_aram',
                 '5v5': 'select_5v5',
+                'blitz': 'select_blitz',
             }.get(game_mode, 'unreadable')
             if select == 'select_aram':
                 select_variant = 'random'
-            elif select in ('select_3v3', 'select_5v5'):
+            elif select in ('select_3v3', 'select_5v5', 'select_blitz'):
                 select_variant = 'bp' if screen_type == 'hero_select_bp' else 'blind'
             else:
                 select_variant = None
@@ -170,6 +184,17 @@ def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]
     return {
         'match_flow_label': flow,
         'match_mode_label': mode,
+        'match_kind_label': (
+            match_kind
+            if flow == 'match_flow' and match_kind in {'pvp', 'bot', 'practice'}
+            else None
+        ),
+        'view_context_label': (
+            view_context
+            if flow == 'match_flow'
+            and view_context in {'played', 'spectated', 'replay'}
+            else None
+        ),
         'hero_select_label': select,
         'hero_select_variant': select_variant,
         'result_panel_label': result,
@@ -183,6 +208,7 @@ def migrate_legacy_training_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
     ).fetchone()
     if prior is not None:
         value = json.loads(prior['detail_json'] or '{}')
+        migrate_legacy_training_review_contexts(conn)
         return {str(key): int(count) for key, count in value.items()}
 
     counts = {
@@ -220,6 +246,8 @@ def migrate_legacy_training_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
                     'game_context': row['game_context'],
                     'screen_type': row['screen_type'],
                     'game_mode': row['game_mode'],
+                    'match_kind': row['match_kind'],
+                    'view_context': row['view_context'],
                 },
             )
             counts['legacy_annotations'] += 1
@@ -348,6 +376,83 @@ def migrate_legacy_training_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
             'VALUES (?, ?, ?)',
             (
                 _MIGRATION_ID,
+                db.now(),
+                json.dumps(counts, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+    migrate_legacy_training_review_contexts(conn)
+    return counts
+
+
+def migrate_legacy_training_review_contexts(conn: sqlite3.Connection) -> Dict[str, int]:
+    """补迁旧人工明确填写的对局性质与观看方式；未知值保持为空。"""
+    prior = conn.execute(
+        'SELECT detail_json FROM workspace_migrations WHERE id = ?',
+        (_CONTEXT_MIGRATION_ID,),
+    ).fetchone()
+    if prior is not None:
+        value = json.loads(prior['detail_json'] or '{}')
+        return {str(key): int(count) for key, count in value.items()}
+
+    with conn:
+        timestamp = db.now()
+        kind_cursor = conn.execute(
+            """
+            UPDATE training_review_items
+            SET match_kind_label = (
+                    SELECT annotation.match_kind
+                    FROM annotations annotation
+                    WHERE annotation.frame_id=training_review_items.frame_id
+                      AND annotation.annotation_status='complete'
+                      AND annotation.match_kind IN ('pvp','bot','practice')
+                    LIMIT 1
+                ),
+                updated_at = ?
+            WHERE match_kind_label IS NULL
+              AND match_flow_label='match_flow'
+              AND EXISTS (
+                  SELECT 1 FROM annotations annotation
+                  WHERE annotation.frame_id=training_review_items.frame_id
+                    AND annotation.annotation_status='complete'
+                    AND annotation.match_kind IN ('pvp','bot','practice')
+              )
+            """,
+            (timestamp,),
+        )
+        view_cursor = conn.execute(
+            """
+            UPDATE training_review_items
+            SET view_context_label = (
+                    SELECT annotation.view_context
+                    FROM annotations annotation
+                    WHERE annotation.frame_id=training_review_items.frame_id
+                      AND annotation.annotation_status='complete'
+                      AND annotation.view_context IN (
+                          'played','spectated','replay')
+                    LIMIT 1
+                ),
+                updated_at = ?
+            WHERE view_context_label IS NULL
+              AND match_flow_label='match_flow'
+              AND EXISTS (
+                  SELECT 1 FROM annotations annotation
+                  WHERE annotation.frame_id=training_review_items.frame_id
+                    AND annotation.annotation_status='complete'
+                    AND annotation.view_context IN (
+                        'played','spectated','replay')
+              )
+            """,
+            (timestamp,),
+        )
+        counts = {
+            'match_kind': max(0, int(kind_cursor.rowcount)),
+            'view_context': max(0, int(view_cursor.rowcount)),
+        }
+        conn.execute(
+            'INSERT INTO workspace_migrations (id, applied_at, detail_json) '
+            'VALUES (?, ?, ?)',
+            (
+                _CONTEXT_MIGRATION_ID,
                 db.now(),
                 json.dumps(counts, ensure_ascii=False, sort_keys=True),
             ),

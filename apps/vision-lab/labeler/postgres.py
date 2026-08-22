@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-POSTGRES_SCHEMA_VERSION = 6
+POSTGRES_SCHEMA_VERSION = 7
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
 _INSERT_TABLE = re.compile(
     r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
@@ -310,6 +310,64 @@ POSTGRES_SCHEMA_MIGRATIONS = {
         ON training_review_candidate_inbox (
             prefill_status,prefill_stage,prefill_attempts,
             source_created_at DESC,frame_id DESC)
+        """,
+    ),
+    7: (
+        """
+        ALTER TABLE training_review_items
+        ADD COLUMN IF NOT EXISTS match_kind_label TEXT CHECK (
+            match_kind_label IS NULL OR match_kind_label IN (
+                'pvp','bot','practice','unreadable'))
+        """,
+        """
+        ALTER TABLE training_review_items
+        ADD COLUMN IF NOT EXISTS view_context_label TEXT CHECK (
+            view_context_label IS NULL OR view_context_label IN (
+                'played','spectated','replay','unreadable'))
+        """,
+        """
+        ALTER TABLE training_review_items
+        DROP CONSTRAINT IF EXISTS training_review_items_match_mode_label_check
+        """,
+        """
+        ALTER TABLE training_review_items
+        ADD CONSTRAINT training_review_items_match_mode_label_check CHECK (
+            match_mode_label IS NULL OR match_mode_label IN (
+                '3v3','aram','5v5','blitz','unreadable'))
+        """,
+        """
+        ALTER TABLE training_review_items
+        DROP CONSTRAINT IF EXISTS training_review_items_hero_select_label_check
+        """,
+        """
+        ALTER TABLE training_review_items
+        ADD CONSTRAINT training_review_items_hero_select_label_check CHECK (
+            hero_select_label IS NULL OR hero_select_label IN (
+                'not_select','select_3v3','select_aram','select_5v5',
+                'select_blitz','unreadable'))
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        DROP CONSTRAINT IF EXISTS training_review_material_index_match_mode_check
+        """,
+        """
+        ALTER TABLE training_review_material_index
+        ADD CONSTRAINT training_review_material_index_match_mode_check CHECK (
+            match_mode IN ('','3v3','aram','5v5','blitz'))
+        """,
+        """
+        ALTER TABLE training_review_match_contexts
+        DROP CONSTRAINT IF EXISTS training_review_match_contexts_game_mode_check
+        """,
+        """
+        ALTER TABLE training_review_match_contexts
+        ADD CONSTRAINT training_review_match_contexts_game_mode_check CHECK (
+            game_mode IN ('','3v3','aram','5v5','blitz'))
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_context
+        ON training_review_items (
+            match_kind_label,view_context_label,review_status,frame_id)
         """,
     ),
 }
