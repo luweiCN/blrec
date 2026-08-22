@@ -4275,6 +4275,9 @@ def _training_review_material_scene(
     select_suggestion = suggestions.get('hero_select') or {}
     if str(select_suggestion.get('label') or '').startswith('select_'):
         return 'hero_select'
+    flow_suggestion = str((suggestions.get('match_flow') or {}).get('label') or '')
+    if flow_suggestion in {'not_match_flow', 'unreadable'}:
+        return None
     result_suggestion = suggestions.get('result_panel') or {}
     if str(result_suggestion.get('label') or '') == 'result_panel':
         return 'result_page'
@@ -4330,14 +4333,17 @@ def _training_review_material_mode(
         return None
 
     suggestions = signal.get('suggestions') or {}
-    mode_suggestion = str((suggestions.get('match_mode') or {}).get('label') or '')
-    if mode_suggestion in {'3v3', 'aram', '5v5', 'blitz'}:
-        return mode_suggestion
     select_mode = _training_review_mode_from_select(
         (suggestions.get('hero_select') or {}).get('label')
     )
     if select_mode is not None:
         return select_mode
+    flow_suggestion = str((suggestions.get('match_flow') or {}).get('label') or '')
+    if flow_suggestion in {'not_match_flow', 'unreadable'}:
+        return None
+    mode_suggestion = str((suggestions.get('match_mode') or {}).get('label') or '')
+    if mode_suggestion in {'3v3', 'aram', '5v5', 'blitz'}:
+        return mode_suggestion
     for metadata in signal.get('metadata') or []:
         for value in (
             metadata.get('game_mode'),
@@ -4702,7 +4708,9 @@ def _training_review_material_contributions(
                 crop_count=crop_count,
             )
     elif (
-        status in {'pending', 'partial'} and str(index_row['prefill_status']) == 'ready'
+        status in {'pending', 'partial'}
+        and str(index_row['prefill_status']) == 'ready'
+        and hero_scene == scene
     ):
         labels = {}
         for slot in slots:
@@ -5385,7 +5393,10 @@ def _training_review_related_hero_counts(
     effective = "COALESCE(NULLIF({slot}.confirmed_label,''),{slot}.suggested_label)"
     direct_missing = (
         'NOT EXISTS (SELECT 1 FROM training_review_hero_slots target_slot '
-        'WHERE target_slot.frame_id=target.frame_id AND '
+        'JOIN training_review_hero_lineups target_lineup '
+        'ON target_lineup.frame_id=target_slot.frame_id '
+        'WHERE target_slot.frame_id=target.frame_id '
+        'AND target_lineup.screen_type=target.scene AND '
         + effective.format(slot='target_slot')
         + '=evidence.hero_label)'
     )
@@ -5397,7 +5408,9 @@ def _training_review_related_hero_counts(
         + effective.format(slot='slot')
         + ' AS hero_label FROM training_review_material_index material '
         'JOIN training_review_hero_slots slot ON slot.frame_id=material.frame_id '
+        'JOIN training_review_hero_lineups lineup ON lineup.frame_id=material.frame_id '
         'WHERE material.linked_match_id IS NOT NULL AND '
+        'lineup.screen_type=material.scene AND '
         + effective.format(slot='slot')
         + " NOT IN ('','unreadable')) "
         'SELECT evidence.hero_label,target.scene,'
@@ -5408,6 +5421,7 @@ def _training_review_related_hero_counts(
         'JOIN training_review_material_index target '
         'ON target.linked_match_id=evidence.match_id '
         "WHERE target.review_status IN ('pending','partial') "
+        "AND target.prefill_status='ready' "
         "AND target.scene IN ('gameplay_hud','scoreboard','result_page') "
         'AND target.result_group_representative_frame_id=target.frame_id AND '
         + direct_missing
@@ -5428,9 +5442,11 @@ def _training_review_related_hero_counts(
         + effective.format(slot='slot')
         + ' AS hero_label FROM training_review_material_index material '
         'JOIN training_review_hero_slots slot ON slot.frame_id=material.frame_id '
+        'JOIN training_review_hero_lineups lineup ON lineup.frame_id=material.frame_id '
         'LEFT JOIN linked_videos linked ON linked.video_id=material.video_id '
         'WHERE material.linked_match_id IS NULL AND material.session_id>0 '
         'AND material.part_id>0 AND linked.video_id IS NULL AND '
+        'lineup.screen_type=material.scene AND '
         + effective.format(slot='slot')
         + " NOT IN ('','unreadable')) "
         'SELECT evidence.hero_label,target.scene,'
@@ -5441,6 +5457,7 @@ def _training_review_related_hero_counts(
         'JOIN training_review_material_index target '
         'ON target.video_id=evidence.video_id '
         "WHERE target.review_status IN ('pending','partial') "
+        "AND target.prefill_status='ready' "
         'AND target.linked_match_id IS NULL '
         "AND target.scene IN ('gameplay_hud','scoreboard','result_page') "
         'AND target.result_group_representative_frame_id=target.frame_id AND '
@@ -5460,7 +5477,9 @@ def _training_review_related_hero_counts(
         + effective.format(slot='slot')
         + ' AS hero_label FROM training_review_material_index material '
         'JOIN training_review_hero_slots slot ON slot.frame_id=material.frame_id '
+        'JOIN training_review_hero_lineups lineup ON lineup.frame_id=material.frame_id '
         'WHERE material.linked_match_id IS NOT NULL AND '
+        'lineup.screen_type=material.scene AND '
         + effective.format(slot='slot')
         + " NOT IN ('','unreadable')),desired(scene) AS (VALUES "
         + scene_values
@@ -6489,7 +6508,11 @@ def _normalized_training_review_heroes(hero: Sequence[str] | str) -> List[str]:
 
 
 def _training_review_related_hero_condition(
-    heroes: Sequence[str], *, material_alias: str = 'material', scope: str = 'all'
+    heroes: Sequence[str],
+    *,
+    material_alias: str = 'material',
+    scope: str = 'all',
+    require_matching_scene: bool = False,
 ) -> Tuple[str, List[Any]]:
     if scope not in {'all', 'direct'}:
         raise ValueError('英雄证据范围无效')
@@ -6497,9 +6520,27 @@ def _training_review_related_hero_condition(
     effective_label = (
         "COALESCE(NULLIF({slot}.confirmed_label,''),{slot}.suggested_label)"
     )
+    direct_scene = (
+        f'direct_lineup.screen_type={material_alias}.scene AND '
+        if require_matching_scene
+        else ''
+    )
+    match_scene = (
+        'match_lineup.screen_type=match_peer.scene AND '
+        if require_matching_scene
+        else ''
+    )
+    video_scene = (
+        'video_lineup.screen_type=video_peer.scene AND '
+        if require_matching_scene
+        else ''
+    )
     direct = (
         'EXISTS (SELECT 1 FROM training_review_hero_slots direct_slot '
+        'JOIN training_review_hero_lineups direct_lineup '
+        'ON direct_lineup.frame_id=direct_slot.frame_id '
         'WHERE direct_slot.frame_id=item.frame_id AND '
+        + direct_scene
         + effective_label.format(slot='direct_slot')
         + f' IN ({placeholders}))'
     )
@@ -6510,7 +6551,10 @@ def _training_review_related_hero_condition(
         'SELECT 1 FROM training_review_material_index match_peer '
         'JOIN training_review_hero_slots match_slot '
         'ON match_slot.frame_id=match_peer.frame_id '
+        'JOIN training_review_hero_lineups match_lineup '
+        'ON match_lineup.frame_id=match_peer.frame_id '
         + f'WHERE match_peer.linked_match_id={material_alias}.linked_match_id AND '
+        + match_scene
         + effective_label.format(slot='match_slot')
         + f' IN ({placeholders}))) OR ('
         + f'{material_alias}.linked_match_id IS NULL '
@@ -6522,7 +6566,10 @@ def _training_review_related_hero_condition(
         'SELECT 1 FROM training_review_material_index video_peer '
         'JOIN training_review_hero_slots video_slot '
         'ON video_slot.frame_id=video_peer.frame_id '
+        'JOIN training_review_hero_lineups video_lineup '
+        'ON video_lineup.frame_id=video_peer.frame_id '
         + f'WHERE video_peer.video_id={material_alias}.video_id AND '
+        + video_scene
         + effective_label.format(slot='video_slot')
         + f' IN ({placeholders}))))'
     )
@@ -6767,7 +6814,7 @@ def _training_review_indexed_attribute_frame_ids(
     heroes = _normalized_training_review_heroes(hero)
     if heroes:
         condition, hero_parameters = _training_review_related_hero_condition(
-            heroes, scope=hero_scope
+            heroes, scope=hero_scope, require_matching_scene=bool(scene)
         )
         conditions.append(condition)
         parameters.extend(hero_parameters)
@@ -7435,7 +7482,7 @@ def _training_review_indexed_page_frame_ids(
     heroes = _normalized_training_review_heroes(hero)
     if heroes:
         condition, hero_parameters = _training_review_related_hero_condition(
-            heroes, scope=hero_scope
+            heroes, scope=hero_scope, require_matching_scene=bool(scene)
         )
         conditions.append(condition)
         parameters.extend(hero_parameters)

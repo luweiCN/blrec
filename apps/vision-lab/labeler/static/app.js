@@ -49,6 +49,11 @@ let candidateHeroPrefillRunning = false;
 let candidateHeroPrefillToken = 0;
 let candidateHeroLoadToken = 0;
 let candidateHeroGeometryRevision = 0;
+const candidateHeroSlotRecognitionStates = new Map();
+const candidateHeroPendingRecognitionSlots = new Map();
+let candidateHeroRecognitionDebounceTimer = null;
+let candidateHeroPersistQueue = Promise.resolve();
+const CANDIDATE_HERO_RECOGNITION_DEBOUNCE_MS = 300;
 let candidateHeroPickerSlot = null;
 let candidateHeroPlayerSlot = null;
 let candidateHeroPlayerStatus = 'pending';
@@ -677,7 +682,7 @@ function candidateHeroSlot(slotKey) {
 }
 
 function startCandidateHeroEdit(event, node, slotKey, mode) {
-  if (event.button !== 0 || candidateHeroLoading) return;
+  if (event.button !== 0) return;
   const layerRect = $('#candidate-box-layer').getBoundingClientRect();
   const slot = candidateHeroSlot(slotKey);
   if (!slot || !layerRect.width || !layerRect.height) return;
@@ -754,7 +759,7 @@ function moveCandidateHeroEdit(event) {
   applyCandidateHeroSlotsToCanvas();
 }
 
-async function finishCandidateHeroEdit(event, node) {
+function finishCandidateHeroEdit(event, node) {
   const edit = candidateHeroEdit;
   if (!edit || edit.pointerId !== event.pointerId) return;
   event.preventDefault();
@@ -776,14 +781,7 @@ async function finishCandidateHeroEdit(event, node) {
   const changedSlots = candidateHeroChangedSlots(
     edit.originalSlots, candidateHeroLineup.slots);
   clearCandidateHeroRecognition(changedSlots);
-  const saved = await persistCandidateHeroLayout(candidateHeroLineup.slots, {
-    recognizeSlots: changedSlots,
-  });
-  if (!saved) {
-    candidateHeroLineup.slots = edit.originalSlots;
-    renderCandidateHeroLineup();
-    return;
-  }
+  scheduleCandidateHeroRecognition(changedSlots);
   $('#candidate-save-state').textContent =
     '英雄圆框的位置和大小已更新，正在重新识别受影响的头像';
 }
@@ -848,6 +846,9 @@ function renderCandidateBoxes() {
     node.className = 'candidate-hero-circle';
     node.dataset.heroSlot = key;
     node.classList.toggle('selected', candidateHeroPickerSlot === key);
+    const recognizing = candidateHeroSlotIsRecognizing(key);
+    node.classList.toggle('recognizing', recognizing);
+    node.setAttribute('aria-busy', String(recognizing));
     const isPlayer = ['scoreboard', 'result_page'].includes(
       candidateHeroLineup.screen_type) &&
       candidateHeroPlayerStatus === 'identified' &&
@@ -868,7 +869,7 @@ function renderCandidateBoxes() {
     const tag = document.createElement('span');
     tag.className = 'candidate-hero-circle-label';
     tag.textContent = `${slot.side === 'left' ? '左' : '右'}${slot.slot}` +
-      (isPlayer ? ' · 本人' : '');
+      (isPlayer ? ' · 本人' : '') + (recognizing ? ' · 识别中' : '');
     node.appendChild(tag);
     const resizeHandle = document.createElement('span');
     resizeHandle.className = 'candidate-hero-resize-handle';
@@ -1064,6 +1065,12 @@ function resetCandidateHeroReview() {
   candidateHeroLoading = false;
   candidateHeroPrefillRunning = false;
   candidateHeroGeometryRevision = 0;
+  candidateHeroSlotRecognitionStates.clear();
+  candidateHeroPendingRecognitionSlots.clear();
+  if (candidateHeroRecognitionDebounceTimer !== null) {
+    window.clearTimeout(candidateHeroRecognitionDebounceTimer);
+    candidateHeroRecognitionDebounceTimer = null;
+  }
   candidateHeroDrawMode = false;
   candidateHeroEdit = null;
   closeCandidateHeroPicker();
@@ -1144,6 +1151,81 @@ function clearCandidateHeroRecognition(slots) {
     candidateHeroManualSlots.delete(key);
     slot.suggested_label = '';
     slot.suggestion_confidence = 0;
+  });
+}
+
+function candidateHeroSlotIsRecognizing(slotKey) {
+  const state = candidateHeroSlotRecognitionStates.get(slotKey);
+  return Boolean(state && ['queued', 'running'].includes(state.status));
+}
+
+function candidateHeroRecognitionCount() {
+  return [...candidateHeroSlotRecognitionStates.values()].filter(
+    (state) => ['queued', 'running'].includes(state.status)).length;
+}
+
+function candidateHeroRecognitionTargets(slots) {
+  return new Map((slots || []).map((slot) => {
+    const key = candidateHeroKey(slot.side, slot.slot);
+    const state = candidateHeroSlotRecognitionStates.get(key);
+    return [key, {
+      generation: Number(state && state.generation || 0),
+      crop: {...slot.crop},
+    }];
+  }));
+}
+
+function setCandidateHeroRecognitionStatus(targets, status) {
+  targets.forEach((target, key) => {
+    const state = candidateHeroSlotRecognitionStates.get(key);
+    if (!state || state.generation !== target.generation) return;
+    candidateHeroSlotRecognitionStates.set(key, {...state, status});
+  });
+}
+
+function removeCandidateHeroRecognitionState(slotKey) {
+  candidateHeroSlotRecognitionStates.delete(slotKey);
+  candidateHeroPendingRecognitionSlots.delete(slotKey);
+}
+
+function scheduleCandidateHeroRecognition(slots) {
+  if (!slots || !slots.length) return;
+  (slots || []).forEach((slot) => {
+    const key = candidateHeroKey(slot.side, slot.slot);
+    const previous = candidateHeroSlotRecognitionStates.get(key);
+    const state = {
+      generation: Number(previous && previous.generation || 0) + 1,
+      status: 'queued',
+      crop: {...slot.crop},
+    };
+    candidateHeroSlotRecognitionStates.set(key, state);
+    candidateHeroPendingRecognitionSlots.set(key, state.generation);
+  });
+  if (candidateHeroRecognitionDebounceTimer !== null) {
+    window.clearTimeout(candidateHeroRecognitionDebounceTimer);
+  }
+  candidateHeroRecognitionDebounceTimer = window.setTimeout(() => {
+    candidateHeroRecognitionDebounceTimer = null;
+    flushCandidateHeroRecognition();
+  }, CANDIDATE_HERO_RECOGNITION_DEBOUNCE_MS);
+  renderCandidateHeroLineup();
+}
+
+function flushCandidateHeroRecognition() {
+  if (!candidateHeroLineup || !candidateHeroPendingRecognitionSlots.size) return;
+  const pending = new Map(candidateHeroPendingRecognitionSlots);
+  candidateHeroPendingRecognitionSlots.clear();
+  const slots = candidateHeroLineup.slots.filter((slot) => {
+    const key = candidateHeroKey(slot.side, slot.slot);
+    const state = candidateHeroSlotRecognitionStates.get(key);
+    return state && state.generation === pending.get(key) &&
+      candidateHeroSameCrop(state.crop, slot.crop);
+  });
+  if (!slots.length) return;
+  const targets = candidateHeroRecognitionTargets(slots);
+  void persistCandidateHeroLayout(candidateHeroLineup.slots, {
+    recognizeSlots: slots,
+    recognitionTargets: targets,
   });
 }
 
@@ -1307,10 +1389,13 @@ function renderCandidateHeroLineup() {
   const progress = $('#candidate-hero-progress');
   const progressText = $('#candidate-hero-progress-text');
   const busy = candidateHeroLoading || candidateHeroPrefillRunning;
-  progress.classList.toggle('hidden', !busy);
+  const recognizingCount = candidateHeroRecognitionCount();
+  progress.classList.toggle('hidden', !busy && !recognizingCount);
   progressText.textContent = candidateHeroPrefillRunning
     ? '正在用模型识别头像位置和英雄…'
-    : '正在读取或保存英雄标注…';
+    : candidateHeroLoading
+      ? '正在读取英雄标注…'
+      : `${recognizingCount} 个头像正在后台识别，可继续画框或调整`;
   teams.innerHTML = '';
   const context = candidateHeroContext(currentCandidate());
   if (!context) {
@@ -1357,7 +1442,7 @@ function renderCandidateHeroLineup() {
   playerUnreadable.classList.toggle(
     'selected', marksPlayer && candidateHeroPlayerStatus === 'unreadable');
   playerUnreadable.classList.remove('needs-attention');
-  playerUnreadable.disabled = busy;
+  playerUnreadable.disabled = candidateHeroLoading;
   playerUnreadable.setAttribute(
     'aria-pressed', String(candidateHeroPlayerStatus === 'unreadable'));
   const next = candidateNextHeroPosition();
@@ -1393,13 +1478,13 @@ function renderCandidateHeroLineup() {
   $('#candidate-hero-status').textContent =
     `${screenName} · ${candidateHeroLineup.team_size}V${candidateHeroLineup.team_size} · ` +
     `${status}${drawingHint}${playerHint}${editHint}`;
-  drawButton.disabled = busy || complete;
+  drawButton.disabled = candidateHeroLoading || complete;
   drawButton.classList.toggle('hidden', complete);
   drawButton.classList.toggle('selected', candidateHeroDrawMode);
   drawButton.textContent = candidateHeroDrawMode && next
       ? `正在画${next.side === 'left' ? '左' : '右'}${next.slot}`
       : '补画头像';
-  clearButton.disabled = busy || !candidateHeroLineup.slots.length;
+  clearButton.disabled = candidateHeroLoading || !candidateHeroLineup.slots.length;
   for (const side of ['left', 'right']) {
     const team = document.createElement('section');
     team.className = 'candidate-hero-team';
@@ -1420,6 +1505,9 @@ function renderCandidateHeroLineup() {
       card.className = 'candidate-hero-slot';
       card.dataset.heroSlot = key;
       card.classList.toggle('player', isPlayer);
+      const recognizing = candidateHeroSlotIsRecognizing(key);
+      card.classList.toggle('recognizing', recognizing);
+      card.setAttribute('aria-busy', String(recognizing));
       const index = document.createElement('span');
       index.className = 'candidate-hero-slot-index';
       index.textContent = String(slot.slot);
@@ -1464,7 +1552,7 @@ function renderCandidateHeroLineup() {
         : '';
       name.textContent = hero
         ? `${hero.name}${hero.label === 'unreadable' ? '' : ` · ${hero.label}`}`
-        : '请选择英雄';
+        : recognizing ? 'AI 识别中…' : '请选择英雄';
       name.textContent += confidence;
       select.title = name.textContent;
       select.appendChild(name);
@@ -1830,83 +1918,100 @@ function candidateHeroSlotsPayload(slots = null) {
     }));
 }
 
+function applyCandidateHeroRecognitionResult(lineup, targets) {
+  if (!candidateHeroLineup || !lineup || !targets.size) return;
+  const recognized = new Map((lineup.slots || []).map((slot) => [
+    candidateHeroKey(slot.side, slot.slot), slot,
+  ]));
+  targets.forEach((target, key) => {
+    const state = candidateHeroSlotRecognitionStates.get(key);
+    const current = candidateHeroSlot(key);
+    const incoming = recognized.get(key);
+    if (!state || state.generation !== target.generation || !current ||
+        !candidateHeroSameCrop(current.crop, target.crop) || !incoming ||
+        !candidateHeroSameCrop(incoming.crop, target.crop)) return;
+    current.suggested_label = incoming.suggested_label || '';
+    current.suggestion_confidence = Number(
+      incoming.suggestion_confidence || 0);
+    if (!candidateHeroManualSlots.has(key)) {
+      if (current.suggested_label) {
+        candidateHeroDraft.set(key, current.suggested_label);
+      } else {
+        candidateHeroDraft.delete(key);
+      }
+    }
+    candidateHeroSlotRecognitionStates.set(key, {...state, status: 'done'});
+  });
+}
+
 async function persistCandidateHeroLayout(
-  slots, {recognizeSlots = []} = {}) {
+  slots, {recognizeSlots = [], recognitionTargets = new Map()} = {}) {
   const item = currentCandidate();
   const context = candidateHeroContext(item);
-  if (!item || !context || !context.teamSize || candidateHeroLoading) return false;
-  const previousDraft = new Map(candidateHeroDraft);
-  const previousPlayerSlot = candidateHeroPlayerSlot;
-  const previousPlayerStatus = candidateHeroPlayerStatus;
+  if (!item || !context || !context.teamSize) return false;
+  const loadToken = candidateHeroLoadToken;
+  const slotPayload = candidateHeroSlotsPayload(slots);
+  const recognizePayload = candidateHeroSlotsPayload(recognizeSlots);
+  const targets = new Map(recognitionTargets);
   const image = $('#candidate-image');
-  candidateHeroLoading = true;
-  $('#btn-candidate-save').disabled = true;
-  renderCandidateHeroLineup();
-  try {
-    const lineup = await api(
-      `/api/training-review/items/${item.frame_id}/hero-layout`, {
-        method: 'PUT',
-        body: JSON.stringify({
-          screen_type: context.screenType,
-          team_size: context.teamSize,
-          slots: candidateHeroSlotsPayload(slots),
-          recognize: recognizeSlots.length > 0,
-          recognize_slots: candidateHeroSlotsPayload(recognizeSlots),
-          image_width: Number(image && image.naturalWidth || item.width || 0),
-          image_height: Number(image && image.naturalHeight || item.height || 0),
-        }),
-      });
-    candidateHeroLineup = lineup;
-    const persistedPlayerStatus = candidateHeroPlayerStatusForLineup(lineup);
-    const persistedPlayerSlot = candidateHeroPlayerKey(lineup);
-    const previousPlayerStillExists = previousPlayerSlot && lineup.slots.some(
-      (slot) => candidateHeroKey(slot.side, slot.slot) === previousPlayerSlot
-    );
-    if (persistedPlayerStatus !== 'pending') {
-      candidateHeroPlayerStatus = persistedPlayerStatus;
-      candidateHeroPlayerSlot = persistedPlayerSlot;
-    } else if (
-      previousPlayerStatus === 'identified' && previousPlayerStillExists
-    ) {
-      candidateHeroPlayerStatus = 'identified';
-      candidateHeroPlayerSlot = previousPlayerSlot;
-    } else if (previousPlayerStatus === 'unreadable') {
-      candidateHeroPlayerStatus = 'unreadable';
-      candidateHeroPlayerSlot = null;
-    } else {
-      candidateHeroPlayerStatus = 'pending';
-      candidateHeroPlayerSlot = null;
+  const imageWidth = Number(image && image.naturalWidth || item.width || 0);
+  const imageHeight = Number(image && image.naturalHeight || item.height || 0);
+  const save = async () => {
+    setCandidateHeroRecognitionStatus(targets, 'running');
+    if (currentCandidate() === item && loadToken === candidateHeroLoadToken) {
+      renderCandidateHeroLineup();
     }
-    candidateHeroDraft = candidateHeroDraftForLineup(
-      item, lineup, previousDraft);
-    candidateHeroDirty = true;
-    const queuedJobId = String((lineup.prefill_job || {}).id || '');
-    if (queuedJobId) {
-      refreshCandidateHeroLayoutAfterWorker(
-        item, queuedJobId, candidateHeroGeometryRevision);
+    try {
+      const lineup = await api(
+        `/api/training-review/items/${item.frame_id}/hero-layout`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            screen_type: context.screenType,
+            team_size: context.teamSize,
+            slots: slotPayload,
+            recognize: recognizePayload.length > 0,
+            recognize_slots: recognizePayload,
+            image_width: imageWidth,
+            image_height: imageHeight,
+          }),
+        });
+      const active = currentCandidate() === item &&
+        loadToken === candidateHeroLoadToken;
+      const queuedJobId = String((lineup.prefill_job || {}).id || '');
+      if (active && queuedJobId) {
+        void refreshCandidateHeroLayoutAfterWorker(
+          item, queuedJobId, targets, loadToken);
+      } else if (active && targets.size) {
+        applyCandidateHeroRecognitionResult(lineup, targets);
+      }
+      if (active) candidateHeroDirty = true;
+      return true;
+    } catch (error) {
+      setCandidateHeroRecognitionStatus(targets, 'failed');
+      if (currentCandidate() === item && loadToken === candidateHeroLoadToken) {
+        $('#candidate-save-state').textContent =
+          '英雄圆框保存失败：' + error.message;
+      }
+      return false;
+    } finally {
+      if (currentCandidate() === item && loadToken === candidateHeroLoadToken) {
+        renderCandidateHeroLineup();
+        renderCandidateChoices();
+      }
     }
-    return true;
-  } catch (error) {
-    $('#candidate-save-state').textContent = '英雄圆框保存失败：' + error.message;
-    return false;
-  } finally {
-    candidateHeroLoading = false;
-    $('#btn-candidate-save').disabled = false;
-    renderCandidateHeroLineup();
-    renderCandidateChoices();
-  }
+  };
+  const queued = candidateHeroPersistQueue.then(save, save);
+  candidateHeroPersistQueue = queued.then(() => undefined, () => undefined);
+  return queued;
 }
 
 async function refreshCandidateHeroLayoutAfterWorker(
-  item, jobId, geometryRevision) {
-  const prefillToken = ++candidateHeroPrefillToken;
-  candidateHeroPrefillRunning = true;
-  renderCandidateHeroLineup();
+  item, jobId, targets, loadToken) {
   try {
     const finished = await waitForVisionJob(jobId);
     if (!finished || finished.status !== 'succeeded' ||
         currentCandidate() !== item ||
-        geometryRevision !== candidateHeroGeometryRevision) return;
+        loadToken !== candidateHeroLoadToken) return;
     const context = candidateHeroContext(item);
     if (!context) return;
     const query = new URLSearchParams({screen_type: context.screenType});
@@ -1914,23 +2019,27 @@ async function refreshCandidateHeroLayoutAfterWorker(
     const lineup = await api(
       `/api/training-review/items/${item.frame_id}/hero-lineup?${query}`);
     if (currentCandidate() !== item || !lineup.applicable ||
-        geometryRevision !== candidateHeroGeometryRevision) return;
-    const previousDraft = new Map(candidateHeroDraft);
-    candidateHeroLineup = lineup;
-    candidateHeroDraft = candidateHeroDraftForLineup(
-      item, lineup, previousDraft);
+        loadToken !== candidateHeroLoadToken) return;
+    applyCandidateHeroRecognitionResult(lineup, targets);
     renderCandidateHeroLineup();
   } catch (_error) {
     // Worker 不在线时继续保留人工选择，不把异步错误盖到当前操作上。
   } finally {
-    if (prefillToken === candidateHeroPrefillToken) {
-      candidateHeroPrefillRunning = false;
+    if (currentCandidate() === item && loadToken === candidateHeroLoadToken) {
+      targets.forEach((target, key) => {
+        const state = candidateHeroSlotRecognitionStates.get(key);
+        if (state && state.generation === target.generation &&
+            state.status === 'running') {
+          candidateHeroSlotRecognitionStates.set(
+            key, {...state, status: 'failed'});
+        }
+      });
       renderCandidateHeroLineup();
     }
   }
 }
 
-async function addCandidateHeroCircle(crop) {
+function addCandidateHeroCircle(crop) {
   const next = candidateNextHeroPosition();
   if (!next || !candidateHeroLineup) return;
   const previousSlots = candidateHeroLineup.slots.map((slot) => ({
@@ -1950,11 +2059,9 @@ async function addCandidateHeroCircle(crop) {
   clearCandidateHeroRecognition(addedSlots);
   markCandidateHeroGeometryEdited();
   candidateHeroLineup.slots = slots;
+  scheduleCandidateHeroRecognition(addedSlots);
   renderCandidateHeroLineup();
-  const saved = await persistCandidateHeroLayout(slots, {
-    recognizeSlots: addedSlots,
-  });
-  if (saved && complete) {
+  if (complete) {
     candidateHeroDrawMode = false;
     const automaticallyAdded = slots.length - manuallyAdded.length;
     if (automaticallyAdded > 0) {
@@ -1978,8 +2085,10 @@ async function deleteCandidateHeroSlot() {
   }
   closeCandidateHeroPicker();
   markCandidateHeroGeometryEdited();
-  const saved = await persistCandidateHeroLayout(slots);
-  if (saved) candidateHeroDrawMode = true;
+  candidateHeroLineup.slots = slots;
+  removeCandidateHeroRecognitionState(key);
+  candidateHeroDrawMode = true;
+  void persistCandidateHeroLayout(slots);
   renderCandidateHeroLineup();
 }
 
@@ -1991,8 +2100,15 @@ async function clearCandidateHeroLayout() {
   candidateHeroPlayerStatus = 'pending';
   closeCandidateHeroPicker();
   markCandidateHeroGeometryEdited();
-  const saved = await persistCandidateHeroLayout([]);
-  if (saved) candidateHeroDrawMode = true;
+  candidateHeroLineup.slots = [];
+  candidateHeroSlotRecognitionStates.clear();
+  candidateHeroPendingRecognitionSlots.clear();
+  if (candidateHeroRecognitionDebounceTimer !== null) {
+    window.clearTimeout(candidateHeroRecognitionDebounceTimer);
+    candidateHeroRecognitionDebounceTimer = null;
+  }
+  candidateHeroDrawMode = true;
+  void persistCandidateHeroLayout([]);
   renderCandidateHeroLineup();
 }
 
@@ -2643,7 +2759,7 @@ function applyCandidateMaterialSuggestion(suggestion, heroScope = 'direct') {
   const filters = suggestion.filters || {};
   setCandidateSourceScope(
     suggestion.source_scope || 'new', filters.status || 'needs_review', true);
-  $('#candidate-source-type-filter').value = CANDIDATE_DEFAULT_SOURCE_TYPE;
+  $('#candidate-source-type-filter').value = '';
   $('#candidate-scene-filter').value = filters.scene || '';
   $('#candidate-mode-filter').value = filters.match_mode || '';
   $('#candidate-match-kind-filter').value = '';
@@ -3394,6 +3510,14 @@ async function saveCandidateReview(skip = false) {
   }
   $('#candidate-save-state').textContent = '正在保存，同时准备下一张…';
   try {
+    if (!skip && heroContext) {
+      if (candidateHeroRecognitionDebounceTimer !== null) {
+        window.clearTimeout(candidateHeroRecognitionDebounceTimer);
+        candidateHeroRecognitionDebounceTimer = null;
+        flushCandidateHeroRecognition();
+      }
+      await candidateHeroPersistQueue;
+    }
     const heroLineupPayload = heroLabels && (
       candidateHeroDirty || candidateHeroLineup.review_status !== 'confirmed'
     ) ? {
@@ -3640,8 +3764,7 @@ function bindCandidateReview() {
     if (!item || !candidateDraft ||
         event.target.closest('.candidate-box') ||
         event.target.closest('.candidate-hero-circle')) return;
-    const canDrawHero = !candidateHeroLoading && !candidateHeroPrefillRunning &&
-      candidateHeroDrawMode &&
+    const canDrawHero = candidateHeroDrawMode &&
       candidateHeroLineup && candidateNextHeroPosition();
     const canDrawResult = !candidateHeroDrawMode &&
       candidateDraft.result_panel_label === 'result_panel';
@@ -3652,7 +3775,7 @@ function bindCandidateReview() {
       const crop = candidateHeroClickCrop(point);
       if (crop) {
         candidateDrawStart = null;
-        await addCandidateHeroCircle(crop);
+        addCandidateHeroCircle(crop);
         return;
       }
     }
@@ -3681,7 +3804,7 @@ function bindCandidateReview() {
         : dy < 0 ? start.point.y - size : start.point.y;
       const left = Math.max(0, Math.min(end.width - size, rawLeft));
       const top = Math.max(0, Math.min(end.height - size, rawTop));
-      await addCandidateHeroCircle({
+      addCandidateHeroCircle({
         x: left / end.width,
         y: top / end.height,
         w: size / end.width,

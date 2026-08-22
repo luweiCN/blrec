@@ -983,6 +983,14 @@ tr:hover td { background: var(--panel2); }
   background: rgb(24 111 63 / 94%);
 }
 
+.candidate-hero-circle.recognizing {
+  border-style: dashed;
+}
+
+.candidate-hero-circle.recognizing .candidate-hero-circle-label {
+  color: #bcd7ff;
+}
+
 .candidate-hero-circle-label {
   position: absolute;
   left: 50%;
@@ -1494,6 +1502,10 @@ tr:hover td { background: var(--panel2); }
 .candidate-hero-slot.player {
   border-color: #3cad70;
   background: rgb(35 100 65 / 20%);
+}
+
+.candidate-hero-slot.recognizing {
+  border-color: rgb(88 166 255 / 65%);
 }
 
 .candidate-hero-slot-index {

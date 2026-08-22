@@ -619,6 +619,149 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         assert ready_total == 1
         assert [item['frame_id'] for item in ready_page] == [frame_id]
 
+    def test_non_match_prediction_suppresses_downstream_mode_and_hud(self) -> None:
+        frame_id = self.frame(51)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='other-game-false-aram-hud',
+            suggestions={
+                'match_flow': {'label': 'not_match_flow', 'confidence': 0.99},
+                'match_mode': {'label': 'aram', 'confidence': 0.96},
+                'hero_select': {'label': 'not_select', 'confidence': 0.99},
+                'result_panel': {'label': 'no_result_panel', 'confidence': 0.99},
+            },
+            metadata={
+                'hero_context_suggestion': {
+                    'screen_type': 'gameplay_hud',
+                    'confidence': 0.91,
+                }
+            },
+        )
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=frame_id,
+            screen_type='gameplay_hud',
+            team_size=3,
+            method='false-positive-hero-model',
+            slots=self.hero_slots('Adagio'),
+        )
+        db.update_training_review_prefill_state(
+            self.conn, frame_id=frame_id, status='ready', stage='complete'
+        )
+
+        indexed = self.conn.execute(
+            'SELECT scene,match_mode FROM training_review_material_index '
+            'WHERE frame_id=?',
+            (frame_id,),
+        ).fetchone()
+        suggestion = next(
+            value
+            for value in db.training_review_material_suggestions(self.conn)
+            if value['kind'] == 'scene_mode'
+            and value['scene'] == 'gameplay_hud'
+            and value['match_mode'] == 'aram'
+        )
+        hero_suggestion = next(
+            value
+            for value in db.training_review_material_suggestions(
+                self.conn, hero_catalog=({'label': 'Adagio', 'name': '奥达基'},)
+            )
+            if value['kind'] == 'hero_scene'
+            and value['scene'] == 'gameplay_hud'
+            and value['hero_label'] == 'Adagio'
+        )
+        page, total = db.training_review_page(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            scene='gameplay_hud',
+            match_mode='aram',
+            prefill_ready_only=True,
+            limit=10,
+        )
+
+        assert indexed['scene'] == 'other'
+        assert indexed['match_mode'] == ''
+        assert suggestion['candidate_count'] == 0
+        assert hero_suggestion['candidate_count'] == 0
+        assert page == []
+        assert total == 0
+
+    def test_related_hero_count_only_includes_ready_review_items(self) -> None:
+        evidence = self.frame(52)
+        target = self.frame(53)
+        common = {'session_id': 12, 'part_id': 13, 'part_index': 1}
+        db.add_training_review_source(
+            self.conn,
+            frame_id=evidence,
+            source_type='worker',
+            source_id='related-ready-evidence',
+            metadata={**common, 'at_ms': 52_000, 'screen_type': 'scoreboard'},
+        )
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=evidence,
+            screen_type='scoreboard',
+            team_size=3,
+            method='hero-model-v1',
+            slots=self.hero_slots('Adagio'),
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=target,
+            source_type='worker',
+            source_id='related-not-ready-target',
+            metadata={**common, 'at_ms': 53_000, 'screen_type': 'gameplay_hud'},
+        )
+
+        def related_count() -> int:
+            suggestion = next(
+                value
+                for value in db.training_review_material_suggestions(
+                    self.conn, hero_catalog=({'label': 'Adagio', 'name': '奥达基'},)
+                )
+                if value['kind'] == 'hero_scene'
+                and value['hero_label'] == 'Adagio'
+                and value['scene'] == 'gameplay_hud'
+            )
+            return int(suggestion['related_candidate_count'])
+
+        assert related_count() == 0
+        page, total = db.training_review_page(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            scene='gameplay_hud',
+            hero=['Adagio'],
+            hero_scope='all',
+            prefill_ready_only=True,
+            limit=10,
+            result_groups={},
+        )
+        assert page == []
+        assert total == 0
+
+        db.update_training_review_prefill_state(
+            self.conn, frame_id=target, status='ready', stage='complete'
+        )
+
+        assert related_count() == 1
+        page, total = db.training_review_page(
+            self.conn,
+            status='needs_review',
+            source_scope='new',
+            scene='gameplay_hud',
+            hero=['Adagio'],
+            hero_scope='all',
+            prefill_ready_only=True,
+            limit=10,
+            result_groups={},
+        )
+        assert [item['frame_id'] for item in page] == [target]
+        assert total == 1
+
     def test_queue_summary_counts_only_ready_pending_items_as_reviewable(self) -> None:
         pending = self.frame(60)
         ready = self.frame(61)
@@ -1093,6 +1236,9 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
             team_size=3,
             method='hero-model-v1',
             slots=self.hero_slots('Adagio'),
+        )
+        db.update_training_review_prefill_state(
+            self.conn, frame_id=hud, status='ready', stage='complete'
         )
 
         suggestion = next(

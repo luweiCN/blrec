@@ -139,6 +139,12 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
         "function applyCandidateMaterialSuggestion(suggestion, heroScope = 'direct')"
         in script
     )
+    material_apply = script[
+        script.index('function applyCandidateMaterialSuggestion(') : script.index(
+            'function renderCandidateMaterialSuggestions()'
+        )
+    ]
+    assert "$('#candidate-source-type-filter').value = '';" in material_apply
     assert "query.set('hero_scope', candidateHeroScope)" in script
     assert 'renderCandidateMaterialSuggestions();' in script
     assert "const CANDIDATE_DEFAULT_SOURCE_TYPE = 'new_model_prefill';" in script
@@ -199,12 +205,14 @@ def test_candidate_hud_prefill_shows_progress_and_preserves_manual_edits() -> No
     assert 'role="status" aria-live="polite"' in html[progress : progress + 300]
     assert 'let candidateHeroGeometryRevision = 0;' in script
     assert 'let candidateHeroPrefillRunning = false;' in script
+    assert 'const candidateHeroSlotRecognitionStates = new Map();' in script
     refresh = script[
         script.index(
             'async function refreshCandidateHeroLayoutAfterWorker('
-        ) : script.index('async function addCandidateHeroCircle(')
+        ) : script.index('function addCandidateHeroCircle(')
     ]
-    assert 'geometryRevision !== candidateHeroGeometryRevision' in refresh
+    assert 'state.generation === target.generation' in refresh
+    assert 'candidateHeroPrefillRunning = true;' not in refresh
     assert 'candidateHeroPrefillRunning = true;' in script
     assert 'candidateHeroPrefillRunning = false;' in script
     completion = script[
@@ -248,17 +256,17 @@ def test_candidate_hero_ai_recognition_has_no_cross_frame_cache() -> None:
     assert 'recognize: true' not in prepare
 
     addition = script[
-        script.index('async function addCandidateHeroCircle(') : script.index(
+        script.index('function addCandidateHeroCircle(') : script.index(
             'async function deleteCandidateHeroSlot('
         )
     ]
-    assert 'recognizeSlots: addedSlots' in addition
+    assert 'scheduleCandidateHeroRecognition(addedSlots);' in addition
     edit = script[
-        script.index('async function finishCandidateHeroEdit(') : script.index(
+        script.index('function finishCandidateHeroEdit(') : script.index(
             'function cancelCandidateHeroEdit('
         )
     ]
-    assert 'recognizeSlots: changedSlots' in edit
+    assert 'scheduleCandidateHeroRecognition(changedSlots);' in edit
 
 
 def test_manual_hero_circle_is_rendered_before_remote_save() -> None:
@@ -266,17 +274,46 @@ def test_manual_hero_circle_is_rendered_before_remote_save() -> None:
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
     ).read_text(encoding='utf-8')
     addition = script[
-        script.index('async function addCandidateHeroCircle(') : script.index(
+        script.index('function addCandidateHeroCircle(') : script.index(
             'async function deleteCandidateHeroSlot('
         )
     ]
 
     local_update = addition.index('candidateHeroLineup.slots = slots;')
-    remote_save = addition.index('await persistCandidateHeroLayout(')
-    assert local_update < remote_save
-    assert addition.index('renderCandidateHeroLineup();') < remote_save
+    scheduled = addition.index('scheduleCandidateHeroRecognition(addedSlots);')
+    assert local_update < scheduled
+    scheduler = script[
+        script.index('function scheduleCandidateHeroRecognition(') : script.index(
+            'function candidateHeroCropCenter('
+        )
+    ]
+    assert 'CANDIDATE_HERO_RECOGNITION_DEBOUNCE_MS' in scheduler
+    assert 'void persistCandidateHeroLayout(' in scheduler
+    assert 'candidateHeroPersistQueue.then(save, save)' in script
     assert 'image_width:' in script
     assert 'image_height:' in script
+
+
+def test_manual_hero_recognition_never_locks_other_boxes() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    editor = script[
+        script.index('function startCandidateHeroEdit(') : script.index(
+            'function moveCandidateHeroEdit('
+        )
+    ]
+    pointer = script[
+        script.index('layer.onpointerdown = async (event) =>') : script.index(
+            'layer.onpointerup = async (event) =>'
+        )
+    ]
+
+    assert 'candidateHeroLoading' not in editor
+    assert 'candidateHeroPrefillRunning' not in pointer
+    assert 'candidateHeroLoading' not in pointer
+    assert "['queued', 'running'].includes(state.status)" in script
+    assert 'candidateHeroSameCrop(current.crop, target.crop)' in script
 
 
 def test_worker_claim_autonomously_runs_core_then_hero_before_review(
