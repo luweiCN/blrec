@@ -1490,7 +1490,8 @@ tr:hover td { background: var(--panel2); }
 }
 
 .candidate-hero-slots.team-size-5 .candidate-hero-select,
-.candidate-hero-slots.team-size-5 .candidate-hero-player {
+.candidate-hero-slots.team-size-5 .candidate-hero-player,
+.candidate-hero-slots.team-size-5 .candidate-hero-afk {
   min-height: 28px;
 }
 
@@ -1568,6 +1569,11 @@ tr:hover td { background: var(--panel2); }
   gap: 4px;
 }
 
+.candidate-hero-slot-actions {
+  display: flex;
+  gap: 3px;
+}
+
 .candidate-hero-select {
   display: flex;
   align-items: center;
@@ -1590,14 +1596,18 @@ tr:hover td { background: var(--panel2); }
   color: #ffd28a;
 }
 
-.candidate-hero-player {
+.candidate-hero-player,
+.candidate-hero-afk {
   min-width: 52px;
   min-height: 32px;
   padding: 4px 6px;
-  border-color: #3d6950;
-  color: #9ad9b2;
   font-size: 10px;
   white-space: nowrap;
+}
+
+.candidate-hero-player {
+  border-color: #3d6950;
+  color: #9ad9b2;
 }
 
 .candidate-hero-player.selected {
@@ -1609,6 +1619,18 @@ tr:hover td { background: var(--panel2); }
 .candidate-hero-player.needs-attention {
   border-color: #ff8b72;
   box-shadow: 0 0 0 2px rgb(255 139 114 / 22%);
+}
+
+.candidate-hero-afk {
+  min-width: 42px;
+  border-color: #6d5935;
+  color: #d8bd83;
+}
+
+.candidate-hero-afk.selected {
+  border-color: #ff9f43;
+  background: rgb(255 159 67 / 18%);
+  color: #ffd4a8;
 }
 
 #candidate-save-state.error {

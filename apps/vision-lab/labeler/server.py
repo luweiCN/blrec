@@ -1500,6 +1500,7 @@ def api_training_review_items(
     hero: Optional[List[str]] = Query(None),
     hero_scope: str = 'all',
     confidence: str = '',
+    review_reason: str = '',
     include_stats: bool = True,
 ) -> Dict[str, Any]:
     hero_values = hero if isinstance(hero, list) else []
@@ -1522,6 +1523,7 @@ def api_training_review_items(
                             hero_values,
                             hero_scope != 'all',
                             confidence,
+                            review_reason,
                         )
                     )
                 )
@@ -1559,7 +1561,8 @@ def api_training_review_items(
                         hero=hero_values,
                         hero_scope=hero_scope,
                         confidence=confidence,
-                        prefill_ready_only=True,
+                        review_reason=review_reason,
+                        prefill_ready_only=status != 'missing_afk',
                         result_groups=result_groups,
                     )
             except ValueError as exc:

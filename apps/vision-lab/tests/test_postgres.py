@@ -393,7 +393,10 @@ class PostgresCompatibilityTests(unittest.TestCase):
                 for value in statements
             )
         )
-        self.assertEqual(cursor.calls[-1][1], (7,))
+        self.assertTrue(
+            any('ADD COLUMN IF NOT EXISTS is_afk' in value for value in statements)
+        )
+        self.assertEqual(cursor.calls[-1][1], (8,))
 
 
 if __name__ == '__main__':

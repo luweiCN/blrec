@@ -1090,6 +1090,209 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
         self.assertEqual([item['frame_id'] for item in page], [correction])
         self.assertEqual(page_total, 1)
 
+    def test_confirmed_review_reasons_find_old_uncertain_and_conflicting_labels(self):
+        mode_unreadable = self.frame(110)
+        mode_conflict = self.frame(111)
+        hero_conflict = self.frame(112)
+        for frame_id, suggestion in ((mode_unreadable, '3v3'), (mode_conflict, 'aram')):
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id=f'worker-{frame_id}',
+            )
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='new_model_prefill',
+                source_id=f'prefill-{frame_id}',
+                suggestions={'match_mode': {'label': suggestion, 'confidence': 0.96}},
+                source_created_at=200,
+            )
+        db.save_training_review(
+            self.conn,
+            frame_id=mode_unreadable,
+            match_flow_label='match_flow',
+            match_mode_label='unreadable',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            status='confirmed',
+        )
+        db.save_training_review(
+            self.conn,
+            frame_id=mode_conflict,
+            match_flow_label='match_flow',
+            match_mode_label='3v3',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            status='confirmed',
+        )
+        db.add_training_review_source(
+            self.conn,
+            frame_id=hero_conflict,
+            source_type='worker',
+            source_id='worker-hero-conflict',
+        )
+        slots = [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.1 + (0.4 if side == 'right' else 0),
+                    'y': 0.1 + slot * 0.1,
+                    'w': 0.05,
+                    'h': 0.08,
+                },
+                'suggested_label': 'Adagio',
+                'suggestion_confidence': 0.97,
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=hero_conflict,
+            screen_type='scoreboard',
+            team_size=3,
+            method='hero-model-v2',
+            slots=slots,
+        )
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=hero_conflict,
+            labels=[
+                {
+                    'side': slot['side'],
+                    'slot': slot['slot'],
+                    'hero_label': (
+                        'Alpha'
+                        if slot['side'] == 'left' and slot['slot'] == 1
+                        else 'Adagio'
+                    ),
+                }
+                for slot in slots
+            ],
+            allowed_labels={'Adagio', 'Alpha'},
+        )
+        db.save_training_review(
+            self.conn,
+            frame_id=hero_conflict,
+            match_flow_label='match_flow',
+            match_mode_label='3v3',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label='scoreboard',
+            status='confirmed',
+        )
+
+        unreadable = db.list_training_review_items(
+            self.conn,
+            status='confirmed',
+            source_scope='new',
+            review_reason='mode_unreadable',
+        )
+        mode_disagreement = db.list_training_review_items(
+            self.conn,
+            status='confirmed',
+            source_scope='new',
+            review_reason='mode_conflict',
+        )
+        hero_disagreement = db.list_training_review_items(
+            self.conn,
+            status='confirmed',
+            source_scope='new',
+            review_reason='hero_conflict',
+        )
+
+        self.assertEqual([item['frame_id'] for item in unreadable], [mode_unreadable])
+        self.assertEqual(
+            [item['frame_id'] for item in mode_disagreement], [mode_conflict]
+        )
+        self.assertEqual(
+            [item['frame_id'] for item in hero_disagreement], [hero_conflict]
+        )
+
+    def test_confirmed_scoreboard_stays_in_afk_backfill_until_every_slot_is_marked(
+        self,
+    ):
+        frame_id = self.frame(113)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='worker-afk-backfill',
+        )
+        slots = [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.1 + (0.4 if side == 'right' else 0),
+                    'y': 0.1 + slot * 0.1,
+                    'w': 0.05,
+                    'h': 0.08,
+                },
+                'suggested_label': 'Adagio',
+                'suggestion_confidence': 0.9,
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=frame_id,
+            screen_type='scoreboard',
+            team_size=3,
+            method='hero-model-v2',
+            slots=slots,
+        )
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=[
+                {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
+                for slot in slots
+            ],
+            allowed_labels={'Adagio'},
+        )
+        db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='3v3',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label='scoreboard',
+            status='confirmed',
+        )
+
+        before = db.list_training_review_items(
+            self.conn, status='missing_afk', source_scope='new'
+        )
+        self.assertEqual([item['frame_id'] for item in before], [frame_id])
+
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=[
+                {
+                    'side': slot['side'],
+                    'slot': slot['slot'],
+                    'hero_label': 'Adagio',
+                    'is_afk': False,
+                }
+                for slot in slots
+            ],
+            allowed_labels={'Adagio'},
+        )
+
+        self.assertEqual(
+            db.list_training_review_items(
+                self.conn, status='missing_afk', source_scope='new'
+            ),
+            [],
+        )
+
     def test_material_suggestions_count_confirmed_and_actionable_candidates(self):
         confirmed = self.frame(12)
         pending_select = self.frame(13)

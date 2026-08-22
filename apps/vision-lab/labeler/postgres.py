@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-POSTGRES_SCHEMA_VERSION = 7
+POSTGRES_SCHEMA_VERSION = 8
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
 _INSERT_TABLE = re.compile(
     r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
@@ -368,6 +368,17 @@ POSTGRES_SCHEMA_MIGRATIONS = {
         CREATE INDEX IF NOT EXISTS idx_training_review_context
         ON training_review_items (
             match_kind_label,view_context_label,review_status,frame_id)
+        """,
+    ),
+    8: (
+        """
+        ALTER TABLE training_review_hero_slots
+        ADD COLUMN IF NOT EXISTS is_afk BIGINT
+        CHECK (is_afk IS NULL OR is_afk IN (0,1))
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_hero_afk
+        ON training_review_hero_slots (is_afk,frame_id)
         """,
     ),
 }

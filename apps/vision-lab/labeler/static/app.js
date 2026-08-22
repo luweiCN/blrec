@@ -57,6 +57,7 @@ const CANDIDATE_HERO_RECOGNITION_DEBOUNCE_MS = 300;
 let candidateHeroPickerSlot = null;
 let candidateHeroPlayerSlot = null;
 let candidateHeroPlayerStatus = 'pending';
+let candidateHeroAfkReviewRequired = false;
 let candidateHeroTeamSizeExplicit = false;
 let candidateHeroTeamSizeOverride = null;
 let candidateHeroDrawMode = false;
@@ -279,6 +280,7 @@ const CANDIDATE_QUEUE_OPTIONS = {
   new: [
     ['needs_review', '待确认'],
     ['missing_player', '只补本人标记'],
+    ['missing_afk', '挂机状态待补'],
     ['confirmed', '已确认'],
     ['skipped', '已跳过'],
     ['all', '全部新图'],
@@ -287,6 +289,7 @@ const CANDIDATE_QUEUE_OPTIONS = {
     ['migration_review', '迁移待人工复核'],
     ['needs_review', '旧标签不完整'],
     ['legacy_hero', '头像待补齐（按局折叠）'],
+    ['missing_afk', '挂机状态待补'],
     ['human_confirmed', '新流程人工已确认'],
     ['skipped', '已跳过'],
     ['all', '全部历史图'],
@@ -329,6 +332,13 @@ function currentCandidate() {
   return candidateQueue[candidateIndex] || null;
 }
 
+function renderCandidateReviewReasonFilter() {
+  const status = $('#candidate-status-filter').value;
+  const visible = ['confirmed', 'human_confirmed'].includes(status);
+  $('#candidate-review-reason-field').classList.toggle('hidden', !visible);
+  if (!visible) $('#candidate-review-reason-filter').value = '';
+}
+
 function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true) {
   candidateSourceScope = scope === 'legacy' ? 'legacy' : 'new';
   candidateReviewStats = {};
@@ -340,6 +350,7 @@ function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true)
     ...options.map(([value, label]) => new Option(label, value)),
   );
   $('#candidate-status-filter').value = selected;
+  renderCandidateReviewReasonFilter();
   const historical = candidateSourceScope === 'legacy';
   const sourceType = $('#candidate-source-type-filter');
   if (sourceType) {
@@ -1061,6 +1072,7 @@ function resetCandidateHeroReview() {
   candidateHeroManualSlots = new Set();
   candidateHeroPlayerSlot = null;
   candidateHeroPlayerStatus = 'pending';
+  candidateHeroAfkReviewRequired = false;
   candidateHeroDirty = false;
   candidateHeroLoading = false;
   candidateHeroPrefillRunning = false;
@@ -1437,6 +1449,8 @@ function renderCandidateHeroLineup() {
   const allowsPartial = candidateHeroAllowsPartialLineup(candidateDraft);
   const marksPlayer = candidateDraft.view_context_label === 'played' &&
     ['scoreboard', 'result_page'].includes(candidateHeroLineup.screen_type);
+  const marksAfk = ['scoreboard', 'result_page'].includes(
+    candidateHeroLineup.screen_type);
   const playerPosition = candidateHeroPlayerPosition();
   playerUnreadable.classList.toggle('hidden', !marksPlayer);
   playerUnreadable.classList.toggle(
@@ -1539,7 +1553,7 @@ function renderCandidateHeroLineup() {
       card.appendChild(comparison);
       const details = document.createElement('div');
       details.className = 'candidate-hero-slot-details';
-      details.classList.toggle('with-player-action', marksPlayer);
+      details.classList.toggle('with-player-action', marksPlayer || marksAfk);
       const select = document.createElement('button');
       select.type = 'button';
       select.className = 'candidate-hero-select';
@@ -1558,6 +1572,8 @@ function renderCandidateHeroLineup() {
       select.appendChild(name);
       select.onclick = () => openCandidateHeroPicker(select, key);
       details.appendChild(select);
+      const slotActions = document.createElement('div');
+      slotActions.className = 'candidate-hero-slot-actions';
       if (marksPlayer) {
         const playerButton = document.createElement('button');
         playerButton.type = 'button';
@@ -1577,8 +1593,30 @@ function renderCandidateHeroLineup() {
           $('#candidate-save-state').textContent = '';
           renderCandidateHeroLineup();
         };
-        details.appendChild(playerButton);
+        slotActions.appendChild(playerButton);
       }
+      if (marksAfk) {
+        const afkButton = document.createElement('button');
+        const isAfk = slot.is_afk === true;
+        afkButton.type = 'button';
+        afkButton.className = 'candidate-hero-afk';
+        afkButton.classList.toggle('selected', isAfk);
+        afkButton.dataset.heroSlot = key;
+        afkButton.setAttribute('aria-pressed', String(isAfk));
+        afkButton.textContent = isAfk ? '✓ 挂机' : '挂机';
+        afkButton.title = isAfk
+          ? '这个位置已标记为挂机，再点一次取消'
+          : '这个位置的玩家挂机时勾选';
+        afkButton.onclick = () => {
+          slot.is_afk = !isAfk;
+          candidateHeroDirty = true;
+          $('#candidate-save-state').classList.remove('error');
+          $('#candidate-save-state').textContent = '';
+          renderCandidateHeroLineup();
+        };
+        slotActions.appendChild(afkButton);
+      }
+      if (slotActions.childElementCount) details.appendChild(slotActions);
       card.appendChild(details);
       slots.appendChild(card);
     });
@@ -1743,7 +1781,23 @@ function completeCandidateHeroLineupPrefetch(item, context, entry) {
 
 function applyCandidateHeroLineup(item, context, lineup, previousDraft = null) {
   lineup.slots ||= [];
+  const previousAfk = new Map(
+    ((candidateHeroLineup && candidateHeroLineup.slots) || [])
+      .filter((slot) => typeof slot.is_afk === 'boolean')
+      .map((slot) => [
+        candidateHeroKey(slot.side, slot.slot), slot.is_afk,
+      ]),
+  );
+  lineup.slots.forEach((slot) => {
+    const previous = previousAfk.get(candidateHeroKey(slot.side, slot.slot));
+    if (slot.is_afk == null && typeof previous === 'boolean') {
+      slot.is_afk = previous;
+    }
+  });
   candidateHeroLineup = lineup;
+  candidateHeroAfkReviewRequired =
+    ['scoreboard', 'result_page'].includes(lineup.screen_type) &&
+    lineup.slots.some((slot) => slot.is_afk == null);
   candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(lineup);
   candidateHeroPlayerSlot = candidateHeroPlayerKey(lineup);
   if (candidateHeroPlayerStatus === 'pending' && lineup.player_suggestion) {
@@ -1782,6 +1836,7 @@ async function loadCandidateHeroLineup(item, contextOverride = null) {
   candidateHeroManualSlots = new Set();
   candidateHeroPlayerSlot = null;
   candidateHeroPlayerStatus = 'pending';
+  candidateHeroAfkReviewRequired = false;
   candidateHeroDirty = false;
   candidateHeroDrawMode = false;
   closeCandidateHeroPicker();
@@ -2610,6 +2665,7 @@ function selectCandidateReviewLabel(field, value) {
 
 function candidateItemMatchesStatus(item, status) {
   if (!item) return false;
+  if (item.review_filter_completed) return false;
   if (status === 'all') return true;
   if (status === 'legacy_hero') {
     return Boolean(item.legacy_hero_needs_review);
@@ -2626,6 +2682,9 @@ function candidateItemMatchesStatus(item, status) {
   }
   if (status === 'missing_player') {
     return Boolean(item.needs_player_hero_review);
+  }
+  if (status === 'missing_afk') {
+    return Boolean(item.needs_afk_review);
   }
   return item.review_status === status;
 }
@@ -2657,7 +2716,7 @@ function candidateReviewTotal(stats, status) {
 function candidateStatusIsReviewQueue(status) {
   return [
     'needs_review', 'missing_player', 'pending', 'partial', 'legacy_hero',
-    'migration_review',
+    'migration_review', 'missing_afk', 'confirmed', 'human_confirmed',
   ].includes(status);
 }
 
@@ -2680,6 +2739,7 @@ function candidateReviewQuery(status, offset = null) {
     match_kind: $('#candidate-match-kind-filter').value,
     view_context: $('#candidate-view-context-filter').value,
     confidence: $('#candidate-confidence-filter').value,
+    review_reason: $('#candidate-review-reason-filter').value,
     streamer: $('#candidate-streamer-filter').value,
   };
   Object.entries(filters).forEach(([key, value]) => {
@@ -2765,6 +2825,7 @@ function applyCandidateMaterialSuggestion(suggestion, heroScope = 'direct') {
   $('#candidate-match-kind-filter').value = '';
   $('#candidate-view-context-filter').value = '';
   $('#candidate-confidence-filter').value = '';
+  $('#candidate-review-reason-filter').value = '';
   $('#candidate-streamer-filter').value = '';
   candidateHeroFilters = new Set(filters.hero ? [filters.hero] : []);
   candidateHeroScope = filters.hero ? heroScope : 'all';
@@ -3012,6 +3073,8 @@ function renderCandidateLegacyControls(stats, status) {
     ? '历史人工数据' : 'Worker 待复核';
   $('#candidate-page-hint').textContent = active
     ? '这里只把历史 HUD、积分板和结算图按主播、同一局和画面类型折叠成代表组；你补一张代表图即可，不需要把约 7000 张旧图逐张重标。未补头像的旧图不会被当作“没有头像”的负样本。'
+    : status === 'missing_afk'
+      ? '这里只显示挂机状态尚未补齐的积分板和结算图。点亮实际挂机的英雄；其余可见英雄会在你确认时明确保存为“未挂机”。HUD 不采集挂机标签。'
     : historical && status === 'migration_review'
       ? '这些图片只是把旧格式标签迁移成了新字段，还没有在统一打标页面由你重新确认。旧标签和新模型结果都只作为预填；请像新数据一样核对完整分类，并按画面选择 HUD、积分板、结算、无头像或看不清。确认后才会进入“新流程人工已确认”。'
       : historical && status === 'human_confirmed'
@@ -3293,6 +3356,8 @@ function renderCandidateItem() {
     ? '历史分类标签已迁移并保留；这里只补头像来源、圆框、英雄和本人位置'
     : item.legacy_migration_needs_review
       ? '旧格式标签已经预填，但你尚未按新流程确认；请核对完整分类和英雄标注'
+    : item.needs_afk_review
+    ? '请点亮实际挂机的英雄；未点亮的可见英雄会在确认时保存为“未挂机”'
     : item.needs_player_hero_review
     ? '原标注已保留，请补齐英雄阵容并标出主播本人'
     : item.review_status === 'confirmed'
@@ -3490,6 +3555,8 @@ async function saveCandidateReview(skip = false) {
       slot: slot.slot,
       hero_label: candidateHeroDraft.get(
         candidateHeroKey(slot.side, slot.slot)) || '',
+      ...(['scoreboard', 'result_page'].includes(heroContext.screenType)
+        ? {is_afk: slot.is_afk === true} : {}),
     })) : null;
   const missingHero = heroLabels && heroLabels.find(
     (value) => !value.hero_label);
@@ -3519,7 +3586,9 @@ async function saveCandidateReview(skip = false) {
       await candidateHeroPersistQueue;
     }
     const heroLineupPayload = heroLabels && (
-      candidateHeroDirty || candidateHeroLineup.review_status !== 'confirmed'
+      candidateHeroDirty || candidateHeroAfkReviewRequired ||
+      loadedStatus === 'missing_afk' ||
+      candidateHeroLineup.review_status !== 'confirmed'
     ) ? {
       heroes: heroLabels,
       player_status: candidateHeroPlayerStatus,
@@ -3561,9 +3630,16 @@ async function saveCandidateReview(skip = false) {
       candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(
         candidateHeroLineup);
       candidateHeroPlayerSlot = candidateHeroPlayerKey(candidateHeroLineup);
+      candidateHeroAfkReviewRequired = candidateHeroLineup.slots.some(
+        (slot) => slot.is_afk == null);
+      saved.needs_afk_review = candidateHeroAfkReviewRequired;
       candidateHeroDirty = false;
     }
     const updated = {...item, ...saved};
+    if (['confirmed', 'human_confirmed'].includes(loadedStatus) &&
+        $('#candidate-review-reason-filter').value) {
+      updated.review_filter_completed = true;
+    }
     if (!skip) {
       cacheCandidateReviewLabels(candidateDraft);
       cacheCandidateMatchContext(item, candidateDraft);
@@ -3681,14 +3757,17 @@ function bindCandidateReview() {
       $('#candidate-material-dialog').close();
     }
   };
-  $('#candidate-status-filter').onchange = loadCandidateReview;
+  $('#candidate-status-filter').onchange = () => {
+    renderCandidateReviewReasonFilter();
+    loadCandidateReview();
+  };
   $('#candidate-legacy-streamer').onchange = loadCandidateReview;
   $('#candidate-legacy-screen').onchange = loadCandidateReview;
   [
     '#candidate-source-type-filter', '#candidate-scene-filter',
     '#candidate-mode-filter', '#candidate-match-kind-filter',
     '#candidate-view-context-filter', '#candidate-confidence-filter',
-    '#candidate-streamer-filter',
+    '#candidate-review-reason-filter', '#candidate-streamer-filter',
   ].forEach((selector) => {
     $(selector).onchange = loadCandidateReview;
   });
@@ -3697,7 +3776,7 @@ function bindCandidateReview() {
       '#candidate-source-type-filter', '#candidate-scene-filter',
       '#candidate-mode-filter', '#candidate-match-kind-filter',
       '#candidate-view-context-filter', '#candidate-confidence-filter',
-      '#candidate-streamer-filter',
+      '#candidate-review-reason-filter', '#candidate-streamer-filter',
     ].forEach((selector) => { $(selector).value = ''; });
     if (candidateSourceScope === 'new') {
       $('#candidate-source-type-filter').value = CANDIDATE_DEFAULT_SOURCE_TYPE;

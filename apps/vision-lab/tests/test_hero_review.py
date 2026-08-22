@@ -179,6 +179,61 @@ class TestHeroReviewStorage(HeroReviewTestCase):
         self.assertEqual(confirmed['slots'][0]['confirmed_label'], 'Alpha')
         self.assertEqual(confirmed['slots'][0]['suggested_label'], 'Adagio')
 
+    def test_afk_labels_are_unknown_until_a_scoreboard_is_reviewed(self):
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=self.frame_id,
+            screen_type='scoreboard',
+            team_size=3,
+            method='hero-model-v1',
+            slots=self.slots(),
+        )
+
+        pending = db.get_training_review_hero_lineup(self.conn, self.frame_id)
+        self.assertTrue(all(slot['is_afk'] is None for slot in pending['slots']))
+        labels = [
+            {
+                'side': slot['side'],
+                'slot': slot['slot'],
+                'hero_label': 'Adagio',
+                'is_afk': slot['side'] == 'right' and slot['slot'] == 2,
+            }
+            for slot in pending['slots']
+        ]
+
+        confirmed = db.save_training_review_hero_lineup(
+            self.conn, frame_id=self.frame_id, labels=labels, allowed_labels={'Adagio'}
+        )
+
+        afk = {
+            (slot['side'], slot['slot']): slot['is_afk'] for slot in confirmed['slots']
+        }
+        self.assertTrue(afk[('right', 2)])
+        self.assertFalse(afk[('left', 1)])
+        self.assertFalse(any(value is None for value in afk.values()))
+
+    def test_omitted_afk_labels_do_not_turn_old_data_into_negative_samples(self):
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=self.frame_id,
+            screen_type='result_page',
+            team_size=3,
+            method='hero-model-v1',
+            slots=self.slots(),
+        )
+
+        confirmed = db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=self.frame_id,
+            labels=[
+                {'side': slot['side'], 'slot': slot['slot'], 'hero_label': 'Adagio'}
+                for slot in self.slots()
+            ],
+            allowed_labels={'Adagio'},
+        )
+
+        self.assertTrue(all(slot['is_afk'] is None for slot in confirmed['slots']))
+
     def test_saving_lineup_reuses_the_initial_read(self):
         db.replace_training_review_hero_suggestions(
             self.conn,

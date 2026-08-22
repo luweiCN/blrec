@@ -612,6 +612,7 @@ CREATE TABLE IF NOT EXISTS training_review_hero_slots (
     suggestion_confidence REAL NOT NULL DEFAULT 0 CHECK (
         suggestion_confidence BETWEEN 0 AND 1),
     confirmed_label TEXT,
+    is_afk INTEGER CHECK (is_afk IS NULL OR is_afk IN (0, 1)),
     updated_at TEXT NOT NULL,
     PRIMARY KEY (frame_id, side, slot)
 );
@@ -968,6 +969,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         """
     )
     _migrate_training_review_hero_lineups(conn)
+    _migrate_training_review_afk_slots(conn)
     _migrate_training_review_player_slot(conn)
     _prepare_training_review_match_columns(conn)
     _prepare_training_review_prefill_columns(conn)
@@ -1320,6 +1322,23 @@ def _migrate_training_review_player_slot(conn: sqlite3.Connection) -> None:
             "AND player_slot BETWEEN 1 AND team_size THEN 'identified' "
             "ELSE 'pending' END"
         )
+
+
+def _migrate_training_review_afk_slots(conn: sqlite3.Connection) -> None:
+    """旧阵容没有挂机结论；保留为 NULL，等待人工补标。"""
+    columns = {
+        row['name']
+        for row in conn.execute('PRAGMA table_info(training_review_hero_slots)')
+    }
+    if 'is_afk' not in columns:
+        conn.execute(
+            'ALTER TABLE training_review_hero_slots ADD COLUMN '
+            'is_afk INTEGER CHECK (is_afk IS NULL OR is_afk IN (0, 1))'
+        )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_training_review_hero_afk '
+        'ON training_review_hero_slots (is_afk, frame_id)'
+    )
 
 
 def repair_managed_paths(conn: sqlite3.Connection) -> Dict[str, int]:
@@ -3447,6 +3466,13 @@ _TRAINING_REVIEW_SOURCE_SCOPES = {'all', 'new', 'legacy'}
 _TRAINING_REVIEW_MODE_FILTERS = {'3v3', 'aram', '5v5', 'blitz', 'unreadable'}
 _TRAINING_REVIEW_KIND_FILTERS = {'pvp', 'bot', 'practice', 'unreadable'}
 _TRAINING_REVIEW_VIEW_FILTERS = {'played', 'spectated', 'replay', 'unreadable'}
+_TRAINING_REVIEW_REVIEW_REASONS = {
+    '',
+    'mode_unreadable',
+    'mode_conflict',
+    'hero_unreadable',
+    'hero_conflict',
+}
 _HERO_SCREEN_TYPES = {'gameplay_hud', 'scoreboard', 'result_page'}
 _HERO_LAYOUT_LABELS = _HERO_SCREEN_TYPES | {'none', 'unreadable'}
 _HERO_SELECT_VARIANTS = {'bp', 'blind', 'random', 'unreadable'}
@@ -3503,6 +3529,63 @@ AND (
     )
 )
 """
+_MISSING_AFK_REVIEW = """
+item.review_status = 'confirmed'
+AND EXISTS (
+    SELECT 1
+    FROM training_review_hero_lineups lineup
+    JOIN training_review_hero_slots slot ON slot.frame_id = lineup.frame_id
+    WHERE lineup.frame_id = item.frame_id
+      AND lineup.review_status = 'confirmed'
+      AND lineup.screen_type IN ('scoreboard', 'result_page')
+      AND slot.is_afk IS NULL
+)
+"""
+
+
+def _training_review_reason_condition(review_reason: str) -> Tuple[str, List[Any]]:
+    if review_reason not in _TRAINING_REVIEW_REVIEW_REASONS:
+        raise ValueError('复查原因筛选无效')
+    if not review_reason:
+        return '', []
+    if review_reason == 'mode_unreadable':
+        return "item.match_mode_label = 'unreadable'", []
+    if review_reason == 'hero_unreadable':
+        return (
+            'EXISTS (SELECT 1 FROM training_review_hero_slots slot '
+            'WHERE slot.frame_id=item.frame_id '
+            "AND slot.confirmed_label='unreadable')",
+            [],
+        )
+    if review_reason == 'hero_conflict':
+        return (
+            'EXISTS (SELECT 1 FROM training_review_hero_slots slot '
+            'WHERE slot.frame_id=item.frame_id '
+            "AND COALESCE(slot.confirmed_label,'') NOT IN ('','unreadable') "
+            "AND COALESCE(slot.suggested_label,'') NOT IN ('','unreadable') "
+            'AND slot.confirmed_label != slot.suggested_label '
+            'AND COALESCE(slot.suggestion_confidence,0) >= 0.85)',
+            [],
+        )
+    return (
+        'EXISTS (SELECT 1 FROM training_review_sources source '
+        'WHERE source.frame_id=item.frame_id '
+        "AND source.source_type='new_model_prefill' "
+        'AND source.id=(SELECT latest.id FROM training_review_sources latest '
+        'WHERE latest.frame_id=item.frame_id '
+        "AND latest.source_type='new_model_prefill' "
+        'ORDER BY latest.source_created_at DESC,latest.id DESC LIMIT 1) '
+        "AND item.match_mode_label IN ('3v3','aram','5v5') "
+        "AND json_extract(source.suggestions_json,'$.match_mode.label') "
+        "IN ('3v3','aram','5v5') "
+        "AND json_extract(source.suggestions_json,'$.match_mode.label') "
+        '!= item.match_mode_label '
+        "AND CAST(json_extract(source.suggestions_json,'$.match_mode.confidence') "
+        'AS REAL) >= 0.85)',
+        [],
+    )
+
+
 _UNIFIED_MANUAL_REVIEWED = """
 EXISTS (
     SELECT 1
@@ -3951,6 +4034,7 @@ def _training_review_item_dict(
     )
     item['boxes'] = get_boxes(conn, int(row['frame_id'])) if boxes is None else boxes
     item['needs_player_hero_review'] = bool(item['needs_player_hero_review'])
+    item['needs_afk_review'] = bool(item['needs_afk_review'])
     item['unified_manual_reviewed'] = bool(item['unified_manual_reviewed'])
     item['legacy_migration_needs_review'] = bool(
         item['review_status'] == 'confirmed'
@@ -6116,6 +6200,8 @@ def get_training_review_item(
                COALESCE(material.prefill_error, '') AS prefill_error,
                CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW})
                     THEN 1 ELSE 0 END AS needs_player_hero_review,
+               CASE WHEN ({_MISSING_AFK_REVIEW})
+                    THEN 1 ELSE 0 END AS needs_afk_review,
                CASE WHEN ({_UNIFIED_MANUAL_REVIEWED})
                     THEN 1 ELSE 0 END AS unified_manual_reviewed
         FROM training_review_items item
@@ -6162,11 +6248,14 @@ def get_training_review_items(
         batch = ordered_ids[start : start + 400]
         placeholders = ', '.join('?' for _frame_id in batch)
         review_columns = (
-            '0 AS needs_player_hero_review, ' '0 AS unified_manual_reviewed'
+            '0 AS needs_player_hero_review, 0 AS needs_afk_review, '
+            '0 AS unified_manual_reviewed'
             if pending_review_queue
             else (
                 f'CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW}) '
                 'THEN 1 ELSE 0 END AS needs_player_hero_review, '
+                f'CASE WHEN ({_MISSING_AFK_REVIEW}) '
+                'THEN 1 ELSE 0 END AS needs_afk_review, '
                 f'CASE WHEN ({_UNIFIED_MANUAL_REVIEWED}) '
                 'THEN 1 ELSE 0 END AS unified_manual_reviewed'
             )
@@ -7020,13 +7109,14 @@ def _training_review_attribute_frame_ids(
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
+    review_reason: str = '',
 ) -> Optional[set[int]]:
     implementation = (
         _training_review_indexed_attribute_frame_ids
         if training_review_material_index_complete(conn)
         else _training_review_unindexed_attribute_frame_ids
     )
-    return implementation(
+    matching = implementation(
         conn,
         streamer=streamer,
         source_type=source_type,
@@ -7038,6 +7128,18 @@ def _training_review_attribute_frame_ids(
         hero_scope=hero_scope,
         confidence=confidence,
     )
+    reason_condition, reason_parameters = _training_review_reason_condition(
+        review_reason
+    )
+    if not reason_condition:
+        return matching
+    rows = conn.execute(
+        'SELECT item.frame_id FROM training_review_items item WHERE '
+        + reason_condition,
+        reason_parameters,
+    ).fetchall()
+    reason_ids = {int(row['frame_id']) for row in rows}
+    return reason_ids if matching is None else matching & reason_ids
 
 
 def _training_review_visible_frame_ids(
@@ -7054,6 +7156,7 @@ def _training_review_visible_frame_ids(
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
+    review_reason: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[List[int], Dict[int, Dict[str, Any]]]:
@@ -7064,6 +7167,7 @@ def _training_review_visible_frame_ids(
         'legacy_hero',
         'migration_review',
         'human_confirmed',
+        'missing_afk',
     }:
         raise ValueError('训练复核状态无效')
     source_frame_ids = _training_review_origin_frame_ids(conn, source_scope)
@@ -7078,6 +7182,7 @@ def _training_review_visible_frame_ids(
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
+        review_reason=review_reason,
     )
     indexed = training_review_material_index_complete(conn)
     base = (
@@ -7112,6 +7217,12 @@ def _training_review_visible_frame_ids(
         base = (
             'SELECT item.frame_id FROM training_review_items item '
             f'WHERE {_MISSING_PLAYER_HERO_REVIEW} '
+            'ORDER BY item.updated_at DESC, item.frame_id DESC'
+        )
+    elif status == 'missing_afk':
+        base = (
+            'SELECT item.frame_id FROM training_review_items item '
+            f'WHERE {_MISSING_AFK_REVIEW} '
             'ORDER BY item.updated_at DESC, item.frame_id DESC'
         )
     elif status == 'migration_review':
@@ -7218,6 +7329,7 @@ def training_review_frame_ids(
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
+    review_reason: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> List[int]:
@@ -7235,6 +7347,7 @@ def training_review_frame_ids(
                 hero,
                 hero_scope != 'all',
                 confidence,
+                review_reason,
             )
         )
     )
@@ -7356,6 +7469,7 @@ def training_review_frame_ids(
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
+        review_reason=review_reason,
         prefill_ready_only=prefill_ready_only,
         result_groups=result_groups,
     )
@@ -7379,6 +7493,7 @@ def list_training_review_items(
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
+    review_reason: str = '',
     prefill_ready_only: bool = False,
 ) -> List[Dict[str, Any]]:
     items, _total = training_review_page(
@@ -7397,6 +7512,7 @@ def list_training_review_items(
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
+        review_reason=review_reason,
         prefill_ready_only=prefill_ready_only,
     )
     return items
@@ -7559,6 +7675,7 @@ def training_review_page(
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
+    review_reason: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -7585,8 +7702,10 @@ def training_review_page(
             int(stats['remaining_groups']),
         )
     if (
-        prefill_ready_only or training_review_material_index_complete(conn)
-    ) and status in _TRAINING_REVIEW_STATUSES | {'all', 'needs_review'}:
+        (prefill_ready_only or training_review_material_index_complete(conn))
+        and not review_reason
+        and status in _TRAINING_REVIEW_STATUSES | {'all', 'needs_review'}
+    ):
         frame_ids, total = _training_review_indexed_page_frame_ids(
             conn,
             status=status,
@@ -7627,6 +7746,7 @@ def training_review_page(
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
+        review_reason=review_reason,
         prefill_ready_only=prefill_ready_only,
         result_groups=result_groups,
     )
@@ -7656,6 +7776,7 @@ def count_training_review_items(
     hero: Sequence[str] | str = (),
     hero_scope: str = 'all',
     confidence: str = '',
+    review_reason: str = '',
 ) -> int:
     if status == 'legacy_hero':
         if source_scope == 'new':
@@ -7678,6 +7799,7 @@ def count_training_review_items(
         hero=hero,
         hero_scope=hero_scope,
         confidence=confidence,
+        review_reason=review_reason,
     )
     return len(visible)
 
@@ -7998,7 +8120,7 @@ def get_training_review_hero_lineup(
     result = dict(row)
     slots = conn.execute(
         'SELECT side, slot, crop_x, crop_y, crop_w, crop_h, '
-        'suggested_label, suggestion_confidence, confirmed_label, updated_at '
+        'suggested_label, suggestion_confidence, confirmed_label, is_afk, updated_at '
         'FROM training_review_hero_slots WHERE frame_id = ? '
         "ORDER BY CASE side WHEN 'left' THEN 0 ELSE 1 END, slot",
         (int(frame_id),),
@@ -8016,6 +8138,7 @@ def get_training_review_hero_lineup(
             'suggested_label': str(slot['suggested_label'] or ''),
             'suggestion_confidence': float(slot['suggestion_confidence']),
             'confirmed_label': slot['confirmed_label'],
+            'is_afk': (None if slot['is_afk'] is None else bool(int(slot['is_afk']))),
             'updated_at': slot['updated_at'],
         }
         for slot in slots
@@ -8480,7 +8603,10 @@ def save_training_review_hero_lineup(
         if hero_label not in accepted:
             raise ValueError('英雄名称无效')
         positions.add(position)
-        normalized.append((hero_label, side, slot))
+        raw_is_afk = value.get('is_afk') if 'is_afk' in value else None
+        if raw_is_afk is not None and not isinstance(raw_is_afk, bool):
+            raise ValueError('挂机标记必须是布尔值')
+        normalized.append((hero_label, raw_is_afk, side, slot))
     drawn_positions = {
         (str(slot['side']), int(slot['slot'])) for slot in lineup['slots']
     }
@@ -8491,6 +8617,10 @@ def save_training_review_hero_lineup(
         if not require_complete:
             raise ValueError('必须确认所有已画出的英雄位置')
         raise ValueError(f'必须确认完整的 {team_size * 2} 个英雄位置')
+    if lineup['screen_type'] == 'gameplay_hud' and any(
+        is_afk is not None for _label, is_afk, _side, _slot in normalized
+    ):
+        raise ValueError('HUD 不采集挂机标签')
     raw_player_status = str(player_status or '').strip()
     normalized_player_status = raw_player_status or (
         'identified'
@@ -8514,10 +8644,18 @@ def save_training_review_hero_lineup(
     timestamp = now()
     conn.executemany(
         'UPDATE training_review_hero_slots SET confirmed_label = ?, '
-        'updated_at = ? WHERE frame_id = ? AND side = ? AND slot = ?',
+        'is_afk=COALESCE(?,is_afk), updated_at = ? '
+        'WHERE frame_id = ? AND side = ? AND slot = ?',
         [
-            (label, timestamp, int(frame_id), side, slot)
-            for label, side, slot in normalized
+            (
+                label,
+                int(is_afk) if is_afk is not None else None,
+                timestamp,
+                int(frame_id),
+                side,
+                slot,
+            )
+            for label, is_afk, side, slot in normalized
         ],
     )
     conn.execute(
@@ -8542,8 +8680,8 @@ def save_training_review_hero_lineup(
             {
                 'team_size': team_size,
                 'heroes': [
-                    {'side': side, 'slot': slot, 'hero_label': label}
-                    for label, side, slot in normalized
+                    {'side': side, 'slot': slot, 'hero_label': label, 'is_afk': is_afk}
+                    for label, is_afk, side, slot in normalized
                 ],
                 'player_status': normalized_player_status,
                 'player_side': normalized_player_side,
@@ -8559,11 +8697,14 @@ def save_training_review_hero_lineup(
         refresh_training_review_material_index(conn, int(frame_id), commit=False)
     if commit:
         conn.commit()
-    labels_by_position = {(side, slot): label for label, side, slot in normalized}
+    labels_by_position = {
+        (side, slot): (label, is_afk) for label, is_afk, side, slot in normalized
+    }
     for slot in lineup['slots']:
-        slot['confirmed_label'] = labels_by_position[
-            (str(slot['side']), int(slot['slot']))
-        ]
+        label, is_afk = labels_by_position[(str(slot['side']), int(slot['slot']))]
+        slot['confirmed_label'] = label
+        if is_afk is not None:
+            slot['is_afk'] = is_afk
         slot['updated_at'] = timestamp
     lineup.update(
         {

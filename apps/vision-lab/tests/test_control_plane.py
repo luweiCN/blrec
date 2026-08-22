@@ -1183,6 +1183,18 @@ def test_candidate_save_posts_hero_lineup_with_review_in_one_request() -> None:
     assert 'hero_lineup:' in save
 
 
+def test_candidate_review_supports_confirmed_rechecks_and_afk_labels() -> None:
+    root = Path(__file__).resolve().parent.parent / 'labeler/static'
+    script = (root / 'app.js').read_text(encoding='utf-8')
+    page = (root / 'index.html').read_text(encoding='utf-8')
+
+    assert 'candidate-review-reason-filter' in page
+    assert "['missing_afk', '挂机状态待补']" in script
+    assert 'candidate-hero-afk' in script
+    assert '{is_afk: slot.is_afk === true}' in script
+    assert "loadedStatus === 'missing_afk'" in script
+
+
 def test_candidate_save_allows_partial_special_lineups() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
