@@ -65,6 +65,18 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+app-root,
+app-public-dashboard-shell {
+  display: block;
+}
+
+@media (max-width: 760px) {
+  app-root,
+  app-public-dashboard-shell {
+    width: 100vw;
+  }
+}
+
 button,
 input {
   font: inherit;
