@@ -36,6 +36,18 @@ describe('PlayerRatingTrendChartComponent', () => {
 
   afterEach(() => fixture.destroy());
 
+  it('clips the accessibility table without exposing its intrinsic width', () => {
+    component.points = [trendPoint('2026-08-01', 2_400)];
+    fixture.detectChanges();
+
+    const page = fixture.nativeElement as HTMLElement;
+    expect(
+      page.querySelector(
+        '.trend-chart-shell > .trend-chart-data-clip > table.trend-chart-data',
+      ),
+    ).not.toBeNull();
+  });
+
   it('marks the current point and announces the undated season record separately', () => {
     component.ariaLabel = '星河在 2026 夏季赛的当日排位分趋势';
     component.latestPointLabel = '当前';

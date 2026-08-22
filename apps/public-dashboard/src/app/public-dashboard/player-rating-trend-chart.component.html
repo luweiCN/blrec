@@ -7,24 +7,25 @@
   <p *ngIf="chartLoadFailed" class="trend-chart-error" role="status">
     趋势图暂时无法加载，请稍后刷新重试。
   </p>
+  <div class="trend-chart-data-clip">
+    <table class="trend-chart-data">
+      <caption>{{ chartAriaLabel }}</caption>
+      <thead>
+        <tr>
+          <th scope="col">日期</th>
+          <th scope="col">当日排位分</th>
+          <th scope="col">排名</th>
+          <th scope="col">变化</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let point of points; trackBy: trackPoint">
+          <td>{{ formatDate(point.publicationDate) }}</td>
+          <td>{{ point.displayScore | number: "1.0-0" }}</td>
+          <td>第 {{ point.rank }} 名</td>
+          <td>{{ deltaText(point) }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
 </div>
-
-<table class="trend-chart-data">
-  <caption>{{ chartAriaLabel }}</caption>
-  <thead>
-    <tr>
-      <th scope="col">日期</th>
-      <th scope="col">当日排位分</th>
-      <th scope="col">排名</th>
-      <th scope="col">变化</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr *ngFor="let point of points; trackBy: trackPoint">
-      <td>{{ formatDate(point.publicationDate) }}</td>
-      <td>{{ point.displayScore | number: "1.0-0" }}</td>
-      <td>第 {{ point.rank }} 名</td>
-      <td>{{ deltaText(point) }}</td>
-    </tr>
-  </tbody>
-</table>
