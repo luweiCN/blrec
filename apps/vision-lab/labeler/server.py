@@ -2547,6 +2547,15 @@ def api_save_training_review_item(
             try:
                 saved_lineup = None
                 if hero_lineup_body is not None:
+                    require_complete_lineup = not (
+                        db.training_review_allows_partial_hero_lineup(
+                            match_kind_label=body.get('match_kind_label'),
+                            result_panel_label=result_label,
+                            result_occlusion=str(
+                                body.get('result_occlusion') or 'none'
+                            ),
+                        )
+                    )
                     saved_lineup = db.save_training_review_hero_lineup(
                         conn,
                         frame_id=frame_id,
@@ -2555,6 +2564,7 @@ def api_save_training_review_item(
                         player_status=hero_lineup_body.get('player_status'),
                         player_side=hero_lineup_body.get('player_side'),
                         player_slot=hero_lineup_body.get('player_slot'),
+                        require_complete=require_complete_lineup,
                         refresh_material_index=False,
                         commit=False,
                     )

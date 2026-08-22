@@ -7635,6 +7635,17 @@ def count_training_review_items(
     return len(visible)
 
 
+def training_review_allows_partial_hero_lineup(
+    *,
+    match_kind_label: Optional[str],
+    result_panel_label: Optional[str],
+    result_occlusion: str,
+) -> bool:
+    return match_kind_label == 'practice' or (
+        result_panel_label == 'result_panel' and result_occlusion == 'occluded'
+    )
+
+
 def save_training_review(
     conn: sqlite3.Connection,
     *,
@@ -7734,6 +7745,11 @@ def save_training_review(
         normalized_occluders = []
     elif normalized_occlusion != 'occluded':
         normalized_occluders = []
+    allows_partial_lineup = training_review_allows_partial_hero_lineup(
+        match_kind_label=match_kind_label,
+        result_panel_label=result_panel_label,
+        result_occlusion=normalized_occlusion,
+    )
     if status == 'confirmed':
         if match_flow_label is None or result_panel_label is None:
             raise ValueError('确认前必须判断对局流程和结算面板')
@@ -7777,11 +7793,14 @@ def save_training_review(
             ):
                 raise ValueError('HUD 或积分板不能同时标记真正结算面板')
             lineup = get_training_review_hero_lineup(conn, int(frame_id))
-            if (
-                lineup is None
-                or lineup['screen_type'] != hero_layout_label
-                or lineup['review_status'] != 'confirmed'
-                or len(lineup['slots']) != int(lineup['team_size']) * 2
+            if lineup is None or lineup['screen_type'] != hero_layout_label:
+                raise ValueError('请先画出并确认英雄头像')
+            if lineup['review_status'] != 'confirmed' or not lineup['slots']:
+                if allows_partial_lineup:
+                    raise ValueError('请至少画出并确认一个实际可见的英雄头像')
+                raise ValueError('请先画满并确认全部英雄头像')
+            if not allows_partial_lineup and (
+                len(lineup['slots']) != int(lineup['team_size']) * 2
             ):
                 raise ValueError('请先画满并确认全部英雄头像')
     if status != 'skipped' and result_panel_label != 'result_panel':
@@ -8387,6 +8406,7 @@ def save_training_review_hero_lineup(
     player_status: Optional[str] = None,
     player_side: Optional[str] = None,
     player_slot: Optional[int] = None,
+    require_complete: bool = True,
     refresh_material_index: bool = True,
     commit: bool = True,
 ) -> Dict[str, Any]:
@@ -8414,7 +8434,15 @@ def save_training_review_hero_lineup(
             raise ValueError('英雄名称无效')
         positions.add(position)
         normalized.append((hero_label, side, slot))
-    if positions != expected:
+    drawn_positions = {
+        (str(slot['side']), int(slot['slot'])) for slot in lineup['slots']
+    }
+    required_positions = expected if require_complete else drawn_positions
+    if not required_positions:
+        raise ValueError('必须至少确认一个实际可见的英雄位置')
+    if positions != required_positions:
+        if not require_complete:
+            raise ValueError('必须确认所有已画出的英雄位置')
         raise ValueError(f'必须确认完整的 {team_size * 2} 个英雄位置')
     raw_player_status = str(player_status or '').strip()
     normalized_player_status = raw_player_status or (
@@ -8432,7 +8460,7 @@ def save_training_review_hero_lineup(
             normalized_player_slot = int(player_slot)
         except (TypeError, ValueError) as exc:
             raise ValueError('主播英雄位置无效') from exc
-        if (normalized_player_side, normalized_player_slot) not in expected:
+        if (normalized_player_side, normalized_player_slot) not in positions:
             raise ValueError('主播英雄位置无效')
     elif player_side is not None or player_slot is not None:
         raise ValueError('主播英雄位置状态冲突')

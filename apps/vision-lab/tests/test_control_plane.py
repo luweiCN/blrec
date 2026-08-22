@@ -1046,7 +1046,64 @@ def test_review_save_bundles_dirty_hero_lineup_into_one_transaction(
     assert result['hero_lineup'] == {'applicable': True, **lineup}
     assert save_lineup.call_args.kwargs['refresh_material_index'] is False
     assert save_lineup.call_args.kwargs['commit'] is False
+    assert save_lineup.call_args.kwargs['require_complete'] is True
     assert save_review.call_args.kwargs['commit'] is True
+
+
+@pytest.mark.parametrize(
+    ('match_kind', 'result_label', 'hero_layout', 'result_occlusion'),
+    [
+        ('practice', 'no_result_panel', 'gameplay_hud', 'none'),
+        ('pvp', 'result_panel', 'result_page', 'occluded'),
+    ],
+)
+def test_review_save_allows_partial_visible_lineup_for_special_contexts(
+    monkeypatch, match_kind, result_label, hero_layout, result_occlusion
+) -> None:
+    connection = mock.Mock()
+    connection.execute.return_value.fetchone.return_value = (1,)
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(
+        server.hero_review, 'allowed_hero_labels', mock.Mock(return_value={'Adagio'})
+    )
+    save_lineup = mock.Mock(
+        return_value={
+            'frame_id': 8,
+            'screen_type': hero_layout,
+            'review_status': 'confirmed',
+            'slots': [{'side': 'left', 'slot': 1}],
+        }
+    )
+    monkeypatch.setattr(server.db, 'save_training_review_hero_lineup', save_lineup)
+    monkeypatch.setattr(
+        server.db,
+        'save_training_review',
+        mock.Mock(return_value={'frame_id': 8, 'review_status': 'confirmed'}),
+    )
+    monkeypatch.setattr(server.db, 'save_box', mock.Mock())
+    monkeypatch.setattr(server, '_mark_training_review_saved', mock.Mock())
+
+    body = {
+        'match_flow_label': 'match_flow',
+        'match_mode_label': '5v5' if match_kind == 'practice' else '3v3',
+        'match_kind_label': match_kind,
+        'view_context_label': 'played',
+        'hero_select_label': 'not_select',
+        'result_panel_label': result_label,
+        'hero_layout_label': hero_layout,
+        'result_occlusion': result_occlusion,
+        'review_status': 'confirmed',
+        'hero_lineup': {
+            'heroes': [{'side': 'left', 'slot': 1, 'hero_label': 'Adagio'}],
+            'player_status': 'unreadable',
+        },
+    }
+    if result_label == 'result_panel':
+        body['result_box'] = {'x': 0.1, 'y': 0.2, 'w': 0.8, 'h': 0.6}
+
+    server.api_save_training_review_item(8, body)
+
+    assert save_lineup.call_args.kwargs['require_complete'] is False
 
 
 def test_candidate_save_posts_hero_lineup_with_review_in_one_request() -> None:
@@ -1061,6 +1118,27 @@ def test_candidate_save_posts_hero_lineup_with_review_in_one_request() -> None:
 
     assert '/hero-lineup' not in save
     assert 'hero_lineup:' in save
+
+
+def test_candidate_save_allows_partial_special_lineups() -> None:
+    script = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
+    ).read_text(encoding='utf-8')
+    helper = script[
+        script.index('function candidateHeroAllowsPartialLineup(') : script.index(
+            'function candidateHeroLayoutComplete('
+        )
+    ]
+    save = script[
+        script.index('async function saveCandidateReview(') : script.index(
+            'function candidatePoint('
+        )
+    ]
+
+    assert "draft.match_kind_label === 'practice'" in helper
+    assert "draft.result_occlusion === 'occluded'" in helper
+    assert 'candidateHeroAllowsPartialLineup(candidateDraft)' in save
+    assert '请至少圈出一个实际可见的英雄头像' in save
 
 
 def test_candidate_save_prepares_next_item_while_current_item_is_saving() -> None:

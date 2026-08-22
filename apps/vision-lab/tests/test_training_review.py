@@ -232,6 +232,157 @@ class TestMatchContextLabels(TrainingReviewTestCase):
         )
         self.assertEqual(export._confirmed_hero_lineup_samples(self.conn), [])
 
+    def test_practice_can_confirm_only_the_visible_hero(self):
+        frame_id = self.frame(8)
+        db.add_training_review_source(
+            self.conn, frame_id=frame_id, source_type='worker', source_id='practice:8'
+        )
+        slots = [
+            {
+                'side': 'left',
+                'slot': 1,
+                'crop': {'x': 0.4, 'y': 0.05, 'w': 0.05, 'h': 0.08},
+            }
+        ]
+        db.replace_training_review_hero_layout(
+            self.conn,
+            frame_id=frame_id,
+            screen_type='gameplay_hud',
+            team_size=5,
+            method='manual-circle-v1',
+            slots=slots,
+        )
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=[{'side': 'left', 'slot': 1, 'hero_label': 'Adagio'}],
+            allowed_labels={'Adagio'},
+            require_complete=False,
+        )
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='5v5',
+            match_kind_label='practice',
+            view_context_label='played',
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            hero_layout_label='gameplay_hud',
+            status='confirmed',
+        )
+
+        self.assertEqual(reviewed['review_status'], 'confirmed')
+        lineup = db.get_training_review_hero_lineup(self.conn, frame_id)
+        self.assertEqual(len(lineup['slots']), 1)
+
+    def test_occluded_result_can_confirm_only_visible_heroes(self):
+        frame_id = self.frame(9)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='occluded-result:9',
+        )
+        db.save_box(self.conn, frame_id, 'result_panel', 0.1, 0.2, 0.8, 0.6)
+        slots = [
+            {
+                'side': side,
+                'slot': 1,
+                'crop': {
+                    'x': 0.35 if side == 'left' else 0.6,
+                    'y': 0.25,
+                    'w': 0.05,
+                    'h': 0.08,
+                },
+            }
+            for side in ('left', 'right')
+        ]
+        db.replace_training_review_hero_layout(
+            self.conn,
+            frame_id=frame_id,
+            screen_type='result_page',
+            team_size=3,
+            method='manual-circle-v1',
+            slots=slots,
+        )
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=[
+                {'side': row['side'], 'slot': 1, 'hero_label': 'Adagio'}
+                for row in slots
+            ],
+            allowed_labels={'Adagio'},
+            player_status='unreadable',
+            require_complete=False,
+        )
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='3v3',
+            match_kind_label='pvp',
+            view_context_label='played',
+            hero_select_label='not_select',
+            result_panel_label='result_panel',
+            hero_layout_label='result_page',
+            result_occlusion='occluded',
+            occluder_types=['platform_ui'],
+            status='confirmed',
+        )
+
+        self.assertEqual(reviewed['review_status'], 'confirmed')
+        lineup = db.get_training_review_hero_lineup(self.conn, frame_id)
+        self.assertEqual(len(lineup['slots']), 2)
+
+    def test_clear_normal_match_still_rejects_partial_hero_lineup(self):
+        frame_id = self.frame(10)
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='worker',
+            source_id='clear-match:10',
+        )
+        slots = [
+            {
+                'side': 'left',
+                'slot': 1,
+                'crop': {'x': 0.4, 'y': 0.05, 'w': 0.05, 'h': 0.08},
+            }
+        ]
+        db.replace_training_review_hero_layout(
+            self.conn,
+            frame_id=frame_id,
+            screen_type='gameplay_hud',
+            team_size=3,
+            method='manual-circle-v1',
+            slots=slots,
+        )
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=[{'side': 'left', 'slot': 1, 'hero_label': 'Adagio'}],
+            allowed_labels={'Adagio'},
+            require_complete=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, '画满并确认全部英雄头像'):
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='match_flow',
+                match_mode_label='3v3',
+                match_kind_label='pvp',
+                view_context_label='played',
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+                hero_layout_label='gameplay_hud',
+                status='confirmed',
+            )
+
     def test_legacy_explicit_context_is_preserved_without_guessing_unknowns(self):
         explicit = self.frame(5)
         unknown = self.frame(6)

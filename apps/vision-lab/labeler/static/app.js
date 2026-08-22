@@ -1097,6 +1097,14 @@ function candidateNextHeroPosition() {
       candidateHeroKey(position.side, position.slot))) || null;
 }
 
+function candidateHeroAllowsPartialLineup(draft = candidateDraft) {
+  return Boolean(draft && (
+    draft.match_kind_label === 'practice' ||
+    (draft.result_panel_label === 'result_panel' &&
+      draft.result_occlusion === 'occluded')
+  ));
+}
+
 function candidateHeroLayoutComplete() {
   return Boolean(
     candidateHeroLineup &&
@@ -1337,6 +1345,7 @@ function renderCandidateHeroLineup() {
   const screenName = CANDIDATE_HERO_LAYOUTS[candidateHeroLineup.screen_type]
     || candidateHeroLineup.screen_type;
   const complete = candidateHeroLayoutComplete();
+  const allowsPartial = candidateHeroAllowsPartialLineup(candidateDraft);
   const marksPlayer = candidateDraft.view_context_label === 'played' &&
     ['scoreboard', 'result_page'].includes(candidateHeroLineup.screen_type);
   const playerPosition = candidateHeroPlayerPosition();
@@ -1350,6 +1359,9 @@ function renderCandidateHeroLineup() {
   const next = candidateNextHeroPosition();
   const status = candidateHeroLineup.review_status === 'confirmed'
     ? '阵容已经人工确认；修改任意下拉框后会更新。'
+    : allowsPartial && candidateHeroLineup.slots.length
+      ? `已标出 ${candidateHeroLineup.slots.length} 个可见头像；` +
+        '当前场景只需确认实际能看见的头像。'
     : complete
       ? `算法预填 ${recognized}/${candidateHeroLineup.slots.length} 个；` +
         '正确的不用改，只修改错误或空白的位置。'
@@ -1358,7 +1370,7 @@ function renderCandidateHeroLineup() {
           `${candidateHeroLineup.team_size * 2} 个；下一框是` +
           `${next.side === 'left' ? '左队' : '右队'}第 ${next.slot} 个。`
         : '还没有英雄圆框。';
-  const drawingHint = !complete
+  const drawingHint = !complete && !allowsPartial
     ? candidateHeroLineup.slots.length
       ? ' 后续圆框沿用第一个大小，可直接点头像中心。'
       : ' 先拖出第一个圆框确定大小。'
@@ -3331,15 +3343,28 @@ async function saveCandidateReview(skip = false) {
     return;
   }
   const heroContext = candidateHeroContext(item);
-  if (!skip && heroContext && (
-    !heroContext.teamSize ||
-    !candidateHeroLineup ||
-    candidateHeroLineup.screen_type !== heroContext.screenType ||
-    candidateHeroLineup.team_size !== heroContext.teamSize ||
-    !candidateHeroLayoutComplete()
-  )) {
-    showCandidateSaveError('请先选择每队人数，并按顺序画满全部英雄圆框');
-    return;
+  if (!skip && heroContext) {
+    if (!heroContext.teamSize) {
+      showCandidateSaveError('请先选择每队人数');
+      return;
+    }
+    if (!candidateHeroLineup ||
+        candidateHeroLineup.screen_type !== heroContext.screenType ||
+        candidateHeroLineup.team_size !== heroContext.teamSize) {
+      showCandidateSaveError('英雄阵容尚未加载完成，请稍等后再确认');
+      return;
+    }
+    const allowsPartial = candidateHeroAllowsPartialLineup(candidateDraft);
+    if (!candidateHeroLineup.slots.length) {
+      showCandidateSaveError(allowsPartial
+        ? '请至少圈出一个实际可见的英雄头像'
+        : '请按顺序画满全部英雄圆框');
+      return;
+    }
+    if (!allowsPartial && !candidateHeroLayoutComplete()) {
+      showCandidateSaveError('请按顺序画满全部英雄圆框');
+      return;
+    }
   }
   const heroLabels = !skip && heroContext && candidateHeroLineup
     ? candidateHeroLineup.slots.map((slot) => ({
