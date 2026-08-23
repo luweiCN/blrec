@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+import os
+import platform
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PIL import Image
@@ -106,6 +109,7 @@ TASK_HINTS = [
 ]
 
 _sessions: Dict[str, Any] = {}  # name -> onnxruntime.InferenceSession
+_sessions_lock = threading.RLock()
 _torch_models: Dict[str, Any] = {}  # name -> (nn.Module, device)
 
 MULTI_CLASSES = {
@@ -133,27 +137,56 @@ def _load_session(name: str) -> Any:
     return _load_session_path(path)
 
 
+def _preferred_execution_providers(
+    available: Sequence[str],
+    *,
+    preference: str = 'auto',
+    system_name: Optional[str] = None,
+) -> Tuple[str, ...]:
+    normalized = str(preference or 'auto').strip().lower()
+    if normalized not in {'auto', 'coreml', 'cpu'}:
+        raise ValueError('VISION_LAB_EXECUTION_PROVIDER 只能是 auto、coreml 或 cpu')
+    available_set = set(available)
+    wants_coreml = normalized == 'coreml' or (
+        normalized == 'auto' and (system_name or platform.system()) == 'Darwin'
+    )
+    if wants_coreml and 'CoreMLExecutionProvider' in available_set:
+        providers = ['CoreMLExecutionProvider']
+        if 'CPUExecutionProvider' in available_set:
+            providers.append('CPUExecutionProvider')
+        return tuple(providers)
+    if 'CPUExecutionProvider' not in available_set:
+        raise RuntimeError('ONNX Runtime 缺少 CPUExecutionProvider')
+    return ('CPUExecutionProvider',)
+
+
 def _load_session_path(path: Path) -> Any:
     cache_key = str(path.resolve())
-    if cache_key in _sessions:
-        return _sessions[cache_key]
     import onnxruntime as ort
 
-    if not path.exists():
-        raise FileNotFoundError(f'模型不存在: {path}')
-    so = ort.SessionOptions()
-    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    so.intra_op_num_threads = 4
-    _sessions[cache_key] = ort.InferenceSession(
-        str(path), so, providers=['CPUExecutionProvider']
-    )
-    return _sessions[cache_key]
+    with _sessions_lock:
+        if cache_key in _sessions:
+            return _sessions[cache_key]
+        if not path.exists():
+            raise FileNotFoundError(f'模型不存在: {path}')
+        providers = _preferred_execution_providers(
+            ort.get_available_providers(),
+            preference=os.environ.get('VISION_LAB_EXECUTION_PROVIDER', 'auto'),
+        )
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        so.intra_op_num_threads = 1 if providers[0] == 'CoreMLExecutionProvider' else 4
+        _sessions[cache_key] = ort.InferenceSession(
+            str(path), so, providers=list(providers)
+        )
+        return _sessions[cache_key]
 
 
 def clear_model_cache() -> None:
     """发布新测试模型后让下一次推理重新加载文件。"""
-    _sessions.clear()
-    _torch_models.clear()
+    with _sessions_lock:
+        _sessions.clear()
+        _torch_models.clear()
 
 
 def list_models() -> List[Dict[str, Any]]:

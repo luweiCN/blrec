@@ -179,6 +179,44 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         assert after_5v5['candidate_count'] == 0
         assert after_3v3['confirmed_count'] == 1
 
+    def test_material_suggestions_separate_ready_waiting_and_failed_prefill(
+        self,
+    ) -> None:
+        pending = self.frame(20)
+        failed = self.frame(21)
+        ready = self.frame(22)
+        for frame_id in (pending, failed, ready):
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type='worker',
+                source_id=f'worker-5v5-hud-{frame_id}',
+                suggestions={'match_mode': {'label': '5v5', 'confidence': 0.9}},
+                metadata={'screen_type': 'gameplay_hud'},
+            )
+        db.update_training_review_prefill_state(
+            self.conn,
+            frame_id=failed,
+            status='failed',
+            stage='core',
+            error='test failure',
+        )
+        db.update_training_review_prefill_state(
+            self.conn, frame_id=ready, status='ready', stage='complete'
+        )
+
+        suggestion = next(
+            item
+            for item in db.training_review_material_suggestions(self.conn)
+            if item['kind'] == 'scene_mode'
+            and item['scene'] == 'gameplay_hud'
+            and item['match_mode'] == '5v5'
+        )
+
+        assert suggestion['candidate_count'] == 1
+        assert suggestion['prefill_waiting_count'] == 1
+        assert suggestion['prefill_failed_count'] == 1
+
     def test_material_suggestions_include_unindexed_confirmed_truth(self) -> None:
         frame_id = self.frame(201)
         db.add_training_review_source(
@@ -1279,4 +1317,4 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         finally:
             self.conn.set_trace_callback(None)
 
-        assert len(statements) == 6
+        assert len(statements) == 7

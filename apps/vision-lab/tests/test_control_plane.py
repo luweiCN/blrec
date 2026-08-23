@@ -1273,8 +1273,10 @@ def test_worker_control_plane_redirects_only_frame_media_to_nas(monkeypatch) -> 
 
     assert isinstance(image, RedirectResponse)
     assert image.headers['location'] == 'http://nas:8800/api/frames/17/image'
+    assert image.headers['cache-control'] == 'private, max-age=31536000, immutable'
     assert isinstance(thumb, RedirectResponse)
     assert thumb.headers['location'] == 'http://nas:8800/api/frames/17/thumb'
+    assert thumb.headers['cache-control'] == 'private, max-age=31536000, immutable'
     local_database.assert_not_called()
 
 

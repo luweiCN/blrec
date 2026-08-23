@@ -14,6 +14,7 @@ from blrec.vainglory.analyzer import (
     VaingloryVideoAnalyzer,
     VideoPart,
     _apply_hud_team_size_evidence,
+    _avatar_screen_context,
     _candidate_segment_start,
     _cap_training_candidate_timestamps,
     _ModeConflict,
@@ -191,6 +192,91 @@ def test_ten_hud_positions_disprove_three_player_mode() -> None:
     assert _apply_hud_team_size_evidence(
         {0: '5v5'}, {0: tuple('hero-{}'.format(index) for index in range(6))}
     ) == {0: '5v5'}
+
+
+def test_avatar_screen_context_separates_top_hud_and_vertical_scoreboard() -> None:
+    frame = RgbFrame(100, 50, b'\x00\x00\x00' * 5_000)
+    hud = tuple(
+        HeroAvatarDetection(PixelRect(1 + index * 9, 3, 8 + index * 9, 8), 0.9)
+        for index in range(10)
+    )
+    scoreboard = tuple(
+        HeroAvatarDetection(
+            PixelRect(
+                30 if index < 3 else 65,
+                9 + (index % 3) * 10,
+                35 if index < 3 else 70,
+                14 + (index % 3) * 10,
+            ),
+            0.85,
+        )
+        for index in range(6)
+    )
+
+    assert _avatar_screen_context(frame, hud) == ('gameplay_hud', 5, 0.9)
+    assert _avatar_screen_context(frame, scoreboard) == ('scoreboard', 3, 0.85)
+    assert _avatar_screen_context(frame, scoreboard[:5]) is None
+
+
+def test_avatar_screen_probe_keeps_spread_clear_hud_and_best_scoreboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = {
+        at_ms: RgbFrame(100, 50, bytes([index, 0, 0]) * 5_000)
+        for index, at_ms in enumerate((10_000, 30_000, 60_000, 80_000), 1)
+    }
+
+    class Sampler:
+        def classify_window_frames(
+            self, _path: str, _window: ScanWindow, *, interval_seconds: int
+        ):
+            assert interval_seconds == 15
+            return tuple(TimedFrame(at_ms, frame) for at_ms, frame in frames.items())
+
+    class Detector:
+        def detect(self, frame: RgbFrame):
+            marker = frame.pixels[0]
+            if marker in {1, 2, 4}:
+                confidence = {1: 0.7, 2: 0.95, 4: 0.9}[marker]
+                return tuple(
+                    HeroAvatarDetection(
+                        PixelRect(1 + index * 15, 3, 8 + index * 15, 8), confidence
+                    )
+                    for index in range(6)
+                )
+            return tuple(
+                HeroAvatarDetection(
+                    PixelRect(
+                        30 if index < 3 else 65,
+                        9 + (index % 3) * 10,
+                        35 if index < 3 else 70,
+                        14 + (index % 3) * 10,
+                    ),
+                    0.88,
+                )
+                for index in range(6)
+            )
+
+    monkeypatch.setattr(
+        analyzer_module, 'jpeg_bytes', lambda frame: b'jpeg-' + frame.pixels
+    )
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=Sampler(), hero_avatar_detector=Detector()  # type: ignore[arg-type]
+    )
+
+    candidates = analyzer._probe_avatar_screen_candidates(
+        'unused', ((0, 90_000),), {0: '3v3'}, cancelled=None, interval_seconds=15
+    )
+
+    assert [
+        (item.at_ms, item.stage_class, item.suggestion_confidence)
+        for item in candidates
+    ] == [
+        (30_000, 'gameplay_hud', 0.95),
+        (60_000, 'scoreboard', 0.88),
+        (80_000, 'gameplay_hud', 0.9),
+    ]
+    assert all('清晰' in item.selection_reason for item in candidates)
 
 
 def test_mode_conflict_candidates_are_selected_before_regular_samples() -> None:

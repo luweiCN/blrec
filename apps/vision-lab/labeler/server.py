@@ -692,9 +692,11 @@ def api_frame(frame_id: int) -> Dict[str, Any]:
 
 @app.get('/api/frames/{frame_id}/image')
 def api_frame_image(frame_id: int) -> Response:
+    cache_headers = {'Cache-Control': 'private, max-age=31536000, immutable'}
     if config.MEDIA_SERVER_URL:
         return RedirectResponse(
-            f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/image'
+            f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/image',
+            headers=cache_headers,
         )
     with _db_lock:
         conn = _conn()
@@ -706,14 +708,18 @@ def api_frame_image(frame_id: int) -> Response:
             conn.close()
     if not row:
         raise HTTPException(404, '帧不存在')
-    return FileResponse(row['frame_path'], media_type='image/jpeg')
+    return FileResponse(
+        row['frame_path'], media_type='image/jpeg', headers=cache_headers
+    )
 
 
 @app.get('/api/frames/{frame_id}/thumb')
 def api_frame_thumb(frame_id: int) -> Response:
+    cache_headers = {'Cache-Control': 'private, max-age=31536000, immutable'}
     if config.MEDIA_SERVER_URL:
         return RedirectResponse(
-            f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/thumb'
+            f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/thumb',
+            headers=cache_headers,
         )
     with _db_lock:
         conn = _conn()
@@ -730,7 +736,7 @@ def api_frame_thumb(frame_id: int) -> Response:
         if row['thumb_path'] and Path(row['thumb_path']).exists()
         else row['frame_path']
     )
-    return FileResponse(path, media_type='image/jpeg')
+    return FileResponse(path, media_type='image/jpeg', headers=cache_headers)
 
 
 def _fetch_frame_image_bytes(frame_id: int) -> bytes:

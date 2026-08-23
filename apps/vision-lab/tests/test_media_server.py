@@ -1,3 +1,4 @@
+import tempfile
 from pathlib import Path
 
 from labeler import media_server
@@ -14,6 +15,9 @@ def test_nas_media_server_exposes_only_media_and_health_routes() -> None:
     assert '/api/vision-workers/model-runs/{run_id}/artifact' in paths
     assert '/api/vision-workers/model-runs/{run_id}/metadata' in paths
     assert '/api/vision-workers/model-packages/{package_id}/archive' in paths
+    assert '/api/vision-workers/database-backups' in paths
+    assert '/api/vision-workers/database-backups/latest' in paths
+    assert '/api/vision-workers/database-backups/{filename}' in paths
     assert '/api/training-candidates/ingest' in paths
     assert '/api/training-review/items/{frame_id}' not in paths
     assert '/api/training-review/items' not in paths
@@ -60,3 +64,23 @@ def test_nas_compose_overrides_the_image_entrypoint() -> None:
 
     assert "entrypoint: ['blrec-vision-media']" in compose
     assert "command: ['blrec-vision-media']" not in compose
+
+
+def test_latest_database_backup_exposes_verified_identity(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        name = 'vision-lab-20260823T010203Z-0123456789ab.dump'
+        (directory / name).write_bytes(b'backup')
+        (directory / f'{name}.sha256').write_text(
+            f'{"a" * 64}  {name}\n', encoding='ascii'
+        )
+        monkeypatch.setattr(media_server.config, 'DATABASE_BACKUP_DIR', directory)
+        monkeypatch.setattr(
+            media_server.server, '_require_vision_worker', lambda _request: None
+        )
+
+        response = media_server.api_latest_vision_database_backup(object())
+
+        assert response.headers['x-backup-filename'] == name
+        assert response.headers['x-checksum-sha256'] == 'a' * 64
+        assert response.headers['cache-control'] == 'no-store'

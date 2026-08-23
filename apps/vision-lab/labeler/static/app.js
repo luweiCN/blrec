@@ -2936,10 +2936,14 @@ function renderCandidateMaterialSuggestions() {
           (missingScene ? ` · 另有 ${missingScene} 局没有${suggestion.scene_label}候选` : ''),
       );
     } else {
+      const waiting = Number(suggestion.prefill_waiting_count || 0);
+      const failed = Number(suggestion.prefill_failed_count || 0);
       counts.append(
         '已确认 ', confirmed,
         ` 张${confirmedBreakdown} / 建议 ${suggestion.target_count || 0} 张 · `,
-        `${queueName}现有 ${available} 张待复核`,
+        `${queueName}可立即复核 ${available} 张` +
+          (waiting ? ` · 已采集待模型预填 ${waiting} 张` : '') +
+          (failed ? ` · 预填失败 ${failed} 张` : ''),
       );
     }
 
@@ -3172,8 +3176,8 @@ function renderCandidateSyncStats(stats) {
 }
 
 function candidateImageUrl(item) {
-  return `/api/frames/${item.frame_id}/image?t=${encodeURIComponent(
-    item.updated_at)}`;
+  const version = item.sha256 || item.frame_id;
+  return `/api/frames/${item.frame_id}/image?v=${encodeURIComponent(version)}`;
 }
 
 function prefetchCandidateImage(item) {

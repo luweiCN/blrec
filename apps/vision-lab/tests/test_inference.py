@@ -34,6 +34,38 @@ class TestClasses(unittest.TestCase):
             self.assertIn(value, inference.PLAYER_POSITION_LABELS)
 
 
+class TestExecutionProviders(unittest.TestCase):
+    def test_auto_uses_coreml_on_macos(self):
+        self.assertEqual(
+            inference._preferred_execution_providers(
+                ['CoreMLExecutionProvider', 'CPUExecutionProvider'],
+                preference='auto',
+                system_name='Darwin',
+            ),
+            ('CoreMLExecutionProvider', 'CPUExecutionProvider'),
+        )
+
+    def test_explicit_cpu_does_not_use_coreml(self):
+        self.assertEqual(
+            inference._preferred_execution_providers(
+                ['CoreMLExecutionProvider', 'CPUExecutionProvider'],
+                preference='cpu',
+                system_name='Darwin',
+            ),
+            ('CPUExecutionProvider',),
+        )
+
+    def test_auto_falls_back_to_cpu_when_coreml_is_unavailable(self):
+        self.assertEqual(
+            inference._preferred_execution_providers(
+                ['AzureExecutionProvider', 'CPUExecutionProvider'],
+                preference='auto',
+                system_name='Darwin',
+            ),
+            ('CPUExecutionProvider',),
+        )
+
+
 class TestProbNormalization(unittest.TestCase):
     def test_already_normalized_not_softmaxed_again(self):
         # 已归一化分布(模拟 ultralytics ONNX 自带 softmax 的输出)

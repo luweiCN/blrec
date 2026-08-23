@@ -5581,6 +5581,32 @@ def _training_review_related_hero_counts(
     return related, missing
 
 
+def _training_review_scene_prefill_counts(
+    conn: sqlite3.Connection,
+) -> Dict[Tuple[str, str], Dict[str, int]]:
+    """按已建立的轻量索引统计尚不可复核的场景素材。"""
+    rows = conn.execute(
+        'SELECT scene,match_mode,'
+        "SUM(CASE WHEN prefill_status IN ('pending','queued','running') "
+        'THEN 1 ELSE 0 END) AS waiting_count,'
+        "SUM(CASE WHEN prefill_status='failed' THEN 1 ELSE 0 END) "
+        'AS failed_count '
+        'FROM training_review_material_index '
+        "WHERE review_status IN ('pending','partial') "
+        'AND result_group_representative_frame_id=frame_id '
+        "AND scene IN ('gameplay_hud','scoreboard','result_page','hero_select') "
+        "AND match_mode IN ('3v3','aram','5v5','blitz') "
+        'GROUP BY scene,match_mode'
+    ).fetchall()
+    return {
+        (str(row['scene']), str(row['match_mode'])): {
+            'waiting': int(row['waiting_count'] or 0),
+            'failed': int(row['failed_count'] or 0),
+        }
+        for row in rows
+    }
+
+
 def training_review_material_suggestions(
     conn: sqlite3.Connection, *, hero_catalog: Sequence[Dict[str, str]] = ()
 ) -> List[Dict[str, Any]]:
@@ -5713,6 +5739,7 @@ def training_review_material_suggestions(
 
     result: List[Dict[str, Any]] = []
     related_heroes, missing_hero_scenes = _training_review_related_hero_counts(conn)
+    scene_prefill = _training_review_scene_prefill_counts(conn)
     for scene, scene_label, minimum in _MATERIAL_SUGGESTION_SCENES:
         strongest = max(
             total('scene_mode', scene, mode, '', 'all', 'confirmed')[0]
@@ -5733,6 +5760,7 @@ def training_review_material_suggestions(
             available = new_count if source_scope == 'new' else legacy_count
             ratio = count / target if target else 1.0
             sufficient = count >= target
+            prefill = scene_prefill.get((scene, mode), {})
             severity = (
                 'sufficient'
                 if sufficient
@@ -5752,6 +5780,8 @@ def training_review_material_suggestions(
                     'target_count': target,
                     'shortage_count': max(0, target - count),
                     'candidate_count': available,
+                    'prefill_waiting_count': int(prefill.get('waiting', 0)),
+                    'prefill_failed_count': int(prefill.get('failed', 0)),
                     'source_scope': source_scope,
                     'severity': severity,
                     'status': 'sufficient' if sufficient else 'shortage',

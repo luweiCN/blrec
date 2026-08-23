@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blrec-vision-lab"
-version = "0.3.46"
+version = "0.3.47"
 description = "Local data collection, labeling, dataset and model training workbench for BLREC"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,6 +30,9 @@ blrec-vision-media = "labeler.media_server:main"
 blrec-vision-worker = "labeler.vision_worker:main"
 blrec-vision-backfill-material-index = "labeler.backfill_material_index:main"
 blrec-vision-migrate-candidate-inbox = "labeler.migrate_candidate_inbox:main"
+blrec-vision-backup = "labeler.database_backup:main"
+blrec-vision-migrate-postgres = "labeler.database_migrate:main"
+blrec-vision-restore = "labeler.database_restore:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

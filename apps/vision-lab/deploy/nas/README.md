@@ -5,11 +5,12 @@ NAS 不再运行交互式标注控制面。这个 Compose 项目只负责：
 - 从 NAS 本地路径读取原图和缩略图；
 - 为模型 Worker 提供受 token 保护的图片下载；
 - 为迁移前生成的数据集清单、模型产物和模型包提供受 token 保护的只读下载；
-- 接收 BLREC Server 刚产出的候选元数据并立即写入共享 PostgreSQL；
+- 接收 BLREC Server 刚产出的候选元数据并立即写入本机 Vision 控制机数据库；
+- 保存控制机定时上传的可验证 PostgreSQL 备份；
 - 仅在人工开启对账时扫描 NAS 候选目录，补回漏写素材。
 
 标注页面、筛选、统计、保存、模型预填和训练任务控制面全部运行在 Vision
-Worker 本机，直接连接共享 PostgreSQL。普通标注 API 不经过 NAS。
+Worker 本机，直接连接本机 PostgreSQL。普通标注 API 不经过 NAS。
 
 持久化目录：
 
@@ -21,8 +22,8 @@ Worker 本机，直接连接共享 PostgreSQL。普通标注 API 不经过 NAS�
 
 ```dotenv
 VISION_LAB_WORKER_TOKEN=独立随机令牌
-VISION_LAB_IMAGE_TAG=vision-lab-v0.3.39
-VISION_LAB_DATABASE_URL=postgresql://...
+VISION_LAB_IMAGE_TAG=vision-lab-v0.3.47
+VISION_LAB_DATABASE_URL=postgresql://vision:密码@127.0.0.1:15434/blrec_vision
 VISION_LAB_DATABASE_SCHEMA=vision_lab
 VISION_LAB_CANDIDATE_RECONCILIATION_ENABLED=0
 ```
@@ -43,8 +44,9 @@ Compose 必须用 `entrypoint` 把镜像入口覆盖为 `blrec-vision-media`，�
 `command`。否则镜像默认的 `blrec-vision-lab` 仍会启动，NAS 会重新暴露完整
 标注 Server，保存请求又可能被错误地接回 NAS。
 
-数据库 URL 继续使用 NAS 自己的固定 PostgreSQL 隧道。Mac Worker 有独立 SSH
-隧道，两者不会互相转发流量。
+数据库 URL 使用 NAS 自己的 `127.0.0.1:15434`。这个端口由 Vision 控制机主动
+建立的反向 SSH 隧道提供，最终连接控制机本地 `127.0.0.1:5432`；因此控制机 IP
+变化不会影响 NAS，PostgreSQL 也不需要监听局域网。
 
 ## 上线顺序与回退
 

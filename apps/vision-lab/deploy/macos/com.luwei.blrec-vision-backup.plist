@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.luwei.blrec-vision-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VISION_RELEASE_DIR__/.venv/bin/blrec-vision-backup</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VISION_LAB_DATABASE_URL_FILE</key>
+    <string>/Users/__VISION_USER__/Library/Application Support/BLRECVisionWorker/database.url</string>
+    <key>VISION_LAB_DATABASE_SCHEMA</key>
+    <string>vision_lab</string>
+    <key>VISION_LAB_DATA_DIR</key>
+    <string>/Users/__VISION_USER__/Library/Application Support/BLRECVisionWorker/control-plane</string>
+    <key>VISION_LAB_MEDIA_SERVER_URL</key>
+    <string>http://192.168.50.24:8800</string>
+    <key>VISION_LAB_WORKER_TOKEN_FILE</key>
+    <string>/Users/__VISION_USER__/Library/Application Support/BLRECVisionWorker/worker.token</string>
+    <key>VISION_LAB_PG_DUMP</key>
+    <string>/opt/homebrew/opt/postgresql@17/bin/pg_dump</string>
+    <key>VISION_LAB_PG_RESTORE</key>
+    <string>/opt/homebrew/opt/postgresql@17/bin/pg_restore</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__VISION_LOG_DIR__/database-backup.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__VISION_LOG_DIR__/database-backup.stderr.log</string>
+</dict>
+</plist>

@@ -42,6 +42,15 @@ DB_PATH = WORK_DIR / 'lab.db'
 DATABASE_URL = read_environment_secret('VISION_LAB_DATABASE_URL')
 DATABASE_SCHEMA = os.environ.get('VISION_LAB_DATABASE_SCHEMA', 'vision_lab').strip()
 DATABASE_POOL_SIZE = max(1, int(os.environ.get('VISION_LAB_DATABASE_POOL_SIZE', '8')))
+DATABASE_BACKUP_DIR = Path(
+    os.environ.get('VISION_LAB_DATABASE_BACKUP_DIR', str(WORK_DIR / 'database-backups'))
+).expanduser()
+DATABASE_BACKUP_KEEP = max(
+    2, int(os.environ.get('VISION_LAB_DATABASE_BACKUP_KEEP', '14'))
+)
+DATABASE_BACKUP_MAX_BYTES = max(
+    1_000_000, int(os.environ.get('VISION_LAB_DATABASE_BACKUP_MAX_BYTES', '8589934592'))
+)
 MEDIA_SERVER_URL = os.environ.get('VISION_LAB_MEDIA_SERVER_URL', '').strip().rstrip('/')
 LOCAL_VIDEO_DIR = WORK_DIR / 'videos'  # 打标时下载到本地的视频(mp4)
 MODELS_DIR = WORK_DIR / 'models'  # 训练好的模型(onnx)

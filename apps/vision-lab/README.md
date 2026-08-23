@@ -74,9 +74,12 @@ export VISION_LAB_WORKER_SSH_USER=luwei
 
 ## Worker 本地控制面与 NAS 图片服务
 
-生产元数据使用正式 PostgreSQL 中独立的 `vision_lab` schema。Worker 通过自己的
-SSH 隧道直连远程 PostgreSQL，并设置 `VISION_LAB_CONTROL_PLANE_ONLY=1`，让模型
-任务进入本机 Worker 队列而不是阻塞 Web 请求。Worker 配置：
+生产元数据使用 Vision 控制机本地的独立 PostgreSQL 数据库 `blrec_vision`，只保存
+`vision_lab` schema；它与对局、榜单数据库物理分开。页面、模型预填 Worker 与训练
+Worker 连接 `127.0.0.1`，避免每个页面操作承担公网数据库往返延迟。NAS 仍永久保存
+候选原图，通过控制机主动建立的反向 SSH 隧道访问同一份训练库；数据库不监听局域网，
+也不会跟随任意 Worker 自动切主。Worker 设置 `VISION_LAB_CONTROL_PLANE_ONLY=1`，
+让模型任务进入本机 Worker 队列而不是阻塞 Web 请求。Worker 配置：
 
 ```bash
 export VISION_LAB_SERVER_URL=http://127.0.0.1:8801
@@ -95,6 +98,34 @@ blrec-vision-worker
 NAS。首次查看 NAS 时代生成的旧数据集或模型时，Worker 还会按需缓存其不可变
 manifest、artifact、metadata 或模型包；不会同步完整训练图片目录。NAS 使用
 `blrec-vision-media` 入口，不暴露保存、筛选或统计 API。
+
+首次从旧 PostgreSQL 迁移时，先创建空的本机 `blrec_vision` 数据库，并分别准备权限
+为 `600` 的源、目标 URL 文件，再停掉 Vision 页面和预填 Worker，执行：
+
+```bash
+blrec-vision-migrate-postgres \
+  --source-url-file /path/to/old-database.url \
+  --target-url-file /path/to/local-database.url \
+  --apply
+```
+
+迁移命令要求目标必须是本机数据库、目标 `vision_lab` schema 必须不存在；它使用
+PostgreSQL 单事务快照导出和单事务恢复，并逐表核对行数。切换完成后启动
+`com.luwei.blrec-vision-nas-database-tunnel.plist`，NAS 只连接自己的
+`127.0.0.1:15434`，因此控制机 DHCP 地址变化不会中断写入。反向端口同一时刻只能由
+一台控制机占用，也就是训练库的单主锁。
+
+`com.luwei.blrec-vision-backup.plist` 每 6 小时执行 `pg_dump`，先用
+`pg_restore --list` 验证，再流式上传到 NAS 的 `/data/database-backups`，默认保留
+14 份。更换
+控制机时必须先停止旧控制机和反向隧道，在新机创建空数据库后执行：
+
+```bash
+blrec-vision-restore --target-url-file /path/to/local-database.url --apply
+```
+
+恢复命令会校验 NAS 返回的 SHA-256 和 PostgreSQL 归档，再恢复 schema；不会覆盖
+已有本地训练库。确认页面数量、预填队列和训练记录一致后，才能在新机启动反向隧道。
 
 数据库 URL 与 token 文件都必须是权限 `600`。可用
 `VISION_WORKER_CAPABILITIES=model_prefill` 把节点限定为只做打标预填，

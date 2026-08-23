@@ -6,9 +6,9 @@ import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
-from . import __version__, config, server
+from . import __version__, config, database_backup, server
 
 
 @asynccontextmanager
@@ -80,6 +80,58 @@ def api_vision_worker_model_package_archive(
 ) -> Response:
     server._require_vision_worker(request)
     return server.api_model_package_archive(package_id)
+
+
+@app.get('/api/vision-workers/database-backups')
+def api_vision_database_backups(request: Request) -> dict[str, object]:
+    server._require_vision_worker(request)
+    return {'backups': database_backup.list_backups(config.DATABASE_BACKUP_DIR)}
+
+
+@app.get('/api/vision-workers/database-backups/latest')
+def api_latest_vision_database_backup(request: Request) -> FileResponse:
+    server._require_vision_worker(request)
+    backups = database_backup.list_backups(config.DATABASE_BACKUP_DIR)
+    if not backups:
+        raise HTTPException(404, '尚无 Vision Lab 数据库备份')
+    path = config.DATABASE_BACKUP_DIR / str(backups[0]['name'])
+    checksum_path = path.with_suffix(path.suffix + '.sha256')
+    checksum = (
+        checksum_path.read_text(encoding='ascii').split()[0]
+        if checksum_path.is_file()
+        else ''
+    )
+    return FileResponse(
+        path,
+        media_type='application/octet-stream',
+        filename=path.name,
+        headers={
+            'Cache-Control': 'no-store',
+            'X-Checksum-Sha256': checksum,
+            'X-Backup-Filename': path.name,
+        },
+    )
+
+
+@app.put('/api/vision-workers/database-backups/{filename}')
+async def api_upload_vision_database_backup(
+    filename: str, request: Request
+) -> dict[str, object]:
+    server._require_vision_worker(request)
+    try:
+        expected_length = int(request.headers.get('content-length') or 0)
+        return await database_backup.store_backup_stream(
+            request.stream(),
+            directory=config.DATABASE_BACKUP_DIR,
+            filename=filename,
+            expected_length=expected_length,
+            maximum_bytes=config.DATABASE_BACKUP_MAX_BYTES,
+            keep=config.DATABASE_BACKUP_KEEP,
+        )
+    except FileExistsError as exc:
+        raise HTTPException(409, '同名 Vision Lab 备份已存在') from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post('/api/training-candidates/ingest')

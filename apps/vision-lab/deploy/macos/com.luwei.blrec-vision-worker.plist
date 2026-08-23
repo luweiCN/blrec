@@ -22,6 +22,8 @@
       <string>vision_lab</string>
       <key>VISION_LAB_DATABASE_POOL_SIZE</key>
       <string>8</string>
+      <key>VISION_LAB_EXECUTION_PROVIDER</key>
+      <string>auto</string>
       <key>VISION_LAB_CONTROL_PLANE_ONLY</key>
       <string>1</string>
       <key>VISION_LAB_DATA_DIR</key>

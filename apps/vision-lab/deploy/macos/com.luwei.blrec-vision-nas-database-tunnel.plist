@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.luwei.blrec-vision-nas-database-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-o</string>
+    <string>BatchMode=yes</string>
+    <string>-o</string>
+    <string>ExitOnForwardFailure=yes</string>
+    <string>-o</string>
+    <string>ServerAliveInterval=30</string>
+    <string>-o</string>
+    <string>ServerAliveCountMax=3</string>
+    <string>-o</string>
+    <string>IdentitiesOnly=yes</string>
+    <string>-i</string>
+    <string>/Users/__VISION_USER__/.ssh/id_rsa</string>
+    <string>-R</string>
+    <string>127.0.0.1:15434:127.0.0.1:5432</string>
+    <string>__NAS_SSH_USER__@192.168.50.24</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>__VISION_LOG_DIR__/nas-database-tunnel.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__VISION_LOG_DIR__/nas-database-tunnel.stderr.log</string>
+</dict>
+</plist>

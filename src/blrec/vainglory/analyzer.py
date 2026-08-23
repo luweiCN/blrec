@@ -578,6 +578,54 @@ def _apply_hud_team_size_evidence(
     return result
 
 
+def _avatar_screen_context(
+    frame: RgbFrame, detections: Sequence[HeroAvatarDetection]
+) -> Optional[Tuple[Literal['gameplay_hud', 'scoreboard'], TeamSize, float]]:
+    """用头像排列区分清晰 HUD 与积分板；不完整时不冒充可用素材。"""
+    if frame.width <= 0 or frame.height <= 0:
+        return None
+    values = [
+        (detection, ((detection.rect.top + detection.rect.bottom) / 2) / frame.height)
+        for detection in detections
+        if detection.rect.right > detection.rect.left
+        and detection.rect.bottom > detection.rect.top
+    ]
+
+    def context(
+        screen_type: Literal['gameplay_hud', 'scoreboard'],
+        candidates: Sequence[Tuple[HeroAvatarDetection, float]],
+    ) -> Optional[Tuple[Literal['gameplay_hud', 'scoreboard'], TeamSize, float]]:
+        if len(candidates) >= 10:
+            team_size: TeamSize = 5
+        elif len(candidates) == 6:
+            team_size = 3
+        else:
+            return None
+        expected = team_size * 2
+        selected = sorted(
+            candidates, key=lambda item: item[0].confidence, reverse=True
+        )[:expected]
+        return (
+            screen_type,
+            team_size,
+            round(mean(item[0].confidence for item in selected), 4),
+        )
+
+    panel = [item for item in values if item[1] >= 0.10]
+    if len(panel) >= 6:
+        panel_y = [item[1] for item in panel]
+        if max(panel_y) - min(panel_y) >= 0.12:
+            detected = context('scoreboard', panel)
+            if detected is not None:
+                return detected
+    top = [item for item in values if item[1] <= 0.22]
+    if len(top) >= 6:
+        top_y = [item[1] for item in top]
+        if max(top_y) - min(top_y) <= 0.10:
+            return context('gameplay_hud', top)
+    return None
+
+
 def _segments_with_gameplay(
     segments: Sequence[Tuple[int, int]], observations: Sequence[ClassifiedObservation]
 ) -> Tuple[Tuple[int, int], ...]:
@@ -801,8 +849,11 @@ def _selected_model_package_candidates(
     result_candidates: Sequence[TrainingCandidate],
     result_borderline: Sequence[TrainingCandidate],
     key_screen_candidates: Sequence[TrainingCandidate],
+    avatar_screen_candidates: Sequence[TrainingCandidate] = (),
 ) -> Tuple[TrainingCandidate, ...]:
-    selected: List[TrainingCandidate] = list(conflicts)
+    # 每局经过头像完整布局确认的 HUD／积分板先占基础配额；模式冲突和困难帧
+    # 继续保留，但不能再把普通清晰画面全部挤掉。
+    selected: List[TrainingCandidate] = [*avatar_screen_candidates, *conflicts]
     for mode in ('3v3', 'aram', '5v5', 'unknown'):
         remaining = 3 - len(selected)
         if remaining <= 0:
@@ -3130,6 +3181,13 @@ class VaingloryVideoAnalyzer:
             if using_model_package
             else {}
         )
+        avatar_screen_candidates = (
+            self._probe_avatar_screen_candidates(
+                part.path, anchor_segments, run_modes, cancelled=cancelled
+            )
+            if using_model_package
+            else ()
+        )
         if using_model_package:
             run_modes = _apply_hud_team_size_evidence(run_modes, segment_hud_lineups)
             mode_conflicts = _model_package_mode_conflicts(
@@ -3458,10 +3516,11 @@ class VaingloryVideoAnalyzer:
                     result_detector_candidates,
                     borderline_result_candidates,
                     key_screen_candidates,
+                    avatar_screen_candidates,
                 )
             )
             selected_training_candidates = _cap_training_candidate_timestamps(
-                selected_training_candidates, maximum_timestamps=24
+                selected_training_candidates, maximum_timestamps=36
             )
             self._emit_status(
                 status_callback,
@@ -5018,6 +5077,104 @@ class VaingloryVideoAnalyzer:
                     result[segment_start_ms] = lineup
                     break
         return result
+
+    def _probe_avatar_screen_candidates(
+        self,
+        path: str,
+        segments: Sequence[Tuple[int, int]],
+        run_modes: Dict[int, str],
+        *,
+        cancelled: Optional[Callable[[], bool]],
+        interval_seconds: int = 15,
+    ) -> Tuple[TrainingCandidate, ...]:
+        """每局保留两个分散的清晰 HUD，并在出现时保留最佳积分板。"""
+        if self._hero_avatar_detector is None:
+            return ()
+        selected: Dict[Tuple[int, str, int], TrainingCandidate] = {}
+        for segment_start_ms, segment_end_ms in segments:
+            if segment_end_ms <= segment_start_ms:
+                continue
+            mode = run_modes.get(segment_start_ms, 'unknown')
+            duration_ms = max(1, segment_end_ms - segment_start_ms)
+            window = ScanWindow(start_ms=segment_start_ms, end_ms=segment_end_ms)
+            for timed in self._sampler.classify_window_frames(
+                path, window, interval_seconds=max(5, int(interval_seconds))
+            ):
+                self._raise_if_cancelled(cancelled)
+                try:
+                    context = _avatar_screen_context(
+                        timed.frame, self._hero_avatar_detector.detect(timed.frame)
+                    )
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(
+                        'Vainglory avatar screen probe failed: at_ms={} error={!r}',
+                        timed.at_ms,
+                        error,
+                    )
+                    continue
+                if context is None:
+                    continue
+                screen_type, _team_size, confidence = context
+                bucket = (
+                    min(
+                        1,
+                        max(0, int(2 * (timed.at_ms - segment_start_ms) / duration_ms)),
+                    )
+                    if screen_type == 'gameplay_hud'
+                    else 0
+                )
+                if screen_type == 'gameplay_hud' and mode in {'3v3', 'aram', '5v5'}:
+                    task: TrainingCandidateTask = 'match_mode'
+                    label = cast(TrainingCandidateLabel, mode)
+                    stage_class = 'gameplay_hud'
+                    reason = '头像完整布局确认的清晰 HUD 按局代表帧'
+                elif screen_type == 'gameplay_hud':
+                    task = 'match_flow'
+                    label = 'match_flow'
+                    stage_class = 'gameplay_hud'
+                    reason = '头像完整布局确认的清晰 HUD 对局代表帧'
+                else:
+                    task = 'key_screen_review'
+                    label = 'scoreboard'
+                    stage_class = 'scoreboard'
+                    reason = '头像完整布局确认的清晰积分板代表帧'
+                try:
+                    payload = jpeg_bytes(timed.frame)
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(
+                        'Vainglory avatar screen candidate skipped: '
+                        'at_ms={} error={!r}',
+                        timed.at_ms,
+                        error,
+                    )
+                    continue
+                candidate = TrainingCandidate(
+                    at_ms=int(timed.at_ms),
+                    segment_start_ms=int(segment_start_ms),
+                    image_jpeg=payload,
+                    model_version=str(
+                        getattr(self._stage_classifier, 'model_version', '')
+                        or 'multi-v2'
+                    ),
+                    suggested_label=label,
+                    suggestion_confidence=confidence,
+                    stage_class=stage_class,
+                    stage_confidence=confidence,
+                    mode_class=mode,
+                    mode_confidence=confidence,
+                    selection_reason=reason,
+                    image_width=int(timed.frame.width),
+                    image_height=int(timed.frame.height),
+                    task=task,
+                )
+                key = (segment_start_ms, screen_type, bucket)
+                previous = selected.get(key)
+                if (
+                    previous is None
+                    or candidate.suggestion_confidence > previous.suggestion_confidence
+                ):
+                    selected[key] = candidate
+        return tuple(sorted(selected.values(), key=lambda item: item.at_ms))
 
     def _refresh_training_candidate_images(
         self,

@@ -73,6 +73,7 @@ jobs:
           version="${GITHUB_REF_NAME#vision-lab-v}"
           gh release create "$GITHUB_REF_NAME" \
             apps/vision-lab/dist/* \
+            apps/vision-lab/deploy/macos/*.plist \
             --verify-tag \
             --generate-notes \
             --prerelease \
