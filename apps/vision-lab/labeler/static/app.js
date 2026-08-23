@@ -68,6 +68,7 @@ const candidateHeroPrefetchRequests = new Map();
 const candidateImagePrefetches = new Map();
 const candidatePreparationRequests = new Map();
 const CANDIDATE_READY_TARGET = 24;
+const CANDIDATE_IMAGE_PREFETCH_TARGET = 2;
 const CANDIDATE_PAGE_SIZE = 50;
 const CANDIDATE_REFILL_LOW_WATER = CANDIDATE_READY_TARGET;
 const CANDIDATE_DEFAULT_SOURCE_TYPE = 'new_model_prefill';
@@ -108,10 +109,13 @@ const api = async (path, opts = {}) => {
 const delay = (milliseconds) => new Promise(
   (resolve) => window.setTimeout(resolve, milliseconds));
 
-async function waitForVisionJob(jobId, timeoutMs = 60000) {
+async function waitForVisionJob(jobId, timeoutMs = 60000, signal = null) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const response = await api(`/api/vision-jobs/${encodeURIComponent(jobId)}`);
+    if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    const response = await api(`/api/vision-jobs/${encodeURIComponent(jobId)}`, {
+      signal,
+    });
     const job = response.job || {};
     if (['succeeded', 'failed', 'cancelled'].includes(job.status)) return job;
     await delay(1000);
@@ -1743,14 +1747,23 @@ function candidateHeroLineupUrl(
 function prepareCandidateHeroLineup(
   item, context, {recognize = false, refresh = false} = {}) {
   const key = candidateHeroPrefetchKey(item, context, recognize);
-  if (recognize) candidateHeroPrefetchRequests.delete(key);
+  if (recognize) {
+    const previous = candidateHeroPrefetchRequests.get(key);
+    if (previous) previous.controller.abort();
+    candidateHeroPrefetchRequests.delete(key);
+  }
   const existing = candidateHeroPrefetchRequests.get(key);
   if (existing) return existing;
+  const controller = new AbortController();
   const entry = {
     key,
+    frameId: Number(item.frame_id),
+    controller,
     initialPromise: Promise.all([
       ensureCandidateHeroCatalog(),
-      api(candidateHeroLineupUrl(item, context, {recognize, refresh})),
+      api(candidateHeroLineupUrl(item, context, {recognize, refresh}), {
+        signal: controller.signal,
+      }),
     ]).then(([, lineup]) => lineup),
     finalPromise: null,
   };
@@ -1768,11 +1781,14 @@ function completeCandidateHeroLineupPrefetch(item, context, entry) {
   entry.finalPromise = entry.initialPromise.then(async (lineup) => {
     const jobId = String((lineup.prefill_job || {}).id || '');
     if (!jobId) return {lineup, refreshed: false};
-    const finished = await waitForVisionJob(jobId);
+    const finished = await waitForVisionJob(
+      jobId, 60000, entry.controller.signal);
     if (!finished || finished.status !== 'succeeded') {
       return {lineup, refreshed: false};
     }
-    const refreshed = await api(candidateHeroLineupUrl(item, context));
+    const refreshed = await api(candidateHeroLineupUrl(item, context), {
+      signal: entry.controller.signal,
+    });
     delete refreshed.prefill_job;
     entry.initialPromise = Promise.resolve(refreshed);
     entry.finalPromise = null;
@@ -3131,6 +3147,12 @@ function renderCandidateLegacyControls(stats, status) {
 }
 
 function renderCandidateProgress() {
+  if (['confirmed', 'human_confirmed'].includes(candidateLoadedStatus)) {
+    $('#candidate-progress').textContent = currentCandidate()
+      ? `当前第 ${candidateIndex + 1} / ${candidateFilteredTotal} 张`
+      : `共 ${candidateFilteredTotal} 张`;
+    return;
+  }
   const activeReview = candidateStatusIsReviewQueue(candidateLoadedStatus);
   if (activeReview) {
     $('#candidate-progress').textContent =
@@ -3187,21 +3209,56 @@ function prefetchCandidateImage(item) {
   if (existing) return existing.promise;
   const image = new Image();
   image.decoding = 'async';
-  const entry = {image, promise: null};
+  const entry = {image, promise: null, settled: false, resolve: null};
   entry.promise = new Promise((resolve) => {
+    entry.resolve = resolve;
+    const settle = (loaded) => {
+      if (entry.settled) return;
+      entry.settled = true;
+      image.onload = null;
+      image.onerror = null;
+      resolve(loaded);
+    };
     image.onload = async () => {
       try {
         await image.decode();
       } catch (_error) {
         // 部分浏览器不支持显式解码；下载完成仍可复用内存缓存。
       }
-      resolve(true);
+      settle(true);
     };
-    image.onerror = () => resolve(false);
+    image.onerror = () => settle(false);
     image.src = candidateImageUrl(item);
   });
   candidateImagePrefetches.set(frameId, entry);
   return entry.promise;
+}
+
+function pruneCandidatePrefetches(keepFrameIds = new Set()) {
+  candidateHeroPrefetchRequests.forEach((entry, key) => {
+    if (keepFrameIds.has(entry.frameId)) return;
+    entry.controller.abort();
+    candidateHeroPrefetchRequests.delete(key);
+  });
+  candidateImagePrefetches.forEach((entry, frameId) => {
+    if (keepFrameIds.has(frameId)) return;
+    entry.image.src = '';
+    if (!entry.settled && entry.resolve) {
+      entry.settled = true;
+      entry.resolve(false);
+    }
+    candidateImagePrefetches.delete(frameId);
+  });
+  candidatePreparationRequests.forEach((_promise, frameId) => {
+    if (!keepFrameIds.has(frameId)) candidatePreparationRequests.delete(frameId);
+  });
+}
+
+function pruneCandidateNavigationPrefetches() {
+  const items = [currentCandidate(), ...nextMatchingCandidates(
+    CANDIDATE_IMAGE_PREFETCH_TARGET)];
+  pruneCandidatePrefetches(new Set(
+    items.filter(Boolean).map((item) => Number(item.frame_id))));
 }
 
 function prepareCandidateForReview(item) {
@@ -3265,7 +3322,8 @@ async function warmCandidateReviewQueue(loadToken) {
       if (loadToken !== candidateReviewLoadToken) return;
       upcoming = nextMatchingCandidates();
     }
-    upcoming.forEach((item) => prefetchCandidateImage(item));
+    upcoming.slice(0, CANDIDATE_IMAGE_PREFETCH_TARGET)
+      .forEach((item) => prefetchCandidateImage(item));
     const item = upcoming[0];
     if (!item) return;
     await prepareCandidateForReview(item);
@@ -3309,12 +3367,14 @@ async function prefetchNextCandidate() {
       upcoming = nextMatchingCandidates();
     }
   }
-  upcoming.forEach((item) => prefetchCandidateImage(item));
+  upcoming.slice(0, CANDIDATE_IMAGE_PREFETCH_TARGET)
+    .forEach((item) => prefetchCandidateImage(item));
   if (upcoming.length) ensureCandidateReviewWarm();
 }
 
 function renderCandidateItem() {
   const item = currentCandidate();
+  pruneCandidateNavigationPrefetches();
   const image = $('#candidate-image');
   const empty = $('#candidate-empty');
   renderCandidateProgress();
@@ -3454,9 +3514,7 @@ async function loadCandidateReview() {
     candidateFilteredTotal = Number(
       data.filtered_total ?? candidateReviewTotal(data.stats || {}, status));
     candidateSessionCompleted = 0;
-    candidateHeroPrefetchRequests.clear();
-    candidateImagePrefetches.clear();
-    candidatePreparationRequests.clear();
+    pruneCandidatePrefetches();
     candidateReviewRefillPromise = null;
     candidateQueue = data.items || [];
     candidateIndex = 0;

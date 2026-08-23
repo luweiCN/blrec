@@ -22,7 +22,7 @@ Worker 本机，直接连接本机 PostgreSQL。普通标注 API 不经过 NAS�
 
 ```dotenv
 VISION_LAB_WORKER_TOKEN=独立随机令牌
-VISION_LAB_IMAGE_TAG=vision-lab-v0.3.47
+VISION_LAB_IMAGE_TAG=vision-lab-v0.3.48
 VISION_LAB_DATABASE_URL=postgresql://vision:密码@127.0.0.1:15434/blrec_vision
 VISION_LAB_DATABASE_SCHEMA=vision_lab
 VISION_LAB_CANDIDATE_RECONCILIATION_ENABLED=0
@@ -30,6 +30,14 @@ VISION_LAB_CANDIDATE_RECONCILIATION_ENABLED=0
 
 正常链路由 BLREC Server 调用本机回环地址
 `http://127.0.0.1:8800/api/training-candidates/ingest`，不再周期遍历全部 JSON。
+BLREC Server 的环境文件需要同时配置：
+
+```dotenv
+BLREC_VISION_LAB_INGEST_URL=http://127.0.0.1:8800/api/training-candidates/ingest
+BLREC_VISION_LAB_INGEST_TOKEN=与上方 VISION_LAB_WORKER_TOKEN 相同的令牌
+```
+
+该入口在代码中强制限定为 loopback HTTP，不会把图片或标注发送到局域网外。
 首次上线或需要对账时，在 NAS Vision Lab 容器中执行：
 
 ```bash

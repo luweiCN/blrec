@@ -29,7 +29,7 @@ _LABELS_BY_TASK = {
     'result_detector': {'result_panel', 'no_result_panel'},
     'mode_gate': {'blocked_gate', 'open_entrance', 'no_evidence'},
 }
-_REMOTE_SOURCE_TYPES = {'worker', 'manual_correction'}
+_REMOTE_SOURCE_TYPES = {'worker', 'manual_correction', 'result_archive'}
 
 
 def _confidence(item: Mapping[str, Any], name: str) -> float:

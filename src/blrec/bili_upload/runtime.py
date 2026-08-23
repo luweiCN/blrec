@@ -36,6 +36,7 @@ from blrec.vainglory.publication import VaingloryPublicationService
 from blrec.vainglory.repository import VaingloryRepository
 from blrec.vainglory.result_detection import load_result_panel_detector
 from blrec.vainglory.service import VaingloryIndexService
+from blrec.vainglory.vision_candidate_ingest import VisionCandidateIngestClient
 
 from .accounts import AccountManager, AccountWriteGate
 from .archive_migration import (
@@ -636,6 +637,7 @@ class BiliAccountRuntime:
             training_candidate_root = os.environ.get(
                 'BLREC_VAINGLORY_TRAINING_CANDIDATE_ROOT', ''
             ).strip()
+            vision_candidate_ingest = VisionCandidateIngestClient.from_environment()
             vainglory_repository = VaingloryRepository(
                 database,
                 result_frame_root=(
@@ -645,6 +647,11 @@ class BiliAccountRuntime:
                     None
                     if not training_candidate_root
                     else Path(training_candidate_root)
+                ),
+                candidate_ingest=(
+                    None
+                    if vision_candidate_ingest is None
+                    else vision_candidate_ingest.ingest
                 ),
                 clock=self._clock,
             )

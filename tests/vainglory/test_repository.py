@@ -574,6 +574,61 @@ async def test_complete_part_stores_worker_training_candidate_sidecar(
 
 
 @pytest.mark.asyncio
+async def test_complete_part_stores_and_ingests_canonical_result_candidate(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    ingested: list[dict[str, object]] = []
+
+    async def ingest(values: object) -> None:
+        ingested.extend(dict(value) for value in values)  # type: ignore[arg-type]
+
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        candidate_root = tmp_path / 'training-candidates'
+        result_root = tmp_path / 'result-frames'
+        repository = VaingloryRepository(
+            database,
+            result_frame_root=result_root,
+            training_candidate_root=candidate_root,
+            candidate_ingest=ingest,
+            clock=lambda: 100,
+        )
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+
+        await repository.complete_part(1, (analyzed_match(),))
+
+        result_image = next(result_root.rglob('*.png'))
+        candidate_image = next(candidate_root.rglob('*.png'))
+        sidecar = next(candidate_root.rglob('*.json'))
+        metadata = json.loads(sidecar.read_text(encoding='utf8'))
+        assert result_image.stat().st_ino == candidate_image.stat().st_ino
+        assert metadata['source_type'] == 'result_archive'
+        assert metadata['suggestions']['result_panel']['label'] == 'result_panel'
+        assert metadata['image_path'].endswith(candidate_image.name)
+        assert ingested == [metadata]
+
+        ingested.clear()
+        backfilled = await repository.backfill_result_archive_candidates(limit=10)
+        assert backfilled['scanned'] == backfilled['written'] == 1
+        assert backfilled['missing'] == backfilled['failed'] == 0
+        assert backfilled['last_match_id'] > 0
+        assert len(ingested) == 1
+        assert ingested[0]['source_id'] == metadata['source_id']
+        assert ingested[0]['suggestions']['match_mode']['label'] == '3v3'
+        exhausted = await repository.backfill_result_archive_candidates(
+            after_match_id=backfilled['last_match_id'], limit=10
+        )
+        assert exhausted['scanned'] == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_same_worker_frame_is_stored_once_with_multiple_suggestions(
     tmp_path: Path,
 ) -> None:
@@ -2121,14 +2176,20 @@ async def test_manual_match_correction_creates_training_candidate(
         metadata_paths = [
             path for path in metadata_paths if not path.name.endswith('.review.json')
         ]
-        assert len(metadata_paths) == 1
-        metadata = json.loads(metadata_paths[0].read_text())
+        metadata_entries = [
+            (path, json.loads(path.read_text())) for path in metadata_paths
+        ]
+        metadata_path, metadata = next(
+            (path, value)
+            for path, value in metadata_entries
+            if value.get('source_type') == 'manual_correction'
+        )
         assert metadata['source_type'] == 'manual_correction'
         assert metadata['manual_correction']['changes']['game_mode'] == {
             'before': '3v3',
             'after': 'aram',
         }
-        review = json.loads(metadata_paths[0].with_suffix('.review.json').read_text())
+        review = json.loads(metadata_path.with_suffix('.review.json').read_text())
         assert review['review_status'] == 'partial'
         assert review['labels']['match_mode_label'] == 'aram'
         image = candidate_root / metadata['image_path']

@@ -180,6 +180,7 @@ def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
     ).read_text(encoding='utf-8')
 
     assert 'const CANDIDATE_READY_TARGET = 24;' in script
+    assert 'const CANDIDATE_IMAGE_PREFETCH_TARGET = 2;' in script
     assert 'async function warmCandidateReviewQueue(' in script
     warmer = script[
         script.index('async function warmCandidateReviewQueue(') : script.index(
@@ -190,6 +191,9 @@ def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
     assert 'loadToken !== candidateReviewLoadToken' in warmer
     assert 'await image.decode();' in script
     assert 'candidateImagePrefetches.get(frameId)' in script
+    assert 'function pruneCandidatePrefetches(' in script
+    assert 'entry.controller.abort();' in script
+    assert 'signal: entry.controller.signal' in script
     assert "api('/api/worker-candidates/state')" not in script
     assert 'setInterval(refreshCandidateIndexState, 30000)' not in script
 
@@ -883,6 +887,37 @@ def test_postgres_review_list_does_not_hold_the_process_database_lock(
     assert result == {'items': [], 'stats': {}, 'filtered_total': 0}
 
 
+@pytest.mark.parametrize(
+    ('status', 'prefill_ready_only'),
+    [
+        ('needs_review', True),
+        ('migration_review', True),
+        ('legacy_hero', True),
+        ('confirmed', False),
+        ('human_confirmed', False),
+        ('missing_afk', False),
+        ('all', False),
+    ],
+)
+def test_review_list_only_requires_prefill_for_pending_review_queues(
+    monkeypatch, status: str, prefill_ready_only: bool
+) -> None:
+    connection = mock.Mock()
+    page = mock.Mock(return_value=([], 0))
+    monkeypatch.setattr(config, 'DATABASE_URL', 'postgresql://vision')
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(
+        server, '_cached_training_review_groups', mock.Mock(return_value={})
+    )
+    monkeypatch.setattr(server.db, 'training_review_page', page)
+
+    server.api_training_review_items(
+        status=status, source_scope='all', include_stats=False
+    )
+
+    assert page.call_args.kwargs['prefill_ready_only'] is prefill_ready_only
+
+
 def test_default_review_queue_reuses_cached_frame_ids(monkeypatch) -> None:
     connection = mock.Mock()
     monkeypatch.setattr(config, 'DATABASE_URL', 'postgresql://vision')
@@ -1206,6 +1241,15 @@ def test_confirmed_training_data_has_a_dedicated_unified_review_entry() -> None:
     assert "all: [['confirmed', '全部已确认训练数据']]" in script
     assert "['new', 'legacy', 'all'].includes(scope)" in script
     assert "candidateSourceScope === 'all'" in script
+    progress = script[
+        script.index('function renderCandidateProgress()') : script.index(
+            'function renderCandidateSyncStats('
+        )
+    ]
+    assert (
+        "['confirmed', 'human_confirmed'].includes(candidateLoadedStatus)" in progress
+    )
+    assert '当前第 ${candidateIndex + 1} / ${candidateFilteredTotal} 张' in progress
 
 
 def test_candidate_save_allows_partial_special_lineups() -> None:
@@ -1278,6 +1322,22 @@ def test_worker_control_plane_redirects_only_frame_media_to_nas(monkeypatch) -> 
     assert thumb.headers['location'] == 'http://nas:8800/api/frames/17/thumb'
     assert thumb.headers['cache-control'] == 'private, max-age=31536000, immutable'
     local_database.assert_not_called()
+
+
+def test_nas_media_reports_png_result_archive_content_type(monkeypatch) -> None:
+    connection = mock.Mock()
+    connection.execute.return_value.fetchone.return_value = {
+        'frame_path': '/result-frames/canonical.png',
+        'thumb_path': '',
+    }
+    monkeypatch.setattr(config, 'MEDIA_SERVER_URL', '')
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+
+    image = server.api_frame_image(17)
+    thumb = server.api_frame_thumb(17)
+
+    assert image.media_type == 'image/png'
+    assert thumb.media_type == 'image/png'
 
 
 def test_worker_control_plane_crops_remote_frame_bytes_locally(monkeypatch) -> None:

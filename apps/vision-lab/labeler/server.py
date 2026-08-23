@@ -708,9 +708,9 @@ def api_frame_image(frame_id: int) -> Response:
             conn.close()
     if not row:
         raise HTTPException(404, '帧不存在')
-    return FileResponse(
-        row['frame_path'], media_type='image/jpeg', headers=cache_headers
-    )
+    path = Path(row['frame_path'])
+    media_type = 'image/png' if path.suffix.lower() == '.png' else 'image/jpeg'
+    return FileResponse(path, media_type=media_type, headers=cache_headers)
 
 
 @app.get('/api/frames/{frame_id}/thumb')
@@ -736,7 +736,8 @@ def api_frame_thumb(frame_id: int) -> Response:
         if row['thumb_path'] and Path(row['thumb_path']).exists()
         else row['frame_path']
     )
-    return FileResponse(path, media_type='image/jpeg', headers=cache_headers)
+    media_type = 'image/png' if Path(path).suffix.lower() == '.png' else 'image/jpeg'
+    return FileResponse(path, media_type=media_type, headers=cache_headers)
 
 
 def _fetch_frame_image_bytes(frame_id: int) -> bytes:
@@ -1568,7 +1569,8 @@ def api_training_review_items(
                         hero_scope=hero_scope,
                         confidence=confidence,
                         review_reason=review_reason,
-                        prefill_ready_only=status != 'missing_afk',
+                        prefill_ready_only=status
+                        in {'needs_review', 'migration_review', 'legacy_hero'},
                         result_groups=result_groups,
                     )
             except ValueError as exc:

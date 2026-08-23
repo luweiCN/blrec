@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     Any,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -1199,6 +1200,9 @@ class VaingloryRepository:
         *,
         result_frame_root: Optional[Path] = None,
         training_candidate_root: Optional[Path] = None,
+        candidate_ingest: Optional[
+            Callable[[Sequence[Mapping[str, Any]]], Awaitable[None]]
+        ] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._database = database
@@ -1212,6 +1216,7 @@ class VaingloryRepository:
             if training_candidate_root is None
             else Path(training_candidate_root)
         ).resolve()
+        self._candidate_ingest = candidate_ingest
         self._clock = clock
 
     @staticmethod
@@ -4341,6 +4346,7 @@ class VaingloryRepository:
         analysis_summary_json = _analysis_summary_json(analysis_summary)
         written_paths: List[Path] = []
         written_training_candidates: List[Path] = []
+        written_candidate_metadata: List[Dict[str, Any]] = []
         obsolete_frame_paths: List[str] = []
         job_sql = (
             'SELECT job.state,job.session_id,job.request_kind,'
@@ -4379,6 +4385,35 @@ class VaingloryRepository:
                 )
                 destination = self._resolve_result_frame_path(relative_path)
                 self._write_result_frame(destination, match.result_frame_png)
+                try:
+                    metadata = self._write_result_archive_candidate(
+                        content=match.result_frame_png,
+                        source_path=destination,
+                        session_id=storage_session_id,
+                        part_id=part_id,
+                        part_index=storage_part_index,
+                        result_at_ms=match.result_at_ms,
+                        game_mode=match.game_mode,
+                        confidence=match.confidence,
+                        streamer=storage_streamer,
+                        room_id=storage_room_id,
+                        session_title=storage_session_title,
+                        filename=Path(storage_source_path).name
+                        or 'part-{}'.format(storage_part_index),
+                        created_at=now,
+                    )
+                    written_candidate_metadata.append(metadata)
+                    written_training_candidates.append(
+                        self._resolve_training_candidate_path(metadata['image_path'])
+                    )
+                except (OSError, ValueError) as error:
+                    logger.warning(
+                        'Vainglory result archive candidate storage skipped: '
+                        'part_id={} at_ms={} error={!r}',
+                        part_id,
+                        match.result_at_ms,
+                        error,
+                    )
 
             for candidate_group in _training_candidate_groups(training_candidates):
                 primary = max(
@@ -4470,6 +4505,7 @@ class VaingloryRepository:
                     self._write_training_candidate(
                         destination, primary.image_jpeg, metadata, metadata_destination
                     )
+                    written_candidate_metadata.append(metadata)
                     written_training_candidates.append(destination)
                 except (OSError, ValueError) as error:
                     logger.warning(
@@ -4793,6 +4829,15 @@ class VaingloryRepository:
 
         await self._database.write(complete)
         self._remove_result_frame_files(obsolete_frame_paths, keep=written_paths)
+        if self._candidate_ingest is not None and written_candidate_metadata:
+            try:
+                await self._candidate_ingest(tuple(written_candidate_metadata))
+            except Exception as error:  # noqa: BLE001 - 素材同步不回滚已完成对局
+                logger.warning(
+                    'Vainglory Vision candidate ingest failed: part_id={} error={!r}',
+                    part_id,
+                    error,
+                )
         if written_paths:
             logger.info(
                 'Vainglory result frames stored: part_id={} frames={} directory={}',
@@ -5711,6 +5756,77 @@ class VaingloryRepository:
             )
             return None
         return path if path.is_file() else None
+
+    async def backfill_result_archive_candidates(
+        self, *, after_match_id: int = 0, limit: int = 500
+    ) -> Dict[str, Any]:
+        """从当前业务库幂等补写规范结算候选；可按 match id 断点续跑。"""
+
+        if after_match_id < 0:
+            raise ValueError('after_match_id must not be negative')
+        if limit < 1 or limit > 1_000:
+            raise ValueError('limit must be between 1 and 1000')
+        rows = await self._database.fetchall(
+            'SELECT match.id,match.session_id,match.result_part_id AS part_id,'
+            'part.part_index,match.result_at_ms,match.game_mode,match.confidence,'
+            'match.result_frame_path,match.created_at,session.anchor_name,'
+            'session.room_id,session.title,'
+            "COALESCE(NULLIF(part.final_path,''),part.source_path) AS source_path "
+            'FROM vainglory_matches match '
+            'JOIN recording_sessions session ON session.id=match.session_id '
+            'JOIN recording_parts part ON part.id=match.result_part_id '
+            'WHERE match.id>? AND match.result_frame_path IS NOT NULL '
+            'ORDER BY match.id LIMIT ?',
+            (int(after_match_id), int(limit)),
+        )
+        result: Dict[str, Any] = {
+            'scanned': len(rows),
+            'written': 0,
+            'missing': 0,
+            'failed': 0,
+            'last_error': '',
+            'last_match_id': int(after_match_id),
+        }
+
+        def store() -> List[Dict[str, Any]]:
+            metadata_items: List[Dict[str, Any]] = []
+            for row in rows:
+                result['last_match_id'] = int(row['id'])
+                try:
+                    source = self._resolve_result_frame_path(
+                        str(row['result_frame_path'])
+                    )
+                    if not source.is_file():
+                        result['missing'] += 1
+                        continue
+                    content = source.read_bytes()
+                    metadata_items.append(
+                        self._write_result_archive_candidate(
+                            content=content,
+                            source_path=source,
+                            session_id=int(row['session_id']),
+                            part_id=int(row['part_id']),
+                            part_index=int(row['part_index']),
+                            result_at_ms=int(row['result_at_ms']),
+                            game_mode=str(row['game_mode']),
+                            confidence=float(row['confidence']),
+                            streamer=str(row['anchor_name'] or ''),
+                            room_id=str(row['room_id'] or ''),
+                            session_title=str(row['title'] or ''),
+                            filename=Path(str(row['source_path'] or '')).name,
+                            created_at=int(row['created_at']),
+                        )
+                    )
+                    result['written'] += 1
+                except (OSError, ValueError) as error:
+                    result['failed'] += 1
+                    result['last_error'] = str(error)[:300]
+            return metadata_items
+
+        metadata_items = await asyncio.get_running_loop().run_in_executor(None, store)
+        if self._candidate_ingest is not None and metadata_items:
+            await self._candidate_ingest(tuple(metadata_items))
+        return result
 
     async def record_manual_correction_candidate(
         self, *, before: MatchRecord, after: MatchRecord, changed_fields: Sequence[str]
@@ -7272,6 +7388,92 @@ class VaingloryRepository:
         self._write_training_candidate_file(
             sidecar, payload, prefix='.training-metadata-'
         )
+
+    def _write_result_archive_candidate(
+        self,
+        *,
+        content: bytes,
+        source_path: Path,
+        session_id: int,
+        part_id: int,
+        part_index: int,
+        result_at_ms: int,
+        game_mode: str,
+        confidence: float,
+        streamer: str,
+        room_id: str,
+        session_title: str,
+        filename: str,
+        created_at: int,
+    ) -> Dict[str, Any]:
+        """把每局规范结算图写成幂等 Vision 候选，优先用硬链接复用原图。"""
+
+        digest = hashlib.sha256(content).hexdigest()
+        relative_path = 'objects/{}/{}.png'.format(digest[:2], digest)
+        destination = self._resolve_training_candidate_path(relative_path)
+        destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if not destination.is_file():
+            try:
+                os.link(source_path, destination)
+                os.chmod(destination, 0o600)
+            except OSError:
+                self._write_training_candidate_file(
+                    destination, content, prefix='.training-result-image-'
+                )
+        width = 0
+        height = 0
+        if content.startswith(b'\x89PNG\r\n\x1a\n') and len(content) >= 24:
+            width, height = struct.unpack('>II', content[16:24])
+        normalized_mode = (
+            game_mode if game_mode in {'3v3', 'aram', '5v5', 'blitz'} else 'unreadable'
+        )
+        bounded_confidence = min(1.0, max(0.0, float(confidence)))
+        metadata = {
+            'schema_version': 3,
+            'task': 'unified_review',
+            'source_type': 'result_archive',
+            'source_id': 'result:{}:{}:{}:{}'.format(
+                session_id, part_id, result_at_ms, digest[:16]
+            ),
+            'session_id': int(session_id),
+            'part_id': int(part_id),
+            'part_index': int(part_index),
+            'at_ms': int(result_at_ms),
+            'segment_start_ms': int(result_at_ms),
+            'streamer': streamer,
+            'room_id': room_id,
+            'session_title': session_title,
+            'filename': filename,
+            'suggestions': {
+                'match_flow': {'label': 'match_flow', 'confidence': bounded_confidence},
+                'match_mode': {
+                    'label': normalized_mode,
+                    'confidence': bounded_confidence,
+                },
+                'hero_select': {'label': 'not_select', 'confidence': 1.0},
+                'result_panel': {
+                    'label': 'result_panel',
+                    'confidence': bounded_confidence,
+                },
+            },
+            'suggested_boxes': [],
+            'model_outputs': [],
+            'image_path': relative_path,
+            'image_sha256': digest,
+            'image_width': int(width),
+            'image_height': int(height),
+            'created_at': int(created_at),
+        }
+        metadata_relative_path = 'items/session-{}/part-{}/{:012d}-{}.json'.format(
+            session_id, part_id, result_at_ms, digest[:16]
+        )
+        self._write_training_candidate(
+            destination,
+            content,
+            metadata,
+            self._resolve_training_candidate_path(metadata_relative_path),
+        )
+        return metadata
 
     @staticmethod
     def _write_training_candidate_file(
