@@ -44,9 +44,10 @@ class VisionCandidateIngestClient:
         return cls(url, _secret('BLREC_VISION_LAB_INGEST_TOKEN'))
 
     async def ingest(self, candidates: Sequence[Mapping[str, Any]]) -> None:
+        loop = asyncio.get_running_loop()
         for offset in range(0, len(candidates), 100):
             batch = candidates[offset : offset + 100]
-            await asyncio.to_thread(self._post, batch)
+            await loop.run_in_executor(None, self._post, batch)
 
     def _post(self, candidates: Sequence[Mapping[str, Any]]) -> None:
         payload = json.dumps(
