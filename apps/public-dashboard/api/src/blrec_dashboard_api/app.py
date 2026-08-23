@@ -329,6 +329,10 @@ def create_app(
             idempotency_key
         ):
             raise HTTPException(status_code=422, detail='invalid idempotency key')
+        if active_settings.repository_mode != 'incremental':
+            raise HTTPException(
+                status_code=409, detail='dashboard cache ingestion is disabled'
+            )
         try:
             result = await run_in_threadpool(
                 partial(

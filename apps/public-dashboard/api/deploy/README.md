@@ -7,12 +7,11 @@ API 通过受限 SSH 隧道连接移动云 PostgreSQL：
 
 - `core` 是权威业务数据源。API 账号只对 `grant-core-read.sql` 列出的表拥有
   `SELECT` 权限；
-- `public` 保存可变的玩家/对局查询索引、同 `source_revision` 发布的 public/owner 榜单、
-  结构化历史趋势、结算图片元数据和幂等记录；
-- API 进程只常驻 public/owner 两份序列化榜单和很小的直播状态，对局、搜索和评分按页
-  从 PostgreSQL 读取；
-- 缓存增量在独立 Python 子进程中应用。public/owner 两套榜单在同一事务中发布；失败时
-  API 继续提供上一份成功结果，子进程退出后临时内存立即归还系统。
+- `public` 保存结算图片元数据、写入幂等记录和可重建的历史查询缓存，不是第二套权威
+  对局数据；
+- API 使用 `direct` 模式直接读取 `core`，并按 source revision 在进程内缓存当前榜单、
+  对局、搜索和评分数据；
+- NAS Publisher 只发布图片资产和处理回放可见性，不发送玩家或对局增量。
 
 首次切换前，由 PostgreSQL 管理员执行 `grant-core-read.sql`。部署脚本会逐一验证 API
 角色能读取批准的 `core` 表；任何表缺少权限或 revision 无效都会在切换 release 前
@@ -25,8 +24,9 @@ API 通过受限 SSH 隧道连接移动云 PostgreSQL：
 
 服务配置位于 `/etc/blrec-dashboard-api/api.env`，权限为 `0600`。默认情况下，同一
 PostgreSQL URL 分别固定 `search_path=public` 和 `search_path=core`；也可通过
-`DASHBOARD_API_SOURCE_DATABASE_URL` 使用独立的只读账号。NAS 只持有缓存/图片写入 API
-的 Bearer 密钥，不持有 API 数据库密码。
+`DASHBOARD_API_SOURCE_DATABASE_URL` 使用独立的只读账号。NAS 只持有图片写入 API 的
+Bearer 密钥，不持有 API 数据库密码。生产配置必须保持
+`DASHBOARD_API_REPOSITORY_MODE=direct`。
 
 站长视图使用单独的高熵 Bearer 令牌。服务端只在 `api.env` 保存令牌的 SHA-256：
 
@@ -38,21 +38,15 @@ DASHBOARD_API_OWNER_TOKEN_SHA256=<64 位小写十六进制摘要>
 `sessionStorage` 中保存明文；站长响应使用 `private, no-store`，不能进入 CDN
 共享缓存。
 
-## PostgreSQL 增量缓存切换
+## PostgreSQL 数据源与缓存边界
 
-新 release 首次部署时保持 `DASHBOARD_API_REPOSITORY_MODE=direct`。数据库备份和迁移
-成功后，先升级 NAS Publisher，让它通过 `/v1/cache/batches` 做影子引导。只有以下条件
-全部满足才能把模式改成 `incremental`：
+`core` 是唯一事实来源。API 根据 `dashboard_source_state.revision` 发现变化并刷新内存
+缓存；刷新失败时继续提供上一份完整缓存，但后续刷新仍直接来自 `core`，不等待 NAS
+文件 outbox。
 
-1. `dashboard_audience_state` 恰有 `public`、`owner` 两行且 revision 相同；
-2. 该 revision 等于 `core.dashboard_source_state.revision`；
-3. public/owner 榜单摘要、对局数量、分页/搜索/英雄筛选和回放权限回归全部通过；
-4. API 公共响应字节与影子缓存字节一致，并记录末批物化耗时和峰值内存。
-
-切换后，Publisher 只发送变化的玩家/对局；纯 revision 变化通过空批次快进，不运行全局
-物化。内容变化时 ingest 子进程增量更新 SQL 行，再重新发布紧凑的榜单/趋势字节。回滚时
-先恢复 `direct` 或上一个 release，不删除缓存表；旧 schema-9 `postgres` 代次仍只作为
-独立回滚路径，不得与 `incremental` 混用。
+`public` 中现存的旧玩家/对局投影表仅作为短期回滚数据保留；当前 API 和 Publisher 都不
+推进它们。跨过回滚窗口后应通过单独迁移删除，不能在恢复发布的同一部署中破坏历史
+备份。
 
 SSH 隧道需要以下文件：
 

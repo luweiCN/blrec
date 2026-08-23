@@ -309,6 +309,31 @@ def test_incremental_endpoint_authenticates_and_refreshes_the_active_repository(
     assert dashboard.headers['etag'] == 'W/"8"'
 
 
+def test_direct_repository_rejects_incremental_cache_batches(tmp_path: Path) -> None:
+    settings = ApiSettings(
+        database_path=tmp_path / 'dashboard.sqlite3',
+        source_database_path=tmp_path / 'source.sqlite3',
+        ingest_token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
+        cors_origins=('https://vg.luwei.host',),
+        repository_mode='direct',
+    )
+
+    with TestClient(
+        create_app(settings, repository=_StaticRepository())  # type: ignore[arg-type]
+    ) as client:
+        response = client.post(
+            '/v1/cache/batches',
+            headers={
+                'Authorization': 'Bearer {}'.format(TOKEN),
+                'X-Idempotency-Key': 'cache-disabled',
+            },
+            json=cache_batch(source_revision=8),
+        )
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'dashboard cache ingestion is disabled'
+
+
 def test_unchanged_source_content_fast_forwards_without_materializing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -585,6 +610,7 @@ def test_publisher_sync_reaches_the_authenticated_api_ingest_seam(
         source_database_path=source_path,
         ingest_token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
         cors_origins=('https://vg.luwei.host',),
+        repository_mode='incremental',
     )
     source = cache_batch(source_revision=11)
     original = source['matches'][0]

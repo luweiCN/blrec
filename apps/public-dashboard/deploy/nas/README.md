@@ -1,8 +1,8 @@
-# 群晖排行榜增量、资产与回放核验 worker
+# 群晖排行榜资产与回放核验 worker
 
 该 worker 是独立 Compose 项目 `blrec-dashboard`。它不会重建、切换或停止正在录制的
-`blrec-next` 容器。它用只读数据库账号发送玩家/对局增量、同步结算图，并按 Dashboard
-API 队列匿名核验 B 站稿件是否可公开回放；榜单与评分仍由 API 侧计算。
+`blrec-next` 容器。它用只读数据库账号同步结算图，并按 Dashboard API 队列匿名核验
+B 站稿件是否可公开回放；玩家、对局、榜单与评分不经过该 worker。
 
 ## 凭据与目录
 
@@ -12,7 +12,7 @@ API 队列匿名核验 B 站稿件是否可公开回放；榜单与评分仍由 
 /volume1/docker/blrec-next/secrets/dashboard-publisher.env
 ```
 
-同一文件还保存 `DASHBOARD_API_TOKEN`，用于写入缓存增量和图片元数据，以及领取和回写
+同一文件还保存 `DASHBOARD_API_TOKEN`，用于写入图片元数据，以及领取和回写
 回放可见性任务。不要把凭据写入 Compose、日志或仓库。
 
 `DASHBOARD_DATABASE_URL` 使用移动云主库的只读账号，连接 NAS 上的
@@ -20,7 +20,7 @@ API 队列匿名核验 B 站稿件是否可公开回放；榜单与评分仍由 
 `/result-frames`。worker 会压缩为最长边 1600 像素的 WebP，再上传到
 `data/match-images/`。
 
-Publisher 的 `/state` 保存玩家/对局内容哈希、图片签名、水位和两个失败 outbox；这些
+Publisher 的 `/state` 保存图片签名、水位和失败 outbox；这些
 JSON 文件不是网页数据源。回放可见性队列和 15 分钟缓存持久化在 Dashboard API 数据库
 中。数据库隧道不可用时停止本轮同步，不回退到旧 SQLite。
 
@@ -53,14 +53,13 @@ curl -fsS https://vg-api.luwei.host/v1/matches/summary
 curl -fsS https://vg-api.luwei.host/v1/dashboard >/dev/null
 ```
 
-日志应出现 `asset_sync=synced|current`、`cache_sync=synced|current`，以及
+日志应出现 `asset_sync=synced|current`，以及
 `replay_visibility=public|unavailable|retry`。网络审计应记录 `dashboard_publish` 和 `bili_api` 用途的线路与源地址。失败批次保留在
-`/state/api-outbox/` 或 `/state/cache-api-outbox/`，容器重启后用相同幂等键重试。
+`/state/api-outbox/`，容器重启后用相同幂等键重试。
 
-常驻 worker 每秒读取 source revision；变化后等待 2 秒合并连续写入。初次缓存引导每批
-最多 500 场且只在末批发布，之后只发送内容哈希变化的对局；纯 revision 变化不触发榜单
-重算。回放核验使用独立长轮询，没有页面请求产生的任务时不访问 B 站；同一稿件合并为
-一条任务。
+常驻 worker 每秒读取 source revision；变化后等待 2 秒合并连续写入，只处理新增或变化
+的图片。回放核验使用独立长轮询，没有页面请求产生的任务时不访问 B 站；同一稿件合并
+为一条任务。
 
 ## 人工检查与回滚
 
@@ -75,6 +74,5 @@ docker compose --project-name blrec-dashboard --env-file publisher.env \
   -f compose.yml up -d dashboard-publisher
 ```
 
-回滚时先把 API 模式恢复为 `direct`，再把 `DASHBOARD_PUBLISHER_IMAGE_TAG` 改为已验证
-的提交 SHA 并执行 `pull`、`up -d`；仍须先备份数据库。旧 API 不支持缓存批次端点时，
-必须同时回滚 Publisher，否则它会保留 outbox 并持续重试。
+回滚时把 `DASHBOARD_PUBLISHER_IMAGE_TAG` 改为已验证的提交 SHA 并执行 `pull`、
+`up -d`；仍须先备份数据库。Publisher 回滚不应改变 Dashboard API 的对局数据源。

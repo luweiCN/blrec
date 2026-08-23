@@ -19,7 +19,6 @@ from blrec.networking.manager import NetworkRouteManager, RouteSelection
 from blrec.networking.requests_session import RoutedRequestsSession
 
 from .api_sync import DashboardApiClient, sync_dashboard_api_once
-from .cache_sync import sync_dashboard_cache_once
 from .replay_visibility import (
     BilibiliReplayVisibilityChecker,
     ReplayVisibilityCheckError,
@@ -215,22 +214,6 @@ def _publish(configuration: _WorkerConfiguration) -> None:
             base_url=configuration.api_url,
             token=_required_environment('DASHBOARD_API_TOKEN'),
             route_manager=route_manager,
-        )
-        cache_result = sync_dashboard_cache_once(
-            database_path=configuration.database,
-            state_directory=configuration.state,
-            post_batch=api_client.post_cache_batch,
-        )
-        LOGGER.info(
-            'cache_sync=%s batches=%s matches=%s removed=%s revision=%s '
-            'purpose=dashboard_publish interface=%s source_address=%s',
-            'synced' if cache_result.synced else 'current',
-            cache_result.batch_count,
-            cache_result.match_count,
-            cache_result.removed_match_count,
-            cache_result.source_revision,
-            api_client.selection.interface_name or 'system-default',
-            api_client.selection.source_address or 'system-default',
         )
         store = OssDashboardStore(
             endpoint=configuration.endpoint,

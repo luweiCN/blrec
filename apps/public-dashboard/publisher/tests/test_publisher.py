@@ -70,30 +70,19 @@ def test_environment_integer_rejects_invalid_values(
         _environment_int('DASHBOARD_TEST_SECONDS', 10)
 
 
-def test_cache_sync_runs_before_oss_initialization(
+def test_publisher_only_syncs_dashboard_assets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     events = []
 
     class ApiClient:
         selection = SimpleNamespace(interface_name=None, source_address=None)
-        post_cache_batch = object()
 
         def __init__(self, **_kwargs: object) -> None:
             pass
 
         def close(self) -> None:
             events.append('api-close')
-
-    def cache_sync(**_kwargs: object) -> SimpleNamespace:
-        events.append('cache')
-        return SimpleNamespace(
-            synced=True,
-            batch_count=1,
-            match_count=1,
-            removed_match_count=0,
-            source_revision=7,
-        )
 
     def unavailable_oss(**_kwargs: object) -> None:
         events.append('oss')
@@ -107,7 +96,6 @@ def test_cache_sync_runs_before_oss_initialization(
         publisher_module, 'NetworkRouteManager', lambda _loader: object()
     )
     monkeypatch.setattr(publisher_module, 'DashboardApiClient', ApiClient)
-    monkeypatch.setattr(publisher_module, 'sync_dashboard_cache_once', cache_sync)
     monkeypatch.setattr(publisher_module, 'OssDashboardStore', unavailable_oss)
     configuration = _WorkerConfiguration(
         database=tmp_path / 'source.sqlite3',
@@ -128,4 +116,4 @@ def test_cache_sync_runs_before_oss_initialization(
     with pytest.raises(DashboardPublishError, match='OSS unavailable'):
         _publish(configuration)
 
-    assert events == ['cache', 'oss', 'api-close']
+    assert events == ['oss', 'api-close']
