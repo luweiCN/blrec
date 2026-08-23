@@ -7,7 +7,10 @@ import os
 from pathlib import Path
 from typing import Optional, Sequence
 
-from blrec.bili_upload.postgres_database import create_bili_upload_database
+from blrec.bili_upload.postgres_database import (
+    PostgresBiliUploadDatabase,
+    create_bili_upload_database,
+)
 from blrec.vainglory.repository import VaingloryRepository
 from blrec.vainglory.vision_candidate_ingest import VisionCandidateIngestClient
 
@@ -33,7 +36,10 @@ async def _run(batch_size: int) -> int:
     database = create_bili_upload_database(
         database_target, local_state_path='/cfg/blrec.sqlite3'
     )
-    await database.open()
+    if isinstance(database, PostgresBiliUploadDatabase):
+        await database.open_readonly()
+    else:
+        await database.open()
     try:
         repository = VaingloryRepository(
             database,

@@ -3,6 +3,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import Mock
 from urllib.parse import urlsplit
 
 import psycopg
@@ -76,6 +77,28 @@ def test_postgres_sql_removes_sqlite_query_planner_hints() -> None:
     assert postgres_sql(source) == (
         'SELECT * FROM first JOIN second ON second.first_id=first.id'
     )
+
+
+@pytest.mark.asyncio
+async def test_postgres_readonly_open_does_not_claim_writer_lock(
+    tmp_path: Path,
+) -> None:
+    database = PostgresBiliUploadDatabase(
+        'postgresql://example.invalid/blrec',
+        local_state_path=str(tmp_path / 'blrec.sqlite3'),
+    )
+    connection = Mock()
+    connection.execute.return_value.fetchone.return_value = (
+        database.LATEST_SCHEMA_VERSION,
+    )
+    adapter = Mock(return_value=connection)
+    database._adapter = adapter  # type: ignore[method-assign]
+
+    await database.open_readonly()
+    try:
+        adapter.assert_called_once_with(writer=False)
+    finally:
+        await database.close()
 
 
 def test_postgres_schema_translates_sqlite_types_and_constraints() -> None:

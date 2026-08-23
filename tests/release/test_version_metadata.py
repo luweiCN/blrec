@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_release_version_matches_preview_beta() -> None:
-    assert blrec.__version__ == '3.0.0-beta.117'
+    assert blrec.__version__ == '3.0.0-beta.118'
 
 
 def test_server_and_worker_runtime_pins_cover_supported_python_wheels() -> None:
@@ -21,7 +21,7 @@ def test_server_and_worker_runtime_pins_cover_supported_python_wheels() -> None:
         )[0]
     )
     assert 'version = "0.1.15"' in worker
-    assert '"blrec==3.0.0b117"' in worker
+    assert '"blrec==3.0.0b118"' in worker
     assert '"onnxruntime==1.23.2; python_version == \'3.10\'"' in worker
     assert '"onnxruntime==1.28.0; python_version >= \'3.11\'"' in worker
 

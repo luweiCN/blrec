@@ -506,6 +506,32 @@ class PostgresBiliUploadDatabase(BiliUploadDatabase):
     def _open_sync(self) -> None:
         self._connection = self._adapter(writer=True)  # type: ignore
 
+    async def open_readonly(self) -> None:
+        async with self._lifecycle_lock:
+            if self._executor_closed:
+                raise RuntimeError('database has been closed')
+            if self._connection is not None:
+                return
+            await self._run(self._open_readonly_sync)
+
+    def _open_readonly_sync(self) -> None:
+        connection = self._adapter(writer=False)
+        try:
+            version = connection.execute(
+                'SELECT COALESCE(MAX(version),0) FROM schema_migrations'
+            ).fetchone()
+            current = 0 if version is None else int(version[0])
+            if current != self.LATEST_SCHEMA_VERSION:
+                raise RuntimeError(
+                    'PostgreSQL schema version {} does not match required {}'.format(
+                        current, self.LATEST_SCHEMA_VERSION
+                    )
+                )
+            self._connection = connection  # type: ignore
+        except BaseException:
+            connection.close()
+            raise
+
     def _close_sync(self) -> None:
         connection, self._connection = self._connection, None
         if connection is not None:
