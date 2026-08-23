@@ -9,7 +9,7 @@ description = "Mac analysis worker for BLREC Vainglory recordings"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "blrec==3.0.0b115",
+  "blrec==3.0.0b116",
   "loguru>=0.7.2,<0.8.0",
   "requests>=2.24.0,<3.0.0",
   "rapidocr==3.9.2",
