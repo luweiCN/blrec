@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ctypes
+import gc
 import json
 import logging
+import sys
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -27,6 +30,27 @@ LOGGER = logging.getLogger(__name__)
 
 RuntimeLoader = Callable[[DatabaseTarget], Tuple[int, Mapping[str, Any]]]
 RevisionLoader = Callable[[DatabaseTarget], int]
+
+
+def _load_malloc_trim() -> Optional[Callable[[int], int]]:
+    if not sys.platform.startswith('linux'):
+        return None
+    try:
+        trim = ctypes.CDLL(None).malloc_trim
+    except (AttributeError, OSError):
+        return None
+    trim.argtypes = [ctypes.c_size_t]
+    trim.restype = ctypes.c_int
+    return trim
+
+
+_MALLOC_TRIM = _load_malloc_trim()
+
+
+def _release_unused_process_memory() -> None:
+    gc.collect()
+    if _MALLOC_TRIM is not None:
+        _MALLOC_TRIM(0)
 
 
 @dataclass(frozen=True)
@@ -530,9 +554,15 @@ class DirectDashboardRepository:
             source_revision, runtime = self._runtime_loader(self._source_target)
             if source_revision < expected_revision:
                 raise RuntimeError('dashboard source changed during refresh')
+            previous_revision = (
+                None if current is None else current.public.source_revision
+            )
             next_state = build_repository_state(source_revision, runtime)
             with self._state_lock:
                 self._state = next_state
+            del current
+            del runtime
+            _release_unused_process_memory()
             LOGGER.info(
                 'dashboard cache refreshed source_revision=%s '
                 'public_players=%s public_matches=%s owner_players=%s '
@@ -544,7 +574,7 @@ class DirectDashboardRepository:
                 len(next_state.owner.matches),
                 time.perf_counter() - started_at,
             )
-            return current is None or current.public.source_revision != source_revision
+            return previous_revision != source_revision
 
     def source_revision(self) -> int:
         return self._revision_loader(self._source_target)

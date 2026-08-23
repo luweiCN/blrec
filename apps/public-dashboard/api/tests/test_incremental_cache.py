@@ -118,9 +118,7 @@ def test_cache_batch_model_preserves_visibility_dedup_and_revision() -> None:
     assert batch.matches[0].duplicate_review_state == 'none'
 
 
-def test_schema_ten_adds_incremental_visibility_and_audience_heads(
-    tmp_path: Path,
-) -> None:
+def test_latest_schema_keeps_incremental_columns_for_rollback(tmp_path: Path) -> None:
     database_path = tmp_path / 'dashboard.sqlite3'
     initialize_database(database_path)
     connection = connect_database(database_path)
@@ -145,7 +143,7 @@ def test_schema_ten_adds_incremental_visibility_and_audience_heads(
     finally:
         connection.close()
 
-    assert version == 10
+    assert version == 11
     assert 'public_visible' in player_columns
     assert {
         'stats_eligible',

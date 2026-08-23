@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 import pytest
+from blrec_dashboard_api import direct as direct_module
 from blrec_dashboard_api.app import create_app
-from blrec_dashboard_api.dashboard import _ranked_trend_rows, load_dashboard_trends
+from blrec_dashboard_api.dashboard import _ranked_trend_rows
 from blrec_dashboard_api.dashboard_cache import (
     PostgresDashboardRepository,
     publish_dashboard_cache,
@@ -224,6 +225,25 @@ def test_repository_rebuilds_only_after_the_source_revision_changes(
 
     assert repository.refresh() is True
     assert repository.get_match(2, rating_scope='3v3', rating_season=None)['id'] == 2
+
+
+def test_repository_releases_unused_pages_after_replacing_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, _loads = _repository(tmp_path)
+    released = []
+    monkeypatch.setattr(
+        direct_module, '_release_unused_process_memory', lambda: released.append(True)
+    )
+
+    assert repository.refresh() is False
+    assert released == []
+
+    repository._revision_loader = lambda _target: 2
+    repository._runtime_loader = lambda _target: (2, _runtime_source(match_id=2))
+
+    assert repository.refresh() is True
+    assert released == [True]
 
 
 def test_public_dataset_reuses_the_owner_rating_index(tmp_path: Path) -> None:
@@ -782,7 +802,7 @@ def test_rating_trends_keep_only_the_latest_frontend_supported_publications() ->
     assert trends['publications'][-1]['snapshotId'] == snapshot['snapshotId']
 
 
-def test_schema_upgrade_converts_legacy_trend_json_to_rows(tmp_path: Path) -> None:
+def test_schema_upgrade_discards_legacy_trend_cache(tmp_path: Path) -> None:
     database_path = tmp_path / 'legacy.sqlite3'
     connection = sqlite3.connect(str(database_path))
     try:
@@ -832,29 +852,15 @@ def test_schema_upgrade_converts_legacy_trend_json_to_rows(tmp_path: Path) -> No
             'SELECT season_key,mode,player_id,rank,rating_score '
             'FROM dashboard_publication_standings'
         ).fetchone()
+        legacy = upgraded.execute(
+            'SELECT publication_date FROM dashboard_trend_publications'
+        ).fetchone()
     finally:
         upgraded.close()
 
-    assert publication is not None
-    assert dict(publication) == {
-        'snapshot_id': 'legacy-snapshot',
-        'source_last_match_id': 99,
-    }
-    assert standing is not None
-    assert dict(standing) == {
-        'season_key': '2026-summer',
-        'mode': 'all',
-        'player_id': 7,
-        'rank': 1,
-        'rating_score': 612,
-    }
-    modes = load_dashboard_trends(database_path)['publications'][0]['standings'][
-        '2026-summer'
-    ]
-    assert tuple(modes) == ('all', '3v3', 'brawl', '5v5')
-    assert modes['3v3'] == []
-    assert modes['brawl'] == []
-    assert modes['5v5'] == []
+    assert publication is None
+    assert standing is None
+    assert legacy is None
 
 
 def test_asset_write_is_transactional_and_visible_without_rebuilding_source(

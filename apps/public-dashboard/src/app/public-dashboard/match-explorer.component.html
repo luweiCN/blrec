@@ -208,8 +208,8 @@
             <span
               *ngIf="match.replayStatus === 'checking'; else replayDisabled"
               class="match-replay-link disabled checking"
-              aria-label="正在核验稿件是否公开"
-            >核验中</span>
+              aria-label="正在加载回放"
+            >加载中</span>
             <ng-template #replayDisabled>
               <span class="match-replay-link disabled" aria-label="暂无公开回放">回放</span>
             </ng-template>

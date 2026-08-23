@@ -317,7 +317,7 @@ describe('MatchExplorerComponent', () => {
     expect(
       fixture.nativeElement.querySelector('.match-replay-link.checking')
         ?.textContent,
-    ).toContain('核验中');
+    ).toContain('加载中');
     expect(matchApi.list).toHaveBeenCalledTimes(1);
 
     tick(1_500);
