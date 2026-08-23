@@ -277,6 +277,7 @@ const CANDIDATE_SOURCE_LABELS = {
 };
 
 const CANDIDATE_QUEUE_OPTIONS = {
+  all: [['confirmed', '全部已确认训练数据']],
   new: [
     ['needs_review', '待确认'],
     ['missing_player', '只补本人标记'],
@@ -340,7 +341,7 @@ function renderCandidateReviewReasonFilter() {
 }
 
 function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true) {
-  candidateSourceScope = scope === 'legacy' ? 'legacy' : 'new';
+  candidateSourceScope = ['new', 'legacy', 'all'].includes(scope) ? scope : 'new';
   candidateReviewStats = {};
   renderCandidateMaterialSuggestionButton();
   const options = CANDIDATE_QUEUE_OPTIONS[candidateSourceScope];
@@ -352,21 +353,27 @@ function setCandidateSourceScope(scope, status = 'needs_review', syncNav = true)
   $('#candidate-status-filter').value = selected;
   renderCandidateReviewReasonFilter();
   const historical = candidateSourceScope === 'legacy';
+  const confirmedTraining = candidateSourceScope === 'all';
   const sourceType = $('#candidate-source-type-filter');
   if (sourceType) {
-    sourceType.value = historical ? '' : CANDIDATE_DEFAULT_SOURCE_TYPE;
+    sourceType.value = historical || confirmedTraining
+      ? '' : CANDIDATE_DEFAULT_SOURCE_TYPE;
   }
-  $('#candidate-page-title').textContent = historical
-    ? '历史人工数据' : 'Worker 待复核';
-  $('#candidate-queue-metrics').classList.toggle('hidden', historical);
-  if (!historical) {
+  $('#candidate-page-title').textContent = confirmedTraining
+    ? '已确认训练数据'
+    : historical ? '历史人工数据' : 'Worker 待复核';
+  $('#candidate-queue-metrics').classList.toggle(
+    'hidden', historical || confirmedTraining);
+  if (!historical && !confirmedTraining) {
     $('#candidate-worker-total').textContent = '—';
     $('#candidate-prefill-ready').textContent = '—';
     $('#candidate-ready-for-review').textContent = '—';
   }
-  $('#candidate-scope-summary').textContent = historical
-    ? '正在读取历史人工数据…'
-    : '这里只展示已经完成模型预打标、可以直接核对的素材。';
+  $('#candidate-scope-summary').textContent = confirmedTraining
+    ? '正在读取全部已确认训练数据…'
+    : historical
+      ? '正在读取历史人工数据…'
+      : '这里只展示已经完成模型预打标、可以直接核对的素材。';
   candidateFilterOptionsLoadedScope = '';
   if (syncNav) {
     $$('.nav-item').forEach((button) => button.classList.remove('active'));
@@ -2690,6 +2697,10 @@ function candidateItemMatchesStatus(item, status) {
 }
 
 function candidateReviewTotal(stats, status) {
+  if (candidateSourceScope === 'all') {
+    if (status === 'all') return Number(stats.total || 0);
+    return Number((stats.statuses || {})[status] || 0);
+  }
   const scope = (stats.source_scopes || {})[candidateSourceScope] || {};
   const statuses = scope.statuses || {};
   if (status === 'all') return Number(scope.total || 0);
@@ -3067,10 +3078,12 @@ async function loadCandidateFilterOptions() {
 
 function renderCandidateLegacyControls(stats, status) {
   const historical = candidateSourceScope === 'legacy';
+  const confirmedTraining = candidateSourceScope === 'all';
   const active = historical && status === 'legacy_hero';
   $('#candidate-legacy-filters').classList.toggle('hidden', !active);
-  $('#candidate-page-title').textContent = historical
-    ? '历史人工数据' : 'Worker 待复核';
+  $('#candidate-page-title').textContent = confirmedTraining
+    ? '已确认训练数据'
+    : historical ? '历史人工数据' : 'Worker 待复核';
   $('#candidate-page-hint').textContent = active
     ? '这里只把历史 HUD、积分板和结算图按主播、同一局和画面类型折叠成代表组；你补一张代表图即可，不需要把约 7000 张旧图逐张重标。未补头像的旧图不会被当作“没有头像”的负样本。'
     : status === 'missing_afk'
@@ -3079,6 +3092,8 @@ function renderCandidateLegacyControls(stats, status) {
       ? '这些图片只是把旧格式标签迁移成了新字段，还没有在统一打标页面由你重新确认。旧标签和新模型结果都只作为预填；请像新数据一样核对完整分类，并按画面选择 HUD、积分板、结算、无头像或看不清。确认后才会进入“新流程人工已确认”。'
       : historical && status === 'human_confirmed'
         ? '这里只显示你在统一打标页面亲自确认过的历史图片；迁移程序自动带入的旧标签不会出现在这里。'
+        : confirmedTraining
+          ? '这里汇总新旧来源中已经人工确认并进入训练集的图片。可以按来源、画面、模式、置信度、主播、英雄或复查原因筛选，修改后直接保存最新标签。'
         : historical
           ? '这里展示旧格式人工标签及其迁移状态，与新数据使用同一套分类、头像来源、圆框、英雄和本人位置标注。没有头像框的旧图不会成为头像模型的负样本。'
           : 'Worker 产出的候选会在 NAS 上自动建立索引，不需要再同步到本机。新模型会预填分类、结算框、头像位置、英雄和主播本人；你只需核对和修正。';
@@ -3126,6 +3141,12 @@ function renderCandidateProgress() {
 function renderCandidateSyncStats(stats) {
   const scopes = stats.source_scopes || {};
   const legacy = scopes.legacy || {};
+  if (candidateSourceScope === 'all') {
+    $('#candidate-scope-summary').textContent =
+      `共 ${trainingNumber((stats.statuses || {}).confirmed || 0)} 张已确认训练图片；` +
+      '可按下方任意维度筛选并重新修改。';
+    return;
+  }
   if (candidateSourceScope === 'legacy') {
     const hero = stats.legacy_hero || {};
     $('#candidate-scope-summary').textContent =

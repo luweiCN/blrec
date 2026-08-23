@@ -1212,6 +1212,43 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             [item['frame_id'] for item in hero_disagreement], [hero_conflict]
         )
 
+    def test_confirmed_review_unifies_new_and_legacy_human_labels(self):
+        new_frame = self.frame(120)
+        legacy_frame = self.frame(121)
+        for frame_id, source_type in (
+            (new_frame, 'worker'),
+            (legacy_frame, 'legacy_annotation'),
+        ):
+            db.add_training_review_source(
+                self.conn,
+                frame_id=frame_id,
+                source_type=source_type,
+                source_id=f'{source_type}-{frame_id}',
+            )
+            db.save_training_review(
+                self.conn,
+                frame_id=frame_id,
+                match_flow_label='match_flow',
+                match_mode_label='unreadable',
+                hero_select_label='not_select',
+                result_panel_label='no_result_panel',
+                status='confirmed',
+            )
+
+        items, total = db.training_review_page(
+            self.conn,
+            status='confirmed',
+            source_scope='all',
+            review_reason='mode_unreadable',
+            prefill_ready_only=True,
+            limit=10,
+        )
+
+        self.assertEqual(total, 2)
+        self.assertEqual(
+            {item['frame_id'] for item in items}, {new_frame, legacy_frame}
+        )
+
     def test_confirmed_scoreboard_stays_in_afk_backfill_until_every_slot_is_marked(
         self,
     ):

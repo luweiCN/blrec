@@ -1195,6 +1195,19 @@ def test_candidate_review_supports_confirmed_rechecks_and_afk_labels() -> None:
     assert "loadedStatus === 'missing_afk'" in script
 
 
+def test_confirmed_training_data_has_a_dedicated_unified_review_entry() -> None:
+    root = Path(__file__).resolve().parent.parent / 'labeler/static'
+    script = (root / 'app.js').read_text(encoding='utf-8')
+    page = (root / 'index.html').read_text(encoding='utf-8')
+
+    assert 'data-candidate-source="all"' in page
+    assert 'data-candidate-status="confirmed"' in page
+    assert '>已确认训练数据</button>' in page
+    assert "all: [['confirmed', '全部已确认训练数据']]" in script
+    assert "['new', 'legacy', 'all'].includes(scope)" in script
+    assert "candidateSourceScope === 'all'" in script
+
+
 def test_candidate_save_allows_partial_special_lineups() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
