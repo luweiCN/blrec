@@ -5,7 +5,7 @@ import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import requests
 from loguru import logger
@@ -26,6 +26,7 @@ from .ocr import (
 from .vision import (
     STANDARD_VIEWPORT,
     RgbFrame,
+    TeamSize,
     ViewportTransform,
     extract_result_panel,
     png_bytes,
@@ -269,6 +270,9 @@ class GlmOcrResultReader:
         wide_screenshot: bool,
         team_size: int,
     ) -> ResultOcr:
+        if team_size not in (3, 5):
+            raise ValueError('team size must be 3 or 5')
+        panel_team_size = cast(TeamSize, team_size)
         local_header = header or self.read_header(
             frame, viewport=viewport, team_size=team_size
         )
@@ -277,7 +281,7 @@ class GlmOcrResultReader:
         for index, candidate in enumerate(candidates, 1):
             try:
                 panel = extract_result_panel(
-                    candidate, viewport=viewport, team_size=team_size
+                    candidate, viewport=viewport, team_size=panel_team_size
                 )
                 remote = parse_glm_result(
                     self._client.recognize(panel).text, team_size=team_size

@@ -4887,14 +4887,16 @@ class VaingloryVideoAnalyzer:
             return '5v5'
         if result_frame is not None and self._match_mode_classifier is not None:
             try:
-                prediction = self._match_mode_classifier.predict(result_frame)
+                result_mode_prediction = self._match_mode_classifier.predict(
+                    result_frame
+                )
             except Exception as error:  # noqa: BLE001
                 logger.warning(
                     'Vainglory result mode classification failed: {!r}', error
                 )
             else:
-                label = str(prediction.label)
-                confidence = float(prediction.confidence)
+                label = str(result_mode_prediction.label)
+                confidence = float(result_mode_prediction.confidence)
                 if (
                     label in ('3v3', 'aram')
                     and confidence >= self._minimum_result_mode_confidence
@@ -4938,11 +4940,12 @@ class VaingloryVideoAnalyzer:
         for timed in self._sampler.fine_frames(
             path, ScanWindow(start_ms=window_start, end_ms=window_end)
         ):
-            prediction = classifier.classify(timed.frame)
-            if prediction.stage == STAGE_PRE_MATCH:
-                pre_match_modes[prediction.mode] += 1
+            stage_prediction = classifier.classify(timed.frame)
+            if stage_prediction.stage == STAGE_PRE_MATCH:
+                pre_match_modes[stage_prediction.mode] += 1
             elif (
-                prediction.stage == STAGE_TALENT_SELECT and prediction.mode == MODE_ARAM
+                stage_prediction.stage == STAGE_TALENT_SELECT
+                and stage_prediction.mode == MODE_ARAM
             ):
                 talent_frames += 1
         logger.info(
