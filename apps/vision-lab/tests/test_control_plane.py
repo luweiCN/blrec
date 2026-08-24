@@ -998,6 +998,8 @@ def test_material_dialog_shows_versioned_model_quality() -> None:
     assert "api('/api/training-review/model-quality')" in script
     assert 'candidateModelQualitySelection' in script
     assert '当前模型仍易错' in script
+    assert '常见错误：' in script
+    assert 'context.wrong' in script
 
 
 def test_review_page_does_not_wait_for_late_core_model_prefill() -> None:

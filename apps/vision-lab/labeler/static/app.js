@@ -2865,6 +2865,13 @@ function candidateQualityContextLabel(context) {
   return mode ? `${scene} · ${mode}` : scene;
 }
 
+function candidateQualityClassLabel(taskId, label) {
+  const taskLabel = MODEL_TASKS[taskId]?.labels?.[label];
+  if (taskLabel) return taskLabel;
+  const hero = candidateHeroByLabel(label);
+  return hero ? hero.name : label;
+}
+
 function renderCandidateModelQuality() {
   const container = $('#candidate-model-quality');
   if (!container) return;
@@ -2942,6 +2949,18 @@ function renderCandidateModelQuality() {
     if (change !== null && change !== undefined) {
       parts.push(`比上一版本${Number(change) >= 0 ? ' +' : ' '}${change} 个百分点`);
     }
+    const commonConfusion = (version.confusions || [])[0];
+    if (commonConfusion) {
+      const [confirmedLabel, predictedLabel] = String(
+        commonConfusion.labels || '').split('→');
+      if (confirmedLabel && predictedLabel) {
+        parts.push(
+          `常见错误：${candidateQualityClassLabel(task.id, confirmedLabel)} ` +
+          `被识别成 ${candidateQualityClassLabel(task.id, predictedLabel)}` +
+          `（${commonConfusion.count}）`,
+        );
+      }
+    }
     detail.textContent = parts.join(' · ');
 
     const contexts = document.createElement('div');
@@ -2949,7 +2968,8 @@ function renderCandidateModelQuality() {
     (version.contexts || []).slice(0, 4).forEach((context) => {
       const chip = document.createElement('span');
       chip.textContent = `${candidateQualityContextLabel(context)} ` +
-        `${candidateQualityPercent(context.accuracy)} / ${context.compared}`;
+        `改 ${context.wrong}/${context.compared} · ` +
+        `一致 ${candidateQualityPercent(context.accuracy)}`;
       contexts.appendChild(chip);
     });
 
@@ -3142,8 +3162,7 @@ async function openCandidateMaterialSuggestions() {
   renderCandidateModelQuality();
   const dialog = $('#candidate-material-dialog');
   if (!dialog.open) dialog.showModal();
-  const materialRequest = Array.isArray(candidateReviewStats.material_suggestions)
-    ? Promise.resolve() : api('/api/training-review/material-suggestions')
+  const materialRequest = api('/api/training-review/material-suggestions')
       .then((data) => {
         candidateReviewStats.material_suggestions = data.material_suggestions || [];
         renderCandidateMaterialSuggestions();
@@ -3153,8 +3172,7 @@ async function openCandidateMaterialSuggestions() {
         $('#candidate-material-summary').textContent =
           '素材建议加载失败：' + error.message;
       });
-  const qualityRequest = candidateModelQuality !== null
-    ? Promise.resolve() : api('/api/training-review/model-quality')
+  const qualityRequest = api('/api/training-review/model-quality')
       .then((data) => {
         candidateModelQuality = data;
         renderCandidateModelQuality();

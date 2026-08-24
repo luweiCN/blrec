@@ -460,6 +460,7 @@ def summary(conn: Any) -> Dict[str, Any]:
                 (
                     {
                         **value,
+                        'wrong': value['compared'] - value['correct'],
                         'accuracy': (
                             value['correct'] / value['compared']
                             if value['compared']
@@ -468,7 +469,11 @@ def summary(conn: Any) -> Dict[str, Any]:
                     }
                     for value in version['contexts'].values()
                 ),
-                key=lambda value: (-value['compared'], value['screen_type']),
+                key=lambda value: (
+                    -value['wrong'],
+                    -value['compared'],
+                    value['screen_type'],
+                ),
             )
             version['confusions'] = [
                 {'labels': labels, 'count': count}

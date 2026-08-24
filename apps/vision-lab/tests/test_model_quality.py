@@ -123,6 +123,7 @@ class TestModelQuality:
         assert versions['match-mode-20260811-old']['high_confidence_wrong'] == 1
         assert versions['match-mode-20260822-new']['correct'] == 1
         assert match_mode['latest_run_id'] == 'match-mode-20260822-new'
+        assert versions['match-mode-20260811-old']['contexts'][0]['wrong'] == 1
         latest = model_quality.latest_issue_rates(self.conn)
         assert latest[('match_mode', '', '3v3')]['run_id'] == (
             'match-mode-20260822-new'
