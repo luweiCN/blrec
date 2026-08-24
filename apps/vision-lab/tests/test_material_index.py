@@ -1317,4 +1317,4 @@ class TestIncrementalMaterialIndex(MaterialIndexTestCase):
         finally:
             self.conn.set_trace_callback(None)
 
-        assert len(statements) == 8
+        assert len(statements) == 9

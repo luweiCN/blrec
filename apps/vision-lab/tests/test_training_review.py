@@ -1541,7 +1541,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
 
     def test_material_suggestions_include_sufficient_and_hero_scene_rows(self):
         frames = []
-        for index in range(100, 150):
+        for index in range(100, 200):
             frame_id = self.frame(index)
             frames.append(frame_id)
             db.add_training_review_source(
@@ -1563,7 +1563,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
                 result_groups={},
             )
 
-        hero_frame = self.frame(151)
+        hero_frame = self.frame(251)
         db.add_training_review_source(
             self.conn,
             frame_id=hero_frame,

@@ -31,6 +31,8 @@ let candidateLoadedStatus = 'needs_review';
 let candidateFilteredTotal = 0;
 let candidateSessionCompleted = 0;
 let candidateReviewStats = {};
+let candidateModelQuality = null;
+const candidateModelQualitySelection = new Map();
 let candidateDraft = null;
 let candidateBoxes = [];
 let candidateDrawStart = null;
@@ -2845,6 +2847,117 @@ function candidateMaterialSeverity(value) {
   }[value] || '建议补充';
 }
 
+function candidateModelRunLabel(runId) {
+  const value = String(runId || '');
+  const date = value.match(/20\d{2}(\d{4})/);
+  return date ? date[1] : value || '未知版本';
+}
+
+function candidateQualityPercent(value) {
+  return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function candidateQualityContextLabel(context) {
+  const scene = CANDIDATE_HERO_LAYOUT_SHORT_LABELS[context.screen_type]
+    || (context.screen_type === 'hero_select' ? '英雄选择' : '其他画面');
+  const mode = {aram: '大乱斗', '3v3': '3V3', '5v5': '5V5'}[
+    context.match_mode] || context.match_mode || '';
+  return mode ? `${scene} · ${mode}` : scene;
+}
+
+function renderCandidateModelQuality() {
+  const container = $('#candidate-model-quality');
+  if (!container) return;
+  container.replaceChildren();
+  if (candidateModelQuality === null) {
+    const loading = document.createElement('div');
+    loading.className = 'candidate-model-quality-empty';
+    loading.textContent = '正在读取各版本人工纠错结果…';
+    container.appendChild(loading);
+    return;
+  }
+  const tasks = Array.isArray(candidateModelQuality.tasks)
+    ? candidateModelQuality.tasks : [];
+  if (!tasks.length) {
+    const empty = document.createElement('div');
+    empty.className = 'candidate-model-quality-empty';
+    empty.textContent = '还没有可与人工确认结果对照的模型数据。';
+    container.appendChild(empty);
+    return;
+  }
+  tasks.forEach((task) => {
+    const versions = Array.isArray(task.versions) ? task.versions : [];
+    if (!versions.length) return;
+    const selectedRun = candidateModelQualitySelection.get(task.id)
+      || task.latest_run_id || versions[0].run_id;
+    const version = versions.find((item) => item.run_id === selectedRun)
+      || versions[0];
+    candidateModelQualitySelection.set(task.id, version.run_id);
+
+    const row = document.createElement('div');
+    row.className = 'candidate-model-quality-row';
+
+    const identity = document.createElement('div');
+    identity.className = 'candidate-model-quality-identity';
+    const name = document.createElement('strong');
+    name.textContent = task.name || task.id;
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', `${task.name || task.id}模型版本`);
+    versions.forEach((item) => {
+      const option = new Option(
+        `${candidateModelRunLabel(item.run_id)}${item.latest ? ' · 当前' : ''}`,
+        item.run_id,
+      );
+      option.title = item.run_id;
+      select.appendChild(option);
+    });
+    select.value = version.run_id;
+    select.title = version.run_id;
+    select.onchange = () => {
+      candidateModelQualitySelection.set(task.id, select.value);
+      renderCandidateModelQuality();
+    };
+    identity.append(name, select);
+
+    const score = document.createElement('div');
+    score.className = `candidate-model-quality-score ${version.status || ''}`;
+    const metric = document.createElement('strong');
+    metric.textContent = candidateQualityPercent(version.accuracy);
+    const metricName = document.createElement('span');
+    metricName.textContent = version.metric === 'complete_rate'
+      ? '自动找齐率' : '人工一致率';
+    score.append(metric, metricName);
+
+    const detail = document.createElement('div');
+    detail.className = 'candidate-model-quality-detail';
+    const compared = Number(version.compared || 0);
+    const wrong = Number(version.wrong || 0);
+    const highConfidenceWrong = Number(version.high_confidence_wrong || 0);
+    const change = version.change_points;
+    const parts = [
+      `已复核 ${compared.toLocaleString('zh-CN')}`,
+      `人工改正 ${wrong.toLocaleString('zh-CN')}`,
+    ];
+    if (highConfidenceWrong) parts.push(`高置信错 ${highConfidenceWrong}`);
+    if (change !== null && change !== undefined) {
+      parts.push(`比上一版本${Number(change) >= 0 ? ' +' : ' '}${change} 个百分点`);
+    }
+    detail.textContent = parts.join(' · ');
+
+    const contexts = document.createElement('div');
+    contexts.className = 'candidate-model-quality-contexts';
+    (version.contexts || []).slice(0, 4).forEach((context) => {
+      const chip = document.createElement('span');
+      chip.textContent = `${candidateQualityContextLabel(context)} ` +
+        `${candidateQualityPercent(context.accuracy)} / ${context.compared}`;
+      contexts.appendChild(chip);
+    });
+
+    row.append(identity, score, detail, contexts);
+    container.appendChild(row);
+  });
+}
+
 function applyCandidateMaterialSuggestion(suggestion, heroScope = 'direct') {
   const filters = suggestion.filters || {};
   setCandidateSourceScope(
@@ -2922,7 +3035,8 @@ function renderCandidateMaterialSuggestions() {
         : `${suggestion.mode_label} · ${suggestion.scene_label}`;
     const severity = document.createElement('span');
     severity.className = `candidate-material-severity ${suggestion.severity || ''}`;
-    severity.textContent = candidateMaterialSeverity(suggestion.severity);
+    severity.textContent = suggestion.status === 'model_errors'
+      ? '当前模型仍易错' : candidateMaterialSeverity(suggestion.severity);
     name.append(title, severity);
 
     const counts = document.createElement('div');
@@ -2981,6 +3095,15 @@ function renderCandidateMaterialSuggestions() {
           (failed ? ` · 预填失败 ${failed} 张` : ''),
       );
     }
+    if (suggestion.model_quality) {
+      const quality = suggestion.model_quality;
+      counts.append(
+        document.createElement('br'),
+        `当前 ${candidateModelRunLabel(quality.run_id)}：人工改正 ` +
+          `${quality.wrong}/${quality.compared} ` +
+          `(${candidateQualityPercent(quality.correction_rate)})`,
+      );
+    }
 
     const actions = document.createElement('div');
     actions.className = 'candidate-material-actions';
@@ -3016,19 +3139,34 @@ function renderCandidateMaterialSuggestions() {
 
 async function openCandidateMaterialSuggestions() {
   renderCandidateMaterialSuggestions();
+  renderCandidateModelQuality();
   const dialog = $('#candidate-material-dialog');
   if (!dialog.open) dialog.showModal();
-  if (!Array.isArray(candidateReviewStats.material_suggestions)) {
-    try {
-      const data = await api('/api/training-review/material-suggestions');
-      candidateReviewStats.material_suggestions = data.material_suggestions || [];
-      renderCandidateMaterialSuggestions();
-      renderCandidateMaterialSuggestionButton();
-    } catch (error) {
-      $('#candidate-material-summary').textContent =
-        '素材建议加载失败：' + error.message;
-    }
-  }
+  const materialRequest = Array.isArray(candidateReviewStats.material_suggestions)
+    ? Promise.resolve() : api('/api/training-review/material-suggestions')
+      .then((data) => {
+        candidateReviewStats.material_suggestions = data.material_suggestions || [];
+        renderCandidateMaterialSuggestions();
+        renderCandidateMaterialSuggestionButton();
+      })
+      .catch((error) => {
+        $('#candidate-material-summary').textContent =
+          '素材建议加载失败：' + error.message;
+      });
+  const qualityRequest = candidateModelQuality !== null
+    ? Promise.resolve() : api('/api/training-review/model-quality')
+      .then((data) => {
+        candidateModelQuality = data;
+        renderCandidateModelQuality();
+      })
+      .catch((error) => {
+        candidateModelQuality = {tasks: []};
+        renderCandidateModelQuality();
+        const container = $('#candidate-model-quality');
+        if (container) container.textContent =
+          '模型纠错分析加载失败：' + error.message;
+      });
+  await Promise.all([materialRequest, qualityRequest]);
 }
 
 function renderCandidateHeroFilter() {

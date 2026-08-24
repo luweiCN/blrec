@@ -969,6 +969,37 @@ def test_material_suggestions_are_loaded_only_when_dialog_opens() -> None:
     assert "api('/api/training-review/material-suggestions')" in script
 
 
+def test_model_quality_api_returns_versioned_human_corrections(monkeypatch) -> None:
+    connection = mock.Mock()
+    report = {
+        'tasks': [
+            {
+                'id': 'match_mode',
+                'latest_run_id': 'match-mode-20260822-current',
+                'versions': [{'run_id': 'match-mode-20260822-current'}],
+            }
+        ]
+    }
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(server.model_quality, 'summary', mock.Mock(return_value=report))
+
+    assert server.api_training_review_model_quality() == report
+    server.model_quality.summary.assert_called_once_with(connection)
+    connection.close.assert_called_once()
+
+
+def test_material_dialog_shows_versioned_model_quality() -> None:
+    root = Path(__file__).resolve().parent.parent
+    page = (root / 'labeler/static/index.html').read_text(encoding='utf-8')
+    script = (root / 'labeler/static/app.js').read_text(encoding='utf-8')
+
+    assert 'candidate-model-quality' in page
+    assert '模型纠错分析' in page
+    assert "api('/api/training-review/model-quality')" in script
+    assert 'candidateModelQualitySelection' in script
+    assert '当前模型仍易错' in script
+
+
 def test_review_page_does_not_wait_for_late_core_model_prefill() -> None:
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'

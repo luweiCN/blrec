@@ -396,7 +396,13 @@ class PostgresCompatibilityTests(unittest.TestCase):
         self.assertTrue(
             any('ADD COLUMN IF NOT EXISTS is_afk' in value for value in statements)
         )
-        self.assertEqual(cursor.calls[-1][1], (8,))
+        self.assertTrue(
+            any(
+                'CREATE TABLE IF NOT EXISTS training_review_model_outcomes' in value
+                for value in statements
+            )
+        )
+        self.assertEqual(cursor.calls[-1][1], (9,))
 
 
 if __name__ == '__main__':

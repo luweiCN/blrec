@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-POSTGRES_SCHEMA_VERSION = 8
+POSTGRES_SCHEMA_VERSION = 9
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
 _INSERT_TABLE = re.compile(
     r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
@@ -379,6 +379,41 @@ POSTGRES_SCHEMA_MIGRATIONS = {
         """
         CREATE INDEX IF NOT EXISTS idx_training_review_hero_afk
         ON training_review_hero_slots (is_afk,frame_id)
+        """,
+    ),
+    9: (
+        """
+        CREATE TABLE IF NOT EXISTS training_review_model_outcomes (
+            frame_id BIGINT NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
+            task_id TEXT NOT NULL CHECK (task_id IN (
+                'match_flow','match_mode','hero_select','result_detector',
+                'hero_avatar_detector','hero_identity','player_position',
+                'afk_status')),
+            model_run_id TEXT NOT NULL,
+            subject_key TEXT NOT NULL DEFAULT 'frame',
+            metric TEXT NOT NULL DEFAULT 'accuracy' CHECK (
+                metric IN ('accuracy','complete_rate')),
+            predicted_label TEXT NOT NULL,
+            confirmed_label TEXT NOT NULL,
+            confidence DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (
+                confidence BETWEEN 0 AND 1),
+            screen_type TEXT NOT NULL DEFAULT '',
+            match_mode TEXT NOT NULL DEFAULT '',
+            is_correct BIGINT NOT NULL CHECK (is_correct IN (0,1)),
+            source_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (frame_id,task_id,model_run_id,subject_key)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_model_quality
+        ON training_review_model_outcomes (
+            task_id,model_run_id,is_correct,screen_type,match_mode)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_model_frame
+        ON training_review_model_outcomes (frame_id,task_id,subject_key)
         """,
     ),
 }

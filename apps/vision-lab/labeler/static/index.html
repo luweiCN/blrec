@@ -644,6 +644,17 @@
         </div>
         <div id="candidate-material-summary" class="candidate-material-summary"
              role="status" aria-live="polite"></div>
+        <section class="candidate-model-quality-section"
+                 aria-labelledby="candidate-model-quality-title">
+          <div class="candidate-model-quality-heading">
+            <div>
+              <h4 id="candidate-model-quality-title">模型纠错分析</h4>
+              <p>按模型版本统计人工修改结果；这是实际复核素材的一致率，不是固定测试集准确率。</p>
+            </div>
+          </div>
+          <div id="candidate-model-quality" class="candidate-model-quality"
+               role="status" aria-live="polite"></div>
+        </section>
         <div id="candidate-material-list" class="candidate-material-list"></div>
       </dialog>
       <div id="candidate-layout">

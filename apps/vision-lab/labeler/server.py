@@ -24,7 +24,14 @@ from . import __version__, bp_review, config, db, events
 from . import export as export_mod
 from . import hero_review
 from . import inference as inference_mod
-from . import local, managed_assets, model_prefill, model_testing, result_archive
+from . import (
+    local,
+    managed_assets,
+    model_prefill,
+    model_quality,
+    model_testing,
+    result_archive,
+)
 from . import stats as stats_mod
 from . import (
     training,
@@ -1660,6 +1667,25 @@ def api_training_review_material_suggestions() -> Dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+@app.get('/api/training-review/model-quality')
+def api_training_review_model_quality() -> Dict[str, Any]:
+    conn = _conn()
+    try:
+        return model_quality.summary(conn)
+    finally:
+        conn.close()
+
+
+@app.post('/api/training-review/model-quality/rebuild')
+def api_rebuild_training_review_model_quality() -> Dict[str, int]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return model_quality.rebuild(conn)
+        finally:
+            conn.close()
 
 
 @app.get('/api/training-review/filter-options')

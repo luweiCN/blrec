@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -577,6 +576,36 @@ CREATE TABLE IF NOT EXISTS training_review_material_totals (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (kind, scene, match_mode, hero_label, source_scope, metric)
 );
+
+-- 模型预填与人工真值的版本化对照。每个模型版本只保留该版本在该对象上的
+-- 最终人工结论；新版本不会覆盖旧版本，报告也不需要重新解析全部来源 JSON。
+CREATE TABLE IF NOT EXISTS training_review_model_outcomes (
+    frame_id INTEGER NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL CHECK (task_id IN (
+        'match_flow', 'match_mode', 'hero_select', 'result_detector',
+        'hero_avatar_detector', 'hero_identity', 'player_position',
+        'afk_status')),
+    model_run_id TEXT NOT NULL,
+    subject_key TEXT NOT NULL DEFAULT 'frame',
+    metric TEXT NOT NULL DEFAULT 'accuracy' CHECK (
+        metric IN ('accuracy', 'complete_rate')),
+    predicted_label TEXT NOT NULL,
+    confirmed_label TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0 CHECK (
+        confidence BETWEEN 0 AND 1),
+    screen_type TEXT NOT NULL DEFAULT '',
+    match_mode TEXT NOT NULL DEFAULT '',
+    is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
+    source_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (frame_id, task_id, model_run_id, subject_key)
+);
+CREATE INDEX IF NOT EXISTS idx_training_review_model_quality
+    ON training_review_model_outcomes (
+        task_id, model_run_id, is_correct, screen_type, match_mode);
+CREATE INDEX IF NOT EXISTS idx_training_review_model_frame
+    ON training_review_model_outcomes (frame_id, task_id, subject_key);
 
 -- 积分板／结算图的英雄阵容复核。算法预填与人工结论分列保存，避免未确认
 -- 的 SIFT 结果直接成为训练真值。
@@ -3477,10 +3506,10 @@ _HERO_SCREEN_TYPES = {'gameplay_hud', 'scoreboard', 'result_page'}
 _HERO_LAYOUT_LABELS = _HERO_SCREEN_TYPES | {'none', 'unreadable'}
 _HERO_SELECT_VARIANTS = {'bp', 'blind', 'random', 'unreadable'}
 _MATERIAL_SUGGESTION_SCENES = (
-    ('gameplay_hud', 'HUD', 80),
-    ('scoreboard', '积分板', 60),
-    ('result_page', '结算界面', 80),
-    ('hero_select', '英雄选择', 50),
+    ('gameplay_hud', 'HUD', 200),
+    ('scoreboard', '积分板', 100),
+    ('result_page', '结算界面', 100),
+    ('hero_select', '英雄选择', 100),
 )
 _MATERIAL_SUGGESTION_MODES = (('3v3', '3V3'), ('aram', '大乱斗'), ('5v5', '5V5'))
 _MATERIAL_HERO_SCENE_TARGET = 20
@@ -3811,6 +3840,10 @@ def add_training_review_source(
                 (timestamp, timestamp, int(frame_id)),
             )
             refresh_training_review_material_index(conn, int(frame_id), commit=False)
+    if normalized_type in {'new_model_prefill', 'new_model_hero_prefill'}:
+        from . import model_quality
+
+        model_quality.refresh_frame(conn, int(frame_id), commit=False)
     conn.commit()
     return existing is None
 
@@ -5612,6 +5645,9 @@ def training_review_material_suggestions(
     conn: sqlite3.Connection, *, hero_catalog: Sequence[Dict[str, str]] = ()
 ) -> List[Dict[str, Any]]:
     """只读取增量汇总，生成素材缺口建议。"""
+    from . import model_quality
+
+    latest_model_issues = model_quality.latest_issue_rates(conn)
     totals = {
         (
             str(row['kind']),
@@ -5742,11 +5778,7 @@ def training_review_material_suggestions(
     related_heroes, missing_hero_scenes = _training_review_related_hero_counts(conn)
     scene_prefill = _training_review_scene_prefill_counts(conn)
     for scene, scene_label, minimum in _MATERIAL_SUGGESTION_SCENES:
-        strongest = max(
-            total('scene_mode', scene, mode, '', 'all', 'confirmed')[0]
-            for mode, _label in _MATERIAL_SUGGESTION_MODES
-        )
-        target = max(minimum, math.ceil(strongest * 0.6))
+        target = minimum
         for mode, mode_label in _MATERIAL_SUGGESTION_MODES:
             count = total('scene_mode', scene, mode, '', 'all', 'confirmed')[0]
             confirmed_breakdown = {
@@ -5761,11 +5793,26 @@ def training_review_material_suggestions(
             available = new_count if source_scope == 'new' else legacy_count
             ratio = count / target if target else 1.0
             sufficient = count >= target
+            if scene == 'hero_select':
+                quality = latest_model_issues.get(
+                    ('hero_select', 'hero_select', f'select_{mode}')
+                )
+            else:
+                quality = latest_model_issues.get(('match_mode', scene, mode))
+            model_needs_attention = bool(
+                quality
+                and int(quality['compared']) >= 20
+                and float(quality['correction_rate']) >= 0.1
+            )
             prefill = scene_prefill.get((scene, mode), {})
             severity = (
-                'sufficient'
-                if sufficient
-                else 'urgent' if count == 0 else 'scarce' if ratio < 0.35 else 'low'
+                ('scarce' if float(quality['correction_rate']) >= 0.2 else 'low')
+                if sufficient and model_needs_attention and quality
+                else (
+                    'sufficient'
+                    if sufficient
+                    else 'urgent' if count == 0 else 'scarce' if ratio < 0.35 else 'low'
+                )
             )
             result.append(
                 {
@@ -5784,8 +5831,13 @@ def training_review_material_suggestions(
                     'prefill_waiting_count': int(prefill.get('waiting', 0)),
                     'prefill_failed_count': int(prefill.get('failed', 0)),
                     'source_scope': source_scope,
+                    'model_quality': quality,
                     'severity': severity,
-                    'status': 'sufficient' if sufficient else 'shortage',
+                    'status': (
+                        'model_errors'
+                        if sufficient and model_needs_attention
+                        else 'sufficient' if sufficient else 'shortage'
+                    ),
                     'filters': {
                         'status': 'needs_review',
                         'scene': scene,
@@ -5909,6 +5961,12 @@ def training_review_material_suggestions(
             target = _MATERIAL_HERO_SCENE_TARGET
             sufficient = count >= target
             ratio = count / target
+            quality = latest_model_issues.get(('hero_identity', scene, hero_label))
+            model_needs_attention = bool(
+                quality
+                and int(quality['compared']) >= 10
+                and float(quality['correction_rate']) >= 0.15
+            )
             result.append(
                 {
                     'kind': 'hero_scene',
@@ -5933,16 +5991,29 @@ def training_review_material_suggestions(
                         (hero_label, scene), 0
                     ),
                     'source_scope': source_scope,
+                    'model_quality': quality,
                     'severity': (
-                        'sufficient'
-                        if sufficient
+                        (
+                            'scarce'
+                            if float(quality['correction_rate']) >= 0.25
+                            else 'low'
+                        )
+                        if sufficient and model_needs_attention and quality
                         else (
-                            'urgent'
-                            if count == 0
-                            else 'scarce' if ratio < 0.35 else 'low'
+                            'sufficient'
+                            if sufficient
+                            else (
+                                'urgent'
+                                if count == 0
+                                else 'scarce' if ratio < 0.35 else 'low'
+                            )
                         )
                     ),
-                    'status': 'sufficient' if sufficient else 'shortage',
+                    'status': (
+                        'model_errors'
+                        if sufficient and model_needs_attention
+                        else 'sufficient' if sufficient else 'shortage'
+                    ),
                     'filters': {
                         'status': 'needs_review',
                         'scene': scene,
@@ -6014,10 +6085,7 @@ def _training_review_material_suggestions(
 
     result = []
     for scene, scene_label, minimum in _MATERIAL_SUGGESTION_SCENES:
-        strongest = max(
-            confirmed[(scene, mode)] for mode, _label in _MATERIAL_SUGGESTION_MODES
-        )
-        target = max(minimum, math.ceil(strongest * 0.6))
+        target = minimum
         for mode, mode_label in _MATERIAL_SUGGESTION_MODES:
             count = confirmed[(scene, mode)]
             key = (scene, mode)
@@ -8143,6 +8211,9 @@ def save_training_review(
         ),
         commit=False,
     )
+    from . import model_quality
+
+    model_quality.refresh_frame(conn, int(frame_id), commit=False)
     refresh_training_review_material_index(conn, int(frame_id), commit=False)
     if commit:
         conn.commit()
@@ -8781,10 +8852,6 @@ def save_training_review_hero_lineup(
         ),
         commit=False,
     )
-    if refresh_material_index:
-        refresh_training_review_material_index(conn, int(frame_id), commit=False)
-    if commit:
-        conn.commit()
     labels_by_position = {
         (side, slot): (label, is_afk) for label, is_afk, side, slot in normalized
     }
@@ -8804,6 +8871,13 @@ def save_training_review_hero_lineup(
             'reviewed_at': timestamp,
         }
     )
+    from . import model_quality
+
+    model_quality.refresh_frame(conn, int(frame_id), hero_lineup=lineup, commit=False)
+    if refresh_material_index:
+        refresh_training_review_material_index(conn, int(frame_id), commit=False)
+    if commit:
+        conn.commit()
     return lineup
 
 
