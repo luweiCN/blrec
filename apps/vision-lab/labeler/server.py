@@ -1864,46 +1864,39 @@ def _queue_next_autonomous_model_prefill(conn: Any) -> Optional[Dict[str, Any]]:
 
 
 def _queue_next_afk_prefill(conn: Any) -> Optional[Dict[str, Any]]:
-    """挂机回填启动后，每次 Worker 领取时只生成一帧任务。"""
+    """每次 Worker 领取时，为当前模型自动生成一帧挂机预填任务。"""
     state = db.load_service_runtime_state(conn, _AFK_BACKFILL_STATE_KEY)
-    if state.get('status') != 'running':
+    if state.get('status') == 'cancelled':
         return None
     models = model_prefill.latest_model_specs(conn, model_prefill.AFK_PREFILL_TASKS)
     context = models.get('afk_status')
     if context is None:
-        db.save_service_runtime_state(
-            conn,
-            _AFK_BACKFILL_STATE_KEY,
-            {
-                **state,
-                'status': 'failed',
-                'error': '挂机模型产物不可用，请检查训练或发布状态',
-                'failed_at': db.now(),
-            },
-        )
+        if state.get('status') == 'running':
+            db.save_service_runtime_state(
+                conn,
+                _AFK_BACKFILL_STATE_KEY,
+                {
+                    **state,
+                    'status': 'failed',
+                    'error': '挂机模型产物不可用，请检查训练或发布状态',
+                    'failed_at': db.now(),
+                },
+            )
         return None
     run_id = str(context['run_id'])
-    if str(state.get('model_run_id') or '') != run_id:
-        db.save_service_runtime_state(
-            conn,
-            _AFK_BACKFILL_STATE_KEY,
-            {
-                **state,
-                'status': 'failed',
-                'error': '运行期间挂机模型版本已变化，请重新启动回填',
-                'failed_at': db.now(),
-            },
-        )
-        return None
+    model_changed = str(state.get('model_run_id') or '') != run_id
+    if model_changed:
+        db.prepare_training_review_afk_backfill(conn, run_id)
     lineup = db.next_training_review_afk_candidate(conn, run_id, commit=False)
     if lineup is None:
-        db.save_service_runtime_state(
-            conn,
-            _AFK_BACKFILL_STATE_KEY,
-            {**state, 'status': 'completed', 'completed_at': db.now()},
-        )
+        if state.get('status') == 'running':
+            db.save_service_runtime_state(
+                conn,
+                _AFK_BACKFILL_STATE_KEY,
+                {**state, 'status': 'completed', 'completed_at': db.now()},
+            )
         return None
-    return _queue_model_prefill(
+    job = _queue_model_prefill(
         conn,
         frame_id=int(lineup['frame_id']),
         operation='afk_slots',
@@ -1912,6 +1905,18 @@ def _queue_next_afk_prefill(conn: Any) -> Optional[Dict[str, Any]]:
         team_size=int(lineup['team_size']),
         slots=list(lineup.get('slots') or []),
     )
+    if state.get('status') != 'running' or model_changed:
+        db.save_service_runtime_state(
+            conn,
+            _AFK_BACKFILL_STATE_KEY,
+            {
+                'status': 'running',
+                'model_run_id': run_id,
+                'started_at': db.now(),
+                'automatic': True,
+            },
+        )
+    return job
 
 
 @app.post('/api/training-review/afk-predictions/backfill')

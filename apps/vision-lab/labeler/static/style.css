@@ -1686,7 +1686,27 @@ tr:hover td { background: var(--panel2); }
 
 .candidate-hero-slot-actions {
   display: flex;
+  align-items: center;
   gap: 3px;
+}
+
+.candidate-hero-afk-prediction {
+  flex: 0 0 auto;
+  min-width: 42px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 3%);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.candidate-hero-slots.team-size-5 .candidate-hero-afk-prediction {
+  min-width: 36px;
+  padding-inline: 3px;
+  font-size: 9px;
 }
 
 .candidate-hero-select {

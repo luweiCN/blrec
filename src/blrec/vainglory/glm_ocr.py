@@ -23,7 +23,13 @@ from .ocr import (
     parse_result_header,
     resolve_player_stats,
 )
-from .vision import STANDARD_VIEWPORT, RgbFrame, ViewportTransform, png_bytes
+from .vision import (
+    STANDARD_VIEWPORT,
+    RgbFrame,
+    ViewportTransform,
+    extract_result_panel,
+    png_bytes,
+)
 
 _KDA_PATTERN = re.compile(r'(?<!\d)(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(\d{1,2})(?!\d)')
 _ECONOMY_PATTERN = re.compile(r'\d{1,2}(?:[.,]\d)?\s*[kK]')
@@ -270,8 +276,11 @@ class GlmOcrResultReader:
         candidates = (frame, *name_frames)[: self._maximum_remote_frames]
         for index, candidate in enumerate(candidates, 1):
             try:
+                panel = extract_result_panel(
+                    candidate, viewport=viewport, team_size=team_size
+                )
                 remote = parse_glm_result(
-                    self._client.recognize(candidate).text, team_size=team_size
+                    self._client.recognize(panel).text, team_size=team_size
                 )
             except GlmOcrError as error:
                 logger.warning('Vainglory GLM-OCR frame failed: reason={!r}', error)

@@ -1634,15 +1634,17 @@ function renderCandidateHeroLineup() {
             slot.afk_prediction_probability !== null &&
             slot.afk_prediction_probability !== undefined) {
           afkPrediction.textContent =
-            `模型 P(挂机) ${(Number(slot.afk_prediction_probability) * 100).toFixed(1)}%`;
+            `${(Number(slot.afk_prediction_probability) * 100).toFixed(1)}%`;
           afkPrediction.title =
-            `预测 ${slot.afk_prediction_label || '未知'} · 模型 ${slot.afk_prediction_model_run_id || '未知版本'}`;
+            `挂机概率 ${afkPrediction.textContent} · ` +
+            `预测 ${slot.afk_prediction_label || '未知'} · ` +
+            `模型 ${slot.afk_prediction_model_run_id || '未知版本'}`;
         } else if (predictionStatus === 'failed') {
-          afkPrediction.textContent = '模型运行失败';
+          afkPrediction.textContent = '失败';
           afkPrediction.title = slot.afk_prediction_error || '挂机模型运行失败';
         } else {
           afkPrediction.textContent = predictionStatus === 'running'
-            ? '模型运行中' : predictionStatus === 'queued' ? '模型排队中' : '模型未运行';
+            ? '识别中' : predictionStatus === 'queued' ? '排队中' : '待识别';
         }
         slotActions.appendChild(afkPrediction);
       }
@@ -3742,10 +3744,10 @@ async function startCandidateAfkBackfill() {
   try {
     const data = await api('/api/training-review/afk-predictions/backfill', {
       method: 'POST',
-      body: '{}',
+      body: JSON.stringify({retry_failed: true}),
     });
     const counts = data.counts || {};
-    state.textContent = `已启动 ${data.model_run_id || ''} · ` +
+    state.textContent = `已重新排队 ${data.model_run_id || ''} · ` +
       `有挂机 ${counts.afk || 0} / 无挂机 ${counts.active || 0} / ` +
       `未运行 ${counts.pending || 0} / 失败 ${counts.failed || 0}`;
     await loadCandidateReview();

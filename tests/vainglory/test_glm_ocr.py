@@ -96,9 +96,11 @@ class _Client:
     def __init__(self, texts: List[str]) -> None:
         self._texts = iter(texts)
         self.calls = 0
+        self.frame_sizes: List[tuple[int, int]] = []
 
-    def recognize(self, _frame: RgbFrame) -> GlmOcrResponse:
+    def recognize(self, frame: RgbFrame) -> GlmOcrResponse:
         self.calls += 1
+        self.frame_sizes.append((frame.width, frame.height))
         return GlmOcrResponse(next(self._texts), None)
 
 
@@ -179,6 +181,17 @@ left3 0/1/11 14.2k right3 3/6/5 13.6k
     assert players[('left', 1)].stats.deaths == 4
     assert players[('right', 1)].stats.kills == 5
     assert players[('right', 3)].stats.kills == 3
+
+
+def test_glm_reader_sends_only_the_result_panel_to_remote_ocr() -> None:
+    client = _Client([REAL_RESULT_TEXT])
+    reader = GlmOcrResultReader(
+        client, fallback=_Fallback(), maximum_remote_frames=1  # type: ignore[arg-type]
+    )
+
+    reader.read(RgbFrame(100, 100, bytes(100 * 100 * 3)), team_size=3)
+
+    assert client.frame_sizes == [(82, 56)]
 
 
 def test_glm_reader_keeps_local_totals_when_remote_header_is_inconsistent() -> None:

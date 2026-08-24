@@ -153,7 +153,7 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'new AbortController()' in script
     assert 'signal: controller.signal' in script
     assert "afk_prediction: $('#candidate-afk-prediction-filter').value" in script
-    assert '模型 P(挂机)' in script
+    assert '挂机概率 ${afkPrediction.textContent}' in script
 
 
 def test_material_suggestions_never_fall_back_to_full_scan(monkeypatch) -> None:
@@ -708,6 +708,57 @@ def test_afk_backfill_queues_one_complete_frame_per_worker_claim(monkeypatch) ->
     )
     assert queue.call_args.kwargs['operation'] == 'afk_slots'
     assert len(queue.call_args.kwargs['slots']) == 6
+
+
+def test_afk_backfill_starts_automatically_when_new_result_frames_exist(
+    monkeypatch,
+) -> None:
+    connection = mock.Mock()
+    slots = [
+        {'side': side, 'slot': slot, 'crop': {'x': 0.1, 'y': 0.1, 'w': 0.1, 'h': 0.1}}
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    ]
+    monkeypatch.setattr(
+        server.db,
+        'load_service_runtime_state',
+        mock.Mock(return_value={'status': 'completed', 'model_run_id': 'afk-v1'}),
+    )
+    monkeypatch.setattr(
+        server.model_prefill,
+        'latest_model_specs',
+        mock.Mock(return_value={'afk_status': {'run_id': 'afk-v1'}}),
+    )
+    monkeypatch.setattr(
+        server.db,
+        'next_training_review_afk_candidate',
+        mock.Mock(return_value={'frame_id': 42, 'team_size': 3, 'slots': slots}),
+    )
+    save_state = mock.Mock()
+    monkeypatch.setattr(server.db, 'save_service_runtime_state', save_state)
+    queue = mock.Mock(return_value={'id': 'afk-job'})
+    monkeypatch.setattr(server, '_queue_model_prefill', queue)
+
+    job = server._queue_next_afk_prefill(connection)
+
+    assert job == {'id': 'afk-job'}
+    save_state.assert_called_once()
+    assert save_state.call_args.args[2]['status'] == 'running'
+    assert save_state.call_args.args[2]['model_run_id'] == 'afk-v1'
+
+
+def test_afk_backfill_manual_pause_prevents_automatic_restart(monkeypatch) -> None:
+    connection = mock.Mock()
+    monkeypatch.setattr(
+        server.db,
+        'load_service_runtime_state',
+        mock.Mock(return_value={'status': 'cancelled', 'model_run_id': 'afk-v1'}),
+    )
+    latest = mock.Mock(return_value={'afk_status': {'run_id': 'afk-v1'}})
+    monkeypatch.setattr(server.model_prefill, 'latest_model_specs', latest)
+
+    assert server._queue_next_afk_prefill(connection) is None
+    latest.assert_not_called()
 
 
 def test_forced_hero_refresh_updates_suggestions_without_losing_human_truth(

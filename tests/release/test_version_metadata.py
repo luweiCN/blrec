@@ -20,7 +20,7 @@ def test_server_and_worker_runtime_pins_cover_supported_python_wheels() -> None:
             '[options.extras_require]', 1
         )[0]
     )
-    assert 'version = "0.1.16"' in worker
+    assert 'version = "0.1.17"' in worker
     assert '"blrec==3.0.0b118"' in worker
     assert '"onnxruntime==1.23.2; python_version == \'3.10\'"' in worker
     assert '"onnxruntime==1.28.0; python_version >= \'3.11\'"' in worker

@@ -611,8 +611,13 @@
               <option value="failed">运行失败</option>
             </select>
           </label>
-          <button id="btn-candidate-afk-backfill" type="button">运行挂机预打标</button>
-          <span id="candidate-afk-backfill-state" class="muted small"></span>
+          <button id="btn-candidate-afk-backfill" type="button"
+                  title="正常情况下会自动运行；仅在模型升级或失败后需要手动重跑">
+            重新运行挂机预测
+          </button>
+          <span id="candidate-afk-backfill-state" class="muted small">
+            已有和新增结算图会由 Vision Worker 自动预打标
+          </span>
           <label id="candidate-review-reason-field" class="hidden">复查原因
             <select id="candidate-review-reason-filter">
               <option value="">全部已确认图片</option>

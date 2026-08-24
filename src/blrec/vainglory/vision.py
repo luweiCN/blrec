@@ -218,6 +218,17 @@ class GameplayHud:
     visible_portraits: int
 
 
+def extract_result_panel(
+    frame: RgbFrame,
+    *,
+    viewport: ViewportTransform = STANDARD_VIEWPORT,
+    team_size: TeamSize = 3,
+) -> RgbFrame:
+    """Crop the visible result panel while preserving its native aspect ratio."""
+    bounds = (0.01, 0.09, 0.99, 0.905) if team_size == 5 else (0.09, 0.22, 0.91, 0.78)
+    return frame.crop(viewport.source_rect(frame, *bounds))
+
+
 def detect_active_content_rect(frame: RgbFrame) -> PixelRect:
     """Locate a materially letterboxed/windowed capture inside a video frame."""
     x_step = max(1, math.ceil(frame.width / 120))
