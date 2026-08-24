@@ -154,6 +154,14 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'signal: controller.signal' in script
     assert "afk_prediction: $('#candidate-afk-prediction-filter').value" in script
     assert '挂机概率 ${afkPrediction.textContent}' in script
+    assert "identityConfidence.className = 'candidate-hero-identity-confidence'" in script
+    assert '英雄识别置信度 ${identityConfidence.textContent}' in script
+
+    style = (
+        Path(__file__).resolve().parent.parent / 'labeler/static/style.css'
+    ).read_text(encoding='utf-8')
+    assert '.candidate-hero-identity-confidence {' in style
+    assert 'font-variant-numeric: tabular-nums;' in style
 
 
 def test_material_suggestions_never_fall_back_to_full_scan(monkeypatch) -> None:

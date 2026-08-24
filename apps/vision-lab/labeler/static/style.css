@@ -1722,7 +1722,7 @@ tr:hover td { background: var(--panel2); }
 
 .candidate-hero-select::after {
   content: '▾';
-  margin-left: auto;
+  flex: 0 0 auto;
   color: var(--muted);
 }
 
@@ -1774,10 +1774,32 @@ tr:hover td { background: var(--panel2); }
 }
 
 .candidate-hero-selected-name {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.candidate-hero-identity-confidence {
+  flex: 0 0 auto;
+  min-width: 40px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: #cfe0ff;
+  background: rgb(255 255 255 / 3%);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.candidate-hero-slots.team-size-5 .candidate-hero-identity-confidence {
+  min-width: 34px;
+  padding-inline: 3px;
+  font-size: 9px;
 }
 
 .candidate-hero-picker {

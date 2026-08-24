@@ -1573,15 +1573,22 @@ function renderCandidateHeroLineup() {
       select.classList.toggle('missing', !hero);
       const name = document.createElement('span');
       name.className = 'candidate-hero-selected-name';
-      const confidence = hero && selected === slot.suggested_label
-        ? ` · ${(Number(slot.suggestion_confidence || 0) * 100).toFixed(1)}%`
-        : '';
       name.textContent = hero
         ? `${hero.name}${hero.label === 'unreadable' ? '' : ` · ${hero.label}`}`
         : recognizing ? 'AI 识别中…' : '请选择英雄';
-      name.textContent += confidence;
       select.title = name.textContent;
       select.appendChild(name);
+      if (hero && selected === slot.suggested_label) {
+        const identityConfidence = document.createElement('span');
+        identityConfidence.className = 'candidate-hero-identity-confidence';
+        identityConfidence.textContent =
+          `${(Number(slot.suggestion_confidence || 0) * 100).toFixed(1)}%`;
+        identityConfidence.title =
+          `英雄识别置信度 ${identityConfidence.textContent}`;
+        identityConfidence.setAttribute('aria-label', identityConfidence.title);
+        select.appendChild(identityConfidence);
+        select.title += ` · ${identityConfidence.title}`;
+      }
       select.onclick = () => openCandidateHeroPicker(select, key);
       details.appendChild(select);
       const slotActions = document.createElement('div');
