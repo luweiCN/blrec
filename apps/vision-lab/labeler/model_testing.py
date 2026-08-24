@@ -698,10 +698,7 @@ def run_sample_image_reference(
         )
         if sample is None:
             raise KeyError(f'当前训练后挑战集中不存在样本: {sample_id}')
-        return {
-            'frame_id': int(sample['frame_id']),
-            'crop': sample.get('_crop'),
-        }
+        return {'frame_id': int(sample['frame_id']), 'crop': sample.get('_crop')}
     if split == SCOREBOARD_CHALLENGE_SPLIT:
         if str(context['run']['task_id']) != 'result_detector':
             raise ValueError('只有结算面板检测模型可以使用计分板难例库')
@@ -716,9 +713,7 @@ def run_sample_image_reference(
     sample = next(
         (
             value
-            for value in _manifest_samples(
-                Path(context['dataset']['manifest_path'])
-            )
+            for value in _manifest_samples(Path(context['dataset']['manifest_path']))
             if str(value.get('sample_id') or '') == sample_id
             and str(value.get('split') or '') == split
         ),
@@ -739,10 +734,7 @@ def run_sample_image_reference(
     if frame_id is None:
         raise KeyError(f'训练快照样本无法追溯原图: {sample_id}')
     crop = sample.get('_crop') or sample.get('crop')
-    return {
-        'frame_id': int(frame_id),
-        'crop': crop if isinstance(crop, dict) else None,
-    }
+    return {'frame_id': int(frame_id), 'crop': crop if isinstance(crop, dict) else None}
 
 
 def list_run_samples(
@@ -1352,6 +1344,11 @@ def _evaluation_gaps(context: Dict[str, Any]) -> List[str]:
     kind = str(context['metadata'].get('kind') or '')
     if kind == 'classify':
         expected = set(_class_names(context['metadata']))
+        if str(context['run']['task_id']) == 'result_mode':
+            # Analysis Worker 先用结算阵容行数确定 5V5，只消费该模型的
+            # 3V3/大乱斗二次判断；闪电战在具备独立固定测试集前保持弃权。
+            # 因此组包门槛必须与实际运行契约一致，不能让未消费的类别阻塞发布。
+            expected &= {'3v3', 'aram'}
         present = {str(sample.get('label') or '') for sample in samples}
         missing = sorted(expected - present)
         return [f'固定测试集缺少类别 {label}' for label in missing]

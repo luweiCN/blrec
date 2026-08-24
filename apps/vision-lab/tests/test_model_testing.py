@@ -827,6 +827,29 @@ class TestModelTesting(unittest.TestCase):
                 self.conn, ['screen-state-run-1'], package_id='vg-test-package'
             )
 
+    def test_result_mode_package_requires_only_runtime_consumed_classes(self):
+        manifest = self.root / 'result-mode-samples.jsonl'
+        manifest.write_text(
+            '\n'.join(
+                json.dumps({'split': 'test', 'label': label})
+                for label in ('3v3', 'aram')
+            ),
+            encoding='utf-8',
+        )
+
+        gaps = model_testing._evaluation_gaps(
+            {
+                'run': {'task_id': 'result_mode'},
+                'dataset': {'manifest_path': str(manifest)},
+                'metadata': {
+                    'kind': 'classify',
+                    'classes': {'0': '3v3', '1': '5v5', '2': 'aram', '3': 'blitz'},
+                },
+            }
+        )
+
+        self.assertEqual(gaps, [])
+
     def test_package_uses_the_training_artifacts_preprocessing_contract(self):
         metadata_path = self.artifact.with_suffix('.json')
         metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
