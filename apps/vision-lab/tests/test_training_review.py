@@ -1306,6 +1306,15 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             self.conn, status='missing_afk', source_scope='new'
         )
         self.assertEqual([item['frame_id'] for item in before], [frame_id])
+        suggestion = next(
+            item
+            for item in db.training_review_material_suggestions(self.conn)
+            if item['kind'] == 'afk_status'
+        )
+        self.assertEqual(suggestion['candidate_count'], 1)
+        self.assertEqual(suggestion['filters']['status'], 'missing_afk')
+        self.assertEqual(suggestion['active_count'], 0)
+        self.assertEqual(suggestion['afk_count'], 0)
 
         db.save_training_review_hero_lineup(
             self.conn,
@@ -1328,6 +1337,14 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             ),
             [],
         )
+        suggestion = next(
+            item
+            for item in db.training_review_material_suggestions(self.conn)
+            if item['kind'] == 'afk_status'
+        )
+        self.assertEqual(suggestion['candidate_count'], 0)
+        self.assertEqual(suggestion['active_count'], 6)
+        self.assertEqual(suggestion['afk_count'], 0)
 
     def test_material_suggestions_count_confirmed_and_actionable_candidates(self):
         confirmed = self.frame(12)

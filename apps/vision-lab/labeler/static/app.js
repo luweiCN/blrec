@@ -2917,7 +2917,9 @@ function renderCandidateMaterialSuggestions() {
     title.textContent = suggestion.kind === 'hero_scene'
       ? `${suggestion.hero_name || suggestion.hero_label} · ` +
         `${suggestion.scene_label}头像`
-      : `${suggestion.mode_label} · ${suggestion.scene_label}`;
+      : suggestion.kind === 'afk_status'
+        ? '真正结算图 · 挂机状态'
+        : `${suggestion.mode_label} · ${suggestion.scene_label}`;
     const severity = document.createElement('span');
     severity.className = `candidate-material-severity ${suggestion.severity || ''}`;
     severity.textContent = candidateMaterialSeverity(suggestion.severity);
@@ -2940,7 +2942,21 @@ function renderCandidateMaterialSuggestions() {
     const relatedAvailable = Number(suggestion.related_candidate_count || 0);
     const queueName = suggestion.source_scope === 'legacy'
       ? '历史队列' : 'Worker 队列';
-    if (suggestion.kind === 'hero_scene') {
+    if (suggestion.kind === 'afk_status') {
+      const active = Number(suggestion.active_count || 0);
+      const afk = Number(suggestion.afk_count || 0);
+      const activeShortage = Number(suggestion.active_shortage_count || 0);
+      const afkShortage = Number(suggestion.afk_shortage_count || 0);
+      counts.append(
+        '挂机 ', confirmed,
+        ` / ${suggestion.afk_target_count || 0} 个 · ` +
+          `正常 ${active} / ${suggestion.active_target_count || 0} 个 · ` +
+          `${queueName}待补 ${available} 张结算图` +
+          (afkShortage || activeShortage
+            ? ` · 还差挂机 ${afkShortage}、正常 ${activeShortage}`
+            : ' · 已达建议线'),
+      );
+    } else if (suggestion.kind === 'hero_scene') {
       const modelPrefill = Number(suggestion.model_prefill_count || 0);
       const sameMatch = Number(suggestion.same_match_candidate_count || 0);
       const sameVideo = Number(suggestion.same_video_candidate_count || 0);
@@ -2972,9 +2988,11 @@ function renderCandidateMaterialSuggestions() {
     action.type = 'button';
     action.disabled = available <= 0;
     action.textContent = available > 0
-      ? suggestion.status === 'sufficient'
-        ? `继续打标（${available}）`
-        : `去打标（${available}）`
+      ? suggestion.kind === 'afk_status'
+        ? `去补挂机（${available}）`
+        : suggestion.status === 'sufficient'
+          ? `继续打标（${available}）`
+          : `去打标（${available}）`
       : '暂无候选';
     action.title = available > 0
       ? '打开对应待确认素材'

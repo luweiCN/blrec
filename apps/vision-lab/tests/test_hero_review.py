@@ -1058,10 +1058,19 @@ class TestHeroTrainingExport(unittest.TestCase):
             for item in training.task_summaries(self.conn)
             if item['id'] == 'afk_status'
         )
+        suggestion = next(
+            item
+            for item in db.training_review_material_suggestions(self.conn)
+            if item['kind'] == 'afk_status'
+        )
         snapshot = export.export_afk_status_classifier(self.conn)
 
         self.assertTrue(summary['ready'])
         self.assertEqual(summary['counts']['excluded_scoreboard'], 12)
+        self.assertEqual(suggestion['active_count'], 10)
+        self.assertEqual(suggestion['afk_count'], 2)
+        self.assertEqual(suggestion['active_target_count'], 500)
+        self.assertEqual(suggestion['afk_target_count'], 200)
         self.assertEqual(snapshot['total'], 12)
         self.assertEqual(snapshot['by_label'], {'active': 10, 'afk': 2})
         samples = [

@@ -3484,6 +3484,7 @@ _MATERIAL_SUGGESTION_SCENES = (
 )
 _MATERIAL_SUGGESTION_MODES = (('3v3', '3V3'), ('aram', '大乱斗'), ('5v5', '5V5'))
 _MATERIAL_HERO_SCENE_TARGET = 20
+_MATERIAL_AFK_TARGETS = {'active': 500, 'afk': 200}
 _MISSING_PLAYER_HERO_REVIEW = """
 item.review_status = 'confirmed'
 AND COALESCE(item.view_context_label, 'played') = 'played'
@@ -5792,6 +5793,63 @@ def training_review_material_suggestions(
                     },
                 }
             )
+
+    afk_row = conn.execute(
+        'SELECT '
+        'COALESCE(SUM(CASE WHEN slot.is_afk=0 THEN 1 ELSE 0 END),0) '
+        'AS active_count,'
+        'COALESCE(SUM(CASE WHEN slot.is_afk=1 THEN 1 ELSE 0 END),0) '
+        'AS afk_count,'
+        'COUNT(DISTINCT CASE WHEN slot.is_afk IS NULL AND material.is_new=1 '
+        'THEN lineup.frame_id END) AS new_candidate_count,'
+        'COUNT(DISTINCT CASE WHEN slot.is_afk IS NULL AND material.is_legacy=1 '
+        'THEN lineup.frame_id END) AS legacy_candidate_count '
+        'FROM training_review_hero_lineups lineup '
+        'JOIN training_review_hero_slots slot ON slot.frame_id=lineup.frame_id '
+        'JOIN training_review_material_index material '
+        'ON material.frame_id=lineup.frame_id '
+        "WHERE lineup.review_status='confirmed' "
+        "AND lineup.screen_type='result_page' "
+        'AND material.result_group_representative_frame_id=lineup.frame_id'
+    ).fetchone()
+    active_count = int(afk_row['active_count'] or 0)
+    afk_count = int(afk_row['afk_count'] or 0)
+    new_candidates = int(afk_row['new_candidate_count'] or 0)
+    legacy_candidates = int(afk_row['legacy_candidate_count'] or 0)
+    source_scope = 'new' if new_candidates >= legacy_candidates else 'legacy'
+    candidate_count = new_candidates if source_scope == 'new' else legacy_candidates
+    active_shortage = max(0, _MATERIAL_AFK_TARGETS['active'] - active_count)
+    afk_shortage = max(0, _MATERIAL_AFK_TARGETS['afk'] - afk_count)
+    sufficient = active_shortage == 0 and afk_shortage == 0
+    ratio = min(
+        active_count / _MATERIAL_AFK_TARGETS['active'],
+        afk_count / _MATERIAL_AFK_TARGETS['afk'],
+    )
+    result.append(
+        {
+            'kind': 'afk_status',
+            'scene': 'result_page',
+            'scene_label': '真正结算图',
+            'confirmed_count': afk_count,
+            'active_count': active_count,
+            'afk_count': afk_count,
+            'active_target_count': _MATERIAL_AFK_TARGETS['active'],
+            'afk_target_count': _MATERIAL_AFK_TARGETS['afk'],
+            'active_shortage_count': active_shortage,
+            'afk_shortage_count': afk_shortage,
+            'target_count': _MATERIAL_AFK_TARGETS['afk'],
+            'shortage_count': active_shortage + afk_shortage,
+            'candidate_count': candidate_count,
+            'source_scope': source_scope,
+            'severity': (
+                'sufficient'
+                if sufficient
+                else 'urgent' if afk_count == 0 else 'scarce' if ratio < 0.35 else 'low'
+            ),
+            'status': 'sufficient' if sufficient else 'shortage',
+            'filters': {'status': 'missing_afk', 'scene': 'result_page'},
+        }
+    )
 
     catalog_by_label = {
         str(hero.get('label') or ''): str(hero.get('name') or hero.get('label') or '')
