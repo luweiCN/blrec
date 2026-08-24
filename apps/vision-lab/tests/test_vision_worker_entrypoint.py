@@ -152,3 +152,50 @@ def test_prefill_reports_downloaded_image_dimensions(monkeypatch, tmp_path) -> N
 
     assert result['image_width'] == 1280
     assert result['image_height'] == 720
+
+
+def test_worker_routes_afk_slots_as_one_frame_batch(monkeypatch, tmp_path) -> None:
+    class Client:
+        @staticmethod
+        def download(_path, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            from PIL import Image
+
+            Image.new('RGB', (1280, 720), '#222222').save(destination)
+
+    worker = vision_worker.VisionWorker(
+        client=Client(),
+        worker_id='worker-1',
+        display_name='Worker 1',
+        work_dir=tmp_path / 'work',
+        base_models_dir=tmp_path / 'models',
+        capabilities=['model_prefill'],
+    )
+    monkeypatch.setattr(worker, '_model_contexts', lambda _models: {'afk_status': {}})
+    calls = []
+
+    def run(_path, slots, _contexts, *, screen_type, team_size):
+        calls.append((len(slots), screen_type, team_size))
+        return {'complete': True, 'slots': slots, 'model_runs': {'afk_status': 'r1'}}
+
+    monkeypatch.setattr(vision_worker.model_prefill, 'run_afk_slots_prefill', run)
+    slots = [
+        {'side': side, 'slot': slot}
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    ]
+    result = worker._prefill(
+        {
+            'payload': {
+                'frame_id': 19,
+                'operation': 'afk_slots',
+                'models': {'afk_status': {}},
+                'screen_type': 'result_page',
+                'team_size': 3,
+                'slots': slots,
+            }
+        }
+    )
+
+    assert calls == [(6, 'result_page', 3)]
+    assert result['operation'] == 'afk_slots'

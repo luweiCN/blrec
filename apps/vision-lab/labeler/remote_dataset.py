@@ -171,7 +171,9 @@ def _materialize_classification(
             image.close()
     if task_id not in {'hero_identity', 'player_position', 'afk_status'}:
         return 0
-    return _balance_training_classes(destinations)
+    return _balance_training_classes(
+        destinations, target_limit=None if task_id == 'afk_status' else 100
+    )
 
 
 def _materialize_detection(
@@ -235,9 +237,13 @@ def _pixel_crop(image: Image.Image, value: Any) -> Tuple[int, int, int, int]:
     return left, top, right, bottom
 
 
-def _balance_training_classes(paths_by_label: Dict[str, List[Path]]) -> int:
+def _balance_training_classes(
+    paths_by_label: Dict[str, List[Path]], *, target_limit: int | None = 100
+) -> int:
     populated = [len(paths) for paths in paths_by_label.values() if paths]
-    target = min(100, max(1, round(median(populated)))) if populated else 0
+    target = max(1, round(median(populated))) if populated else 0
+    if target_limit is not None:
+        target = min(target_limit, target)
     replicas = 0
     for paths in paths_by_label.values():
         if not paths:

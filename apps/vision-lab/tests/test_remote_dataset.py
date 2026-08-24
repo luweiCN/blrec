@@ -125,6 +125,41 @@ def test_materializes_afk_context_crop() -> None:
         assert crop.size == (70, 18)
 
 
+def test_afk_training_balances_above_generic_hundred_sample_cap() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source = root / 'source.jpg'
+        sha256 = _jpeg(source, (100, 120, 140))
+        manifest = root / 'samples.jsonl'
+        samples = []
+        for label, count in (('active', 160), ('afk', 120)):
+            samples.extend(
+                {
+                    'sample_id': f'f00000001-{label}-{index:03d}',
+                    'frame_id': 1,
+                    'video_id': 10,
+                    'sha256': sha256,
+                    'split': 'train',
+                    'label': label,
+                    'crop': {'x': 0.1, 'y': 0.1, 'w': 0.7, 'h': 0.3},
+                }
+                for index in range(count)
+            )
+        _manifest(manifest, samples)
+
+        result = materialize_dataset(
+            task_id='afk_status',
+            manifest_path=manifest,
+            output_dir=root / 'dataset',
+            fetch_image=lambda _frame_id, destination: destination.write_bytes(
+                source.read_bytes()
+            ),
+        )
+
+        assert result['training_balance_replicas'] == 20
+        assert len(list((root / 'dataset/images/train/afk').glob('*.jpg'))) == 140
+
+
 def test_materializes_detector_labels() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)

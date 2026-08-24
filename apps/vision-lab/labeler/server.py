@@ -20,7 +20,12 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, bp_review, config, db, events
+# isort: off
+from . import __version__
+from . import bp_review
+from . import config
+from . import db
+from . import events
 from . import export as export_mod
 from . import hero_review
 from . import inference as inference_mod
@@ -48,6 +53,8 @@ from .extract import (
     task_state,
 )
 from .nas import NasClient
+
+# isort: on
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -177,6 +184,7 @@ _training_tasks_cache: Dict[str, Any] = {
     'retry_at': 0.0,
 }
 _TRAINING_TASKS_STATE_KEY = 'training_task_summaries'
+_AFK_BACKFILL_STATE_KEY = 'afk_prediction_backfill'
 _worker_candidate_state_response_lock = threading.Lock()
 _worker_candidate_state_response: Dict[str, Any] = {'value': None, 'expires_at': 0.0}
 _WORKER_CANDIDATE_STATE_CACHE_SECONDS = 10.0
@@ -1515,6 +1523,7 @@ def api_training_review_items(
     hero_scope: str = 'all',
     confidence: str = '',
     review_reason: str = '',
+    afk_prediction: str = '',
     include_stats: bool = True,
 ) -> Dict[str, Any]:
     hero_values = hero if isinstance(hero, list) else []
@@ -1538,6 +1547,7 @@ def api_training_review_items(
                             hero_scope != 'all',
                             confidence,
                             review_reason,
+                            afk_prediction,
                         )
                     )
                 )
@@ -1576,6 +1586,7 @@ def api_training_review_items(
                         hero_scope=hero_scope,
                         confidence=confidence,
                         review_reason=review_reason,
+                        afk_prediction=afk_prediction,
                         prefill_ready_only=status
                         in {'needs_review', 'migration_review', 'legacy_hero'},
                         result_groups=result_groups,
@@ -1852,6 +1863,123 @@ def _queue_next_autonomous_model_prefill(conn: Any) -> Optional[Dict[str, Any]]:
     return job
 
 
+def _queue_next_afk_prefill(conn: Any) -> Optional[Dict[str, Any]]:
+    """挂机回填启动后，每次 Worker 领取时只生成一帧任务。"""
+    state = db.load_service_runtime_state(conn, _AFK_BACKFILL_STATE_KEY)
+    if state.get('status') != 'running':
+        return None
+    models = model_prefill.latest_model_specs(conn, model_prefill.AFK_PREFILL_TASKS)
+    context = models.get('afk_status')
+    if context is None:
+        db.save_service_runtime_state(
+            conn,
+            _AFK_BACKFILL_STATE_KEY,
+            {
+                **state,
+                'status': 'failed',
+                'error': '挂机模型产物不可用，请检查训练或发布状态',
+                'failed_at': db.now(),
+            },
+        )
+        return None
+    run_id = str(context['run_id'])
+    if str(state.get('model_run_id') or '') != run_id:
+        db.save_service_runtime_state(
+            conn,
+            _AFK_BACKFILL_STATE_KEY,
+            {
+                **state,
+                'status': 'failed',
+                'error': '运行期间挂机模型版本已变化，请重新启动回填',
+                'failed_at': db.now(),
+            },
+        )
+        return None
+    lineup = db.next_training_review_afk_candidate(conn, run_id, commit=False)
+    if lineup is None:
+        db.save_service_runtime_state(
+            conn,
+            _AFK_BACKFILL_STATE_KEY,
+            {**state, 'status': 'completed', 'completed_at': db.now()},
+        )
+        return None
+    return _queue_model_prefill(
+        conn,
+        frame_id=int(lineup['frame_id']),
+        operation='afk_slots',
+        models={'afk_status': context},
+        screen_type='result_page',
+        team_size=int(lineup['team_size']),
+        slots=list(lineup.get('slots') or []),
+    )
+
+
+@app.post('/api/training-review/afk-predictions/backfill')
+def api_start_training_review_afk_backfill(
+    body: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            models = model_prefill.latest_model_specs(
+                conn, model_prefill.AFK_PREFILL_TASKS
+            )
+            context = models.get('afk_status')
+            if context is None:
+                raise HTTPException(409, '没有可用的挂机分类模型')
+            existing = db.load_service_runtime_state(conn, _AFK_BACKFILL_STATE_KEY)
+            if existing.get('status') == 'running' and str(
+                existing.get('model_run_id') or ''
+            ) == str(context['run_id']):
+                return {
+                    **existing,
+                    'already_running': True,
+                    'counts': db.training_review_afk_prediction_stats(conn),
+                }
+            reset = db.prepare_training_review_afk_backfill(
+                conn,
+                str(context['run_id']),
+                retry_failed=bool((body or {}).get('retry_failed')),
+            )
+            state = {
+                'status': 'running',
+                'model_run_id': str(context['run_id']),
+                'started_at': db.now(),
+                'reset_slots': reset,
+            }
+            db.save_service_runtime_state(conn, _AFK_BACKFILL_STATE_KEY, state)
+            return {**state, 'counts': db.training_review_afk_prediction_stats(conn)}
+        finally:
+            conn.close()
+
+
+@app.get('/api/training-review/afk-predictions/backfill')
+def api_training_review_afk_backfill_status() -> Dict[str, Any]:
+    with _training_review_read_guard():
+        conn = _conn()
+        try:
+            state = db.load_service_runtime_state(conn, _AFK_BACKFILL_STATE_KEY)
+            return {
+                **({'status': 'idle'} if not state else state),
+                'counts': db.training_review_afk_prediction_stats(conn),
+            }
+        finally:
+            conn.close()
+
+
+@app.post('/api/training-review/afk-predictions/backfill/cancel')
+def api_cancel_training_review_afk_backfill() -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            state = db.load_service_runtime_state(conn, _AFK_BACKFILL_STATE_KEY)
+            state = {**state, 'status': 'cancelled', 'cancelled_at': db.now()}
+            db.save_service_runtime_state(conn, _AFK_BACKFILL_STATE_KEY, state)
+            return {**state, 'counts': db.training_review_afk_prediction_stats(conn)}
+        finally:
+            conn.close()
+
+
 def _update_autonomous_prefill_after_result(
     conn: Any, leased: Dict[str, Any], result: Dict[str, Any]
 ) -> None:
@@ -1859,6 +1987,8 @@ def _update_autonomous_prefill_after_result(
     frame_id = int(payload.get('frame_id') or result.get('frame_id') or 0)
     operation = str(payload.get('operation') or result.get('operation') or 'core')
     if frame_id <= 0:
+        return
+    if operation == 'afk_slots':
         return
     if operation != 'core':
         db.update_training_review_prefill_state(
@@ -4045,7 +4175,10 @@ def api_claim_vision_job(request: Request, body: Dict[str, Any]) -> Dict[str, An
                     and worker is not None
                     and bool(worker['enabled'])
                     and 'model_prefill' in capabilities
-                    and _queue_next_autonomous_model_prefill(conn) is not None
+                    and (
+                        _queue_next_afk_prefill(conn) is not None
+                        or _queue_next_autonomous_model_prefill(conn) is not None
+                    )
                 ):
                     job = vision_jobs.claim_job(
                         conn,
@@ -4060,14 +4193,23 @@ def api_claim_vision_job(request: Request, body: Dict[str, Any]) -> Dict[str, An
                     team_size = (
                         int(payload['team_size']) if payload.get('team_size') else None
                     )
-                    db.update_training_review_prefill_state(
-                        conn,
-                        frame_id=int(payload['frame_id']),
-                        status='running',
-                        stage='core' if operation == 'core' else 'hero',
-                        screen_type=screen_type,
-                        team_size=team_size,
-                    )
+                    if operation == 'afk_slots':
+                        model = (payload.get('models') or {}).get('afk_status') or {}
+                        db.update_training_review_afk_prediction_status(
+                            conn,
+                            frame_id=int(payload['frame_id']),
+                            model_run_id=str(model.get('run_id') or ''),
+                            status='running',
+                        )
+                    else:
+                        db.update_training_review_prefill_state(
+                            conn,
+                            frame_id=int(payload['frame_id']),
+                            status='running',
+                            stage='core' if operation == 'core' else 'hero',
+                            screen_type=screen_type,
+                            team_size=team_size,
+                        )
             except KeyError:
                 raise HTTPException(409, '请先注册 Vision Worker')
             return {'job': job}
@@ -4310,6 +4452,72 @@ def _apply_remote_model_prefill(
             conn, frame_id, result, result_groups={}
         )
         return {'applied': True, 'frame_id': frame_id, 'item': item}
+    if operation == 'afk_slots':
+        existing = db.get_training_review_hero_lineup(conn, frame_id)
+        if existing is None:
+            raise KeyError(f'英雄阵容不存在: {frame_id}')
+        screen_type = str(payload.get('screen_type') or '')
+        team_size = int(payload.get('team_size') or 0)
+        if (
+            screen_type != 'result_page'
+            or existing['screen_type'] != screen_type
+            or int(existing['team_size']) != team_size
+        ):
+            return {
+                'applied': False,
+                'frame_id': frame_id,
+                'reason': '等待期间结算页上下文已变化',
+            }
+        expected_slots = (
+            payload.get('slots') if isinstance(payload.get('slots'), list) else []
+        )
+        result_slots = (
+            result.get('slots') if isinstance(result.get('slots'), list) else []
+        )
+        existing_by_key = {
+            (str(value['side']), int(value['slot'])): value
+            for value in existing.get('slots') or []
+        }
+        expected_keys = {_hero_slot_key(value) for value in expected_slots}
+        result_keys = {_hero_slot_key(value) for value in result_slots}
+        unchanged = bool(expected_slots) and all(
+            (key := _hero_slot_key(value)) in existing_by_key
+            and _same_hero_crop(
+                dict(value.get('crop') or {}), existing_by_key[key]['crop']
+            )
+            for value in expected_slots
+        )
+        if (
+            not result.get('complete')
+            or len(result_slots) != team_size * 2
+            or result_keys != expected_keys
+        ):
+            raise ValueError('挂机任务没有返回完整的 6/10 个槽位')
+        if not unchanged:
+            return {
+                'applied': False,
+                'frame_id': frame_id,
+                'reason': '等待期间头像框已被人工修改',
+            }
+        model = (payload.get('models') or {}).get('afk_status') or {}
+        model_run_id = str(model.get('run_id') or '')
+        try:
+            lineup = db.apply_training_review_afk_predictions(
+                conn,
+                frame_id=frame_id,
+                model_run_id=model_run_id,
+                slots=result_slots,
+                commit=False,
+            )
+        except RuntimeError:
+            return {
+                'applied': False,
+                'frame_id': frame_id,
+                'reason': '挂机模型版本已变化，旧结果已忽略',
+            }
+        model_quality.refresh_frame(conn, frame_id, hero_lineup=lineup, commit=False)
+        conn.commit()
+        return {'applied': True, 'frame_id': frame_id, 'lineup': lineup}
     item = _single_training_review_item(conn, frame_id)
     if item is None:
         raise KeyError(f'训练复核图片不存在: {frame_id}')
@@ -4560,17 +4768,29 @@ def api_fail_vision_job(
             elif leased['kind'] == 'model_prefill':
                 payload = leased.get('payload') or {}
                 operation = str(payload.get('operation') or 'core')
-                db.update_training_review_prefill_state(
-                    conn,
-                    frame_id=int(payload['frame_id']),
-                    status='failed',
-                    stage='core' if operation == 'core' else 'hero',
-                    screen_type=str(payload.get('screen_type') or ''),
-                    team_size=(
-                        int(payload['team_size']) if payload.get('team_size') else None
-                    ),
-                    error=error,
-                )
+                if operation == 'afk_slots':
+                    model = (payload.get('models') or {}).get('afk_status') or {}
+                    db.update_training_review_afk_prediction_status(
+                        conn,
+                        frame_id=int(payload['frame_id']),
+                        model_run_id=str(model.get('run_id') or ''),
+                        status='failed',
+                        error=error,
+                    )
+                else:
+                    db.update_training_review_prefill_state(
+                        conn,
+                        frame_id=int(payload['frame_id']),
+                        status='failed',
+                        stage='core' if operation == 'core' else 'hero',
+                        screen_type=str(payload.get('screen_type') or ''),
+                        team_size=(
+                            int(payload['team_size'])
+                            if payload.get('team_size')
+                            else None
+                        ),
+                        error=error,
+                    )
                 _invalidate_training_review_cache()
             job = vision_jobs.finish_job(
                 conn,

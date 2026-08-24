@@ -308,6 +308,14 @@ class VisionWorker:
                     screen_type=screen_type,
                     team_size=team_size,
                 )
+            elif operation == 'afk_slots':
+                result = model_prefill.run_afk_slots_prefill(
+                    frame_path,
+                    list(payload.get('slots') or []),
+                    contexts,
+                    screen_type=screen_type,
+                    team_size=team_size,
+                )
             else:
                 raise ValueError(f'未知预填操作: {operation}')
             return {

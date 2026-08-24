@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-POSTGRES_SCHEMA_VERSION = 9
+POSTGRES_SCHEMA_VERSION = 10
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
 _INSERT_TABLE = re.compile(
     r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
@@ -416,6 +416,43 @@ POSTGRES_SCHEMA_MIGRATIONS = {
         ON training_review_model_outcomes (frame_id,task_id,subject_key)
         """,
     ),
+    10: (
+        """
+        ALTER TABLE training_review_hero_slots
+        ADD COLUMN IF NOT EXISTS afk_prediction_label TEXT NOT NULL DEFAULT ''
+        CHECK (afk_prediction_label IN ('','active','afk'))
+        """,
+        """
+        ALTER TABLE training_review_hero_slots
+        ADD COLUMN IF NOT EXISTS afk_prediction_probability DOUBLE PRECISION
+        CHECK (afk_prediction_probability IS NULL OR
+               afk_prediction_probability BETWEEN 0 AND 1)
+        """,
+        """
+        ALTER TABLE training_review_hero_slots
+        ADD COLUMN IF NOT EXISTS afk_prediction_model_run_id TEXT NOT NULL DEFAULT ''
+        """,
+        """
+        ALTER TABLE training_review_hero_slots
+        ADD COLUMN IF NOT EXISTS afk_prediction_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (afk_prediction_status IN (
+            'pending','queued','running','succeeded','failed'))
+        """,
+        """
+        ALTER TABLE training_review_hero_slots
+        ADD COLUMN IF NOT EXISTS afk_prediction_error TEXT NOT NULL DEFAULT ''
+        """,
+        """
+        ALTER TABLE training_review_hero_slots
+        ADD COLUMN IF NOT EXISTS afk_predicted_at TEXT
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_training_review_hero_afk_prediction
+        ON training_review_hero_slots (
+            afk_prediction_status,afk_prediction_label,
+            afk_prediction_model_run_id,frame_id)
+        """,
+    ),
 }
 
 
@@ -780,6 +817,13 @@ def _initialize_schema(
         if version == 0:
             for statement in statements:
                 cursor.execute(statement)
+            cursor.execute(
+                'CREATE INDEX IF NOT EXISTS '
+                'idx_training_review_hero_afk_prediction '
+                'ON training_review_hero_slots ('
+                'afk_prediction_status,afk_prediction_label,'
+                'afk_prediction_model_run_id,frame_id)'
+            )
             cursor.executemany(
                 'INSERT INTO annotation_tasks (id, name, description) '
                 'VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING',

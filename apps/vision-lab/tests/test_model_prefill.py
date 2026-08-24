@@ -135,6 +135,56 @@ class TestModelPrefill(unittest.TestCase):
 
         self.assertEqual(item['frame_id'], self.frame_id)
 
+    def test_afk_prefill_batches_six_context_crops_and_returns_afk_probability(self):
+        Image.new('RGB', (1280, 720), (20, 30, 40)).save(self.image)
+        slots = [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.42 if side == 'left' else 0.54,
+                    'y': 0.18 + slot * 0.16,
+                    'w': 0.04,
+                    'h': 0.07,
+                },
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+        predictions = [
+            {
+                'top1': {'class': 'afk' if index == 0 else 'active', 'prob': 0.9},
+                'scores': [
+                    {'class': 'active', 'prob': 0.1 if index == 0 else 0.9},
+                    {'class': 'afk', 'prob': 0.9 if index == 0 else 0.1},
+                ],
+            }
+            for index in range(6)
+        ]
+        with mock.patch.object(
+            model_prefill.inference, 'run_artifact_batch', return_value=predictions
+        ) as batch:
+            result = model_prefill.run_afk_slots_prefill(
+                self.image,
+                slots,
+                {
+                    'afk_status': {
+                        'run_id': 'afk-run',
+                        'artifact': self.root / 'afk.onnx',
+                        'metadata': {'task_id': 'afk_status', 'kind': 'classify'},
+                    }
+                },
+                screen_type='result_page',
+                team_size=3,
+            )
+
+        self.assertEqual(batch.call_count, 1)
+        self.assertEqual(len(batch.call_args.args[2]), 6)
+        self.assertGreater(batch.call_args.args[2][0].width, 200)
+        self.assertEqual(result['slots'][0]['afk_prediction_label'], 'afk')
+        self.assertEqual(result['slots'][0]['afk_prediction_probability'], 0.9)
+        self.assertEqual(result['model_runs'], {'afk_status': 'afk-run'})
+
     def test_prefill_uses_latest_runs_and_keeps_human_fields_empty(self):
         def prediction(_artifact, metadata, _image, conf_thr=0.25):
             task_id = metadata['task_id']

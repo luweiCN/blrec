@@ -1073,6 +1073,14 @@ class TestHeroTrainingExport(unittest.TestCase):
         self.assertEqual(suggestion['afk_target_count'], 200)
         self.assertEqual(snapshot['total'], 12)
         self.assertEqual(snapshot['by_label'], {'active': 10, 'afk': 2})
+        version = next(
+            item
+            for item in db.list_dataset_versions(self.conn)
+            if item['id'] == snapshot['version']
+        )
+        self.assertEqual(
+            version['filter_json']['train_balance'], 'repeat_to_class_median'
+        )
         samples = [
             json.loads(line)
             for line in (Path(snapshot['dir']) / 'samples.jsonl')
@@ -1092,6 +1100,41 @@ class TestHeroTrainingExport(unittest.TestCase):
         )
         with Image.open(exported_image) as image:
             self.assertGreater(image.width, image.height)
+
+    def test_afk_backfill_restart_recovers_orphaned_queued_slots(self):
+        video_id = db.upsert_video(
+            self.conn,
+            remote_path='/nas/afk-orphan.flv',
+            streamer='挂机恢复主播',
+            room_id='afk-orphan',
+            filename='afk-orphan.flv',
+            duration_seconds=100,
+            size_bytes=1,
+        )
+        frame_id = self._confirmed_lineup(video_id, 420, 'result_page')
+
+        db.prepare_training_review_afk_backfill(self.conn, 'afk-v1')
+        queued = db.next_training_review_afk_candidate(self.conn, 'afk-v1')
+        self.assertEqual(queued['frame_id'], frame_id)
+        self.assertTrue(
+            all(
+                slot['afk_prediction_status'] == 'queued'
+                for slot in db.get_training_review_hero_lineup(self.conn, frame_id)[
+                    'slots'
+                ]
+            )
+        )
+
+        db.prepare_training_review_afk_backfill(self.conn, 'afk-v1')
+
+        self.assertTrue(
+            all(
+                slot['afk_prediction_status'] == 'pending'
+                for slot in db.get_training_review_hero_lineup(self.conn, frame_id)[
+                    'slots'
+                ]
+            )
+        )
 
 
 class TestHeroReviewInference(unittest.TestCase):

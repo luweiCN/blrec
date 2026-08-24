@@ -211,6 +211,89 @@ class TestModelQuality:
         assert avatar['metric'] == 'complete_rate'
         assert avatar['correct'] == 1
 
+    def test_afk_predictions_stay_separate_from_truth_and_feed_model_quality(self):
+        frame_id = self.frame(3)
+        db.add_training_review_source(
+            self.conn, frame_id=frame_id, source_type='worker', source_id='worker-3'
+        )
+        slots = [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.42 if side == 'left' else 0.54,
+                    'y': 0.15 + slot * 0.18,
+                    'w': 0.04,
+                    'h': 0.07,
+                },
+                'suggested_label': 'Adagio',
+                'suggestion_confidence': 0.9,
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=frame_id,
+            screen_type='result_page',
+            team_size=3,
+            method='test',
+            slots=slots,
+        )
+
+        candidate = db.next_training_review_afk_candidate(self.conn, 'afk-run-v1')
+        assert candidate is not None
+        assert all(slot['is_afk'] is None for slot in candidate['slots'])
+        predicted = [
+            {
+                'side': slot['side'],
+                'slot': slot['slot'],
+                'afk_prediction_label': (
+                    'afk' if slot['side'] == 'left' and slot['slot'] == 1 else 'active'
+                ),
+                'afk_prediction_probability': (
+                    0.94 if slot['side'] == 'left' and slot['slot'] == 1 else 0.04
+                ),
+            }
+            for slot in slots
+        ]
+        db.apply_training_review_afk_predictions(
+            self.conn, frame_id=frame_id, model_run_id='afk-run-v1', slots=predicted
+        )
+        lineup = db.get_training_review_hero_lineup(self.conn, frame_id)
+        assert lineup is not None
+        assert all(slot['is_afk'] is None for slot in lineup['slots'])
+        assert db.training_review_afk_prediction_frame_ids(self.conn, 'afk') == {
+            frame_id
+        }
+        filtered, total = db.training_review_page(
+            self.conn, status='all', source_scope='all', afk_prediction='afk', limit=10
+        )
+        assert total == 1
+        assert [item['frame_id'] for item in filtered] == [frame_id]
+
+        db.save_training_review_hero_lineup(
+            self.conn,
+            frame_id=frame_id,
+            labels=[
+                {
+                    'side': slot['side'],
+                    'slot': slot['slot'],
+                    'hero_label': 'Adagio',
+                    'is_afk': slot['side'] == 'left' and slot['slot'] == 1,
+                }
+                for slot in slots
+            ],
+            allowed_labels={'Adagio'},
+        )
+
+        quality = model_quality.summary(self.conn)
+        afk = next(task for task in quality['tasks'] if task['id'] == 'afk_status')
+        version = afk['versions'][0]
+        assert version['run_id'] == 'afk-run-v1'
+        assert version['compared'] == 6
+        assert version['correct'] == 6
+
     def test_rebuild_restores_existing_model_outcomes(self):
         self.test_core_model_versions_remain_comparable_after_new_prefill()
         self.conn.execute('DELETE FROM training_review_model_outcomes')

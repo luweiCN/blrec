@@ -1627,6 +1627,24 @@ function renderCandidateHeroLineup() {
           renderCandidateHeroLineup();
         };
         slotActions.appendChild(afkButton);
+        const afkPrediction = document.createElement('span');
+        afkPrediction.className = 'muted small candidate-hero-afk-prediction';
+        const predictionStatus = slot.afk_prediction_status || 'pending';
+        if (predictionStatus === 'succeeded' &&
+            slot.afk_prediction_probability !== null &&
+            slot.afk_prediction_probability !== undefined) {
+          afkPrediction.textContent =
+            `模型 P(挂机) ${(Number(slot.afk_prediction_probability) * 100).toFixed(1)}%`;
+          afkPrediction.title =
+            `预测 ${slot.afk_prediction_label || '未知'} · 模型 ${slot.afk_prediction_model_run_id || '未知版本'}`;
+        } else if (predictionStatus === 'failed') {
+          afkPrediction.textContent = '模型运行失败';
+          afkPrediction.title = slot.afk_prediction_error || '挂机模型运行失败';
+        } else {
+          afkPrediction.textContent = predictionStatus === 'running'
+            ? '模型运行中' : predictionStatus === 'queued' ? '模型排队中' : '模型未运行';
+        }
+        slotActions.appendChild(afkPrediction);
       }
       if (slotActions.childElementCount) details.appendChild(slotActions);
       card.appendChild(details);
@@ -2771,6 +2789,7 @@ function candidateReviewQuery(status, offset = null) {
     match_kind: $('#candidate-match-kind-filter').value,
     view_context: $('#candidate-view-context-filter').value,
     confidence: $('#candidate-confidence-filter').value,
+    afk_prediction: $('#candidate-afk-prediction-filter').value,
     review_reason: $('#candidate-review-reason-filter').value,
     streamer: $('#candidate-streamer-filter').value,
   };
@@ -3715,6 +3734,28 @@ async function loadCandidateReview() {
   }
 }
 
+async function startCandidateAfkBackfill() {
+  const button = $('#btn-candidate-afk-backfill');
+  const state = $('#candidate-afk-backfill-state');
+  button.disabled = true;
+  state.textContent = '正在启动…';
+  try {
+    const data = await api('/api/training-review/afk-predictions/backfill', {
+      method: 'POST',
+      body: '{}',
+    });
+    const counts = data.counts || {};
+    state.textContent = `已启动 ${data.model_run_id || ''} · ` +
+      `有挂机 ${counts.afk || 0} / 无挂机 ${counts.active || 0} / ` +
+      `未运行 ${counts.pending || 0} / 失败 ${counts.failed || 0}`;
+    await loadCandidateReview();
+  } catch (error) {
+    state.textContent = '启动失败：' + error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function refillCandidateReviewQueue(loadToken = candidateReviewLoadToken) {
   const status = candidateLoadedStatus;
   const sourceScope = candidateLoadedSourceScope;
@@ -4038,12 +4079,19 @@ function bindCandidateReview() {
   ].forEach((selector) => {
     $(selector).onchange = loadCandidateReview;
   });
+  $('#candidate-afk-prediction-filter').onchange = () => {
+    if ($('#candidate-afk-prediction-filter').value) {
+      $('#candidate-source-type-filter').value = '';
+    }
+    loadCandidateReview();
+  };
   $('#btn-candidate-clear-filters').onclick = () => {
     [
       '#candidate-source-type-filter', '#candidate-scene-filter',
       '#candidate-mode-filter', '#candidate-match-kind-filter',
       '#candidate-view-context-filter', '#candidate-confidence-filter',
       '#candidate-review-reason-filter', '#candidate-streamer-filter',
+      '#candidate-afk-prediction-filter',
     ].forEach((selector) => { $(selector).value = ''; });
     if (candidateSourceScope === 'new') {
       $('#candidate-source-type-filter').value = CANDIDATE_DEFAULT_SOURCE_TYPE;
@@ -4060,6 +4108,7 @@ function bindCandidateReview() {
     ensureCandidateFilterOptions();
     loadCandidateReview();
   };
+  $('#btn-candidate-afk-backfill').onclick = startCandidateAfkBackfill;
   $('#candidate-streamer-filter').onfocus = ensureCandidateFilterOptions;
   $('#candidate-hero-filter').ontoggle = () => {
     if ($('#candidate-hero-filter').open) ensureCandidateFilterOptions();

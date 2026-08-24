@@ -13,6 +13,7 @@ from . import db, inference, managed_assets
 
 CORE_PREFILL_TASKS = ('match_flow', 'hero_select', 'match_mode', 'result_detector')
 HERO_PREFILL_TASKS = ('hero_avatar_detector', 'hero_identity', 'player_position')
+AFK_PREFILL_TASKS = ('afk_status',)
 PREFILL_PIPELINE_VERSION = 'cascade-v2'
 PREFILL_APPLICABILITY_THRESHOLD = 0.55
 
@@ -528,9 +529,7 @@ def _ordered_avatar_slots(
     return slots
 
 
-def _crop_to_path(
-    image: Image.Image, crop: Dict[str, float], destination: Path
-) -> None:
+def _crop_image(image: Image.Image, crop: Dict[str, float]) -> Image.Image:
     left = max(0, min(image.width - 1, round(crop['x'] * image.width)))
     top = max(0, min(image.height - 1, round(crop['y'] * image.height)))
     right = max(
@@ -539,7 +538,100 @@ def _crop_to_path(
     bottom = max(
         top + 1, min(image.height, round((crop['y'] + crop['h']) * image.height))
     )
-    image.crop((left, top, right, bottom)).save(destination, format='JPEG', quality=95)
+    return image.crop((left, top, right, bottom))
+
+
+def _crop_to_path(
+    image: Image.Image, crop: Dict[str, float], destination: Path
+) -> None:
+    _crop_image(image, crop).save(destination, format='JPEG', quality=95)
+
+
+def afk_status_context_crop(slot: Dict[str, Any]) -> Dict[str, float]:
+    """按训练导出的同一规则扩展结算页头像上下文。"""
+    crop = dict(slot.get('crop') or {})
+    x, y, width, height = (float(crop[key]) for key in ('x', 'y', 'w', 'h'))
+    top = max(0.0, y - height * 0.3)
+    bottom = min(1.0, y + height * 1.3)
+    if str(slot.get('side') or '') == 'left':
+        left = max(0.0, x - width * 6.0)
+        right = min(1.0, x + width * 1.2)
+    else:
+        left = max(0.0, x - width * 0.2)
+        right = min(1.0, x + width * 7.0)
+    return {
+        'x': left,
+        'y': top,
+        'w': max(0.001, right - left),
+        'h': max(0.001, bottom - top),
+    }
+
+
+def run_afk_slots_prefill(
+    frame_path: Path,
+    slots: List[Dict[str, Any]],
+    contexts: Dict[str, Dict[str, Any]],
+    *,
+    screen_type: str,
+    team_size: int,
+) -> Dict[str, Any]:
+    """对一帧全部 6/10 个槽位做一次批量挂机分类。"""
+    if screen_type != 'result_page':
+        raise ValueError('挂机模型只适用于结算页')
+    if team_size not in {3, 5}:
+        raise ValueError('英雄阵容人数必须是 3 或 5')
+    expected = {
+        (side, slot) for side in ('left', 'right') for slot in range(1, team_size + 1)
+    }
+    normalized = sorted(
+        slots,
+        key=lambda value: (
+            0 if str(value.get('side') or '') == 'left' else 1,
+            int(value.get('slot') or 0),
+        ),
+    )
+    keys = {
+        (str(value.get('side') or ''), int(value.get('slot') or 0))
+        for value in normalized
+    }
+    if len(normalized) != team_size * 2 or keys != expected:
+        raise ValueError('挂机推理要求完整的 6/10 个头像槽位')
+    context = contexts.get('afk_status')
+    if context is None:
+        raise ValueError('没有可用的挂机分类模型')
+    source = Path(frame_path)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    with Image.open(source) as opened:
+        image = opened.convert('RGB')
+    crops = [_crop_image(image, afk_status_context_crop(slot)) for slot in normalized]
+    predictions = inference.run_artifact_batch(
+        Path(context['artifact']), context['metadata'], crops
+    )
+    result_slots = []
+    for slot, prediction in zip(normalized, predictions):
+        scores = {
+            str(value.get('class') or ''): float(value.get('prob') or 0)
+            for value in prediction.get('scores') or []
+            if isinstance(value, dict)
+        }
+        top1 = prediction.get('top1') or {}
+        label = str(top1.get('class') or '')
+        if label not in {'active', 'afk'} or 'afk' not in scores:
+            raise ValueError('挂机模型输出标签必须包含 active 和 afk')
+        result_slots.append(
+            {
+                'side': str(slot['side']),
+                'slot': int(slot['slot']),
+                'afk_prediction_label': label,
+                'afk_prediction_probability': round(scores['afk'], 4),
+            }
+        )
+    return {
+        'complete': len(result_slots) == team_size * 2,
+        'slots': result_slots,
+        'model_runs': {'afk_status': str(context['run_id'])},
+    }
 
 
 def _player_position_suggestion(

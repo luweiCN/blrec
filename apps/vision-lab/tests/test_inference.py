@@ -3,6 +3,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -132,6 +133,49 @@ class TestClassificationPreprocessing(unittest.TestCase):
             metadata['preprocessing']['training_augmentation']['pad_color'],
             'random_neutral',
         )
+
+    def test_artifact_batch_runs_all_slot_crops_in_one_session_call(self):
+        class Input:
+            name = 'images'
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            @staticmethod
+            def get_inputs():
+                return [Input()]
+
+            def run(self, _outputs, inputs):
+                self.calls.append(inputs['images'].shape)
+                return [
+                    np.asarray(
+                        [
+                            [0.9, 0.1] if index % 2 == 0 else [0.2, 0.8]
+                            for index in range(10)
+                        ],
+                        dtype=np.float32,
+                    )
+                ]
+
+        session = Session()
+        images = [Image.new('RGB', (320, 80), 'white') for _ in range(10)]
+        with mock.patch.object(inference, '_load_session_path', return_value=session):
+            results = inference.run_artifact_batch(
+                Path('/tmp/afk.onnx'),
+                {
+                    'task_id': 'afk_status',
+                    'kind': 'classify',
+                    'imgsz': 224,
+                    'classes': {'0': 'active', '1': 'afk'},
+                },
+                images,
+            )
+
+        self.assertEqual(session.calls, [(10, 3, 224, 224)])
+        self.assertEqual(len(results), 10)
+        self.assertEqual(results[1]['top1']['class'], 'afk')
+        self.assertEqual(results[0]['scores'][1]['class'], 'afk')
 
 
 class TestDetectParse(unittest.TestCase):

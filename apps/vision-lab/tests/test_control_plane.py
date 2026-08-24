@@ -94,6 +94,8 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'candidate-worker-total' in html
     assert 'candidate-prefill-ready' in html
     assert 'candidate-ready-for-review' in html
+    assert 'candidate-afk-prediction-filter' in html
+    assert 'btn-candidate-afk-backfill' in html
 
     script = (
         Path(__file__).resolve().parent.parent / 'labeler/static/app.js'
@@ -150,6 +152,8 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert "const CANDIDATE_DEFAULT_SOURCE_TYPE = 'new_model_prefill';" in script
     assert 'new AbortController()' in script
     assert 'signal: controller.signal' in script
+    assert "afk_prediction: $('#candidate-afk-prediction-filter').value" in script
+    assert '模型 P(挂机)' in script
 
 
 def test_material_suggestions_never_fall_back_to_full_scan(monkeypatch) -> None:
@@ -604,6 +608,106 @@ def test_forced_model_prefill_job_marks_payload_as_refresh(monkeypatch) -> None:
     )
 
     assert create_job.call_args.kwargs['payload']['force_refresh'] is True
+
+
+def test_afk_prefill_applies_to_confirmed_lineup_without_touching_human_truth(
+    monkeypatch,
+) -> None:
+    connection = mock.Mock()
+    slots = [
+        {
+            'side': side,
+            'slot': slot,
+            'crop': {'x': 0.4, 'y': slot * 0.1, 'w': 0.05, 'h': 0.08},
+            'confirmed_label': 'Adagio',
+            'is_afk': side == 'left' and slot == 1,
+        }
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    ]
+    existing = {
+        'frame_id': 31,
+        'screen_type': 'result_page',
+        'team_size': 3,
+        'review_status': 'confirmed',
+        'slots': slots,
+    }
+    monkeypatch.setattr(
+        server.db, 'get_training_review_hero_lineup', mock.Mock(return_value=existing)
+    )
+    applied_lineup = {**existing, 'slots': [dict(slot) for slot in slots]}
+    apply_predictions = mock.Mock(return_value=applied_lineup)
+    monkeypatch.setattr(
+        server.db, 'apply_training_review_afk_predictions', apply_predictions
+    )
+    refresh_quality = mock.Mock()
+    monkeypatch.setattr(server.model_quality, 'refresh_frame', refresh_quality)
+    predicted = [
+        {
+            'side': slot['side'],
+            'slot': slot['slot'],
+            'afk_prediction_label': 'active',
+            'afk_prediction_probability': 0.03,
+        }
+        for slot in slots
+    ]
+
+    result = server._apply_remote_model_prefill(
+        connection,
+        {
+            'payload': {
+                'frame_id': 31,
+                'operation': 'afk_slots',
+                'screen_type': 'result_page',
+                'team_size': 3,
+                'slots': slots,
+                'models': {'afk_status': {'run_id': 'afk-v1'}},
+            }
+        },
+        {'complete': True, 'slots': predicted},
+    )
+
+    assert result['applied'] is True
+    assert apply_predictions.call_args.kwargs['model_run_id'] == 'afk-v1'
+    assert existing['slots'][0]['is_afk'] is True
+    refresh_quality.assert_called_once_with(
+        connection, 31, hero_lineup=applied_lineup, commit=False
+    )
+
+
+def test_afk_backfill_queues_one_complete_frame_per_worker_claim(monkeypatch) -> None:
+    connection = mock.Mock()
+    slots = [
+        {'side': side, 'slot': slot, 'crop': {'x': 0.1, 'y': 0.1, 'w': 0.1, 'h': 0.1}}
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    ]
+    monkeypatch.setattr(
+        server.db,
+        'load_service_runtime_state',
+        mock.Mock(return_value={'status': 'running', 'model_run_id': 'afk-v1'}),
+    )
+    monkeypatch.setattr(
+        server.model_prefill,
+        'latest_model_specs',
+        mock.Mock(return_value={'afk_status': {'run_id': 'afk-v1'}}),
+    )
+    monkeypatch.setattr(
+        server.db,
+        'next_training_review_afk_candidate',
+        mock.Mock(return_value={'frame_id': 41, 'team_size': 3, 'slots': slots}),
+    )
+    queue = mock.Mock(return_value={'id': 'afk-job'})
+    monkeypatch.setattr(server, '_queue_model_prefill', queue)
+
+    job = server._queue_next_afk_prefill(connection)
+
+    assert job == {'id': 'afk-job'}
+    assert (
+        server.db.next_training_review_afk_candidate.call_args.kwargs['commit'] is False
+    )
+    assert queue.call_args.kwargs['operation'] == 'afk_slots'
+    assert len(queue.call_args.kwargs['slots']) == 6
 
 
 def test_forced_hero_refresh_updates_suggestions_without_losing_human_truth(

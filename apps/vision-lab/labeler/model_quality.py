@@ -261,6 +261,46 @@ def refresh_frame(
                     timestamp=timestamp,
                 )
             )
+            afk_truth = (
+                ''
+                if slot.get('is_afk') is None
+                else ('afk' if slot.get('is_afk') else 'active')
+            )
+            _sync_truth(
+                conn,
+                frame_id=frame_id,
+                task_id='afk_status',
+                subject_key=subject,
+                confirmed_label=afk_truth,
+                screen_type=lineup_screen,
+                match_mode=match_mode,
+                timestamp=timestamp,
+            )
+            afk_label = (
+                _usable_label(slot.get('afk_prediction_label'))
+                if slot.get('afk_prediction_status') == 'succeeded'
+                else ''
+            )
+            afk_probability = _confidence(slot.get('afk_prediction_probability'))
+            written += int(
+                _upsert(
+                    conn,
+                    frame_id=frame_id,
+                    task_id='afk_status',
+                    model_run_id=str(slot.get('afk_prediction_model_run_id') or ''),
+                    subject_key=subject,
+                    metric='accuracy',
+                    predicted_label=afk_label,
+                    confirmed_label=afk_truth,
+                    confidence=(
+                        afk_probability if afk_label == 'afk' else 1 - afk_probability
+                    ),
+                    screen_type=lineup_screen,
+                    match_mode=match_mode,
+                    source_type='afk_status_prefill',
+                    timestamp=timestamp,
+                )
+            )
         existing_subjects = conn.execute(
             'SELECT DISTINCT subject_key FROM training_review_model_outcomes '
             "WHERE frame_id=? AND task_id='hero_identity'",
@@ -373,7 +413,12 @@ def rebuild(conn: Any, *, batch_size: int = 500) -> Dict[str, int]:
         'ON lineup.frame_id=source.frame_id '
         "WHERE source.source_type IN ('new_model_prefill','new_model_hero_prefill') "
         "AND (item.review_status='confirmed' OR lineup.review_status='confirmed') "
-        'ORDER BY source.frame_id'
+        'UNION SELECT DISTINCT lineup.frame_id '
+        'FROM training_review_hero_lineups lineup '
+        'JOIN training_review_hero_slots slot ON slot.frame_id=lineup.frame_id '
+        "WHERE lineup.review_status='confirmed' "
+        "AND slot.afk_prediction_status='succeeded' "
+        'ORDER BY 1'
     ).fetchall()
     frame_ids = [int(row['frame_id']) for row in rows]
     for offset in range(0, len(frame_ids), max(1, int(batch_size))):

@@ -1041,7 +1041,12 @@ def export_hero_avatar_detector(
 
 
 def _write_hero_identity_images(
-    conn: Any, out_dir: Path, samples: List[Dict[str, Any]], labels: Tuple[str, ...]
+    conn: Any,
+    out_dir: Path,
+    samples: List[Dict[str, Any]],
+    labels: Tuple[str, ...],
+    *,
+    target_limit: Optional[int] = 100,
 ) -> int:
     for split_name in ('train', 'val', 'test'):
         for label in labels:
@@ -1092,7 +1097,9 @@ def _write_hero_identity_images(
             image.close()
 
     populated = [len(paths) for paths in written.values() if paths]
-    target = min(100, max(1, round(median(populated)))) if populated else 0
+    target = max(1, round(median(populated))) if populated else 0
+    if target_limit is not None:
+        target = min(target_limit, target)
     replicas = 0
     for label, paths in written.items():
         if not paths:
@@ -1108,7 +1115,10 @@ def _write_hero_identity_images(
 
 
 def _classification_balance_replicas(
-    samples: List[Dict[str, Any]], labels: Tuple[str, ...]
+    samples: List[Dict[str, Any]],
+    labels: Tuple[str, ...],
+    *,
+    target_limit: Optional[int] = 100,
 ) -> int:
     counts = {
         label: sum(
@@ -1118,7 +1128,9 @@ def _classification_balance_replicas(
         for label in labels
     }
     populated = [count for count in counts.values() if count]
-    target = min(100, max(1, round(median(populated)))) if populated else 0
+    target = max(1, round(median(populated))) if populated else 0
+    if target_limit is not None:
+        target = min(target_limit, target)
     return sum(max(0, target - count) for count in counts.values() if count)
 
 
@@ -1322,9 +1334,13 @@ def export_afk_status_classifier(
         raise RuntimeError(f'数据集版本已存在: {version_id}')
     out_dir.mkdir(parents=True, exist_ok=False)
     replicas = (
-        _write_hero_identity_images(conn, out_dir, samples, AFK_STATUS_LABELS)
+        _write_hero_identity_images(
+            conn, out_dir, samples, AFK_STATUS_LABELS, target_limit=None
+        )
         if materialize
-        else _classification_balance_replicas(samples, AFK_STATUS_LABELS)
+        else _classification_balance_replicas(
+            samples, AFK_STATUS_LABELS, target_limit=None
+        )
     )
     jsonl_path = out_dir / 'samples.jsonl'
     with jsonl_path.open('w', encoding='utf-8') as handle:
@@ -1363,7 +1379,7 @@ def export_afk_status_classifier(
             'labels': list(AFK_STATUS_LABELS),
             'requires_explicit_is_afk': True,
             'split_unit': 'video',
-            'train_balance': 'repeat_to_class_median_capped_at_100',
+            'train_balance': 'repeat_to_class_median',
             'materialized_by': 'vision_worker' if not materialize else 'vision_lab',
         },
         counts=counts,

@@ -642,6 +642,17 @@ CREATE TABLE IF NOT EXISTS training_review_hero_slots (
         suggestion_confidence BETWEEN 0 AND 1),
     confirmed_label TEXT,
     is_afk INTEGER CHECK (is_afk IS NULL OR is_afk IN (0, 1)),
+    afk_prediction_label TEXT NOT NULL DEFAULT '' CHECK (
+        afk_prediction_label IN ('', 'active', 'afk')),
+    afk_prediction_probability REAL CHECK (
+        afk_prediction_probability IS NULL OR
+        afk_prediction_probability BETWEEN 0 AND 1),
+    afk_prediction_model_run_id TEXT NOT NULL DEFAULT '',
+    afk_prediction_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        afk_prediction_status IN (
+            'pending', 'queued', 'running', 'succeeded', 'failed')),
+    afk_prediction_error TEXT NOT NULL DEFAULT '',
+    afk_predicted_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (frame_id, side, slot)
 );
@@ -651,7 +662,6 @@ CREATE INDEX IF NOT EXISTS idx_training_review_hero_confirmed_label
     ON training_review_hero_slots (confirmed_label, frame_id);
 CREATE INDEX IF NOT EXISTS idx_training_review_hero_suggested_label
     ON training_review_hero_slots (suggested_label, frame_id);
-
 -- 主播在同一类画面和近似宽高比下，英雄头像位置通常保持不变。模板只保存
 -- 人工画出的圆框位置，不保存算法预填或英雄真值。
 CREATE TABLE IF NOT EXISTS training_review_hero_templates (
@@ -999,6 +1009,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     )
     _migrate_training_review_hero_lineups(conn)
     _migrate_training_review_afk_slots(conn)
+    _migrate_training_review_afk_predictions(conn)
     _migrate_training_review_player_slot(conn)
     _prepare_training_review_match_columns(conn)
     _prepare_training_review_prefill_columns(conn)
@@ -1367,6 +1378,46 @@ def _migrate_training_review_afk_slots(conn: sqlite3.Connection) -> None:
     conn.execute(
         'CREATE INDEX IF NOT EXISTS idx_training_review_hero_afk '
         'ON training_review_hero_slots (is_afk, frame_id)'
+    )
+
+
+def _migrate_training_review_afk_predictions(conn: sqlite3.Connection) -> None:
+    """给旧阵容补充独立的挂机模型结果，不改写人工 ``is_afk``。"""
+    columns = {
+        str(row['name'])
+        for row in conn.execute('PRAGMA table_info(training_review_hero_slots)')
+    }
+    additions = (
+        (
+            'afk_prediction_label',
+            "TEXT NOT NULL DEFAULT '' CHECK (afk_prediction_label IN ("
+            "'', 'active', 'afk'))",
+        ),
+        (
+            'afk_prediction_probability',
+            'REAL CHECK (afk_prediction_probability IS NULL OR '
+            'afk_prediction_probability BETWEEN 0 AND 1)',
+        ),
+        ('afk_prediction_model_run_id', "TEXT NOT NULL DEFAULT ''"),
+        (
+            'afk_prediction_status',
+            "TEXT NOT NULL DEFAULT 'pending' CHECK (afk_prediction_status IN ("
+            "'pending', 'queued', 'running', 'succeeded', 'failed'))",
+        ),
+        ('afk_prediction_error', "TEXT NOT NULL DEFAULT ''"),
+        ('afk_predicted_at', 'TEXT'),
+    )
+    for column, definition in additions:
+        if column not in columns:
+            conn.execute(
+                'ALTER TABLE training_review_hero_slots '
+                f'ADD COLUMN {column} {definition}'
+            )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_training_review_hero_afk_prediction '
+        'ON training_review_hero_slots ('
+        'afk_prediction_status,afk_prediction_label,'
+        'afk_prediction_model_run_id,frame_id)'
     )
 
 
@@ -7313,6 +7364,7 @@ def _training_review_visible_frame_ids(
     hero_scope: str = 'all',
     confidence: str = '',
     review_reason: str = '',
+    afk_prediction: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[List[int], Dict[int, Dict[str, Any]]]:
@@ -7327,6 +7379,11 @@ def _training_review_visible_frame_ids(
     }:
         raise ValueError('训练复核状态无效')
     source_frame_ids = _training_review_origin_frame_ids(conn, source_scope)
+    afk_prediction_ids = (
+        None
+        if not afk_prediction
+        else training_review_afk_prediction_frame_ids(conn, afk_prediction)
+    )
     attribute_frame_ids = _training_review_attribute_frame_ids(
         conn,
         streamer=streamer,
@@ -7463,6 +7520,7 @@ def _training_review_visible_frame_ids(
         if (source_frame_ids is None or int(row['frame_id']) in source_frame_ids)
         if (attribute_frame_ids is None or int(row['frame_id']) in attribute_frame_ids)
         if (prefill_visible_ids is None or int(row['frame_id']) in prefill_visible_ids)
+        if (afk_prediction_ids is None or int(row['frame_id']) in afk_prediction_ids)
         if groups.get(int(row['frame_id']), {}).get(
             'result_group_representative_frame_id', int(row['frame_id'])
         )
@@ -7486,6 +7544,7 @@ def training_review_frame_ids(
     hero_scope: str = 'all',
     confidence: str = '',
     review_reason: str = '',
+    afk_prediction: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> List[int]:
@@ -7504,6 +7563,7 @@ def training_review_frame_ids(
                 hero_scope != 'all',
                 confidence,
                 review_reason,
+                afk_prediction,
             )
         )
     )
@@ -7626,6 +7686,7 @@ def training_review_frame_ids(
         hero_scope=hero_scope,
         confidence=confidence,
         review_reason=review_reason,
+        afk_prediction=afk_prediction,
         prefill_ready_only=prefill_ready_only,
         result_groups=result_groups,
     )
@@ -7650,6 +7711,7 @@ def list_training_review_items(
     hero_scope: str = 'all',
     confidence: str = '',
     review_reason: str = '',
+    afk_prediction: str = '',
     prefill_ready_only: bool = False,
 ) -> List[Dict[str, Any]]:
     items, _total = training_review_page(
@@ -7669,6 +7731,7 @@ def list_training_review_items(
         hero_scope=hero_scope,
         confidence=confidence,
         review_reason=review_reason,
+        afk_prediction=afk_prediction,
         prefill_ready_only=prefill_ready_only,
     )
     return items
@@ -7832,6 +7895,7 @@ def training_review_page(
     hero_scope: str = 'all',
     confidence: str = '',
     review_reason: str = '',
+    afk_prediction: str = '',
     prefill_ready_only: bool = False,
     result_groups: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -7860,6 +7924,7 @@ def training_review_page(
     if (
         (prefill_ready_only or training_review_material_index_complete(conn))
         and not review_reason
+        and not afk_prediction
         and status in _TRAINING_REVIEW_STATUSES | {'all', 'needs_review'}
     ):
         frame_ids, total = _training_review_indexed_page_frame_ids(
@@ -7903,6 +7968,7 @@ def training_review_page(
         hero_scope=hero_scope,
         confidence=confidence,
         review_reason=review_reason,
+        afk_prediction=afk_prediction,
         prefill_ready_only=prefill_ready_only,
         result_groups=result_groups,
     )
@@ -7933,6 +7999,7 @@ def count_training_review_items(
     hero_scope: str = 'all',
     confidence: str = '',
     review_reason: str = '',
+    afk_prediction: str = '',
 ) -> int:
     if status == 'legacy_hero':
         if source_scope == 'new':
@@ -7956,6 +8023,7 @@ def count_training_review_items(
         hero_scope=hero_scope,
         confidence=confidence,
         review_reason=review_reason,
+        afk_prediction=afk_prediction,
     )
     return len(visible)
 
@@ -8279,7 +8347,10 @@ def get_training_review_hero_lineup(
     result = dict(row)
     slots = conn.execute(
         'SELECT side, slot, crop_x, crop_y, crop_w, crop_h, '
-        'suggested_label, suggestion_confidence, confirmed_label, is_afk, updated_at '
+        'suggested_label, suggestion_confidence, confirmed_label, is_afk, '
+        'afk_prediction_label, afk_prediction_probability, '
+        'afk_prediction_model_run_id, afk_prediction_status, '
+        'afk_prediction_error, afk_predicted_at, updated_at '
         'FROM training_review_hero_slots WHERE frame_id = ? '
         "ORDER BY CASE side WHEN 'left' THEN 0 ELSE 1 END, slot",
         (int(frame_id),),
@@ -8298,10 +8369,265 @@ def get_training_review_hero_lineup(
             'suggestion_confidence': float(slot['suggestion_confidence']),
             'confirmed_label': slot['confirmed_label'],
             'is_afk': (None if slot['is_afk'] is None else bool(int(slot['is_afk']))),
+            'afk_prediction_label': str(slot['afk_prediction_label'] or ''),
+            'afk_prediction_probability': (
+                None
+                if slot['afk_prediction_probability'] is None
+                else float(slot['afk_prediction_probability'])
+            ),
+            'afk_prediction_model_run_id': str(
+                slot['afk_prediction_model_run_id'] or ''
+            ),
+            'afk_prediction_status': str(slot['afk_prediction_status'] or 'pending'),
+            'afk_prediction_error': str(slot['afk_prediction_error'] or ''),
+            'afk_predicted_at': slot['afk_predicted_at'],
             'updated_at': slot['updated_at'],
         }
         for slot in slots
     ]
+    return result
+
+
+def next_training_review_afk_candidate(
+    conn: sqlite3.Connection, model_run_id: str, *, commit: bool = True
+) -> Optional[Dict[str, Any]]:
+    """领取一张 canonical 真结算图，并原子地把全部槽位置为 queued。"""
+    normalized_run_id = str(model_run_id).strip()[:200]
+    if not normalized_run_id:
+        raise ValueError('挂机模型版本不能为空')
+    row = conn.execute(
+        """
+        SELECT lineup.frame_id,lineup.screen_type,lineup.team_size,
+               lineup.review_status
+        FROM training_review_hero_lineups lineup
+        JOIN training_review_hero_slots slot ON slot.frame_id=lineup.frame_id
+        LEFT JOIN training_review_material_index material
+          ON material.frame_id=lineup.frame_id
+        WHERE lineup.screen_type='result_page'
+          AND COALESCE(material.result_group_representative_frame_id,
+                       lineup.frame_id)=lineup.frame_id
+        GROUP BY lineup.frame_id,lineup.screen_type,lineup.team_size,
+                 lineup.review_status,lineup.updated_at
+        HAVING COUNT(*)=lineup.team_size*2
+           AND SUM(CASE WHEN slot.crop_w>0 AND slot.crop_h>0 THEN 1 ELSE 0 END)
+               =lineup.team_size*2
+           AND SUM(CASE
+                 WHEN slot.afk_prediction_model_run_id<>?
+                   OR slot.afk_prediction_status='pending'
+                 THEN 1 ELSE 0 END)>0
+           AND SUM(CASE
+                 WHEN slot.afk_prediction_model_run_id=?
+                  AND slot.afk_prediction_status IN ('queued','running')
+                 THEN 1 ELSE 0 END)=0
+        ORDER BY CASE lineup.review_status WHEN 'confirmed' THEN 0 ELSE 1 END,
+                 lineup.updated_at DESC,lineup.frame_id DESC
+        LIMIT 1
+        """,
+        (normalized_run_id, normalized_run_id),
+    ).fetchone()
+    if row is None:
+        return None
+    frame_id = int(row['frame_id'])
+    conn.execute(
+        """
+        UPDATE training_review_hero_slots
+        SET afk_prediction_label='',afk_prediction_probability=NULL,
+            afk_prediction_model_run_id=?,afk_prediction_status='queued',
+            afk_prediction_error='',afk_predicted_at=NULL
+        WHERE frame_id=?
+        """,
+        (normalized_run_id, frame_id),
+    )
+    if commit:
+        conn.commit()
+    lineup = get_training_review_hero_lineup(conn, frame_id)
+    if lineup is None:
+        raise KeyError(frame_id)
+    return lineup
+
+
+def prepare_training_review_afk_backfill(
+    conn: sqlite3.Connection, model_run_id: str, *, retry_failed: bool = False
+) -> int:
+    """把 canonical 结算图的旧版本预测变为当前版本“未运行”。"""
+    normalized_run_id = str(model_run_id).strip()[:200]
+    if not normalized_run_id:
+        raise ValueError('挂机模型版本不能为空')
+    cursor = conn.execute(
+        """
+        UPDATE training_review_hero_slots
+        SET afk_prediction_label='',afk_prediction_probability=NULL,
+            afk_prediction_model_run_id=?,afk_prediction_status='pending',
+            afk_prediction_error='',afk_predicted_at=NULL
+        WHERE EXISTS (
+            SELECT 1
+            FROM training_review_hero_lineups lineup
+            LEFT JOIN training_review_material_index material
+              ON material.frame_id=lineup.frame_id
+            WHERE lineup.frame_id=training_review_hero_slots.frame_id
+              AND lineup.screen_type='result_page'
+              AND COALESCE(material.result_group_representative_frame_id,
+                           lineup.frame_id)=lineup.frame_id
+        )
+          AND (afk_prediction_model_run_id<>?
+               OR afk_prediction_status IN ('queued','running')
+               OR (?=1 AND afk_prediction_status='failed'))
+        """,
+        (normalized_run_id, normalized_run_id, int(bool(retry_failed))),
+    )
+    conn.commit()
+    return int(cursor.rowcount)
+
+
+def update_training_review_afk_prediction_status(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    model_run_id: str,
+    status: str,
+    error: str = '',
+    commit: bool = True,
+) -> bool:
+    if status not in {'queued', 'running', 'failed'}:
+        raise ValueError('挂机预测任务状态无效')
+    cursor = conn.execute(
+        'UPDATE training_review_hero_slots SET afk_prediction_status=?, '
+        'afk_prediction_error=? WHERE frame_id=? '
+        'AND afk_prediction_model_run_id=?',
+        (
+            status,
+            str(error)[:2000] if status == 'failed' else '',
+            int(frame_id),
+            model_run_id,
+        ),
+    )
+    if commit:
+        conn.commit()
+    return cursor.rowcount > 0
+
+
+def apply_training_review_afk_predictions(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    model_run_id: str,
+    slots: Sequence[Dict[str, Any]],
+    commit: bool = True,
+) -> Dict[str, Any]:
+    lineup = get_training_review_hero_lineup(conn, int(frame_id))
+    if lineup is None or lineup['screen_type'] != 'result_page':
+        raise ValueError('挂机预测只能应用到结算页阵容')
+    expected = {
+        (str(value['side']), int(value['slot'])) for value in lineup.get('slots') or []
+    }
+    normalized = []
+    positions = set()
+    for value in slots:
+        key = (str(value.get('side') or ''), int(value.get('slot') or 0))
+        label = str(value.get('afk_prediction_label') or '')
+        try:
+            probability = float(value.get('afk_prediction_probability'))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('挂机预测概率无效') from exc
+        if key not in expected or key in positions or label not in {'active', 'afk'}:
+            raise ValueError('挂机预测槽位或标签无效')
+        if not 0 <= probability <= 1:
+            raise ValueError('挂机预测概率必须在 0 到 1 之间')
+        positions.add(key)
+        normalized.append((*key, label, probability))
+    if positions != expected or len(normalized) != int(lineup['team_size']) * 2:
+        raise ValueError('挂机预测必须完整覆盖全部槽位')
+    current_model_slots = conn.execute(
+        'SELECT COUNT(*) FROM training_review_hero_slots '
+        'WHERE frame_id=? AND afk_prediction_model_run_id=?',
+        (int(frame_id), str(model_run_id)),
+    ).fetchone()
+    if current_model_slots is None or int(current_model_slots[0]) != len(normalized):
+        raise RuntimeError('挂机预测模型版本已变化，拒绝应用旧任务结果')
+    timestamp = now()
+    for side, slot, label, probability in normalized:
+        cursor = conn.execute(
+            """
+            UPDATE training_review_hero_slots
+            SET afk_prediction_label=?,afk_prediction_probability=?,
+                afk_prediction_status='succeeded',afk_prediction_error='',
+                afk_predicted_at=?
+            WHERE frame_id=? AND side=? AND slot=?
+              AND afk_prediction_model_run_id=?
+            """,
+            (
+                label,
+                probability,
+                timestamp,
+                int(frame_id),
+                side,
+                slot,
+                str(model_run_id),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError('挂机预测模型版本已变化，拒绝应用旧任务结果')
+    if commit:
+        conn.commit()
+    result = get_training_review_hero_lineup(conn, int(frame_id))
+    assert result is not None
+    return result
+
+
+def _training_review_afk_prediction_status_rows(
+    conn: sqlite3.Connection,
+) -> List[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT lineup.frame_id,
+               SUM(CASE WHEN slot.afk_prediction_status='failed' THEN 1 ELSE 0 END)
+                   AS failed_count,
+               SUM(CASE WHEN slot.afk_prediction_status='succeeded' THEN 1 ELSE 0 END)
+                   AS succeeded_count,
+               SUM(CASE WHEN slot.afk_prediction_status='succeeded'
+                         AND slot.afk_prediction_label='afk' THEN 1 ELSE 0 END)
+                   AS afk_count,
+               COUNT(*) AS slot_count
+        FROM training_review_hero_lineups lineup
+        JOIN training_review_hero_slots slot ON slot.frame_id=lineup.frame_id
+        LEFT JOIN training_review_material_index material
+          ON material.frame_id=lineup.frame_id
+        WHERE lineup.screen_type='result_page'
+          AND COALESCE(material.result_group_representative_frame_id,
+                       lineup.frame_id)=lineup.frame_id
+        GROUP BY lineup.frame_id
+        """
+    ).fetchall()
+
+
+def _training_review_afk_prediction_status(row: sqlite3.Row) -> str:
+    failed = int(row['failed_count'] or 0)
+    succeeded = int(row['succeeded_count'] or 0)
+    slots = int(row['slot_count'] or 0)
+    afk = int(row['afk_count'] or 0)
+    return (
+        'failed'
+        if failed
+        else ('pending' if succeeded != slots else ('afk' if afk else 'active'))
+    )
+
+
+def training_review_afk_prediction_frame_ids(
+    conn: sqlite3.Connection, status: str
+) -> set[int]:
+    if status not in {'afk', 'active', 'pending', 'failed'}:
+        raise ValueError('挂机预测筛选无效')
+    matching = set()
+    for row in _training_review_afk_prediction_status_rows(conn):
+        if _training_review_afk_prediction_status(row) == status:
+            matching.add(int(row['frame_id']))
+    return matching
+
+
+def training_review_afk_prediction_stats(conn: sqlite3.Connection) -> Dict[str, int]:
+    result = {status: 0 for status in ('afk', 'active', 'pending', 'failed')}
+    for row in _training_review_afk_prediction_status_rows(conn):
+        result[_training_review_afk_prediction_status(row)] += 1
     return result
 
 
@@ -8466,6 +8792,12 @@ def replace_training_review_hero_suggestions(
                 crop_h=excluded.crop_h,
                 suggested_label=excluded.suggested_label,
                 suggestion_confidence=excluded.suggestion_confidence,
+                afk_prediction_label='',
+                afk_prediction_probability=NULL,
+                afk_prediction_model_run_id='',
+                afk_prediction_status='pending',
+                afk_prediction_error='',
+                afk_predicted_at=NULL,
                 updated_at=excluded.updated_at
             """,
             [

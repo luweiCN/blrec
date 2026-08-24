@@ -602,6 +602,17 @@
               <option value="high">85% 以上</option>
             </select>
           </label>
+          <label>挂机预打标
+            <select id="candidate-afk-prediction-filter">
+              <option value="">全部状态</option>
+              <option value="afk">预测有挂机</option>
+              <option value="active">预测无挂机</option>
+              <option value="pending">未运行／运行中</option>
+              <option value="failed">运行失败</option>
+            </select>
+          </label>
+          <button id="btn-candidate-afk-backfill" type="button">运行挂机预打标</button>
+          <span id="candidate-afk-backfill-state" class="muted small"></span>
           <label id="candidate-review-reason-field" class="hidden">复查原因
             <select id="candidate-review-reason-filter">
               <option value="">全部已确认图片</option>

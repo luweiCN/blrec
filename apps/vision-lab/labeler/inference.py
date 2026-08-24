@@ -81,9 +81,11 @@ PLAYER_POSITION_LABELS = {
     label: '{}队第 {} 位'.format('左' if label.startswith('left') else '右', label[-1])
     for label in PLAYER_POSITION_CLASSES
 }
+AFK_STATUS_LABELS = {'active': '正常', 'afk': '挂机'}
 
 # 内置注册表:文件名关键字 → 任务与类别(文件名以 -cls- 或 -detector- 区分)
 TASK_HINTS = [
+    ('afk-status-classifier', 'classify', ['active', 'afk'], AFK_STATUS_LABELS, 224),
     ('hero-avatar-detector', 'detect', [], {'hero_avatar': '英雄头像'}, 960),
     (
         'player-position-classifier',
@@ -447,6 +449,81 @@ def _run_classify_session(
     }
 
 
+def _classification_classes(metadata: Dict[str, Any]) -> List[str]:
+    raw_classes = metadata.get('classes') or {}
+    if isinstance(raw_classes, dict):
+        return [
+            str(value)
+            for _key, value in sorted(
+                raw_classes.items(), key=lambda item: int(item[0])
+            )
+        ]
+    if isinstance(raw_classes, list):
+        return [str(value) for value in raw_classes]
+    raise ValueError('训练产物缺少分类标签顺序')
+
+
+def run_artifact_batch(
+    artifact_path: Path, metadata: Dict[str, Any], images: Sequence[Image.Image]
+) -> List[Dict[str, Any]]:
+    """一次 ``session.run`` 分类同一帧的多个裁剪，避免逐槽推理。"""
+    if str(metadata.get('kind') or '') != 'classify':
+        raise ValueError('批量推理只支持分类模型')
+    if not images:
+        return []
+    artifact = Path(artifact_path)
+    session = _load_session_path(artifact)
+    classes = _classification_classes(metadata)
+    task_id = str(metadata.get('task_id') or '')
+    labels = {'afk_status': AFK_STATUS_LABELS}.get(task_id, {})
+    imgsz = int(metadata.get('imgsz') or 224)
+    input_values = metadata.get('input') or {}
+    preprocessing_values = metadata.get('preprocessing') or {}
+    recorded_pad_value = preprocessing_values.get('pad_value')
+    tensors = [
+        _classification_tensor(
+            image.convert('RGB'),
+            imgsz,
+            input_width=input_values.get('width'),
+            input_height=input_values.get('height'),
+            resize=str(
+                preprocessing_values.get('resize') or 'shortest_edge_center_crop'
+            ),
+            pad_value=int(114 if recorded_pad_value is None else recorded_pad_value),
+        )
+        for image in images
+    ]
+    batch = np.concatenate(tensors, axis=0)
+    raw_batch = session.run(None, {session.get_inputs()[0].name: batch})[0]
+    if len(raw_batch) != len(images):
+        raise RuntimeError('批量分类模型返回数量与输入裁剪不一致')
+    results = []
+    for raw_logits in raw_batch:
+        logits = np.asarray(raw_logits, dtype=np.float32)
+        probs = _finalize_probs(logits)
+        order = probs.argsort()[::-1]
+        scores = [
+            {
+                'class': classes[index],
+                'label': labels.get(classes[index], classes[index]),
+                'prob': round(float(probs[index]), 4),
+            }
+            for index in order
+        ]
+        results.append(
+            {
+                'model': artifact.name,
+                'task': 'classify',
+                'top1': scores[0],
+                'top5': scores[:5],
+                'scores': scores,
+                'raw_logits': [round(float(value), 4) for value in logits.tolist()],
+                'raw_probs': [round(float(value), 4) for value in probs.tolist()],
+            }
+        )
+    return results
+
+
 def run_artifact(
     artifact_path: Path,
     metadata: Dict[str, Any],
@@ -460,18 +537,7 @@ def run_artifact(
     task_id = str(metadata.get('task_id') or '')
     imgsz = int(metadata.get('imgsz') or (640 if kind == 'detect' else 224))
     if kind == 'classify':
-        raw_classes = metadata.get('classes') or {}
-        if isinstance(raw_classes, dict):
-            classes = [
-                str(value)
-                for _key, value in sorted(
-                    raw_classes.items(), key=lambda item: int(item[0])
-                )
-            ]
-        elif isinstance(raw_classes, list):
-            classes = [str(value) for value in raw_classes]
-        else:
-            raise ValueError('训练产物缺少分类标签顺序')
+        classes = _classification_classes(metadata)
         label_maps = {
             'match_flow': MATCH_FLOW_LABELS,
             'hero_select': HERO_SELECT_LABELS,
@@ -480,6 +546,7 @@ def run_artifact(
             'bp_review': BP_LABELS,
             'key_screen_review': KEY_SCREEN_LABELS,
             'player_position': PLAYER_POSITION_LABELS,
+            'afk_status': AFK_STATUS_LABELS,
         }
         return {
             'model': artifact.name,
