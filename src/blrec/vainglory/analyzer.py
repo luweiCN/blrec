@@ -79,13 +79,17 @@ from .vision import (
     detect_recorded_player,
     detect_result_layouts,
     extract_gameplay_hud_heroes,
+    extract_result_afk_contexts,
     extract_result_heroes,
     hero_fingerprint,
     jpeg_bytes,
     normalize_gameplay_frame,
     png_bytes,
+    result_action_min_contrast,
+    result_avatar_slots,
     result_frame_quality,
     select_gameplay_hud_centers,
+    visible_result_portrait_count,
 )
 
 
@@ -152,6 +156,20 @@ class MatchModeClassifier(Protocol):
     def predict(self, frame: RgbFrame) -> MatchModePrediction: ...  # noqa: E704
 
 
+class AfkStatusPrediction(Protocol):
+    label: str
+    confidence: float
+    scores: Sequence[Tuple[str, float]]
+
+
+class AfkStatusClassifier(Protocol):
+    model_version: str
+
+    def predict_many(  # noqa: E704
+        self, frames: Sequence[RgbFrame]
+    ) -> Sequence[AfkStatusPrediction]: ...  # noqa: E704
+
+
 class HeroRecognizer(Protocol):
     def recognize(self, frame: RgbFrame) -> Optional[HeroMatch]: ...  # noqa: E704
 
@@ -214,6 +232,16 @@ class AnalyzedHero:
 
 
 @dataclass(frozen=True)
+class AnalyzedAfkStatus:
+    side: TeamSide
+    slot: int
+    status: Literal['unknown', 'active', 'afk']
+    probability: Optional[float]
+    model_version: str
+    gate_reason: str = ''
+
+
+@dataclass(frozen=True)
 class AnalyzedMatch:
     part_id: int
     part_index: int
@@ -229,6 +257,7 @@ class AnalyzedMatch:
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
     stats_eligible: bool = True
     stats_exclusion_reason: str = ''
+    afk_statuses: Tuple[AnalyzedAfkStatus, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1353,6 +1382,8 @@ class VaingloryVideoAnalyzer:
         result_panel_detector: Optional[ResultPanelDetector] = None,
         stage_classifier: Optional[StageFrameClassifier] = None,
         match_mode_classifier: Optional[MatchModeClassifier] = None,
+        afk_status_classifier: Optional[AfkStatusClassifier] = None,
+        minimum_afk_confidence: float = 0.5,
         minimum_result_mode_confidence: float = 0.75,
         minimum_match_seconds: int = 60,
     ) -> None:
@@ -1360,6 +1391,8 @@ class VaingloryVideoAnalyzer:
             raise ValueError('minimum match duration must not be negative')
         if not 0.0 <= minimum_result_mode_confidence <= 1.0:
             raise ValueError('result mode confidence must be between zero and one')
+        if not 0.0 <= minimum_afk_confidence <= 1.0:
+            raise ValueError('挂机置信度必须在零和一之间')
         self._sampler = sampler or FfmpegSampler()
         self._result_reader = result_reader or TesseractResultReader()
         self._hero_recognizer = hero_recognizer
@@ -1369,6 +1402,8 @@ class VaingloryVideoAnalyzer:
         self._result_panel_detector = result_panel_detector
         self._stage_classifier = stage_classifier
         self._match_mode_classifier = match_mode_classifier
+        self._afk_status_classifier = afk_status_classifier
+        self._minimum_afk_confidence = minimum_afk_confidence
         self._minimum_result_mode_confidence = minimum_result_mode_confidence
         self._minimum_match_seconds = minimum_match_seconds
 
@@ -4607,6 +4642,7 @@ class VaingloryVideoAnalyzer:
         ocr_seconds = time.monotonic() - ocr_started
         if not self._is_credible_result(recognized, team_size=layout.team_size):
             raise _ResultEvidenceRejected(recognized)
+        afk_statuses = self._classify_afk_statuses(frame, layout, recognized)
         heroes_started = time.monotonic()
         heroes = self._recognize_heroes(frame, layout, nearby_frames=hero_frames)
         recorded_player = (
@@ -4710,7 +4746,103 @@ class VaingloryVideoAnalyzer:
             view_context=resolved_view_context,
             stats_eligible=eligible,
             stats_exclusion_reason=exclusion_reason,
+            afk_statuses=afk_statuses,
         )
+
+    def _classify_afk_statuses(
+        self, frame: RgbFrame, layout: ResultLayout, recognized: ResultOcr
+    ) -> Tuple[AnalyzedAfkStatus, ...]:
+        classifier = self._afk_status_classifier
+        slots = result_avatar_slots(
+            frame, viewport=layout.viewport, team_size=layout.team_size
+        )
+        model_version = '' if classifier is None else str(classifier.model_version)
+
+        def abstain(reason: str) -> Tuple[AnalyzedAfkStatus, ...]:
+            return tuple(
+                AnalyzedAfkStatus(
+                    side=slot.side,
+                    slot=slot.slot,
+                    status='unknown',
+                    probability=None,
+                    model_version=model_version,
+                    gate_reason=reason,
+                )
+                for slot in slots
+            )
+
+        if classifier is None:
+            return abstain('model_unavailable')
+        expected = layout.team_size * 2
+        expected_positions = {(slot.side, slot.slot) for slot in slots}
+        observed_positions = {
+            (str(player.side), int(player.slot)) for player in recognized.players
+        }
+        if len(slots) != expected or observed_positions != expected_positions:
+            return abstain('slots_incomplete')
+        if layout.confidence < 0.8:
+            return abstain('layout_low_confidence')
+        if visible_result_portrait_count(frame, slots) != expected:
+            return abstain('avatars_not_all_visible')
+        if result_action_min_contrast(frame, layout) < 60:
+            return abstain('panel_low_contrast')
+        if any(
+            not (player.name or player.raw_name)
+            or player.confidence < 0.55
+            or any(
+                value is None
+                for value in (
+                    player.stats.kills,
+                    player.stats.deaths,
+                    player.stats.assists,
+                    player.stats.economy,
+                )
+            )
+            for player in recognized.players
+        ):
+            return abstain('ocr_low_quality')
+        contexts = extract_result_afk_contexts(frame, slots)
+        try:
+            predictions = tuple(
+                classifier.predict_many(tuple(context.frame for context in contexts))
+            )
+        except Exception as error:  # noqa: BLE001 - 模型失败只能弃权，不能影响对局
+            logger.warning(
+                'Vainglory AFK model abstained after failure: model={} error={!r}',
+                model_version,
+                error,
+            )
+            return abstain('model_error:{}'.format(type(error).__name__))
+        if len(predictions) != expected:
+            return abstain('model_output_incomplete')
+        statuses = []
+        for slot, prediction in zip(slots, predictions):
+            scores = dict(prediction.scores)
+            probability = scores.get('afk')
+            label = str(prediction.label)
+            confidence = float(prediction.confidence)
+            if label not in ('active', 'afk') or probability is None:
+                return abstain('model_output_invalid')
+            accepted = confidence >= self._minimum_afk_confidence
+            statuses.append(
+                AnalyzedAfkStatus(
+                    side=slot.side,
+                    slot=slot.slot,
+                    status=cast(Any, label if accepted else 'unknown'),
+                    probability=max(0.0, min(1.0, float(probability))),
+                    model_version=model_version,
+                    gate_reason='' if accepted else 'model_low_confidence',
+                )
+            )
+        logger.info(
+            'Vainglory AFK classification completed: model={} slots={} afk={} '
+            'unknown={}',
+            model_version,
+            len(statuses),
+            sum(value.status == 'afk' for value in statuses),
+            sum(value.status == 'unknown' for value in statuses),
+        )
+        return tuple(statuses)
 
     def _detect_game_mode(
         self,

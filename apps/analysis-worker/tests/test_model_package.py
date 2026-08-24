@@ -2,12 +2,15 @@ import hashlib
 import json
 from pathlib import Path
 
+import blrec_analysis_worker.model_package as model_package_module
 import pytest
 from blrec_analysis_worker.model_package import (
     ClassificationPrediction,
+    OnnxClassificationModel,
     PackageHeroRecognizer,
     PackageRecordedPlayerDetector,
     PackageStageClassifier,
+    build_package_runtime,
     load_model_package,
 )
 
@@ -194,8 +197,7 @@ def test_package_stage_classifier_finds_selection_outside_match_flow() -> None:
     frame = RgbFrame(1, 1, b'\x00\x00\x00')
 
     selection = _stage_classifier(
-        flow=('not_match_flow', 0.96),
-        select=('select_aram', 0.93),
+        flow=('not_match_flow', 0.96), select=('select_aram', 0.93)
     ).classify(frame)
 
     assert (selection.stage, selection.mode) == (STAGE_PRE_MATCH, MODE_ARAM)
@@ -218,3 +220,109 @@ def test_package_hero_and_player_classifiers_keep_low_confidence_as_unknown() ->
     assert player.detect(frame, layout).side == 'right'
     assert player.detect(frame, layout).slot == 3
     assert invalid_player.detect(frame, layout) is None
+
+
+def _bare_onnx_classifier(*, fixed_batch_size):
+    model = OnnxClassificationModel.__new__(OnnxClassificationModel)
+    model._spec = type(
+        'Spec',
+        (),
+        {
+            'role': 'afk_status',
+            'classes': ('active', 'afk'),
+            'training_run_id': 'afk-run-1',
+        },
+    )()
+    model._input_name = 'input'
+    model._fixed_batch_size = fixed_batch_size
+    return model
+
+
+def test_afk_onnx_classifier_runs_dynamic_slot_batch_once(monkeypatch) -> None:
+    numpy = pytest.importorskip('numpy')
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+    model = _bare_onnx_classifier(fixed_batch_size=None)
+
+    class Session:
+        def __init__(self) -> None:
+            self.batch_sizes = []
+
+        def run(self, _outputs, inputs):
+            batch = next(iter(inputs.values())).shape[0]
+            self.batch_sizes.append(batch)
+            return [numpy.tile(numpy.asarray([[0.8, 0.2]]), (batch, 1))]
+
+    session = Session()
+    model._session = session
+    monkeypatch.setattr(
+        model_package_module,
+        '_classification_tensor',
+        lambda _frame, _spec: numpy.zeros((1, 3, 1, 1), dtype=numpy.float32),
+    )
+
+    predictions = model.predict_many((frame,) * 6)
+
+    assert session.batch_sizes == [6]
+    assert [prediction.label for prediction in predictions] == ['active'] * 6
+    assert model.model_version == 'afk-run-1'
+
+
+def test_afk_onnx_classifier_serializes_a_fixed_batch_one_model(monkeypatch) -> None:
+    numpy = pytest.importorskip('numpy')
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+    model = _bare_onnx_classifier(fixed_batch_size=1)
+
+    class Session:
+        def __init__(self) -> None:
+            self.batch_sizes = []
+
+        def run(self, _outputs, inputs):
+            batch = next(iter(inputs.values())).shape[0]
+            self.batch_sizes.append(batch)
+            return [numpy.asarray([[0.7, 0.3]], dtype=numpy.float32)]
+
+    session = Session()
+    model._session = session
+    monkeypatch.setattr(
+        model_package_module,
+        '_classification_tensor',
+        lambda _frame, _spec: numpy.zeros((1, 3, 1, 1), dtype=numpy.float32),
+    )
+
+    predictions = model.predict_many((frame,) * 6)
+
+    assert len(predictions) == 6
+    assert session.batch_sizes == [1] * 6
+
+
+def test_package_runtime_instantiates_afk_status_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = load_model_package(_write_package(tmp_path))
+    created_roles = []
+
+    class Classifier:
+        def __init__(self, spec, **_kwargs) -> None:
+            self.spec = spec
+            self.model_version = spec.training_run_id
+            created_roles.append(spec.role)
+
+        def predict(self, _frame):
+            return ClassificationPrediction(self.spec.classes[0], 1, ())
+
+    monkeypatch.setattr(model_package_module, 'OnnxClassificationModel', Classifier)
+    monkeypatch.setattr(
+        model_package_module,
+        'OnnxResultPanelDetector',
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        model_package_module,
+        'OnnxHeroAvatarDetector',
+        lambda *_args, **_kwargs: object(),
+    )
+
+    runtime = build_package_runtime(package)
+
+    assert 'afk_status' in created_roles
+    assert runtime.afk_status_classifier is runtime.classifiers['afk_status']

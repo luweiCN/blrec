@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import math
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, cast
 
 from blrec.vainglory.analyzer import (
+    AnalyzedAfkStatus,
     AnalyzedHero,
     AnalyzedMatch,
     TrainingCandidate,
@@ -223,6 +225,17 @@ def encode_match(match: AnalyzedMatch) -> Dict[str, Any]:
             'raw_text': match.ocr.raw_text,
         },
         'heroes': [encode_hero(hero) for hero in match.heroes],
+        'afk_statuses': [
+            {
+                'side': value.side,
+                'slot': value.slot,
+                'status': value.status,
+                'probability': value.probability,
+                'model_version': value.model_version,
+                'gate_reason': value.gate_reason,
+            }
+            for value in match.afk_statuses
+        ],
         'confidence': match.confidence,
         'result_frame_png': _encode_bytes(match.result_frame_png),
         'game_mode': match.game_mode,
@@ -246,6 +259,7 @@ def decode_match(payload: Mapping[str, Any]) -> AnalyzedMatch:
     player_payloads = cast(Sequence[Mapping[str, Any]], ocr_payload['players'])
     hero_payloads = cast(Sequence[Mapping[str, Any]], payload['heroes'])
     recorded_payload = cast(Optional[Mapping[str, Any]], payload.get('recorded_player'))
+    afk_payloads = cast(Sequence[Mapping[str, Any]], payload.get('afk_statuses') or ())
     viewport = ViewportTransform(
         name=str(viewport_payload['name']),
         left=float(viewport_payload['left']),
@@ -298,6 +312,40 @@ def decode_match(payload: Mapping[str, Any]) -> AnalyzedMatch:
         )
         for player in player_payloads
     )
+    afk_statuses = []
+    for value in afk_payloads:
+        side = str(value.get('side') or '')
+        slot = int(value.get('slot') or 0)
+        status = str(value.get('status') or 'unknown')
+        probability_value = value.get('probability')
+        probability = None if probability_value is None else float(probability_value)
+        if side not in ('left', 'right') or not 1 <= slot <= 5:
+            raise ValueError('挂机预测槽位无效')
+        if status not in ('unknown', 'active', 'afk'):
+            raise ValueError('挂机预测状态无效')
+        if probability is not None and (
+            not math.isfinite(probability) or not 0 <= probability <= 1
+        ):
+            raise ValueError('挂机预测概率必须在零和一之间')
+        afk_statuses.append(
+            AnalyzedAfkStatus(
+                side=cast(Any, side),
+                slot=slot,
+                status=cast(Any, status),
+                probability=probability,
+                model_version=str(value.get('model_version') or '')[:200],
+                gate_reason=str(value.get('gate_reason') or '')[:200],
+            )
+        )
+    if afk_statuses:
+        positions = {(value.side, value.slot) for value in afk_statuses}
+        expected_positions = {
+            (side, slot)
+            for side in ('left', 'right')
+            for slot in range(1, layout.team_size + 1)
+        }
+        if len(afk_statuses) != len(positions) or positions != expected_positions:
+            raise ValueError('挂机预测必须完整覆盖结算页槽位')
     return AnalyzedMatch(
         part_id=int(payload['part_id']),
         part_index=int(payload['part_index']),
@@ -317,6 +365,7 @@ def decode_match(payload: Mapping[str, Any]) -> AnalyzedMatch:
         view_context=cast(Any, str(payload.get('view_context', 'unknown'))),
         stats_eligible=bool(payload.get('stats_eligible', True)),
         stats_exclusion_reason=str(payload.get('stats_exclusion_reason', '')),
+        afk_statuses=tuple(afk_statuses),
     )
 
 

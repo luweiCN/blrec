@@ -128,6 +128,8 @@ def _build_analyzer(
             result_panel_detector=runtime.result_panel_detector,
             stage_classifier=runtime.stage_classifier,
             match_mode_classifier=runtime.classifiers['result_mode'],
+            afk_status_classifier=runtime.afk_status_classifier,
+            minimum_afk_confidence=package.runtime.thresholds['afk_status'],
         ),
         package,
     )
@@ -158,6 +160,17 @@ def _match_payload(
         'game_mode': match.game_mode,
         'confidence': round(match.confidence, 4),
         'heroes': [hero.label for hero in match.heroes],
+        'afk_statuses': [
+            {
+                'side': value.side,
+                'slot': value.slot,
+                'status': value.status,
+                'probability': value.probability,
+                'model_version': value.model_version,
+                'gate_reason': value.gate_reason,
+            }
+            for value in match.afk_statuses
+        ],
         'stats_eligible': match.stats_eligible,
         'stats_exclusion_reason': match.stats_exclusion_reason,
         'result_frame': None if frame_path is None else str(frame_path.resolve()),

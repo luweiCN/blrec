@@ -169,6 +169,18 @@ def test_postgres_schema_migration_80_has_duplicate_review_fields() -> None:
     assert 'vainglory_matches_duplicate_review_idx' in statements[2]
 
 
+def test_postgres_schema_migration_81_has_afk_prediction_fields() -> None:
+    statements = tuple(_migration_statements(81))
+
+    assert len(statements) == 6
+    assert 'ADD COLUMN afk_prediction_status TEXT' in statements[0]
+    assert 'ADD COLUMN afk_prediction_probability DOUBLE PRECISION' in statements[1]
+    assert 'ADD COLUMN afk_prediction_model_version TEXT' in statements[2]
+    assert 'ADD COLUMN afk_prediction_gate_reason TEXT' in statements[3]
+    assert 'ADD COLUMN afk_manual_override BIGINT' in statements[4]
+    assert 'vainglory_match_players_afk_prediction_idx' in statements[5]
+
+
 def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() -> None:
     database_url = os.environ.get('BLREC_TEST_POSTGRES_URL', '').strip()
     if not database_url:
@@ -213,6 +225,10 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
             )
             connection.execute('CREATE TABLE vainglory_matches(id BIGINT PRIMARY KEY)')
             connection.execute(
+                'CREATE TABLE vainglory_match_players('
+                'id BIGINT PRIMARY KEY,match_id BIGINT NOT NULL)'
+            )
+            connection.execute(
                 'CREATE TABLE vainglory_archive_imports('
                 'id BIGINT PRIMARY KEY,account_id BIGINT,bvid TEXT,'
                 'is_only_self BIGINT)'
@@ -241,7 +257,7 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
 
         assert migrate_postgres_schema(
             schema_url, expected_database=database_name, expected_schema=schema
-        ) == (77, 78, 79, 80)
+        ) == (77, 78, 79, 80, 81)
 
         with psycopg.connect(schema_url, autocommit=True) as connection:
             assert connection.execute(
@@ -269,7 +285,7 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
             ).fetchall() == [('owner', None), ('owner', None)]
             assert connection.execute(
                 'SELECT MAX(version) FROM schema_migrations'
-            ).fetchone() == (80,)
+            ).fetchone() == (81,)
             columns = {
                 row[0]
                 for row in connection.execute(

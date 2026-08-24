@@ -205,6 +205,13 @@ class HeroFrame:
 
 
 @dataclass(frozen=True)
+class ResultAvatarSlot:
+    side: TeamSide
+    slot: int
+    rect: PixelRect
+
+
+@dataclass(frozen=True)
 class RecordedPlayer:
     side: TeamSide
     slot: int
@@ -739,7 +746,27 @@ def extract_result_heroes(
     team_size: TeamSize = 3,
     center_shift: float = 0.0,
 ) -> Tuple[HeroFrame, ...]:
-    result: List[HeroFrame] = []
+    return tuple(
+        HeroFrame(
+            side=avatar.side,
+            slot=avatar.slot,
+            frame=frame.crop(avatar.rect).resize_nearest(96, 96),
+        )
+        for avatar in result_avatar_slots(
+            frame, viewport=viewport, team_size=team_size, center_shift=center_shift
+        )
+    )
+
+
+def result_avatar_slots(
+    frame: RgbFrame,
+    *,
+    viewport: ViewportTransform = STANDARD_VIEWPORT,
+    team_size: TeamSize = 3,
+    center_shift: float = 0.0,
+) -> Tuple[ResultAvatarSlot, ...]:
+    """返回结算页固定 6/10 个头像槽位及其源图矩形。"""
+    result: List[ResultAvatarSlot] = []
     separator = 0.5 + center_shift
     row_centers: Tuple[float, ...]
     if team_size == 5:
@@ -766,11 +793,49 @@ def extract_result_heroes(
             side_length = min(rect.right - rect.left, rect.bottom - rect.top)
             left = rect.left + (rect.right - rect.left - side_length) // 2
             top = rect.top + (rect.bottom - rect.top - side_length) // 2
-            crop = frame.crop(
-                PixelRect(left, top, left + side_length, top + side_length)
-            ).resize_nearest(96, 96)
-            result.append(HeroFrame(side=side, slot=slot, frame=crop))
+            result.append(
+                ResultAvatarSlot(
+                    side=side,
+                    slot=slot,
+                    rect=PixelRect(left, top, left + side_length, top + side_length),
+                )
+            )
     return tuple(result)
+
+
+def visible_result_portrait_count(
+    frame: RgbFrame, slots: Sequence[ResultAvatarSlot]
+) -> int:
+    return sum(_looks_like_portrait(frame.crop(slot.rect)) for slot in slots)
+
+
+def extract_result_afk_contexts(
+    frame: RgbFrame, slots: Sequence[ResultAvatarSlot]
+) -> Tuple[HeroFrame, ...]:
+    """按 Vision Lab 的训练规则扩展头像框，包含头像与玩家名字。"""
+    contexts = []
+    for slot in slots:
+        avatar = slot.rect
+        width = avatar.right - avatar.left
+        height = avatar.bottom - avatar.top
+        top = max(0, round(avatar.top - height * 0.3))
+        bottom = min(frame.height, round(avatar.top + height * 1.3))
+        if slot.side == 'left':
+            left = max(0, round(avatar.left - width * 6.0))
+            right = min(frame.width, round(avatar.left + width * 1.2))
+        else:
+            left = max(0, round(avatar.left - width * 0.2))
+            right = min(frame.width, round(avatar.left + width * 7.0))
+        contexts.append(
+            HeroFrame(
+                side=slot.side,
+                slot=slot.slot,
+                frame=frame.crop(
+                    PixelRect(left, top, max(left + 1, right), max(top + 1, bottom))
+                ),
+            )
+        )
+    return tuple(contexts)
 
 
 def detect_recorded_player(
@@ -877,6 +942,20 @@ def result_frame_quality(frame: RgbFrame, layout: ResultLayout) -> float:
         quality += expected / sampled * 0.5
         quality -= unexpected / sampled * 0.15
     return quality
+
+
+def result_action_min_contrast(frame: RgbFrame, layout: ResultLayout) -> float:
+    """返回标准/归一化 viewport 中较可信的一组最低操作按钮对比度。"""
+    return max(
+        min(
+            _result_action_contrasts(
+                frame, STANDARD_VIEWPORT, team_size=layout.team_size
+            )
+        ),
+        min(
+            _result_action_contrasts(frame, layout.viewport, team_size=layout.team_size)
+        ),
+    )
 
 
 def _result_viewports(aspect_ratio: float) -> Tuple[ViewportTransform, ...]:

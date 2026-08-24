@@ -168,39 +168,81 @@ class OnnxClassificationModel:
             sess_options=options,
             providers=tuple(providers or ('CPUExecutionProvider',)),
         )
-        self._input_name = self._session.get_inputs()[0].name
+        model_input = self._session.get_inputs()[0]
+        self._input_name = model_input.name
+        batch_dimension = model_input.shape[0]
+        self._fixed_batch_size = (
+            int(batch_dimension)
+            if isinstance(batch_dimension, int) and batch_dimension > 0
+            else None
+        )
+
+    @property
+    def model_version(self) -> str:
+        return self._spec.training_run_id
 
     def predict(self, frame: RgbFrame) -> ClassificationPrediction:
-        numpy: Any = importlib.import_module('numpy')
-        tensor = _classification_tensor(frame, self._spec)
-        output = self._session.run(None, {self._input_name: tensor})[0]
-        values = numpy.asarray(output, dtype=numpy.float32).reshape(-1)
-        if len(values) != len(self._spec.classes):
+        return self.predict_many((frame,))[0]
+
+    def predict_many(
+        self, frames: Sequence[RgbFrame]
+    ) -> Tuple[ClassificationPrediction, ...]:
+        if not frames:
+            return ()
+        if self._fixed_batch_size == 1 and len(frames) > 1:
+            return tuple(self._predict_batch((frame,))[0] for frame in frames)
+        if self._fixed_batch_size not in (None, len(frames)):
             raise RuntimeError(
-                '{} 模型输出类别数与 manifest 不一致'.format(self._spec.role)
+                '{} 模型固定 batch={}，无法处理 {} 个槽位'.format(
+                    self._spec.role, self._fixed_batch_size, len(frames)
+                )
             )
-        if (
-            len(values)
-            and float(values.min()) >= 0
-            and float(values.max()) <= 1
-            and abs(float(values.sum()) - 1.0) < 0.01
-        ):
-            probabilities = values
-        else:
-            shifted = values - values.max()
-            exponentials = numpy.exp(shifted)
-            probabilities = exponentials / exponentials.sum()
-        scores = tuple(
-            sorted(
-                (
-                    (label, float(probabilities[index]))
-                    for index, label in enumerate(self._spec.classes)
-                ),
-                key=lambda item: item[1],
-                reverse=True,
-            )
+        return self._predict_batch(frames)
+
+    def _predict_batch(
+        self, frames: Sequence[RgbFrame]
+    ) -> Tuple[ClassificationPrediction, ...]:
+        numpy: Any = importlib.import_module('numpy')
+        tensor = numpy.concatenate(
+            tuple(_classification_tensor(frame, self._spec) for frame in frames), axis=0
         )
-        return ClassificationPrediction(scores[0][0], scores[0][1], scores)
+        raw_output = self._session.run(None, {self._input_name: tensor})[0]
+        output = numpy.asarray(raw_output, dtype=numpy.float32)
+        if output.ndim == 1 and len(frames) == 1:
+            output = output.reshape(1, -1)
+        if output.ndim != 2 or output.shape[0] != len(frames):
+            raise RuntimeError('{} 模型输出批次数与输入不一致'.format(self._spec.role))
+        predictions = []
+        for values in output:
+            if len(values) != len(self._spec.classes):
+                raise RuntimeError(
+                    '{} 模型输出类别数与 manifest 不一致'.format(self._spec.role)
+                )
+            if (
+                len(values)
+                and float(values.min()) >= 0
+                and float(values.max()) <= 1
+                and abs(float(values.sum()) - 1.0) < 0.01
+            ):
+                probabilities = values
+            else:
+                shifted = values - values.max()
+                exponentials = numpy.exp(shifted)
+                probabilities = exponentials / exponentials.sum()
+            scores = tuple(
+                sorted(
+                    (
+                        (label, float(probabilities[index]))
+                        for index, label in enumerate(self._spec.classes)
+                    ),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+            )
+            predictions.append(
+                ClassificationPrediction(scores[0][0], scores[0][1], scores)
+            )
+        return tuple(predictions)
 
 
 class OnnxHeroAvatarDetector:
@@ -464,6 +506,7 @@ class PackageRuntime:
     hero_avatar_detector: OnnxHeroAvatarDetector
     hero_recognizer: PackageHeroRecognizer
     recorded_player_detector: PackageRecordedPlayerDetector
+    afk_status_classifier: OnnxClassificationModel
 
 
 def build_package_runtime(
@@ -511,6 +554,10 @@ def build_package_runtime(
     recorded_player_detector = PackageRecordedPlayerDetector(
         player, threshold=package.runtime.thresholds['player_position']
     )
+    afk_status = OnnxClassificationModel(
+        package.model('afk_status'), providers=providers
+    )
+    classifiers['afk_status'] = afk_status
     return PackageRuntime(
         package,
         stage_classifier,
@@ -519,6 +566,7 @@ def build_package_runtime(
         hero_avatar_detector,
         hero_recognizer,
         recorded_player_detector,
+        afk_status,
     )
 
 

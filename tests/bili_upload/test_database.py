@@ -2306,7 +2306,10 @@ async def test_migration_79_adds_global_match_deduplication_fields(
             'vainglory_matches_content_fingerprint_idx',
             'vainglory_matches_duplicate_of_idx',
         }.issubset(indexes)
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 80
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
     finally:
         await database.close()
 
@@ -2329,5 +2332,38 @@ async def test_migration_80_adds_duplicate_review_fields(tmp_path: Path) -> None
             columns
         )
         assert 'vainglory_matches_duplicate_review_idx' in indexes
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_81_adds_afk_prediction_and_manual_override_fields(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        columns = {
+            str(row['name'])
+            for row in await database.fetchall(
+                'PRAGMA table_info(vainglory_match_players)'
+            )
+        }
+        indexes = {
+            str(row['name'])
+            for row in await database.fetchall(
+                'PRAGMA index_list(vainglory_match_players)'
+            )
+        }
+
+        assert {
+            'afk_prediction_status',
+            'afk_prediction_probability',
+            'afk_prediction_model_version',
+            'afk_prediction_gate_reason',
+            'afk_manual_override',
+        }.issubset(columns)
+        assert 'vainglory_match_players_afk_prediction_idx' in indexes
+        assert await database.scalar('PRAGMA quick_check') == 'ok'
     finally:
         await database.close()

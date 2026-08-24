@@ -9,11 +9,13 @@ from blrec.vainglory.vision import (
     detect_observer_hud,
     detect_result_layout,
     detect_result_layouts,
+    extract_result_afk_contexts,
     extract_result_heroes,
     hamming_distance,
     hero_fingerprint,
     perceptual_hash,
     png_bytes,
+    result_avatar_slots,
 )
 
 
@@ -480,3 +482,35 @@ def test_crop_hash_and_png_are_deterministic() -> None:
     assert perceptual_hash(left) == perceptual_hash(left)
     assert perceptual_hash(left) != perceptual_hash(right)
     assert png_bytes(left).startswith(b'\x89PNG\r\n\x1a\n')
+
+
+def test_afk_context_crop_matches_avatar_and_name_training_geometry() -> None:
+    frame = RgbFrame(1_000, 1_000, b'\x00\x00\x00' * 1_000 * 1_000)
+    slots = result_avatar_slots(frame)
+
+    contexts = extract_result_afk_contexts(frame, slots)
+
+    assert [(context.side, context.slot) for context in contexts] == [
+        ('left', 1),
+        ('left', 2),
+        ('left', 3),
+        ('right', 1),
+        ('right', 2),
+        ('right', 3),
+    ]
+    left_avatar = slots[0].rect
+    right_avatar = slots[3].rect
+    avatar_width = left_avatar.right - left_avatar.left
+    avatar_height = left_avatar.bottom - left_avatar.top
+    assert contexts[0].frame.width == (
+        round(left_avatar.left + avatar_width * 1.2)
+        - round(left_avatar.left - avatar_width * 6.0)
+    )
+    assert contexts[0].frame.height == (
+        round(left_avatar.top + avatar_height * 1.3)
+        - round(left_avatar.top - avatar_height * 0.3)
+    )
+    assert contexts[3].frame.width == (
+        round(right_avatar.left + avatar_width * 7.0)
+        - round(right_avatar.left - avatar_width * 0.2)
+    )

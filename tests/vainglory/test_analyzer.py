@@ -1894,6 +1894,11 @@ def test_incomplete_result_evidence_stops_before_hero_recognition(
         '_recognize_heroes',
         lambda *_args, **_kwargs: pytest.fail('不完整候选不得进入英雄识别'),
     )
+    monkeypatch.setattr(
+        analyzer,
+        '_classify_afk_statuses',
+        lambda *_args, **_kwargs: pytest.fail('非结算页不得进入挂机识别'),
+    )
 
     with pytest.raises(analyzer_module._ResultEvidenceRejected):
         analyzer._recognize_frame(
@@ -1904,6 +1909,139 @@ def test_incomplete_result_evidence_stops_before_hero_recognition(
             header=scoreboard.header,
             video_duration_ms=600_000,
         )
+
+
+def _complete_afk_result(team_size: int = 3) -> ResultOcr:
+    return ResultOcr(
+        ResultHeader('胜利', 'normal', 900, 12, 8, 30_000, 25_000),
+        tuple(
+            OcrPlayer(
+                side=side,
+                slot=slot,
+                name='{}{}'.format(side, slot),
+                normalized_name='{}{}'.format(side, slot),
+                raw_name='{}{}'.format(side, slot),
+                stats=PlayerStats(slot, slot, slot, 10_000),
+                confidence=0.9,
+            )
+            for side in ('left', 'right')
+            for slot in range(1, team_size + 1)
+        ),
+    )
+
+
+def test_afk_classifier_batches_every_result_slot_after_quality_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
+
+    class Classifier:
+        model_version = 'afk-run-1'
+
+        def __init__(self) -> None:
+            self.batch_sizes = []
+
+        def predict_many(self, frames):
+            self.batch_sizes.append(len(frames))
+            return tuple(
+                SimpleNamespace(
+                    label='afk' if index == 1 else 'active',
+                    confidence=0.9,
+                    scores=(
+                        (('active', 0.1), ('afk', 0.9))
+                        if index == 1
+                        else (('active', 0.9), ('afk', 0.1))
+                    ),
+                )
+                for index, _frame in enumerate(frames)
+            )
+
+    classifier = Classifier()
+    analyzer = VaingloryVideoAnalyzer(afk_status_classifier=classifier)
+    monkeypatch.setattr(
+        analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
+    )
+    monkeypatch.setattr(
+        analyzer_module, 'result_action_min_contrast', lambda *_args: 100
+    )
+
+    statuses = analyzer._classify_afk_statuses(
+        frame, hit(0).layout, _complete_afk_result()
+    )
+
+    assert classifier.batch_sizes == [6]
+    assert len(statuses) == 6
+    assert statuses[1].status == 'afk'
+    assert statuses[1].probability == pytest.approx(0.9)
+    assert {status.model_version for status in statuses} == {'afk-run-1'}
+    assert all(not status.gate_reason for status in statuses)
+
+
+@pytest.mark.parametrize(
+    ('visible_portraits', 'action_contrast', 'reason'),
+    ((5, 100, 'avatars_not_all_visible'), (6, 36, 'panel_low_contrast')),
+)
+def test_afk_classifier_abstains_on_low_quality_result(
+    monkeypatch: pytest.MonkeyPatch,
+    visible_portraits: int,
+    action_contrast: int,
+    reason: str,
+) -> None:
+    frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
+
+    class Classifier:
+        model_version = 'afk-run-1'
+
+        def predict_many(self, _frames):
+            raise AssertionError('低质结算页不得进入模型')
+
+    analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
+    monkeypatch.setattr(
+        analyzer_module,
+        'visible_result_portrait_count',
+        lambda *_args: visible_portraits,
+    )
+    monkeypatch.setattr(
+        analyzer_module, 'result_action_min_contrast', lambda *_args: action_contrast
+    )
+
+    statuses = analyzer._classify_afk_statuses(
+        frame, hit(0).layout, _complete_afk_result()
+    )
+
+    assert len(statuses) == 6
+    assert {status.status for status in statuses} == {'unknown'}
+    assert {status.gate_reason for status in statuses} == {reason}
+    assert all(status.probability is None for status in statuses)
+
+
+def test_afk_classifier_error_abstains_instead_of_marking_players_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
+
+    class Classifier:
+        model_version = 'afk-run-1'
+
+        def predict_many(self, _frames):
+            raise RuntimeError('onnx failed')
+
+    analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
+    monkeypatch.setattr(
+        analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
+    )
+    monkeypatch.setattr(
+        analyzer_module, 'result_action_min_contrast', lambda *_args: 100
+    )
+
+    statuses = analyzer._classify_afk_statuses(
+        frame, hit(0).layout, _complete_afk_result()
+    )
+
+    assert len(statuses) == 6
+    assert {status.status for status in statuses} == {'unknown'}
+    assert {status.gate_reason for status in statuses} == {'model_error:RuntimeError'}
+    assert all(status.probability is None for status in statuses)
 
 
 def test_result_hero_lineup_distinguishes_mismatch_from_missing_evidence() -> None:

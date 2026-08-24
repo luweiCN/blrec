@@ -16,7 +16,7 @@ from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.postgres_database import postgres_schema_sql
 
 _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]*$')
-_SUPPORTED_MIGRATIONS = (77, 78, 79, 80)
+_SUPPORTED_MIGRATIONS = (77, 78, 79, 80, 81)
 
 
 def _migration_path(version: int) -> Path:

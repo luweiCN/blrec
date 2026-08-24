@@ -30,6 +30,7 @@ from loguru import logger
 from blrec.bili_upload.database import BiliUploadDatabase
 
 from .analyzer import (
+    AnalyzedAfkStatus,
     AnalyzedHero,
     AnalyzedMatch,
     ScannedPart,
@@ -109,6 +110,20 @@ def _analysis_revision_snapshot(matches: Sequence[AnalyzedMatch]) -> Tuple[str, 
                     }
                     for hero in match.heroes
                 ],
+                'afk_statuses': [
+                    {
+                        'side': status.side,
+                        'slot': int(status.slot),
+                        'status': status.status,
+                        'probability': status.probability,
+                        'model_version': status.model_version,
+                        'gate_reason': status.gate_reason,
+                    }
+                    for status in sorted(
+                        match.afk_statuses,
+                        key=lambda item: (0 if item.side == 'left' else 1, item.slot),
+                    )
+                ],
                 'confidence': float(match.confidence),
                 'game_mode': match.game_mode,
                 'recorded_player': (
@@ -135,12 +150,40 @@ def _analysis_revision_snapshot(matches: Sequence[AnalyzedMatch]) -> Tuple[str, 
                 key=lambda item: (item.part_index, item.result_at_ms, item.part_id),
             )
         ],
-        'version': 1,
+        'version': 2,
     }
     snapshot_json = json.dumps(
         payload, ensure_ascii=False, separators=(',', ':'), sort_keys=True
     )
     return snapshot_json, hashlib.sha256(snapshot_json.encode('utf8')).hexdigest()
+
+
+def _afk_predictions_by_position(
+    match: AnalyzedMatch,
+) -> Dict[Tuple[str, int], AnalyzedAfkStatus]:
+    return {(status.side, int(status.slot)): status for status in match.afk_statuses}
+
+
+def _afk_prediction_values(
+    predictions: Mapping[Tuple[str, int], AnalyzedAfkStatus], *, side: str, slot: int
+) -> Tuple[str, Optional[float], str, str]:
+    prediction = predictions.get((side, int(slot)))
+    if prediction is None:
+        return 'unknown', None, '', 'not_analyzed'
+    status = (
+        prediction.status
+        if prediction.status in ('unknown', 'active', 'afk')
+        else 'unknown'
+    )
+    probability = prediction.probability
+    if probability is not None:
+        probability = max(0.0, min(1.0, float(probability)))
+    return (
+        status,
+        probability,
+        prediction.model_version.strip()[:200],
+        prediction.gate_reason.strip()[:200],
+    )
 
 
 def _analysis_summary_json(value: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -598,6 +641,11 @@ class MatchPlayerRecord:
     confidence: float
     last_hits: Optional[int] = None
     is_recorded_player: bool = False
+    afk_prediction_status: Literal['unknown', 'active', 'afk'] = 'unknown'
+    afk_probability: Optional[float] = None
+    afk_model_version: str = ''
+    afk_gate_reason: str = ''
+    afk_manual_override: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -702,6 +750,11 @@ def _manual_correction_snapshot(match: MatchRecord) -> Dict[str, Any]:
                 'assists': player.assists,
                 'economy': player.economy,
                 'last_hits': player.last_hits,
+                'afk_prediction_status': player.afk_prediction_status,
+                'afk_probability': player.afk_probability,
+                'afk_model_version': player.afk_model_version,
+                'afk_gate_reason': player.afk_gate_reason,
+                'afk_manual_override': player.afk_manual_override,
             }
             for player in match.players
         ],
@@ -3201,12 +3254,18 @@ class VaingloryRepository:
             ),
         )
         match_id = int(cursor.lastrowid)
+        afk_predictions = _afk_predictions_by_position(match)
         for player in match.ocr.players:
+            afk_values = _afk_prediction_values(
+                afk_predictions, side=player.side, slot=player.slot
+            )
             connection.execute(
                 'INSERT INTO vainglory_match_players('
                 'match_id,side,slot,player_name,normalized_name,hero_id,hero_source,'
-                'kills,deaths,assists,economy,last_hits,confidence) '
-                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                'kills,deaths,assists,economy,last_hits,confidence,'
+                'afk_prediction_status,afk_prediction_probability,'
+                'afk_prediction_model_version,afk_prediction_gate_reason) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (
                     match_id,
                     player.side,
@@ -3221,6 +3280,7 @@ class VaingloryRepository:
                     player.stats.economy,
                     player.stats.last_hits,
                     player.confidence,
+                    *afk_values,
                 ),
             )
         return match_id
@@ -4580,6 +4640,20 @@ class VaingloryRepository:
                     (int(part_id),),
                 ).fetchall()
             }
+            manual_afk_overrides = {
+                (int(row['result_at_ms']), str(row['side']), int(row['slot'])): bool(
+                    int(row['afk_manual_override'])
+                )
+                for row in connection.execute(
+                    'SELECT match.result_at_ms,player.side,player.slot,'
+                    'player.afk_manual_override FROM vainglory_matches match '
+                    'JOIN vainglory_match_players player '
+                    'ON player.match_id=match.id '
+                    'WHERE match.result_part_id=? '
+                    'AND player.afk_manual_override IS NOT NULL',
+                    (int(part_id),),
+                ).fetchall()
+            }
             match_overrides = tuple(
                 (int(row['result_at_ms']), self._override_payload(row['payload_json']))
                 for row in connection.execute(
@@ -4591,6 +4665,7 @@ class VaingloryRepository:
             )
             used_match_overrides: Set[int] = set()
             used_manual_overrides: Set[Tuple[int, str, int]] = set()
+            used_manual_afk_overrides: Set[Tuple[int, str, int]] = set()
             old_fingerprints = tuple(
                 str(row['content_fingerprint'])
                 for row in connection.execute(
@@ -4713,6 +4788,7 @@ class VaingloryRepository:
                 )
                 match_id = int(cursor.lastrowid)
                 inserted_match_ids.append(match_id)
+                afk_predictions = _afk_predictions_by_position(match)
                 for player in match.ocr.players:
                     stats = player.stats
                     override_key = (
@@ -4736,11 +4812,40 @@ class VaingloryRepository:
                             _, override_key, manual_hero_id = nearest
                     if manual_hero_id is not None:
                         used_manual_overrides.add(override_key)
+                    exact_afk_key = (
+                        int(match.result_at_ms),
+                        player.side,
+                        int(player.slot),
+                    )
+                    manual_afk_key = (
+                        exact_afk_key if exact_afk_key in manual_afk_overrides else None
+                    )
+                    if manual_afk_key is None:
+                        nearby_afk_overrides = (
+                            (abs(result_at_ms - int(match.result_at_ms)), key)
+                            for key in manual_afk_overrides
+                            for result_at_ms, side, slot in (key,)
+                            if key not in used_manual_afk_overrides
+                            and side == player.side
+                            and slot == int(player.slot)
+                            and abs(result_at_ms - int(match.result_at_ms)) <= 30_000
+                        )
+                        nearest_afk = min(nearby_afk_overrides, default=None)
+                        if nearest_afk is not None:
+                            _, manual_afk_key = nearest_afk
+                    if manual_afk_key is not None:
+                        used_manual_afk_overrides.add(manual_afk_key)
+                    afk_values = _afk_prediction_values(
+                        afk_predictions, side=player.side, slot=player.slot
+                    )
                     connection.execute(
                         'INSERT INTO vainglory_match_players('
                         'match_id,side,slot,player_name,normalized_name,hero_id,'
                         'hero_source,kills,deaths,assists,economy,last_hits,'
-                        'confidence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        'confidence,afk_prediction_status,'
+                        'afk_prediction_probability,afk_prediction_model_version,'
+                        'afk_prediction_gate_reason,afk_manual_override) '
+                        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                         (
                             match_id,
                             player.side,
@@ -4759,6 +4864,12 @@ class VaingloryRepository:
                             stats.economy,
                             stats.last_hits,
                             player.confidence,
+                            *afk_values,
+                            (
+                                None
+                                if manual_afk_key is None
+                                else int(manual_afk_overrides[manual_afk_key])
+                            ),
                         ),
                     )
                 nearby_override = min(
@@ -5467,6 +5578,15 @@ class VaingloryRepository:
             ).fetchone()
             if current is None:
                 raise VaingloryConflict('单局重新识别任务当前不能写入结果')
+            manual_afk_overrides = {
+                (str(row['side']), int(row['slot'])): int(row['afk_manual_override'])
+                for row in connection.execute(
+                    'SELECT side,slot,afk_manual_override '
+                    'FROM vainglory_match_players WHERE match_id=? '
+                    'AND afk_manual_override IS NOT NULL',
+                    (int(match_id),),
+                ).fetchall()
+            }
             part_id = int(current['result_part_id'])
             session_id = int(current['session_id'])
             if int(recognized.part_id) != part_id:
@@ -5607,13 +5727,20 @@ class VaingloryRepository:
             connection.execute(
                 'DELETE FROM vainglory_match_players WHERE match_id=?', (int(match_id),)
             )
+            afk_predictions = _afk_predictions_by_position(recognized)
             for player in recognized.ocr.players:
                 stats = player.stats
+                afk_values = _afk_prediction_values(
+                    afk_predictions, side=player.side, slot=player.slot
+                )
                 connection.execute(
                     'INSERT INTO vainglory_match_players('
                     'match_id,side,slot,player_name,normalized_name,hero_id,'
                     'hero_source,kills,deaths,assists,economy,last_hits,'
-                    'confidence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    'confidence,afk_prediction_status,'
+                    'afk_prediction_probability,afk_prediction_model_version,'
+                    'afk_prediction_gate_reason,afk_manual_override) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (
                         int(match_id),
                         player.side,
@@ -5628,6 +5755,8 @@ class VaingloryRepository:
                         stats.economy,
                         stats.last_hits,
                         player.confidence,
+                        *afk_values,
+                        manual_afk_overrides.get((player.side, int(player.slot))),
                     ),
                 )
             override = connection.execute(
@@ -7998,6 +8127,11 @@ class VaingloryRepository:
                         if type(value) is not int or cast(int, value) < minimum:
                             raise ValueError('玩家数值 {} 无效'.format(field_name))
                     player_patch[field_name] = value
+                if 'afk_manual_override' in raw_player:
+                    afk_override = raw_player['afk_manual_override']
+                    if afk_override is not None and type(afk_override) is not bool:
+                        raise ValueError('人工挂机状态无效')
+                    player_patch['afk_manual_override'] = afk_override
                 if player_patch:
                     normalized_players['{}:{}'.format(side, slot)] = player_patch
             if normalized_players:
@@ -8187,6 +8321,12 @@ class VaingloryRepository:
                 ):
                     player_assignments.extend(('hero_id=?', "hero_source='manual'"))
                     player_values.append(hero_id)
+            if 'afk_manual_override' in player_patch:
+                afk_override = player_patch['afk_manual_override']
+                player_assignments.append('afk_manual_override=?')
+                player_values.append(
+                    None if afk_override is None else int(bool(afk_override))
+                )
             if player_assignments:
                 connection.execute(
                     'UPDATE vainglory_match_players SET {} '
@@ -8213,6 +8353,21 @@ class VaingloryRepository:
             last_hits=(None if row['last_hits'] is None else int(row['last_hits'])),
             confidence=float(row['confidence']),
             is_recorded_player=bool(int(row['is_recorded_player'])),
+            afk_prediction_status=cast(
+                Literal['unknown', 'active', 'afk'], str(row['afk_prediction_status'])
+            ),
+            afk_probability=(
+                None
+                if row['afk_prediction_probability'] is None
+                else float(row['afk_prediction_probability'])
+            ),
+            afk_model_version=str(row['afk_prediction_model_version']),
+            afk_gate_reason=str(row['afk_prediction_gate_reason']),
+            afk_manual_override=(
+                None
+                if row['afk_manual_override'] is None
+                else bool(int(row['afk_manual_override']))
+            ),
         )
 
     @staticmethod

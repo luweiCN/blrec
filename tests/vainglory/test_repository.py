@@ -10,6 +10,7 @@ import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.vainglory.analyzer import (
+    AnalyzedAfkStatus,
     AnalyzedHero,
     AnalyzedMatch,
     ScannedPart,
@@ -258,8 +259,26 @@ async def test_final_part_analysis_replaces_live_provisional_result(
         fine = await repository.claim_live_analysis('worker-a')
         assert fine is not None and fine.kind == 'fine'
 
+        live_afk_statuses = tuple(
+            AnalyzedAfkStatus(
+                side=side,
+                slot=slot,
+                status='afk' if (side, slot) == ('right', 3) else 'active',
+                probability=0.91 if (side, slot) == ('right', 3) else 0.09,
+                model_version='afk-live-1',
+            )
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        )
         await repository.complete_live_window(
-            fine, (replace(analyzed_match(), result_at_ms=80_000),)
+            fine,
+            (
+                replace(
+                    analyzed_match(),
+                    result_at_ms=80_000,
+                    afk_statuses=live_afk_statuses,
+                ),
+            ),
         )
 
         assert (
@@ -290,6 +309,20 @@ async def test_final_part_analysis_replaces_live_provisional_result(
         assert live_item.pending_window_count == 0
         assert live_item.running_window_count == 0
         assert live_item.provisional_match_count == 1
+        provisional_afk = await database.fetchone(
+            'SELECT player.afk_prediction_status,'
+            'player.afk_prediction_probability,player.afk_prediction_model_version '
+            'FROM vainglory_match_players player '
+            'JOIN vainglory_matches match ON match.id=player.match_id '
+            "WHERE match.analysis_state='provisional' "
+            "AND player.side='right' AND player.slot=3"
+        )
+        assert provisional_afk is not None
+        assert str(provisional_afk['afk_prediction_status']) == 'afk'
+        assert float(provisional_afk['afk_prediction_probability']) == pytest.approx(
+            0.91
+        )
+        assert str(provisional_afk['afk_prediction_model_version']) == 'afk-live-1'
         await database.execute(
             "UPDATE recording_sessions SET state='closed' WHERE id=1"
         )
@@ -913,6 +946,109 @@ def distinct_hero_match(*, recorded_side: str, recorded_slot: int) -> AnalyzedMa
             side=recorded_side, slot=recorded_slot, confidence=0.99
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_afk_predictions_persist_with_revision_and_separate_manual_override(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        first_statuses = tuple(
+            AnalyzedAfkStatus(
+                side=side,
+                slot=slot,
+                status='afk' if (side, slot) == ('left', 1) else 'active',
+                probability=0.92 if (side, slot) == ('left', 1) else 0.08,
+                model_version='afk-run-1',
+            )
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        )
+        first = replace(analyzed_match(), afk_statuses=first_statuses)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (first,))
+
+        stored = (await repository.list_matches()).items[0]
+        left_one = stored.players[0]
+        assert left_one.afk_prediction_status == 'afk'
+        assert left_one.afk_probability == pytest.approx(0.92)
+        assert left_one.afk_model_version == 'afk-run-1'
+        assert left_one.afk_gate_reason == ''
+        assert left_one.afk_manual_override is None
+        snapshot = json.loads(
+            str(
+                await database.scalar(
+                    'SELECT snapshot_json FROM vainglory_analysis_revisions '
+                    'ORDER BY revision_no DESC LIMIT 1'
+                )
+            )
+        )
+        assert snapshot['version'] == 2
+        assert snapshot['matches'][0]['afk_statuses'][0] == {
+            'side': 'left',
+            'slot': 1,
+            'status': 'afk',
+            'probability': 0.92,
+            'model_version': 'afk-run-1',
+            'gate_reason': '',
+        }
+
+        edited = await repository.update_match_fields(
+            stored.id,
+            {'players': [{'side': 'left', 'slot': 1, 'afk_manual_override': True}]},
+        )
+        assert edited.players[0].afk_prediction_status == 'afk'
+        assert edited.players[0].afk_manual_override is True
+
+        second_statuses = tuple(
+            replace(
+                status, status='active', probability=0.08, model_version='afk-run-2'
+            )
+            for status in first_statuses
+        )
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(
+            1, (replace(first, afk_statuses=second_statuses),)
+        )
+
+        rescanned = (await repository.list_matches()).items[0]
+        assert rescanned.players[0].afk_prediction_status == 'active'
+        assert rescanned.players[0].afk_probability == pytest.approx(0.08)
+        assert rescanned.players[0].afk_model_version == 'afk-run-2'
+        assert rescanned.players[0].afk_manual_override is True
+
+        rerun_statuses = tuple(
+            replace(status, status='afk', probability=0.95, model_version='afk-run-3')
+            for status in first_statuses
+        )
+        await repository.request_match_rerun(rescanned.id)
+        claim = await repository.claim_next_match_rerun()
+        assert claim is not None and claim.match_id == rescanned.id
+        rerun = await repository.complete_match_rerun(
+            rescanned.id, replace(first, afk_statuses=rerun_statuses)
+        )
+
+        assert rerun.players[0].afk_prediction_status == 'afk'
+        assert rerun.players[0].afk_probability == pytest.approx(0.95)
+        assert rerun.players[0].afk_model_version == 'afk-run-3'
+        assert rerun.players[0].afk_manual_override is True
+
+        cleared = await repository.update_match_fields(
+            rerun.id,
+            {'players': [{'side': 'left', 'slot': 1, 'afk_manual_override': None}]},
+        )
+        assert cleared.players[0].afk_manual_override is None
+        assert cleared.players[0].afk_prediction_status == 'afk'
+    finally:
+        await database.close()
 
 
 def distinct_hero_references() -> tuple[HeroReference, ...]:
