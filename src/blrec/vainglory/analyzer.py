@@ -143,6 +143,15 @@ class StageFrameClassifier(Protocol):
     def classify(self, frame: RgbFrame) -> StagePrediction: ...  # noqa: E704
 
 
+class MatchModePrediction(Protocol):
+    label: str
+    confidence: float
+
+
+class MatchModeClassifier(Protocol):
+    def predict(self, frame: RgbFrame) -> MatchModePrediction: ...  # noqa: E704
+
+
 class HeroRecognizer(Protocol):
     def recognize(self, frame: RgbFrame) -> Optional[HeroMatch]: ...  # noqa: E704
 
@@ -1343,10 +1352,14 @@ class VaingloryVideoAnalyzer:
         aram_detector: Optional[AramDetector] = None,
         result_panel_detector: Optional[ResultPanelDetector] = None,
         stage_classifier: Optional[StageFrameClassifier] = None,
+        match_mode_classifier: Optional[MatchModeClassifier] = None,
+        minimum_result_mode_confidence: float = 0.75,
         minimum_match_seconds: int = 60,
     ) -> None:
         if minimum_match_seconds < 0:
             raise ValueError('minimum match duration must not be negative')
+        if not 0.0 <= minimum_result_mode_confidence <= 1.0:
+            raise ValueError('result mode confidence must be between zero and one')
         self._sampler = sampler or FfmpegSampler()
         self._result_reader = result_reader or TesseractResultReader()
         self._hero_recognizer = hero_recognizer
@@ -1355,6 +1368,8 @@ class VaingloryVideoAnalyzer:
         self._aram_detector = aram_detector or AramTalentSelectionDetector()
         self._result_panel_detector = result_panel_detector
         self._stage_classifier = stage_classifier
+        self._match_mode_classifier = match_mode_classifier
+        self._minimum_result_mode_confidence = minimum_result_mode_confidence
         self._minimum_match_seconds = minimum_match_seconds
 
     def analyze_part(
@@ -4632,6 +4647,7 @@ class VaingloryVideoAnalyzer:
             video_duration_ms=video_duration_ms,
             team_size=layout.team_size,
             hint=game_mode_hint,
+            result_frame=frame,
         )
         populated_players = sum(
             bool(player.name or player.raw_name) for player in recognized.players
@@ -4705,9 +4721,40 @@ class VaingloryVideoAnalyzer:
         video_duration_ms: int,
         team_size: TeamSize,
         hint: str = '',
+        result_frame: Optional[RgbFrame] = None,
     ) -> str:
         if team_size == 5:
             return '5v5'
+        if result_frame is not None and self._match_mode_classifier is not None:
+            try:
+                prediction = self._match_mode_classifier.predict(result_frame)
+            except Exception as error:  # noqa: BLE001
+                logger.warning(
+                    'Vainglory result mode classification failed: {!r}', error
+                )
+            else:
+                label = str(prediction.label)
+                confidence = float(prediction.confidence)
+                if (
+                    label in ('3v3', 'aram')
+                    and confidence >= self._minimum_result_mode_confidence
+                ):
+                    if hint in ('3v3', 'aram') and hint != label:
+                        logger.info(
+                            'Vainglory result mode conflicts with timeline: '
+                            'result_mode={} confidence={:.4f} timeline_mode={}',
+                            label,
+                            confidence,
+                            hint,
+                        )
+                    else:
+                        logger.info(
+                            'Vainglory game mode resolved from result frame: '
+                            'mode={} confidence={:.4f}',
+                            label,
+                            confidence,
+                        )
+                        return label
         if hint in ('5v5', 'aram'):
             return hint
         if duration_seconds is None:

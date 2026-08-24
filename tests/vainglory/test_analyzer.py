@@ -1,4 +1,5 @@
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Tuple
 
 import pytest
@@ -1327,6 +1328,61 @@ def test_aram_detection_samples_the_talent_selection_near_estimated_start() -> N
 
     assert mode == 'aram'
     assert sampler.calls == [11_000, 13_000, 15_000]
+
+
+def test_result_frame_mode_skips_opening_rescan_when_confident() -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class Sampler:
+        def fine_frames(self, _path: str, _window: ScanWindow):
+            raise AssertionError('confident result mode must not rescan the opening')
+
+    class ModeClassifier:
+        def predict(self, predicted_frame: RgbFrame):
+            assert predicted_frame is frame
+            return SimpleNamespace(label='aram', confidence=0.98)
+
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=Sampler(),  # type: ignore[arg-type]
+        match_mode_classifier=ModeClassifier(),  # type: ignore[arg-type]
+        minimum_result_mode_confidence=0.75,
+    )
+
+    mode = analyzer._detect_game_mode(
+        'unused',
+        result_at_ms=600_000,
+        duration_seconds=590,
+        video_duration_ms=700_000,
+        team_size=3,
+        result_frame=frame,
+    )
+
+    assert mode == 'aram'
+
+
+def test_result_frame_mode_conflict_keeps_existing_fallback() -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class ModeClassifier:
+        def predict(self, _frame: RgbFrame):
+            return SimpleNamespace(label='aram', confidence=0.99)
+
+    analyzer = VaingloryVideoAnalyzer(
+        match_mode_classifier=ModeClassifier(),  # type: ignore[arg-type]
+        minimum_result_mode_confidence=0.75,
+    )
+
+    mode = analyzer._detect_game_mode(
+        'unused',
+        result_at_ms=600_000,
+        duration_seconds=None,
+        video_duration_ms=700_000,
+        team_size=3,
+        hint='3v3',
+        result_frame=frame,
+    )
+
+    assert mode == '3v3'
 
 
 def test_aram_detection_rejects_one_noisy_circle_match() -> None:
