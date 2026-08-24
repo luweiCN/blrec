@@ -137,6 +137,7 @@ class TestClassificationPreprocessing(unittest.TestCase):
     def test_artifact_batch_runs_all_slot_crops_in_one_session_call(self):
         class Input:
             name = 'images'
+            shape = [None, 3, 224, 224]
 
         class Session:
             def __init__(self):
@@ -176,6 +177,47 @@ class TestClassificationPreprocessing(unittest.TestCase):
         self.assertEqual(len(results), 10)
         self.assertEqual(results[1]['top1']['class'], 'afk')
         self.assertEqual(results[0]['scores'][1]['class'], 'afk')
+
+    def test_artifact_batch_falls_back_for_static_single_batch_model(self):
+        class Input:
+            name = 'images'
+            shape = [1, 3, 224, 224]
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            @staticmethod
+            def get_inputs():
+                return [Input()]
+
+            def run(self, _outputs, inputs):
+                self.calls.append(inputs['images'].shape)
+                index = len(self.calls) - 1
+                return [
+                    np.asarray(
+                        [[0.9, 0.1] if index % 2 == 0 else [0.2, 0.8]], dtype=np.float32
+                    )
+                ]
+
+        session = Session()
+        images = [Image.new('RGB', (320, 80), 'white') for _ in range(3)]
+        with mock.patch.object(inference, '_load_session_path', return_value=session):
+            results = inference.run_artifact_batch(
+                Path('/tmp/afk-static.onnx'),
+                {
+                    'task_id': 'afk_status',
+                    'kind': 'classify',
+                    'imgsz': 224,
+                    'classes': {'0': 'active', '1': 'afk'},
+                },
+                images,
+            )
+
+        self.assertEqual(session.calls, [(1, 3, 224, 224)] * 3)
+        self.assertEqual(
+            [item['top1']['class'] for item in results], ['active', 'afk', 'active']
+        )
 
 
 class TestDetectParse(unittest.TestCase):

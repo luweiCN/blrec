@@ -493,8 +493,19 @@ def run_artifact_batch(
         )
         for image in images
     ]
-    batch = np.concatenate(tensors, axis=0)
-    raw_batch = session.run(None, {session.get_inputs()[0].name: batch})[0]
+    input_info = session.get_inputs()[0]
+    input_shape = getattr(input_info, 'shape', None)
+    fixed_single_batch = bool(
+        input_shape and isinstance(input_shape[0], int) and int(input_shape[0]) == 1
+    )
+    if fixed_single_batch and len(tensors) > 1:
+        raw_batch = np.concatenate(
+            [session.run(None, {input_info.name: tensor})[0] for tensor in tensors],
+            axis=0,
+        )
+    else:
+        batch = np.concatenate(tensors, axis=0)
+        raw_batch = session.run(None, {input_info.name: batch})[0]
     if len(raw_batch) != len(images):
         raise RuntimeError('批量分类模型返回数量与输入裁剪不一致')
     results = []

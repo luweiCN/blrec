@@ -123,6 +123,16 @@ class TestTrainingRuns(unittest.TestCase):
         self.assertNotIn('input', metadata)
         self.assertEqual(metadata['preprocessing']['resize'], 'letterbox')
 
+    def test_afk_onnx_export_supports_dynamic_slot_batch(self):
+        self.assertEqual(
+            training_runner._onnx_export_options('afk_status', [224, 224]),
+            {'format': 'onnx', 'imgsz': [224, 224], 'dynamic': True},
+        )
+        self.assertEqual(
+            training_runner._onnx_export_options('match_flow', [288, 512]),
+            {'format': 'onnx', 'imgsz': [288, 512]},
+        )
+
     def test_interrupted_run_can_resume_only_with_nonempty_last_checkpoint(self):
         old_work_dir = config.WORK_DIR
         config.WORK_DIR = Path(self.tmp.name) / 'work'

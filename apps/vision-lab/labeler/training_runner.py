@@ -42,6 +42,13 @@ def _artifact_input_metadata(
     }
 
 
+def _onnx_export_options(task_id: str, export_size: Any) -> Dict[str, Any]:
+    options: Dict[str, Any] = {'format': 'onnx', 'imgsz': export_size}
+    if task_id == 'afk_status':
+        options['dynamic'] = True
+    return options
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='虚荣视觉模型训练子进程')
     parser.add_argument('--task-id', required=True)
@@ -127,7 +134,9 @@ def main() -> None:
     export_size = (
         [args.input_height, args.input_width] if args.kind == 'classify' else args.imgsz
     )
-    exported = Path(str(best_model.export(format='onnx', imgsz=export_size)))
+    exported = Path(
+        str(best_model.export(**_onnx_export_options(args.task_id, export_size)))
+    )
     args.artifact.parent.mkdir(parents=True, exist_ok=True)
     if exported.resolve() != args.artifact.resolve():
         shutil.copy2(exported, args.artifact)
