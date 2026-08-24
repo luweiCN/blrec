@@ -130,3 +130,65 @@ python apps/public-dashboard/api/scripts/measure_dashboard_payload.py \
 - 单响应 `<500 KB gzip`。
 - payload budget fixture 在 CI 中对 raw 与 gzip 双门槛失败。
 - v1/v2 同 season/mode 的玩家顺序、分数、英雄榜和趋势点逐字段对比。
+
+## 实施结果（2026-08-25）
+
+v2 已在保留 v1 契约的前提下灰度上线。真实 iPhone Safari 首次进入玩家页时，
+服务器访问日志记录了以下资源请求；同一浏览器会话没有请求
+`/v1/dashboard`：
+
+| 资源 | 原始响应 | gzip 传输 | 服务端耗时 | 加载原因 |
+| --- | ---: | ---: | ---: | --- |
+| `summary` | 10,752 B | 3,778 B | 3 ms | 首次进入 |
+| 当前赛季 `standings` | 320,613 B | 42,552 B | 5 ms | 首次进入 |
+| 当前视图 `trends`（10 位玩家） | 19,807 B | 1,631 B | 20 ms | 当前趋势图 |
+| 当前赛季 `environment` | 170,295 B | 42,280 B | 3 ms | 仅进入环境视图时 |
+
+普通首屏前三项合计 47,961 B gzip，比旧整包 1,801,166 B 减少
+97.34%。从 summary 请求开始到 trends 响应开始的访问日志跨度为 633 ms；三个
+API 的服务端耗时合计 28 ms。环境资源不属于普通首屏。
+
+### 改造前后对比
+
+| 指标 | v1 | v2 |
+| --- | ---: | ---: |
+| 普通首屏 API 原始载荷 | 12,302,575 B | 351,172 B |
+| 普通首屏 API gzip 载荷 | 1,801,166 B | 47,961 B |
+| Dashboard 数据请求数 | 1 个整包 | 3 个独立资源 |
+| 首屏接口耗时 | gzip 请求约 3.59 s | 访问日志跨度 0.633 s；服务端合计 28 ms |
+| 一次 standings 更新的最大 body | 约 1.8 MB gzip | 当前赛季 42,552 B gzip；未变化为 0 B |
+| 历史 180 份完整 standings | 首屏下载 | 不下载；趋势只返回当前查询的紧凑序列 |
+| 九赛季 environment 明细 | 首屏下载 | 当前视图按需下载一个赛季 |
+
+### 八项验收证据
+
+1. 真实 Safari 首屏 `summary + standings + trends` 为 47,961 B gzip，低于
+   500 KB，也低于 250 KB 目标。
+2. 真实访问日志只出现当前赛季 standings 和当前查询 trends；没有历史 180
+   份完整 standings，也没有 environment 请求。
+3. 当前四类 v2 资源最大的单次响应是 standings 的 42,552 B gzip，低于
+   500 KB。
+4. `public-dashboard-data.service.spec.ts` 与
+   `public-dashboard-shell.component.spec.ts` 验证普通 resource 事件只刷新当前
+   可见资源、忽略旧 `dashboard` 整包事件；未打开 environment 时不发请求。
+   真实 Safari SSE 会话也没有出现 `/v1/dashboard` 请求。
+5. 线上带当前 `If-None-Match` 的 standings 请求返回 304，访问日志中的
+   `body_bytes_sent` 为 0。
+6. API 契约测试逐字段比较 v1/v2 同赛季榜单和趋势数据；Angular 测试覆盖切换
+   赛季后仅加载目标赛季资源。
+7. `test_v2_first_view_payload_stays_within_budget` 对固定 300 位玩家、180 天
+   fixture 同时限制原始载荷与 gzip 载荷，超预算会令 CI 失败。
+8. `environment.useDashboardV2` 是一键灰度开关；v1 服务、旧 ETag 和旧 SSE
+   事件保持不变。回滚只需将该开关改为 `false` 并重新发布静态站点。
+
+验证命令：
+
+```bash
+PYTHONPATH=apps/public-dashboard/api/src \
+  python -m pytest apps/public-dashboard/api/tests
+cd apps/public-dashboard && npm test -- --watch=false && npm run lint && npm run build
+```
+
+API 测试结果为 64 passed、4 skipped；前端测试、lint 和 production build 均
+通过。访问日志证据只记录路径、状态、字节数和耗时，不保存响应正文与客户端
+地址。
