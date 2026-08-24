@@ -1786,6 +1786,10 @@ function completeCandidateHeroLineupPrefetch(item, context, entry) {
     if (!finished || finished.status !== 'succeeded') {
       return {lineup, refreshed: false};
     }
+    const application = (finished.result || {}).application || {};
+    if (application.applied === false) {
+      throw new Error(application.reason || '模型结果没有应用');
+    }
     const refreshed = await api(candidateHeroLineupUrl(item, context), {
       signal: entry.controller.signal,
     });
@@ -3155,8 +3159,14 @@ function renderCandidateProgress() {
   }
   const activeReview = candidateStatusIsReviewQueue(candidateLoadedStatus);
   if (activeReview) {
+    const sessionTotal = candidateFilteredTotal + candidateSessionCompleted;
+    const currentPosition = Math.min(
+      sessionTotal,
+      candidateSessionCompleted + (currentCandidate() ? 1 : 0),
+    );
     $('#candidate-progress').textContent =
-      `待标 ${candidateFilteredTotal} · 本次完成 ${candidateSessionCompleted}`;
+      `当前第 ${currentPosition} / ${sessionTotal} 张 · ` +
+      `剩余 ${candidateFilteredTotal} 张`;
     return;
   }
   $('#candidate-progress').textContent = currentCandidate()

@@ -1768,6 +1768,8 @@ def _queue_model_prefill(
         payload['team_size'] = int(team_size)
     if slots is not None:
         payload['slots'] = slots
+    if force:
+        payload['force_refresh'] = True
     fingerprint = hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
     ).hexdigest()[:16]
@@ -1999,7 +2001,12 @@ def _remote_training_review_hero_lineup(
                 and existing['screen_type'] == inferred_screen
                 and int(existing['team_size']) == inferred_size
             )
-            if same_existing and existing and existing['review_status'] == 'confirmed':
+            if (
+                same_existing
+                and existing
+                and existing['review_status'] == 'confirmed'
+                and not (recognize and refresh)
+            ):
                 return _hero_lineup_payload(existing, item=item)
             if (
                 same_existing
@@ -2027,6 +2034,8 @@ def _remote_training_review_hero_lineup(
                 conn, model_prefill.HERO_PREFILL_TASKS
             )
             if not models:
+                if recognize and refresh:
+                    raise HTTPException(503, '英雄头像识别模型尚未部署')
                 if same_existing and existing is not None:
                     return _hero_lineup_payload(existing, item=item)
                 return {
@@ -2152,7 +2161,7 @@ def api_training_review_hero_lineup(
         same_size = inferred_size is None or int(existing['team_size']) == inferred_size
         same_context_existing = same_screen and same_size
         if same_context_existing:
-            if existing['review_status'] == 'confirmed' or not recognize:
+            if not recognize:
                 return _hero_lineup_payload(existing, item=item)
             if not refresh:
                 return _hero_lineup_payload(existing, item=item)
@@ -2163,7 +2172,7 @@ def api_training_review_hero_lineup(
             'needs_team_size': True,
             'slots': [],
         }
-    if recognize and (existing is None or existing['review_status'] != 'confirmed'):
+    if recognize:
         try:
             with _db_lock:
                 model_conn = _conn()
@@ -2176,20 +2185,36 @@ def api_training_review_hero_lineup(
                     )
                 finally:
                     model_conn.close()
-        except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            if refresh:
+                raise HTTPException(503, f'AI 识别失败：{exc}') from exc
             model_result = {'complete': False}
         if model_result.get('complete'):
             with _db_lock:
                 conn = _conn()
                 try:
-                    lineup = db.replace_training_review_hero_suggestions(
-                        conn,
-                        frame_id=frame_id,
-                        screen_type=inferred_screen,
-                        team_size=inferred_size,
-                        method='new-model-cascade-v1',
-                        slots=model_result['slots'],
-                    )
+                    if (
+                        existing is not None
+                        and existing['review_status'] == 'confirmed'
+                        and not same_context_existing
+                    ):
+                        lineup = db.replace_training_review_hero_layout(
+                            conn,
+                            frame_id=frame_id,
+                            screen_type=inferred_screen,
+                            team_size=inferred_size,
+                            method='new-model-cascade-v1',
+                            slots=model_result['slots'],
+                        )
+                    else:
+                        lineup = db.replace_training_review_hero_suggestions(
+                            conn,
+                            frame_id=frame_id,
+                            screen_type=inferred_screen,
+                            team_size=inferred_size,
+                            method='new-model-cascade-v1',
+                            slots=model_result['slots'],
+                        )
                     _save_new_model_hero_prefill_source(
                         conn,
                         frame_id=frame_id,
@@ -2202,6 +2227,10 @@ def api_training_review_hero_lineup(
                 finally:
                     conn.close()
             return _hero_lineup_payload(lineup, item=item)
+        if refresh:
+            raise HTTPException(
+                422, str(model_result.get('reason') or '模型没有找全头像')
+            )
     if same_context_existing and existing is not None:
         return _hero_lineup_payload(existing, item=item)
     return {
@@ -4231,6 +4260,7 @@ def _apply_remote_model_prefill(
     payload = leased.get('payload') or {}
     frame_id = int(payload.get('frame_id') or result.get('frame_id') or 0)
     operation = str(payload.get('operation') or result.get('operation') or 'core')
+    force_refresh = bool(payload.get('force_refresh'))
     if frame_id <= 0:
         raise ValueError('预填任务缺少 frame_id')
     try:
@@ -4258,7 +4288,18 @@ def _apply_remote_model_prefill(
     if item is None:
         raise KeyError(f'训练复核图片不存在: {frame_id}')
     existing = db.get_training_review_hero_lineup(conn, frame_id)
-    if existing is not None and existing['review_status'] == 'confirmed':
+    same_context_existing = bool(
+        existing
+        and existing['screen_type']
+        == str(payload.get('screen_type') or result.get('screen_type') or '')
+        and int(existing['team_size'])
+        == int(payload.get('team_size') or result.get('team_size') or 0)
+    )
+    if (
+        existing is not None
+        and existing['review_status'] == 'confirmed'
+        and not force_refresh
+    ):
         return {'applied': False, 'frame_id': frame_id, 'reason': '人工已确认'}
     screen_type = str(payload.get('screen_type') or result.get('screen_type') or '')
     team_size = int(payload.get('team_size') or result.get('team_size') or 0)
@@ -4310,6 +4351,12 @@ def _apply_remote_model_prefill(
         )
     elif operation == 'hero_lineup':
         if not result.get('complete') or len(result_slots) != team_size * 2:
+            if existing is not None and existing['review_status'] == 'confirmed':
+                return {
+                    'applied': False,
+                    'frame_id': frame_id,
+                    'reason': str(result.get('reason') or '模型没有找全头像'),
+                }
             lineup = db.replace_training_review_hero_layout(
                 conn,
                 frame_id=frame_id,
@@ -4339,20 +4386,36 @@ def _apply_remote_model_prefill(
             and not str(existing.get('suggestion_method') or '').startswith(
                 'worker-pending'
             )
+            and not force_refresh
         ):
             return {
                 'applied': False,
                 'frame_id': frame_id,
                 'reason': '等待期间已人工绘制头像框',
             }
-        lineup = db.replace_training_review_hero_suggestions(
-            conn,
-            frame_id=frame_id,
-            screen_type=screen_type,
-            team_size=team_size,
-            method='new-model-cascade-worker-v1',
-            slots=result_slots,
-        )
+        if (
+            force_refresh
+            and existing is not None
+            and existing['review_status'] == 'confirmed'
+            and not same_context_existing
+        ):
+            lineup = db.replace_training_review_hero_layout(
+                conn,
+                frame_id=frame_id,
+                screen_type=screen_type,
+                team_size=team_size,
+                method='new-model-cascade-worker-v1',
+                slots=result_slots,
+            )
+        else:
+            lineup = db.replace_training_review_hero_suggestions(
+                conn,
+                frame_id=frame_id,
+                screen_type=screen_type,
+                team_size=team_size,
+                method='new-model-cascade-worker-v1',
+                slots=result_slots,
+            )
     else:
         raise ValueError(f'未知预填操作: {operation}')
     _save_new_model_hero_prefill_source(

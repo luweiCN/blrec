@@ -245,6 +245,7 @@ def test_candidate_hero_ai_recognition_has_no_cross_frame_cache() -> None:
     assert 'refresh: true' in recognize
     assert 'candidateHeroPrefillRunning = true;' in recognize
     assert 'candidateHeroPrefillRunning = false;' in recognize
+    assert 'application.applied === false' in script
     assert "$('#btn-candidate-hero-recognize').onclick" in script
     assert 'CANDIDATE_HERO_LINEUP_CACHE_STORAGE_KEY' not in script
     assert 'candidateCachedHeroLineup' not in script
@@ -545,6 +546,165 @@ def test_failed_core_prefill_never_promotes_candidate(monkeypatch) -> None:
         )
 
     apply_core.assert_not_called()
+
+
+def test_explicit_ai_refresh_queues_for_confirmed_hero_lineup(monkeypatch) -> None:
+    connection = mock.Mock()
+    existing = {
+        'frame_id': 12,
+        'screen_type': 'gameplay_hud',
+        'team_size': 3,
+        'review_status': 'confirmed',
+        'suggestion_method': 'human-confirmed-v1',
+        'slots': [],
+    }
+    monkeypatch.setattr(server, '_conn', mock.Mock(return_value=connection))
+    monkeypatch.setattr(
+        server,
+        '_single_training_review_item',
+        mock.Mock(return_value={'frame_id': 12, 'sources': []}),
+    )
+    monkeypatch.setattr(
+        server.db, 'get_training_review_hero_lineup', mock.Mock(return_value=existing)
+    )
+    monkeypatch.setattr(
+        server.hero_review,
+        'infer_lineup_context',
+        mock.Mock(return_value=('gameplay_hud', 3)),
+    )
+    monkeypatch.setattr(
+        server.model_prefill,
+        'latest_model_specs',
+        mock.Mock(return_value={'hero_avatar_detector': {'run_id': 'detector-v1'}}),
+    )
+    queued = {'id': 'model-prefill-refresh'}
+    queue_prefill = mock.Mock(return_value=queued)
+    monkeypatch.setattr(server, '_queue_model_prefill', queue_prefill)
+
+    result = server._remote_training_review_hero_lineup(
+        12, screen_type='gameplay_hud', team_size=3, recognize=True, refresh=True
+    )
+
+    assert result['prefill_job'] == queued
+    assert queue_prefill.call_args.kwargs['force'] is True
+
+
+def test_forced_model_prefill_job_marks_payload_as_refresh(monkeypatch) -> None:
+    create_job = mock.Mock(return_value={'id': 'model-prefill-refresh'})
+    monkeypatch.setattr(server.vision_jobs, 'create_job', create_job)
+
+    server._queue_model_prefill(
+        mock.Mock(),
+        frame_id=12,
+        operation='hero_lineup',
+        models={'hero_avatar_detector': {'run_id': 'detector-v1'}},
+        screen_type='gameplay_hud',
+        team_size=3,
+        force=True,
+    )
+
+    assert create_job.call_args.kwargs['payload']['force_refresh'] is True
+
+
+def test_forced_hero_refresh_updates_suggestions_without_losing_human_truth(
+    monkeypatch,
+) -> None:
+    existing_slots = [
+        {
+            'side': side,
+            'slot': slot,
+            'crop': {'x': 0.1, 'y': 0.1, 'w': 0.05, 'h': 0.05},
+            'suggested_label': 'Adagio',
+            'suggestion_confidence': 0.8,
+            'confirmed_label': 'Caine',
+            'is_afk': side == 'left' and slot == 1,
+        }
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    ]
+    predicted_slots = [
+        {**slot, 'suggested_label': 'Baron', 'suggestion_confidence': 0.95}
+        for slot in existing_slots
+    ]
+    existing = {
+        'frame_id': 12,
+        'screen_type': 'gameplay_hud',
+        'team_size': 3,
+        'review_status': 'confirmed',
+        'suggestion_method': 'human-confirmed-v1',
+        'slots': existing_slots,
+    }
+    monkeypatch.setattr(
+        server, '_single_training_review_item', mock.Mock(return_value={'sources': []})
+    )
+    monkeypatch.setattr(
+        server.db, 'get_training_review_hero_lineup', mock.Mock(return_value=existing)
+    )
+    replace_suggestions = mock.Mock(return_value=existing)
+    monkeypatch.setattr(
+        server.db, 'replace_training_review_hero_suggestions', replace_suggestions
+    )
+    replace_layout = mock.Mock()
+    monkeypatch.setattr(
+        server.db, 'replace_training_review_hero_layout', replace_layout
+    )
+    monkeypatch.setattr(server, '_save_new_model_hero_prefill_source', mock.Mock())
+
+    applied = server._apply_remote_model_prefill(
+        mock.Mock(),
+        {
+            'payload': {
+                'frame_id': 12,
+                'operation': 'hero_lineup',
+                'screen_type': 'gameplay_hud',
+                'team_size': 3,
+                'force_refresh': True,
+            }
+        },
+        {'complete': True, 'slots': predicted_slots, 'model_runs': {}},
+    )
+
+    assert applied['applied'] is True
+    replace_suggestions.assert_called_once()
+    replace_layout.assert_not_called()
+
+
+def test_incomplete_forced_hero_refresh_preserves_confirmed_lineup(monkeypatch) -> None:
+    existing = {
+        'frame_id': 12,
+        'screen_type': 'result_page',
+        'team_size': 3,
+        'review_status': 'confirmed',
+        'suggestion_method': 'human-confirmed-v1',
+        'slots': [{'side': 'left', 'slot': 1}],
+    }
+    monkeypatch.setattr(
+        server, '_single_training_review_item', mock.Mock(return_value={'sources': []})
+    )
+    monkeypatch.setattr(
+        server.db, 'get_training_review_hero_lineup', mock.Mock(return_value=existing)
+    )
+    replace_layout = mock.Mock()
+    monkeypatch.setattr(
+        server.db, 'replace_training_review_hero_layout', replace_layout
+    )
+
+    applied = server._apply_remote_model_prefill(
+        mock.Mock(),
+        {
+            'payload': {
+                'frame_id': 12,
+                'operation': 'hero_lineup',
+                'screen_type': 'result_page',
+                'team_size': 3,
+                'force_refresh': True,
+            }
+        },
+        {'complete': False, 'reason': '只找到 4 个头像', 'slots': []},
+    )
+
+    assert applied == {'applied': False, 'frame_id': 12, 'reason': '只找到 4 个头像'}
+    replace_layout.assert_not_called()
 
 
 def test_partial_hero_slot_result_merges_without_deleting_other_slots(
@@ -1250,6 +1410,8 @@ def test_confirmed_training_data_has_a_dedicated_unified_review_entry() -> None:
         "['confirmed', 'human_confirmed'].includes(candidateLoadedStatus)" in progress
     )
     assert '当前第 ${candidateIndex + 1} / ${candidateFilteredTotal} 张' in progress
+    assert 'candidateFilteredTotal + candidateSessionCompleted' in progress
+    assert '剩余 ${candidateFilteredTotal} 张' in progress
 
 
 def test_candidate_save_allows_partial_special_lineups() -> None:
