@@ -1,3 +1,3 @@
 __prog__ = 'blrec'
-__version__ = '3.0.0-beta.118'
+__version__ = '3.0.0-beta.119'
 __github__ = 'https://github.com/acgnhiki/blrec'

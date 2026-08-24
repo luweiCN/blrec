@@ -7620,7 +7620,9 @@ class VaingloryRepository:
                 temporary_path = Path(output.name)
                 output.write(content)
                 output.flush()
-                os.fsync(output.fileno())
+                # 候选素材可由 Worker 重新生成。保留原子替换以避免读到半文件，
+                # 但不要在 NAS 机械盘上为每张图片和 sidecar 单独强制落盘；
+                # 历史下载繁忙时，单次 fsync 可能阻塞一分钟以上并拖垮任务回报。
             os.replace(str(temporary_path), str(destination))
             os.chmod(destination, 0o600)
         finally:

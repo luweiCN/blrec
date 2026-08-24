@@ -607,6 +607,50 @@ async def test_complete_part_stores_worker_training_candidate_sidecar(
 
 
 @pytest.mark.asyncio
+async def test_training_candidate_storage_does_not_require_file_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        candidate_root = tmp_path / 'training-candidates'
+        repository = VaingloryRepository(
+            database, training_candidate_root=candidate_root, clock=lambda: 100
+        )
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        candidate = TrainingCandidate(
+            at_ms=12_000,
+            segment_start_ms=10_000,
+            image_jpeg=b'\xff\xd8candidate\xff\xd9',
+            model_version='result-detector-v1',
+            suggested_label='result_panel',
+            suggestion_confidence=0.8,
+            stage_class='result_page',
+            stage_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.8,
+            selection_reason='worker 测试候选',
+            task='result_detector',
+        )
+
+        def reject_fsync(_descriptor: int) -> None:
+            raise AssertionError('候选素材不应逐文件调用 fsync')
+
+        monkeypatch.setattr('blrec.vainglory.repository.os.fsync', reject_fsync)
+
+        await repository.complete_part(1, (), training_candidates=(candidate,))
+
+        assert len(list(candidate_root.rglob('*.jpg'))) == 1
+        assert len(list(candidate_root.rglob('*.json'))) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_complete_part_stores_and_ingests_canonical_result_candidate(
     tmp_path: Path,
 ) -> None:
