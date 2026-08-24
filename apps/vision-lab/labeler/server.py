@@ -1841,7 +1841,10 @@ def _queue_next_autonomous_model_prefill(conn: Any) -> Optional[Dict[str, Any]]:
         )
         return None
     models = model_prefill.latest_model_specs(conn, task_ids)
-    if any(task_id not in models for task_id in task_ids):
+    required_task_ids = tuple(
+        task_id for task_id in task_ids if task_id != 'result_mode'
+    )
+    if any(task_id not in models for task_id in required_task_ids):
         return None
     job = _queue_model_prefill(
         conn,

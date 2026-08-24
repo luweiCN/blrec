@@ -11,7 +11,13 @@ from PIL import Image
 
 from . import db, inference, managed_assets
 
-CORE_PREFILL_TASKS = ('match_flow', 'hero_select', 'match_mode', 'result_detector')
+CORE_PREFILL_TASKS = (
+    'match_flow',
+    'hero_select',
+    'match_mode',
+    'result_mode',
+    'result_detector',
+)
 HERO_PREFILL_TASKS = ('hero_avatar_detector', 'hero_identity', 'player_position')
 AFK_PREFILL_TASKS = ('afk_status',)
 PREFILL_PIPELINE_VERSION = 'cascade-v2'
@@ -142,7 +148,7 @@ def run_core_prefill(
     suggested_boxes = []
     errors: Dict[str, str] = {}
 
-    def run_classification(task_id: str) -> None:
+    def run_classification(task_id: str, *, suggestion_key: Optional[str] = None) -> None:
         context = contexts.get(task_id)
         if context is None:
             return
@@ -154,7 +160,7 @@ def run_core_prefill(
                 conf_thr=0.25,
             )
             suggestion = _classification_suggestion(task_id, context, output)
-            suggestions[task_id] = suggestion
+            suggestions[suggestion_key or task_id] = suggestion
             model_outputs.append(
                 {
                     'task_id': task_id,
@@ -228,7 +234,12 @@ def run_core_prefill(
     )
 
     # 英雄选择本身已经给出模式；其他非对局画面没有对局模式可供判断。
-    if not selection_found and in_match:
+    if not selection_found and result_found:
+        if contexts.get('result_mode') is not None:
+            run_classification('result_mode', suggestion_key='match_mode')
+        elif in_match:
+            run_classification('match_mode')
+    elif not selection_found and in_match:
         run_classification('match_mode')
 
     hero_context_suggestion = None

@@ -6823,6 +6823,10 @@ const MODEL_TASKS = {
     name: '对局画面模式', kind: 'classify', role: 'match_mode',
     labels: {'3v3': '3V3', aram: '大乱斗', '5v5': '5V5'},
   },
+  result_mode: {
+    name: '结算图模式', kind: 'classify', role: 'result_mode',
+    labels: {'3v3': '3V3', aram: '大乱斗', '5v5': '5V5', blitz: '闪电战'},
+  },
   result_detector: {
     name: '结算面板检测', kind: 'detect', role: 'result_panel',
     labels: {result_panel: '有结算面板', no_result_panel: '没有结算面板'},
@@ -6873,10 +6877,10 @@ const MODEL_TASKS = {
   },
 };
 const MODEL_PACKAGE_CORE_TASKS = [
-  'match_flow', 'hero_select', 'match_mode', 'result_detector',
+  'match_flow', 'hero_select', 'match_mode', 'result_mode', 'result_detector',
 ];
 const MODEL_PACKAGE_HERO_TASKS = [
-  'hero_avatar_detector', 'hero_identity', 'player_position',
+  'hero_avatar_detector', 'hero_identity', 'player_position', 'afk_status',
 ];
 const MODEL_PACKAGE_REQUIRED_TASKS = [
   ...MODEL_PACKAGE_CORE_TASKS, ...MODEL_PACKAGE_HERO_TASKS,
@@ -7545,7 +7549,7 @@ function refreshModelPackageBuildState() {
   $('#btn-build-model-package').disabled = Boolean(missing.length);
   $('#model-package-state').textContent = missing.length
     ? `还缺发布模型：${missing.join('、')}`
-    : `7 个新模型已齐，当前会打包 ${selected.length} 个模型`;
+    : `${MODEL_PACKAGE_REQUIRED_TASKS.length} 个模型已齐，当前会打包 ${selected.length} 个模型`;
 }
 
 function modelDeploymentStatusLabel(status) {
@@ -7672,7 +7676,8 @@ async function buildModelPackage() {
   const missing = MODEL_PACKAGE_REQUIRED_TASKS.filter(
     (taskId) => !selectedTasks.has(taskId));
   if (missing.length) {
-    $('#model-package-state').textContent = '7 个新模型全部通过验收并选好后才能生成';
+    $('#model-package-state').textContent =
+      `${MODEL_PACKAGE_REQUIRED_TASKS.length} 个模型全部通过验收并选好后才能生成`;
     return;
   }
   $('#model-package-state').textContent = '正在校验哈希并组装…';
@@ -7758,7 +7763,9 @@ const TRAINING_TASK_GROUPS = [
     id: 'timeline',
     title: '对局解析核心模型',
     description: '负责找到一局的开始、过程、模式和结算位置。',
-    taskIds: ['match_flow', 'hero_select', 'match_mode', 'result_detector'],
+    taskIds: [
+      'match_flow', 'hero_select', 'match_mode', 'result_mode', 'result_detector',
+    ],
   },
   {
     id: 'heroes',
@@ -7800,6 +7807,14 @@ function trainingCountMetrics(task) {
       ['来源视频', counts.videos],
     ];
   }
+  if (task.id === 'result_mode') {
+    const labels = counts.by_label || {};
+    return [
+      ['完整结算图', counts.total], ['3V3', labels['3v3']],
+      ['大乱斗', labels.aram], ['5V5', labels['5v5']],
+      ['闪电战', labels.blitz], ['来源视频', counts.videos],
+    ];
+  }
   if (task.id === 'result_detector') {
     return [
       ['有效图片', counts.total], ['结算正样本', counts.positive],
@@ -7837,6 +7852,12 @@ function trainingCountMetrics(task) {
       ['结算玩家区域', counts.total], ['挂机', labels.afk],
       ['正常', labels.active], ['来源视频', counts.videos],
     ];
+  }
+  if (task.id === 'result_mode') {
+    const states = counts.by_render_state || {};
+    return `清晰 ${trainingNumber(states.clear)} 张 · ` +
+      `半透明 ${trainingNumber(states.translucent)} 张 · ` +
+      `有遮挡 ${trainingNumber(counts.occluded)} 张`;
   }
   if (task.id === 'screen_state') {
     const labels = counts.by_label || {};

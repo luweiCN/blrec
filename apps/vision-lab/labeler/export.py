@@ -1232,6 +1232,132 @@ def export_hero_identity_classifier(
 
 
 AFK_STATUS_LABELS = ('active', 'afk')
+RESULT_MODE_LABELS = ('3v3', 'aram', '5v5', 'blitz')
+
+
+def confirmed_result_mode_samples(conn: Any) -> List[Dict[str, Any]]:
+    """返回人工确认的完整结算图模式标签，保留整张画面作为模型输入。"""
+    annotations, boxes = _frame_sample_metadata(conn)
+    rows = conn.execute(
+        'SELECT f.*, v.streamer, v.remote_path, r.match_mode_label AS label, '
+        'r.review_status, r.panel_render_state, r.ocr_usable, '
+        'r.result_occlusion '
+        'FROM training_review_items r '
+        'JOIN frames f ON f.id = r.frame_id '
+        'JOIN videos v ON v.id = f.video_id '
+        "WHERE (r.review_status = 'confirmed' OR ("
+        "r.review_status = 'partial' AND EXISTS ("
+        'SELECT 1 FROM training_review_sources source '
+        'WHERE source.frame_id = r.frame_id '
+        "AND source.source_type = 'manual_correction'))) "
+        "AND r.result_panel_label = 'result_panel' "
+        'AND r.match_mode_label IS NOT NULL '
+        'ORDER BY f.video_id, f.timestamp_ms, f.id'
+    ).fetchall()
+    duplicate_results = db.training_review_duplicate_result_frame_ids(conn)
+    samples: List[Dict[str, Any]] = []
+    for row in rows:
+        frame = dict(row)
+        if int(frame['id']) in duplicate_results:
+            continue
+        label = str(frame['label'])
+        if label not in RESULT_MODE_LABELS:
+            continue
+        sample = _frame_sample(conn, frame, annotations=annotations, boxes=boxes)
+        if sample is None:
+            continue
+        sample.update(
+            {
+                'label': label,
+                'label_source': (
+                    'manual_correction'
+                    if frame['review_status'] == 'partial'
+                    else 'training_review_confirmed'
+                ),
+                'hero_screen_type': 'result_page',
+                'panel_render_state': str(frame['panel_render_state']),
+                'ocr_usable': str(frame['ocr_usable']),
+                'result_occlusion': str(frame['result_occlusion']),
+            }
+        )
+        samples.append(sample)
+    return samples
+
+
+def export_result_mode_classifier(
+    conn: Any, *, materialize: bool = True
+) -> Dict[str, Any]:
+    """导出结算图专用模式分类数据，不混入 HUD、商店或英雄选择画面。"""
+    samples = confirmed_result_mode_samples(conn)
+    if not samples:
+        raise RuntimeError('没有可导出的结算图模式标注')
+    split = split_classification_by_video(samples, RESULT_MODE_LABELS)
+    video_split = {
+        video_id: name for name, video_ids in split.items() for video_id in video_ids
+    }
+    for sample in samples:
+        sample['split'] = video_split[int(sample['video_id'])]
+
+    version_id = next_version_id(conn, 'result_mode')
+    out_dir = config.EXPORT_DIR / version_id
+    if out_dir.exists():
+        raise RuntimeError(f'数据集版本已存在: {version_id}')
+    out_dir.mkdir(parents=True, exist_ok=False)
+    jsonl_path = out_dir / 'samples.jsonl'
+    with jsonl_path.open('w', encoding='utf-8') as handle:
+        for sample in samples:
+            handle.write(json.dumps(sample, ensure_ascii=False) + '\n')
+    if materialize:
+        _write_classification_images(conn, out_dir, samples, RESULT_MODE_LABELS)
+    counts = {
+        'total': len(samples),
+        'videos': len({int(sample['video_id']) for sample in samples}),
+        'by_label': {
+            label: sum(sample['label'] == label for sample in samples)
+            for label in RESULT_MODE_LABELS
+        },
+        'videos_by_label': {
+            label: len(
+                {
+                    int(sample['video_id'])
+                    for sample in samples
+                    if sample['label'] == label
+                }
+            )
+            for label in RESULT_MODE_LABELS
+        },
+        'by_render_state': {
+            state: sum(sample['panel_render_state'] == state for sample in samples)
+            for state in ('clear', 'translucent', 'unknown')
+        },
+        'occluded': sum(
+            sample['result_occlusion'] == 'occluded' for sample in samples
+        ),
+        'by_split': {
+            name: sum(sample['split'] == name for sample in samples)
+            for name in ('train', 'val', 'test')
+        },
+    }
+    db.create_dataset_version(
+        conn,
+        version_id=version_id,
+        task_id='result_mode',
+        filter_json={
+            'source': 'training_review_items',
+            'screen_type': 'result_page',
+            'labels': list(RESULT_MODE_LABELS),
+            'requires_result_panel': True,
+            'confirmed_only': True,
+            'excluded_labels': ['unreadable'],
+            'split_unit': 'video',
+            'preserve_full_image': True,
+            'materialized_by': 'vision_worker' if not materialize else 'vision_lab',
+        },
+        counts=counts,
+        manifest_path=str(jsonl_path),
+        git_commit=_git_commit(),
+    )
+    return {'version': version_id, 'dir': str(out_dir), **counts}
 
 
 def afk_status_context_crop(slot: Dict[str, Any]) -> Dict[str, float]:

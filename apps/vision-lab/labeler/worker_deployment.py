@@ -77,8 +77,8 @@ import zipfile
 from pathlib import Path
 
 REQUIRED_MODEL_ROLES = (
-    'match_flow', 'hero_select', 'match_mode', 'result_panel',
-    'hero_avatar', 'hero_identity', 'player_position',
+    'match_flow', 'hero_select', 'match_mode', 'result_mode', 'result_panel',
+    'hero_avatar', 'hero_identity', 'player_position', 'afk_status',
 )
 
 

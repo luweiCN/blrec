@@ -305,7 +305,7 @@ run；页面直接读取 run 绑定的不可变快照和 ONNX，不需要先覆�
 版本不能部署到 Worker。
 
 模型测试页会显示 Worker 当前模型和每次部署记录。模型包达到 `ready` 后可直接点
-“部署到 Worker”：Vision Lab 通过 SSH 上传完整 ZIP，远端校验七个角色与所有
+“部署到 Worker”：Vision Lab 通过 SSH 上传完整 ZIP，远端校验九个角色与所有
 SHA-256，原子切换 `current` 后重新加载 launchd；若新进程没有稳定启动，会恢复
 旧配置和旧模型。SSH 只使用系统密钥或 SSH agent，页面和数据库不保存 Worker
 密码。部署以前的完整模型包即为回滚。NAS Server 仍不加载视觉模型。

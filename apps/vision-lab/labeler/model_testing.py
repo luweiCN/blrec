@@ -21,6 +21,7 @@ TASK_ROLES = {
     'match_flow': 'match_flow',
     'hero_select': 'hero_select',
     'match_mode': 'match_mode',
+    'result_mode': 'result_mode',
     'screen_state': 'screen_state',
     'bp_review': 'bp_classifier',
     'key_screen_review': 'key_screen',
@@ -35,10 +36,12 @@ REQUIRED_TASKS = (
     'match_flow',
     'hero_select',
     'match_mode',
+    'result_mode',
     'result_detector',
     'hero_avatar_detector',
     'hero_identity',
     'player_position',
+    'afk_status',
 )
 FIXED_DATASET_SPLITS = {'train', 'val', 'test'}
 SCOREBOARD_CHALLENGE_SPLIT = 'scoreboard_challenge'
@@ -47,6 +50,7 @@ POST_RUN_CHALLENGE_TASKS = {
     'match_flow',
     'hero_select',
     'match_mode',
+    'result_mode',
     'result_detector',
     'hero_avatar_detector',
     'hero_identity',
@@ -287,12 +291,14 @@ def _post_run_core_samples(
         'match_flow': 'match_flow_label',
         'hero_select': 'hero_select_label',
         'match_mode': 'match_mode_label',
+        'result_mode': 'match_mode_label',
         'result_detector': 'result_panel_label',
     }[task_id]
     allowed = {
         'match_flow': {'match_flow', 'not_match_flow'},
         'hero_select': {'not_select', 'select_3v3', 'select_aram', 'select_5v5'},
         'match_mode': {'3v3', 'aram', '5v5'},
+        'result_mode': {'3v3', 'aram', '5v5', 'blitz'},
         'result_detector': {'result_panel', 'no_result_panel'},
     }[task_id]
     rows = conn.execute(
@@ -316,6 +322,8 @@ def _post_run_core_samples(
         frame_id = int(row['frame_id'])
         label = str(row['label'])
         if label not in allowed or frame_id in duplicate_results:
+            continue
+        if task_id == 'result_mode' and row.get('evaluation_scenario') != 'result_page':
             continue
         sample_id = f'f{frame_id:08d}'
         if task_id != 'result_detector':
@@ -493,7 +501,13 @@ def _post_run_challenge_samples(
     cutoff = str(
         context['run'].get('finished_at') or context['run'].get('created_at') or ''
     )
-    if task_id in {'match_flow', 'hero_select', 'match_mode', 'result_detector'}:
+    if task_id in {
+        'match_flow',
+        'hero_select',
+        'match_mode',
+        'result_mode',
+        'result_detector',
+    }:
         samples = _post_run_core_samples(conn, task_id=task_id, cutoff=cutoff)
     else:
         samples = _post_run_hero_samples(conn, task_id=task_id, cutoff=cutoff)
@@ -1505,10 +1519,12 @@ def prepare_model_package(
                 'match_flow': 0.55,
                 'hero_select': 0.55,
                 'match_mode': 0.50,
+                'result_mode': 0.75,
                 'result_panel': 0.55,
                 'hero_avatar': 0.25,
                 'hero_identity': 0.50,
                 'player_position': 0.50,
+                'afk_status': 0.50,
             },
         },
         'compatibility': {
@@ -1644,10 +1660,12 @@ def build_model_package(
                     'match_flow': 0.55,
                     'hero_select': 0.55,
                     'match_mode': 0.50,
+                    'result_mode': 0.75,
                     'result_panel': 0.55,
                     'hero_avatar': 0.25,
                     'hero_identity': 0.50,
                     'player_position': 0.50,
+                    'afk_status': 0.50,
                 },
             },
             'compatibility': {

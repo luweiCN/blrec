@@ -20,6 +20,7 @@ ProgressCallback = Callable[[int, int], None]
 CLASSIFICATION_TASKS = {
     'match_flow',
     'match_mode',
+    'result_mode',
     'hero_select',
     'hero_identity',
     'player_position',

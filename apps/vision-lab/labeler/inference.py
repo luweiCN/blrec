@@ -46,6 +46,12 @@ STAGE_LABELS = {
     'post_match': '赛后(结算/胜负动画)',
 }
 MODE_LABELS = {'3v3': '3v3', 'aram': '大乱斗', '5v5': '5v5'}
+RESULT_MODE_LABELS = {
+    '3v3': '3V3',
+    'aram': '大乱斗',
+    '5v5': '5V5',
+    'blitz': '闪电战',
+}
 CONTENT_LABELS = {'vainglory': '虚荣', 'not_vainglory': '非虚荣'}
 BP_CLASSES = ['bp_3v3', 'bp_5v5', 'bp_aram', 'not_bp']
 BP_LABELS = {
@@ -86,6 +92,13 @@ AFK_STATUS_LABELS = {'active': '正常', 'afk': '挂机'}
 # 内置注册表:文件名关键字 → 任务与类别(文件名以 -cls- 或 -detector- 区分)
 TASK_HINTS = [
     ('afk-status-classifier', 'classify', ['active', 'afk'], AFK_STATUS_LABELS, 224),
+    (
+        'result-mode-classifier',
+        'classify',
+        ['3v3', '5v5', 'aram', 'blitz'],
+        RESULT_MODE_LABELS,
+        512,
+    ),
     ('hero-avatar-detector', 'detect', [], {'hero_avatar': '英雄头像'}, 960),
     (
         'player-position-classifier',
@@ -553,6 +566,7 @@ def run_artifact(
             'match_flow': MATCH_FLOW_LABELS,
             'hero_select': HERO_SELECT_LABELS,
             'match_mode': MODE_LABELS,
+            'result_mode': RESULT_MODE_LABELS,
             'screen_state': STAGE_LABELS,
             'bp_review': BP_LABELS,
             'key_screen_review': KEY_SCREEN_LABELS,

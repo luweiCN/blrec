@@ -424,6 +424,15 @@ class TestUnifiedTrainingSnapshots(unittest.TestCase):
                     self._frame(video_id, index), 'match_flow', mode, 'not_select'
                 )
                 index += 1
+            for mode in ('3v3', 'aram', '5v5', 'blitz'):
+                self._save(
+                    self._frame(video_id, index),
+                    'match_flow',
+                    mode,
+                    'not_select',
+                    'result_panel',
+                )
+                index += 1
             for select in ('select_3v3', 'select_aram', 'select_5v5'):
                 self._save(self._frame(video_id, index), 'not_match_flow', None, select)
                 index += 1
@@ -443,20 +452,30 @@ class TestUnifiedTrainingSnapshots(unittest.TestCase):
 
         snapshots = {
             task: training.export_snapshot(self.conn, task)
-            for task in ('match_flow', 'match_mode', 'hero_select', 'result_detector')
+            for task in (
+                'match_flow',
+                'match_mode',
+                'result_mode',
+                'hero_select',
+                'result_detector',
+            )
         }
 
         self.assertEqual(
-            snapshots['match_flow']['by_label'], {'match_flow': 8, 'not_match_flow': 8}
+            snapshots['match_flow']['by_label'], {'match_flow': 16, 'not_match_flow': 8}
         )
         self.assertEqual(
             set(snapshots['match_mode']['by_label']), {'3v3', 'aram', '5v5'}
         )
         self.assertEqual(
+            snapshots['result_mode']['by_label'],
+            {'3v3': 2, 'aram': 2, '5v5': 2, 'blitz': 2},
+        )
+        self.assertEqual(
             set(snapshots['hero_select']['by_label']),
             {'not_select', 'select_3v3', 'select_aram', 'select_5v5'},
         )
-        self.assertEqual(snapshots['result_detector']['positive'], 2)
+        self.assertEqual(snapshots['result_detector']['positive'], 10)
         self.assertEqual(snapshots['result_detector']['negative'], 14)
         detector_samples = [
             json.loads(line)
@@ -470,7 +489,7 @@ class TestUnifiedTrainingSnapshots(unittest.TestCase):
                 for sample in detector_samples
                 if sample['detector_label'] == 'result_panel'
             },
-            {'translucent'},
+            {'clear', 'translucent'},
         )
 
     def test_classifier_snapshot_bulk_loads_frame_metadata(self):

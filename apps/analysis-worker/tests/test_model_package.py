@@ -30,10 +30,12 @@ def _write_package(root: Path) -> Path:
         'match_flow',
         'hero_select',
         'match_mode',
+        'result_mode',
         'result_panel',
         'hero_avatar',
         'hero_identity',
         'player_position',
+        'afk_status',
     )
     manifest_models = {}
     for role in roles:
@@ -75,8 +77,10 @@ def _write_package(root: Path) -> Path:
                         'select_aram',
                     ],
                     'match_mode': ['3v3', '5v5', 'aram'],
+                    'result_mode': ['3v3', '5v5', 'aram', 'blitz'],
                     'hero_identity': ['Kestrel', 'Ringo'],
                     'player_position': ['left1', 'right1'],
+                    'afk_status': ['active', 'afk'],
                 }[role]
             ),
             'dataset_version': f'{role}-v1',

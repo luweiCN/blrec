@@ -112,6 +112,22 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'recommended': '每种模式至少 200 张，并覆盖地图区域、设备和遮挡差异。',
         'active': True,
     },
+    'result_mode': {
+        'name': '结算图模式分类',
+        'kind': 'classify',
+        'description': (
+            '只查看完整结算图，判断 3V3、大乱斗、5V5或闪电战；'
+            '不混入 HUD、商店和英雄选择画面。'
+        ),
+        'epochs': 60,
+        **_CLASSIFICATION_INPUT,
+        'base_model': 'yolov8n-cls.pt',
+        'publish_name': 'result-mode-classifier-current.onnx',
+        'recommended': (
+            '3V3、大乱斗和 5V5 各至少 100 张；闪电战数据不足时会明确提醒。'
+        ),
+        'active': True,
+    },
     'screen_state': {
         'name': '画面状态分类',
         'kind': 'classify',
@@ -659,6 +675,8 @@ def _current_task_members(conn: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
         samples = _confirmed_player_position_members(conn)
     elif task_id == 'afk_status':
         samples = export.confirmed_afk_status_samples(conn)
+    elif task_id == 'result_mode':
+        samples = export.confirmed_result_mode_samples(conn)
     else:
         return {}
     return {
@@ -1017,6 +1035,27 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             ),
         }
         video_count = len({int(row['video_id']) for row in rows})
+    elif task_id == 'result_mode':
+        rows = export.confirmed_result_mode_samples(conn)
+        counts = {
+            'total': len(rows),
+            'by_label': {
+                label: sum(row['label'] == label for row in rows)
+                for label in export.RESULT_MODE_LABELS
+            },
+            'videos_by_label': {
+                label: len(
+                    {int(row['video_id']) for row in rows if row['label'] == label}
+                )
+                for label in export.RESULT_MODE_LABELS
+            },
+            'by_render_state': {
+                state: sum(row['panel_render_state'] == state for row in rows)
+                for state in ('clear', 'translucent', 'unknown')
+            },
+            'occluded': sum(row['result_occlusion'] == 'occluded' for row in rows),
+        }
+        video_count = len({int(row['video_id']) for row in rows})
     else:
         raise ValueError(f'未知训练任务: {task_id}')
     counts['videos'] = video_count
@@ -1083,6 +1122,14 @@ def _blocking_reasons(task_id: str, counts: Dict[str, Any]) -> List[str]:
             count = int(counts.get('by_label', {}).get(label, 0))
             if count < 2:
                 reasons.append(f'{names[label]}至少需要 2 个有效头像区域')
+            elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
+                reasons.append(f'{names[label]}至少需要来自 2 个不同视频')
+    elif task_id == 'result_mode':
+        names = {'3v3': '3V3', 'aram': '大乱斗', '5v5': '5V5', 'blitz': '闪电战'}
+        for label in export.RESULT_MODE_LABELS:
+            count = int(counts.get('by_label', {}).get(label, 0))
+            if count < 2:
+                reasons.append(f'{names[label]}至少需要 2 张结算图')
             elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
                 reasons.append(f'{names[label]}至少需要来自 2 个不同视频')
     elif task_id == 'screen_state':
@@ -1205,6 +1252,14 @@ def _quality_warnings(task_id: str, counts: Dict[str, Any]) -> List[str]:
     elif task_id == 'afk_status':
         values = counts.get('by_label', {})
         targets = {'active': ('正常', 500), 'afk': ('挂机', 200)}
+    elif task_id == 'result_mode':
+        values = counts.get('by_label', {})
+        targets = {
+            '3v3': ('3V3 结算图', 100),
+            'aram': ('大乱斗结算图', 100),
+            '5v5': ('5V5 结算图', 100),
+            'blitz': ('闪电战结算图', 50),
+        }
     elif task_id == 'mode_gate':
         values = counts
         targets = {'positive': ('有光栅', 100), 'negative': ('开放入口', 100)}
@@ -1274,6 +1329,8 @@ def export_snapshot(
         return export.export_player_position_classifier(conn, materialize=materialize)
     if task_id == 'afk_status':
         return export.export_afk_status_classifier(conn, materialize=materialize)
+    if task_id == 'result_mode':
+        return export.export_result_mode_classifier(conn, materialize=materialize)
     raise ValueError(f'未知训练任务: {task_id}')
 
 

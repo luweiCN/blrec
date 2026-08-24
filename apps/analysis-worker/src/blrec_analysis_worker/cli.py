@@ -127,7 +127,7 @@ def _build_analyzer(
             recorded_player_detector=runtime.recorded_player_detector,
             result_panel_detector=runtime.result_panel_detector,
             stage_classifier=runtime.stage_classifier,
-            match_mode_classifier=runtime.classifiers['match_mode'],
+            match_mode_classifier=runtime.classifiers['result_mode'],
         ),
         package,
     )

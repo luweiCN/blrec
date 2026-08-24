@@ -408,7 +408,7 @@ class PostgresCompatibilityTests(unittest.TestCase):
                 for value in statements
             )
         )
-        self.assertEqual(cursor.calls[-1][1], (10,))
+        self.assertEqual(cursor.calls[-1][1], (11,))
 
 
 if __name__ == '__main__':

@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-POSTGRES_SCHEMA_VERSION = 10
+POSTGRES_SCHEMA_VERSION = 11
 _SCHEMA_NAME = re.compile(r'^[a-z_][a-z0-9_]*$')
 _INSERT_TABLE = re.compile(
     r'^\s*INSERT\s+INTO\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.I
@@ -451,6 +451,20 @@ POSTGRES_SCHEMA_MIGRATIONS = {
         ON training_review_hero_slots (
             afk_prediction_status,afk_prediction_label,
             afk_prediction_model_run_id,frame_id)
+        """,
+    ),
+    11: (
+        """
+        ALTER TABLE training_review_model_outcomes
+        DROP CONSTRAINT IF EXISTS training_review_model_outcomes_task_id_check
+        """,
+        """
+        ALTER TABLE training_review_model_outcomes
+        ADD CONSTRAINT training_review_model_outcomes_task_id_check CHECK (
+            task_id IN (
+                'match_flow','match_mode','result_mode','hero_select',
+                'result_detector','hero_avatar_detector','hero_identity',
+                'player_position','afk_status'))
         """,
     ),
 }

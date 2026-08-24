@@ -32,10 +32,12 @@ REQUIRED_MODEL_ROLES = (
     'match_flow',
     'hero_select',
     'match_mode',
+    'result_mode',
     'result_panel',
     'hero_avatar',
     'hero_identity',
     'player_position',
+    'afk_status',
 )
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 
@@ -469,7 +471,7 @@ def build_package_runtime(
 ) -> PackageRuntime:
     classifiers: Dict[str, OnnxClassificationModel] = {
         role: OnnxClassificationModel(package.model(role), providers=providers)
-        for role in ('match_flow', 'hero_select', 'match_mode')
+        for role in ('match_flow', 'hero_select', 'match_mode', 'result_mode')
     }
     result_spec = package.model('result_panel')
     if result_spec.kind != 'detection':
@@ -560,10 +562,12 @@ def _runtime_config(value: Any) -> RuntimeConfig:
         'match_flow': 0.55,
         'hero_select': 0.55,
         'match_mode': 0.50,
+        'result_mode': 0.75,
         'result_panel': 0.55,
         'hero_avatar': 0.25,
         'hero_identity': 0.50,
         'player_position': 0.50,
+        'afk_status': 0.50,
     }.items():
         source = thresholds_raw if isinstance(thresholds_raw, dict) else {}
         try:

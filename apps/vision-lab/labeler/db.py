@@ -582,7 +582,7 @@ CREATE TABLE IF NOT EXISTS training_review_material_totals (
 CREATE TABLE IF NOT EXISTS training_review_model_outcomes (
     frame_id INTEGER NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
     task_id TEXT NOT NULL CHECK (task_id IN (
-        'match_flow', 'match_mode', 'hero_select', 'result_detector',
+        'match_flow', 'match_mode', 'result_mode', 'hero_select', 'result_detector',
         'hero_avatar_detector', 'hero_identity', 'player_position',
         'afk_status')),
     model_run_id TEXT NOT NULL,

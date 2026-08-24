@@ -10,6 +10,7 @@ from . import db
 TASKS: Dict[str, Dict[str, str]] = {
     'match_flow': {'name': '是否在对局中', 'metric': 'accuracy'},
     'match_mode': {'name': '对局模式', 'metric': 'accuracy'},
+    'result_mode': {'name': '结算图模式', 'metric': 'accuracy'},
     'hero_select': {'name': '英雄选择', 'metric': 'accuracy'},
     'result_detector': {'name': '结算面板', 'metric': 'accuracy'},
     'hero_avatar_detector': {'name': '头像位置找齐', 'metric': 'complete_rate'},
@@ -21,6 +22,7 @@ TASKS: Dict[str, Dict[str, str]] = {
 _CORE_TASKS = {
     'match_flow': ('match_flow', 'match_flow_label'),
     'match_mode': ('match_mode', 'match_mode_label'),
+    'result_mode': ('match_mode', 'match_mode_label'),
     'hero_select': ('hero_select', 'hero_select_label'),
     'result_detector': ('result_panel', 'result_panel_label'),
 }
@@ -183,6 +185,8 @@ def refresh_frame(
     core_runs = _object(core_metadata.get('model_runs'))
     core_suggestions = (core or {}).get('suggestions') or {}
     for task_id, (suggestion_key, truth_column) in _CORE_TASKS.items():
+        if task_id == 'result_mode' and screen_type != 'result_page':
+            continue
         truth = (
             _usable_label(item[truth_column])
             if item['review_status'] == 'confirmed'
