@@ -179,11 +179,11 @@ class TestHeroReviewStorage(HeroReviewTestCase):
         self.assertEqual(confirmed['slots'][0]['confirmed_label'], 'Alpha')
         self.assertEqual(confirmed['slots'][0]['suggested_label'], 'Adagio')
 
-    def test_afk_labels_are_unknown_until_a_scoreboard_is_reviewed(self):
+    def test_afk_labels_are_only_saved_from_a_result_page(self):
         db.replace_training_review_hero_suggestions(
             self.conn,
             frame_id=self.frame_id,
-            screen_type='scoreboard',
+            screen_type='result_page',
             team_size=3,
             method='hero-model-v1',
             slots=self.slots(),
@@ -211,6 +211,32 @@ class TestHeroReviewStorage(HeroReviewTestCase):
         self.assertTrue(afk[('right', 2)])
         self.assertFalse(afk[('left', 1)])
         self.assertFalse(any(value is None for value in afk.values()))
+
+    def test_scoreboard_does_not_accept_final_afk_labels(self):
+        db.replace_training_review_hero_suggestions(
+            self.conn,
+            frame_id=self.frame_id,
+            screen_type='scoreboard',
+            team_size=3,
+            method='hero-model-v1',
+            slots=self.slots(),
+        )
+
+        with self.assertRaisesRegex(ValueError, '只有真正结算图'):
+            db.save_training_review_hero_lineup(
+                self.conn,
+                frame_id=self.frame_id,
+                labels=[
+                    {
+                        'side': slot['side'],
+                        'slot': slot['slot'],
+                        'hero_label': 'Adagio',
+                        'is_afk': False,
+                    }
+                    for slot in self.slots()
+                ],
+                allowed_labels={'Adagio'},
+            )
 
     def test_omitted_afk_labels_do_not_turn_old_data_into_negative_samples(self):
         db.replace_training_review_hero_suggestions(
@@ -988,6 +1014,75 @@ class TestHeroTrainingExport(unittest.TestCase):
         )
         with Image.open(exported_image) as image:
             self.assertEqual(image.size, (1280, 720))
+
+    def test_afk_training_only_exports_final_result_pages(self):
+        index = 300
+        for video_number in (1, 2):
+            video_id = db.upsert_video(
+                self.conn,
+                remote_path=f'/nas/afk-{video_number}.flv',
+                streamer=f'挂机主播{video_number}',
+                room_id=f'afk-{video_number}',
+                filename=f'afk-{video_number}.flv',
+                duration_seconds=100,
+                size_bytes=1,
+            )
+            index += 1
+            result_frame = self._confirmed_lineup(video_id, index, 'result_page')
+            result_lineup = db.get_training_review_hero_lineup(self.conn, result_frame)
+            db.save_training_review_hero_lineup(
+                self.conn,
+                frame_id=result_frame,
+                labels=[
+                    {
+                        'side': slot['side'],
+                        'slot': slot['slot'],
+                        'hero_label': slot['confirmed_label'],
+                        'is_afk': slot['side'] == 'right' and slot['slot'] == 2,
+                    }
+                    for slot in result_lineup['slots']
+                ],
+                allowed_labels={'Adagio', 'Alpha'},
+            )
+            index += 1
+            scoreboard_frame = self._confirmed_lineup(video_id, index, 'scoreboard')
+            with self.conn:
+                self.conn.execute(
+                    'UPDATE training_review_hero_slots SET is_afk=1 '
+                    'WHERE frame_id=?',
+                    (scoreboard_frame,),
+                )
+
+        summary = next(
+            item
+            for item in training.task_summaries(self.conn)
+            if item['id'] == 'afk_status'
+        )
+        snapshot = export.export_afk_status_classifier(self.conn)
+
+        self.assertTrue(summary['ready'])
+        self.assertEqual(summary['counts']['excluded_scoreboard'], 12)
+        self.assertEqual(snapshot['total'], 12)
+        self.assertEqual(snapshot['by_label'], {'active': 10, 'afk': 2})
+        samples = [
+            json.loads(line)
+            for line in (Path(snapshot['dir']) / 'samples.jsonl')
+            .read_text(encoding='utf-8')
+            .splitlines()
+        ]
+        self.assertEqual(
+            {sample['hero_screen_type'] for sample in samples}, {'result_page'}
+        )
+        first = samples[0]
+        exported_image = (
+            Path(snapshot['dir'])
+            / 'images'
+            / first['split']
+            / first['label']
+            / f"{first['sample_id']}.jpg"
+        )
+        with Image.open(exported_image) as image:
+            self.assertGreater(image.width, image.height)
 
 
 class TestHeroReviewInference(unittest.TestCase):

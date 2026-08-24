@@ -1219,6 +1219,160 @@ def export_hero_identity_classifier(
     return {'version': version_id, 'dir': str(out_dir), **counts}
 
 
+AFK_STATUS_LABELS = ('active', 'afk')
+
+
+def afk_status_context_crop(slot: Dict[str, Any]) -> Dict[str, float]:
+    """从头像向玩家名字一侧扩展，保留灰头像与名字删除线。"""
+    avatar = slot['crop']
+    x = float(avatar['x'])
+    y = float(avatar['y'])
+    width = float(avatar['w'])
+    height = float(avatar['h'])
+    top = max(0.0, y - height * 0.3)
+    bottom = min(1.0, y + height * 1.3)
+    if slot['side'] == 'left':
+        left = max(0.0, x - width * 6.0)
+        right = min(1.0, x + width * 1.2)
+    else:
+        left = max(0.0, x - width * 0.2)
+        right = min(1.0, x + width * 7.0)
+    return {
+        'x': left,
+        'y': top,
+        'w': max(0.001, right - left),
+        'h': max(0.001, bottom - top),
+    }
+
+
+def confirmed_afk_status_samples(conn: Any) -> List[Dict[str, Any]]:
+    """只返回真正结算图上人工确认的最终挂机状态。"""
+    annotations, boxes = _frame_sample_metadata(conn)
+    rows = conn.execute(
+        'SELECT f.*, v.streamer, v.remote_path, lineup.team_size, '
+        'slot.side, slot.slot, slot.crop_x, slot.crop_y, slot.crop_w, '
+        'slot.crop_h, slot.is_afk '
+        'FROM training_review_hero_slots slot '
+        'JOIN training_review_hero_lineups lineup '
+        'ON lineup.frame_id = slot.frame_id '
+        'JOIN frames f ON f.id = slot.frame_id '
+        'JOIN videos v ON v.id = f.video_id '
+        "WHERE lineup.review_status = 'confirmed' "
+        "AND lineup.screen_type = 'result_page' "
+        'AND slot.is_afk IS NOT NULL '
+        'ORDER BY f.video_id, f.timestamp_ms, f.id, '
+        "CASE slot.side WHEN 'left' THEN 0 ELSE 1 END, slot.slot"
+    ).fetchall()
+    duplicate_results = db.training_review_duplicate_result_frame_ids(conn)
+    samples = []
+    for row in rows:
+        frame = dict(row)
+        if int(frame['id']) in duplicate_results:
+            continue
+        sample = _frame_sample(conn, frame, annotations=annotations, boxes=boxes)
+        if sample is None:
+            continue
+        slot = {
+            'side': str(frame['side']),
+            'slot': int(frame['slot']),
+            'crop': {
+                'x': float(frame['crop_x']),
+                'y': float(frame['crop_y']),
+                'w': float(frame['crop_w']),
+                'h': float(frame['crop_h']),
+            },
+        }
+        sample.update(
+            {
+                'sample_id': 'f{:08d}-{}-{}'.format(
+                    int(frame['id']), slot['side'], slot['slot']
+                ),
+                'frame_id': int(frame['id']),
+                'label': 'afk' if bool(int(frame['is_afk'])) else 'active',
+                'hero_screen_type': 'result_page',
+                'team_size': int(frame['team_size']),
+                'side': slot['side'],
+                'slot': slot['slot'],
+                'avatar_crop': slot['crop'],
+                'crop': afk_status_context_crop(slot),
+                'label_source': 'result_page_final_afk_confirmed',
+            }
+        )
+        samples.append(sample)
+    return samples
+
+
+def export_afk_status_classifier(
+    conn: Any, *, materialize: bool = True
+) -> Dict[str, Any]:
+    """导出真正结算图上的最终挂机二分类数据。"""
+    samples = confirmed_afk_status_samples(conn)
+    if not samples:
+        raise RuntimeError('没有可导出的结算图挂机标注')
+    split = split_classification_by_video(samples, AFK_STATUS_LABELS)
+    video_split = {
+        video_id: name for name, video_ids in split.items() for video_id in video_ids
+    }
+    for sample in samples:
+        sample['split'] = video_split[int(sample['video_id'])]
+
+    version_id = next_version_id(conn, 'afk_status')
+    out_dir = config.EXPORT_DIR / version_id
+    if out_dir.exists():
+        raise RuntimeError(f'数据集版本已存在: {version_id}')
+    out_dir.mkdir(parents=True, exist_ok=False)
+    replicas = (
+        _write_hero_identity_images(conn, out_dir, samples, AFK_STATUS_LABELS)
+        if materialize
+        else _classification_balance_replicas(samples, AFK_STATUS_LABELS)
+    )
+    jsonl_path = out_dir / 'samples.jsonl'
+    with jsonl_path.open('w', encoding='utf-8') as handle:
+        for sample in samples:
+            handle.write(json.dumps(sample, ensure_ascii=False) + '\n')
+    counts = {
+        'total': len(samples),
+        'videos': len({int(sample['video_id']) for sample in samples}),
+        'training_balance_replicas': replicas,
+        'by_label': {
+            label: sum(sample['label'] == label for sample in samples)
+            for label in AFK_STATUS_LABELS
+        },
+        'videos_by_label': {
+            label: len(
+                {
+                    int(sample['video_id'])
+                    for sample in samples
+                    if sample['label'] == label
+                }
+            )
+            for label in AFK_STATUS_LABELS
+        },
+        'by_split': {
+            name: sum(sample['split'] == name for sample in samples)
+            for name in ('train', 'val', 'test')
+        },
+    }
+    db.create_dataset_version(
+        conn,
+        version_id=version_id,
+        task_id='afk_status',
+        filter_json={
+            'source': 'training_review_hero_slots',
+            'screen_type': 'result_page',
+            'labels': list(AFK_STATUS_LABELS),
+            'requires_explicit_is_afk': True,
+            'split_unit': 'video',
+            'train_balance': 'repeat_to_class_median_capped_at_100',
+            'materialized_by': 'vision_worker' if not materialize else 'vision_lab',
+        },
+        counts=counts,
+        manifest_path=str(jsonl_path),
+        git_commit=_git_commit(),
+    )
+    return {'version': version_id, 'dir': str(out_dir), **counts}
+
+
 def export_player_position_classifier(
     conn: Any, *, materialize: bool = True
 ) -> Dict[str, Any]:

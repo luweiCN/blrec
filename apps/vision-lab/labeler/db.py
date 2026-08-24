@@ -3537,7 +3537,7 @@ AND EXISTS (
     JOIN training_review_hero_slots slot ON slot.frame_id = lineup.frame_id
     WHERE lineup.frame_id = item.frame_id
       AND lineup.review_status = 'confirmed'
-      AND lineup.screen_type IN ('scoreboard', 'result_page')
+      AND lineup.screen_type = 'result_page'
       AND slot.is_afk IS NULL
 )
 """
@@ -8647,10 +8647,10 @@ def save_training_review_hero_lineup(
         if not require_complete:
             raise ValueError('必须确认所有已画出的英雄位置')
         raise ValueError(f'必须确认完整的 {team_size * 2} 个英雄位置')
-    if lineup['screen_type'] == 'gameplay_hud' and any(
+    if lineup['screen_type'] != 'result_page' and any(
         is_afk is not None for _label, is_afk, _side, _slot in normalized
     ):
-        raise ValueError('HUD 不采集挂机标签')
+        raise ValueError('只有真正结算图采集挂机标签')
     raw_player_status = str(player_status or '').strip()
     normalized_player_status = raw_player_status or (
         'identified'

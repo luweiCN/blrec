@@ -91,6 +91,40 @@ def test_materializes_hero_crop_and_reuses_one_source_frame() -> None:
         assert crop.size == (20, 18)
 
 
+def test_materializes_afk_context_crop() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source = root / 'source.jpg'
+        sha256 = _jpeg(source, (100, 120, 140))
+        manifest = root / 'samples.jsonl'
+        _manifest(
+            manifest,
+            [
+                {
+                    'sample_id': 'f00000001-left-1',
+                    'frame_id': 1,
+                    'video_id': 10,
+                    'sha256': sha256,
+                    'split': 'train',
+                    'label': 'afk',
+                    'crop': {'x': 0.1, 'y': 0.1, 'w': 0.7, 'h': 0.3},
+                }
+            ],
+        )
+
+        materialize_dataset(
+            task_id='afk_status',
+            manifest_path=manifest,
+            output_dir=root / 'dataset',
+            fetch_image=lambda _frame_id, destination: destination.write_bytes(
+                source.read_bytes()
+            ),
+        )
+
+        crop = Image.open(root / 'dataset/images/train/afk/f00000001-left-1.jpg')
+        assert crop.size == (70, 18)
+
+
 def test_materializes_detector_labels() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)

@@ -1388,6 +1388,9 @@ def test_candidate_review_supports_confirmed_rechecks_and_afk_labels() -> None:
     assert 'candidate-hero-afk' in script
     assert '{is_afk: slot.is_afk === true}' in script
     assert "loadedStatus === 'missing_afk'" in script
+    assert "candidateHeroLineup.screen_type === 'result_page'" in script
+    assert "taskIds: [\n      'hero_avatar_detector', 'hero_identity', " in script
+    assert "'player_position', 'afk_status'," in script
 
 
 def test_confirmed_training_data_has_a_dedicated_unified_review_entry() -> None:

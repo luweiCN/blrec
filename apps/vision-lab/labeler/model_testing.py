@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from . import config, db, inference, managed_assets
+from . import config, db, export, inference, managed_assets
 
 TASK_ROLES = {
     'match_flow': 'match_flow',
@@ -29,6 +29,7 @@ TASK_ROLES = {
     'hero_avatar_detector': 'hero_avatar',
     'hero_identity': 'hero_identity',
     'player_position': 'player_position',
+    'afk_status': 'afk_status',
 }
 REQUIRED_TASKS = (
     'match_flow',
@@ -50,6 +51,7 @@ POST_RUN_CHALLENGE_TASKS = {
     'hero_avatar_detector',
     'hero_identity',
     'player_position',
+    'afk_status',
 }
 
 
@@ -367,7 +369,7 @@ def _post_run_hero_samples(
         'lineup.reviewed_at, f.video_id, f.frame_path, f.timestamp_ms, '
         'v.streamer, review.panel_render_state, review.match_mode_label, '
         'slot.side, slot.slot, slot.crop_x, slot.crop_y, slot.crop_w, '
-        'slot.crop_h, slot.confirmed_label '
+        'slot.crop_h, slot.confirmed_label, slot.is_afk '
         'FROM training_review_hero_lineups lineup '
         'JOIN training_review_hero_slots slot '
         'ON slot.frame_id = lineup.frame_id '
@@ -404,6 +406,7 @@ def _post_run_hero_samples(
                     'h': float(row['crop_h']),
                 },
                 'label': str(row['confirmed_label'] or ''),
+                'is_afk': (None if row['is_afk'] is None else bool(int(row['is_afk']))),
             }
         )
     duplicate_results = db.training_review_duplicate_result_frame_ids(conn)
@@ -449,6 +452,22 @@ def _post_run_hero_samples(
                     expected=label,
                 )
                 sample['_crop'] = slot['crop']
+                samples.append(sample)
+            continue
+        if task_id == 'afk_status':
+            if row['screen_type'] != 'result_page':
+                continue
+            for slot in row['slots']:
+                if slot['is_afk'] is None:
+                    continue
+                sample = _challenge_base(
+                    row,
+                    sample_id='f{:08d}-{}-{}'.format(
+                        frame_id, slot['side'], slot['slot']
+                    ),
+                    expected='afk' if slot['is_afk'] else 'active',
+                )
+                sample['_crop'] = export.afk_status_context_crop(slot)
                 samples.append(sample)
             continue
         if (

@@ -1460,8 +1460,7 @@ function renderCandidateHeroLineup() {
   const allowsPartial = candidateHeroAllowsPartialLineup(candidateDraft);
   const marksPlayer = candidateDraft.view_context_label === 'played' &&
     ['scoreboard', 'result_page'].includes(candidateHeroLineup.screen_type);
-  const marksAfk = ['scoreboard', 'result_page'].includes(
-    candidateHeroLineup.screen_type);
+  const marksAfk = candidateHeroLineup.screen_type === 'result_page';
   const playerPosition = candidateHeroPlayerPosition();
   playerUnreadable.classList.toggle('hidden', !marksPlayer);
   playerUnreadable.classList.toggle(
@@ -1823,7 +1822,7 @@ function applyCandidateHeroLineup(item, context, lineup, previousDraft = null) {
   });
   candidateHeroLineup = lineup;
   candidateHeroAfkReviewRequired =
-    ['scoreboard', 'result_page'].includes(lineup.screen_type) &&
+    lineup.screen_type === 'result_page' &&
     lineup.slots.some((slot) => slot.is_afk == null);
   candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(lineup);
   candidateHeroPlayerSlot = candidateHeroPlayerKey(lineup);
@@ -3111,7 +3110,7 @@ function renderCandidateLegacyControls(stats, status) {
   $('#candidate-page-hint').textContent = active
     ? '这里只把历史 HUD、积分板和结算图按主播、同一局和画面类型折叠成代表组；你补一张代表图即可，不需要把约 7000 张旧图逐张重标。未补头像的旧图不会被当作“没有头像”的负样本。'
     : status === 'missing_afk'
-      ? '这里只显示挂机状态尚未补齐的积分板和结算图。点亮实际挂机的英雄；其余可见英雄会在你确认时明确保存为“未挂机”。HUD 不采集挂机标签。'
+      ? '这里只显示挂机状态尚未补齐的真正结算图。点亮最终挂机的英雄；其余可见英雄会在你确认时明确保存为“未挂机”。积分板上的临时掉线不作为挂机训练真值。'
     : historical && status === 'migration_review'
       ? '这些图片只是把旧格式标签迁移成了新字段，还没有在统一打标页面由你重新确认。旧标签和新模型结果都只作为预填；请像新数据一样核对完整分类，并按画面选择 HUD、积分板、结算、无头像或看不清。确认后才会进入“新流程人工已确认”。'
       : historical && status === 'human_confirmed'
@@ -3648,7 +3647,7 @@ async function saveCandidateReview(skip = false) {
       slot: slot.slot,
       hero_label: candidateHeroDraft.get(
         candidateHeroKey(slot.side, slot.slot)) || '',
-      ...(['scoreboard', 'result_page'].includes(heroContext.screenType)
+      ...(heroContext.screenType === 'result_page'
         ? {is_afk: slot.is_afk === true} : {}),
     })) : null;
   const missingHero = heroLabels && heroLabels.find(
@@ -3723,8 +3722,9 @@ async function saveCandidateReview(skip = false) {
       candidateHeroPlayerStatus = candidateHeroPlayerStatusForLineup(
         candidateHeroLineup);
       candidateHeroPlayerSlot = candidateHeroPlayerKey(candidateHeroLineup);
-      candidateHeroAfkReviewRequired = candidateHeroLineup.slots.some(
-        (slot) => slot.is_afk == null);
+      candidateHeroAfkReviewRequired =
+        candidateHeroLineup.screen_type === 'result_page' &&
+        candidateHeroLineup.slots.some((slot) => slot.is_afk == null);
       saved.needs_afk_review = candidateHeroAfkReviewRequired;
       candidateHeroDirty = false;
     }
@@ -6611,6 +6611,10 @@ const MODEL_TASKS = {
       right1: '右队第 1 位', right2: '右队第 2 位', right3: '右队第 3 位',
     },
   },
+  afk_status: {
+    name: '结算图挂机识别', kind: 'classify', role: 'afk_status',
+    labels: {active: '正常', afk: '挂机'},
+  },
   // 保留旧训练结果的可读名称，便于回看历史 run。
   screen_state: {
     name: '旧·画面状态', kind: 'classify', role: 'screen_state',
@@ -6692,6 +6696,7 @@ function modelTestDataUnit(run) {
   if (run.task_id === 'hero_avatar_detector') return '张完整阵容图';
   if (run.task_id === 'hero_identity') return '个可读头像';
   if (run.task_id === 'player_position') return '张完整面板图';
+  if (run.task_id === 'afk_status') return '个结算玩家区域';
   return '张';
 }
 
@@ -7526,8 +7531,10 @@ const TRAINING_TASK_GROUPS = [
   {
     id: 'heroes',
     title: '英雄阵容增强模型',
-    description: '只在关键画面按需运行，负责头像位置、英雄身份和主播本人位置。',
-    taskIds: ['hero_avatar_detector', 'hero_identity', 'player_position'],
+    description: '只在关键画面按需运行，负责头像、英雄、主播本人和结算挂机状态。',
+    taskIds: [
+      'hero_avatar_detector', 'hero_identity', 'player_position', 'afk_status',
+    ],
   },
 ];
 const openTrainingQualityTasks = new Set();
@@ -7592,6 +7599,13 @@ function trainingCountMetrics(task) {
       ['来源视频', counts.videos],
     ];
   }
+  if (task.id === 'afk_status') {
+    const labels = counts.by_label || {};
+    return [
+      ['结算玩家区域', counts.total], ['挂机', labels.afk],
+      ['正常', labels.active], ['来源视频', counts.videos],
+    ];
+  }
   if (task.id === 'screen_state') {
     const labels = counts.by_label || {};
     return Object.entries(labels).map(([label, value]) => [label, value]);
@@ -7624,6 +7638,10 @@ function trainingSupplementalText(task) {
   if (task.id === 'player_position') {
     return `HUD ${trainingNumber(counts.excluded_hud)} 张由代码规则处理、不参与训练 · ` +
       `本人看不清 ${trainingNumber(counts.excluded_unreadable)} 张已排除`;
+  }
+  if (task.id === 'afk_status') {
+    return `积分板标记 ${trainingNumber(counts.excluded_scoreboard)} 个仅作辅助审查，` +
+      '不会进入挂机训练集';
   }
   return trainingSnapshotNote(task.id);
 }

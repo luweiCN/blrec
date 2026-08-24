@@ -23,6 +23,7 @@ CLASSIFICATION_TASKS = {
     'hero_select',
     'hero_identity',
     'player_position',
+    'afk_status',
 }
 DETECTION_TASKS = {'result_detector', 'hero_avatar_detector'}
 
@@ -152,7 +153,7 @@ def _materialize_classification(
             destination_dir.mkdir(parents=True, exist_ok=True)
             destination = destination_dir / f"{_safe_sample_id(sample)}.jpg"
             source = frame_sources[int(sample['frame_id'])]
-            if task_id == 'hero_identity':
+            if task_id in {'hero_identity', 'afk_status'}:
                 frame_id = int(sample['frame_id'])
                 image = opened.get(frame_id)
                 if image is None:
@@ -168,7 +169,7 @@ def _materialize_classification(
     finally:
         for image in opened.values():
             image.close()
-    if task_id not in {'hero_identity', 'player_position'}:
+    if task_id not in {'hero_identity', 'player_position', 'afk_status'}:
         return 0
     return _balance_training_classes(destinations)
 

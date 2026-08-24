@@ -85,6 +85,22 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'recommended': '8 个有效位置各至少 30 张，并覆盖多位主播和不同设备。',
         'active': True,
     },
+    'afk_status': {
+        'name': '结算图挂机识别',
+        'kind': 'classify',
+        'description': (
+            '只看真正结算图中单个玩家的头像和名字区域，判断最终是否挂机；'
+            '积分板上的临时掉线不训练。'
+        ),
+        'epochs': 60,
+        'imgsz': 224,
+        'input_width': 224,
+        'input_height': 224,
+        'base_model': 'yolov8n-cls.pt',
+        'publish_name': 'afk-status-classifier-current.onnx',
+        'recommended': '挂机至少 200 个、正常至少 500 个，并覆盖不同模式和设备。',
+        'active': True,
+    },
     'match_mode': {
         'name': '对局画面模式分类',
         'kind': 'classify',
@@ -641,6 +657,8 @@ def _current_task_members(conn: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
                     )
     elif task_id == 'player_position':
         samples = _confirmed_player_position_members(conn)
+    elif task_id == 'afk_status':
+        samples = export.confirmed_afk_status_samples(conn)
     else:
         return {}
     return {
@@ -683,6 +701,8 @@ def _task_member_signature(task_id: str, sample: Dict[str, Any]) -> str:
             ),
         }
     elif task_id == 'hero_identity':
+        value = {'label': value, 'crop': _rounded_box(sample.get('crop'))}
+    elif task_id == 'afk_status':
         value = {'label': value, 'crop': _rounded_box(sample.get('crop'))}
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
@@ -971,6 +991,32 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             ),
         }
         video_count = len({int(row['video_id']) for row in rows})
+    elif task_id == 'afk_status':
+        rows = export.confirmed_afk_status_samples(conn)
+        counts = {
+            'total': len(rows),
+            'by_label': {
+                label: sum(row['label'] == label for row in rows)
+                for label in export.AFK_STATUS_LABELS
+            },
+            'videos_by_label': {
+                label: len(
+                    {int(row['video_id']) for row in rows if row['label'] == label}
+                )
+                for label in export.AFK_STATUS_LABELS
+            },
+            'excluded_scoreboard': int(
+                conn.execute(
+                    'SELECT COUNT(*) FROM training_review_hero_slots slot '
+                    'JOIN training_review_hero_lineups lineup '
+                    'ON lineup.frame_id = slot.frame_id '
+                    "WHERE lineup.review_status = 'confirmed' "
+                    "AND lineup.screen_type = 'scoreboard' "
+                    'AND slot.is_afk IS NOT NULL'
+                ).fetchone()[0]
+            ),
+        }
+        video_count = len({int(row['video_id']) for row in rows})
     else:
         raise ValueError(f'未知训练任务: {task_id}')
     counts['videos'] = video_count
@@ -1029,6 +1075,14 @@ def _blocking_reasons(task_id: str, counts: Dict[str, Any]) -> List[str]:
             count = int(counts.get('by_label', {}).get(label, 0))
             if count < 2:
                 reasons.append(f'{names[label]}至少需要 2 张有效图片')
+            elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
+                reasons.append(f'{names[label]}至少需要来自 2 个不同视频')
+    elif task_id == 'afk_status':
+        names = {'active': '正常', 'afk': '挂机'}
+        for label in export.AFK_STATUS_LABELS:
+            count = int(counts.get('by_label', {}).get(label, 0))
+            if count < 2:
+                reasons.append(f'{names[label]}至少需要 2 个有效头像区域')
             elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
                 reasons.append(f'{names[label]}至少需要来自 2 个不同视频')
     elif task_id == 'screen_state':
@@ -1148,6 +1202,9 @@ def _quality_warnings(task_id: str, counts: Dict[str, Any]) -> List[str]:
             for label in export.PLAYER_POSITION_LABELS
             if int(values.get(label, 0)) < 30
         ]
+    elif task_id == 'afk_status':
+        values = counts.get('by_label', {})
+        targets = {'active': ('正常', 500), 'afk': ('挂机', 200)}
     elif task_id == 'mode_gate':
         values = counts
         targets = {'positive': ('有光栅', 100), 'negative': ('开放入口', 100)}
@@ -1215,6 +1272,8 @@ def export_snapshot(
         return export.export_hero_identity_classifier(conn, materialize=materialize)
     if task_id == 'player_position':
         return export.export_player_position_classifier(conn, materialize=materialize)
+    if task_id == 'afk_status':
+        return export.export_afk_status_classifier(conn, materialize=materialize)
     raise ValueError(f'未知训练任务: {task_id}')
 
 

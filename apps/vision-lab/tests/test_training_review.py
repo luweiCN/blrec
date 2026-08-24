@@ -1249,9 +1249,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             {item['frame_id'] for item in items}, {new_frame, legacy_frame}
         )
 
-    def test_confirmed_scoreboard_stays_in_afk_backfill_until_every_slot_is_marked(
-        self,
-    ):
+    def test_only_confirmed_result_page_stays_in_afk_backfill_until_marked(self):
         frame_id = self.frame(113)
         db.add_training_review_source(
             self.conn,
@@ -1278,7 +1276,7 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
         db.replace_training_review_hero_suggestions(
             self.conn,
             frame_id=frame_id,
-            screen_type='scoreboard',
+            screen_type='result_page',
             team_size=3,
             method='hero-model-v2',
             slots=slots,
@@ -1292,14 +1290,15 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             ],
             allowed_labels={'Adagio'},
         )
+        db.save_box(self.conn, frame_id, 'result_panel', 0.1, 0.1, 0.8, 0.8)
         db.save_training_review(
             self.conn,
             frame_id=frame_id,
             match_flow_label='match_flow',
             match_mode_label='3v3',
             hero_select_label='not_select',
-            result_panel_label='no_result_panel',
-            hero_layout_label='scoreboard',
+            result_panel_label='result_panel',
+            hero_layout_label='result_page',
             status='confirmed',
         )
 
