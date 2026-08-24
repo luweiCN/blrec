@@ -158,6 +158,17 @@ describe('PublicDashboardShellComponent', () => {
     tick(1800);
   }));
 
+  it('documents the legacy v1 contract: a dashboard event reloads the aggregate document', fakeAsync(() => {
+    data.state = { kind: 'ready' };
+    data.refresh.calls.reset();
+
+    realtimeUpdates.next('dashboard');
+    flushMicrotasks();
+
+    expect(data.refresh).toHaveBeenCalledTimes(1);
+    tick(1800);
+  }));
+
   it('notifies mounted match views after an image asset update', fakeAsync(() => {
     realtimeUpdates.next('matches');
     flushMicrotasks();

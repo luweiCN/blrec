@@ -1,0 +1,40 @@
+{
+  "measuredAt": "2026-08-25T01:00:00+08:00",
+  "endpoint": "https://vg-api.luwei.host/v1/dashboard",
+  "document": {
+    "rawBytes": 12302575,
+    "localGzipLevel6Bytes": 1271577,
+    "productionWireGzipBytes": 1801166,
+    "identityRequestSeconds": 30.848,
+    "gzipRequestSeconds": 3.588
+  },
+  "topLevel": {
+    "snapshot": {"rawBytes": 5625195, "gzipBytes": 566170},
+    "trends": {"rawBytes": 6677357, "gzipBytes": 705082}
+  },
+  "largeFields": {
+    "snapshot.standings": {"rawBytes": 5623068, "gzipBytes": 565647},
+    "trends.publications": {"rawBytes": 6677280, "gzipBytes": 705013},
+    "snapshot.standings.all-time": {"rawBytes": 1381111, "gzipBytes": 133856},
+    "snapshot.standings.2026-summer": {"rawBytes": 613556, "gzipBytes": 61191},
+    "snapshot.standings.2026-summer.environmentHeroes": {
+      "rawBytes": 170076,
+      "gzipBytes": 32002
+    }
+  },
+  "counts": {
+    "trendPublications": 180,
+    "snapshotMatches": 0,
+    "standingsSeasons": 9,
+    "seasonPlayerObjects": 269,
+    "uniquePlayerIds": 57
+  },
+  "knownDuplication": {
+    "heroPoolEqualsHeroPoolsAllRawBytes": 1072872
+  },
+  "notes": [
+    "字段 gzipBytes 为脚本对稳定紧凑 JSON 使用 gzip level 6 的独立估算，不能相加后当作整包压缩大小。",
+    "productionWireGzipBytes 使用 curl Accept-Encoding:gzip 实测。",
+    "脚本只输出尺寸、计数和字段名，不保存或打印数据正文。"
+  ]
+}
