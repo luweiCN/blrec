@@ -812,6 +812,89 @@ def test_result_regression_scans_backwards_in_chunks_and_stops_after_hit(
     assert [item.at_ms for item in hits] == [31_000]
 
 
+def test_result_regression_uses_one_fps_preview_for_result_only_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = RgbFrame(2, 2, b'\x00\x00\x00' * 4)
+
+    class Sampler:
+        def __init__(self) -> None:
+            self.windows = []
+
+        def result_preview_frames(
+            self, _path: str, window: ScanWindow, *, keyframes_only: bool
+        ):
+            assert keyframes_only is False
+            self.windows.append((window.start_ms, window.end_ms))
+            yield TimedFrame(at_ms=window.start_ms + 1_000, frame=empty)
+
+        def fine_frames(self, _path: str, _window: ScanWindow):
+            raise AssertionError('结算图定模式管线的补漏不得直接全区间 4 FPS')
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(sampler=sampler, result_panel_detector=object())
+    monkeypatch.setattr(analyzer, '_detect_result_layout', lambda _frame: None)
+
+    found = analyzer._scan_result_backwards(
+        'unused',
+        start_ms=0,
+        end_ms=120_000,
+        hits=[],
+        cancelled=None,
+        training_candidates=None,
+        key_screen_reason='test',
+        detector_reason='test',
+        preview_first=True,
+    )
+
+    assert found.hit_count == 0
+    assert found.decoded_frames == 3
+    assert found.scanned_ms == 120_000
+    assert sampler.windows == [(75_000, 120_000), (30_000, 75_000), (0, 30_000)]
+
+
+def test_result_regression_refines_a_preview_hit_before_recognition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = RgbFrame(2, 2, b'\x00\x00\x00' * 4)
+    result = RgbFrame(2, 2, b'\x01\x01\x01' * 4)
+
+    class Sampler:
+        def result_preview_frames(
+            self, _path: str, window: ScanWindow, *, keyframes_only: bool
+        ):
+            assert keyframes_only is False
+            yield TimedFrame(at_ms=31_000, frame=result)
+
+        def fine_frames(self, _path: str, window: ScanWindow):
+            assert window.start_ms <= 29_000 < window.end_ms
+            yield TimedFrame(at_ms=29_000, frame=result)
+            yield TimedFrame(at_ms=29_250, frame=empty)
+
+    analyzer = VaingloryVideoAnalyzer(sampler=Sampler(), result_panel_detector=object())
+    monkeypatch.setattr(
+        analyzer,
+        '_detect_result_layout',
+        lambda frame: hit(0).layout if frame is result else None,
+    )
+    hits = []
+
+    found = analyzer._scan_result_backwards(
+        'unused',
+        start_ms=0,
+        end_ms=45_000,
+        hits=hits,
+        cancelled=None,
+        training_candidates=None,
+        key_screen_reason='test',
+        detector_reason='test',
+        preview_first=True,
+    )
+
+    assert found.hit_count == 1
+    assert [item.at_ms for item in hits] == [29_000]
+
+
 def test_tail_regression_skips_segment_that_already_has_a_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1269,6 +1352,43 @@ def test_name_ocr_samples_the_same_result_slot_from_nearby_frames(
 
     assert sampler.calls == [0, 500, 1_500, 1_999]
     assert nearby == tuple((frame, layout) for _index in range(4))
+
+
+def test_name_ocr_previews_once_then_fetches_only_three_full_resolution_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = RgbFrame(1, 1, b'\x00\x00\x00')
+    full = RgbFrame(1, 1, b'\x01\x01\x01')
+
+    class Sampler:
+        calls = []
+
+        def result_preview_frames(
+            self, _path: str, window: ScanWindow, *, keyframes_only: bool
+        ):
+            assert (window.start_ms, window.end_ms) == (5_000, 15_001)
+            assert keyframes_only is False
+            for candidate_at in (6_000, 8_000, 12_000, 14_000):
+                yield TimedFrame(at_ms=candidate_at, frame=preview)
+
+        def frame_at(self, _path: str, candidate_at: int) -> RgbFrame:
+            self.calls.append(candidate_at)
+            return full
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(sampler=sampler)  # type: ignore[arg-type]
+    layout = hit(0).layout
+    monkeypatch.setattr(analyzer, '_detect_result_layout', lambda _frame: layout)
+    monkeypatch.setattr(
+        analyzer_module, 'result_frame_quality', lambda _frame, _layout: 1.5
+    )
+
+    nearby = analyzer._sample_nearby_result_frames(
+        'unused', at_ms=10_000, duration_ms=20_000
+    )
+
+    assert sampler.calls == [14_000, 12_000, 8_000]
+    assert nearby == ((full, layout), (full, layout), (full, layout))
 
 
 def test_name_ocr_skips_an_unreadable_optional_nearby_frame(
@@ -1961,9 +2081,7 @@ def test_afk_classifier_batches_every_result_slot_after_quality_gate(
     monkeypatch.setattr(
         analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
     )
-    monkeypatch.setattr(
-        analyzer_module, 'result_action_min_contrast', lambda *_args: 100
-    )
+    monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
 
     statuses = analyzer._classify_afk_statuses(
         frame, hit(0).layout, _complete_afk_result()
@@ -2013,13 +2131,9 @@ def test_afk_classifier_does_not_treat_incomplete_ocr_as_visual_occlusion(
     monkeypatch.setattr(
         analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
     )
-    monkeypatch.setattr(
-        analyzer_module, 'result_action_min_contrast', lambda *_args: 100
-    )
+    monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
 
-    statuses = analyzer._classify_afk_statuses(
-        frame, hit(0).layout, recognized
-    )
+    statuses = analyzer._classify_afk_statuses(frame, hit(0).layout, recognized)
 
     assert len(statuses) == 6
     assert {status.status for status in statuses} == {'active'}
@@ -2027,13 +2141,13 @@ def test_afk_classifier_does_not_treat_incomplete_ocr_as_visual_occlusion(
 
 
 @pytest.mark.parametrize(
-    ('visible_portraits', 'action_contrast', 'reason'),
-    ((5, 100, 'avatars_not_all_visible'), (6, 36, 'panel_low_contrast')),
+    ('visible_portraits', 'frame_quality', 'reason'),
+    ((4, 1.5, 'avatars_not_all_visible'), (6, 1.1, 'panel_low_quality')),
 )
 def test_afk_classifier_abstains_on_low_quality_result(
     monkeypatch: pytest.MonkeyPatch,
     visible_portraits: int,
-    action_contrast: int,
+    frame_quality: float,
     reason: str,
 ) -> None:
     frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
@@ -2051,7 +2165,7 @@ def test_afk_classifier_abstains_on_low_quality_result(
         lambda *_args: visible_portraits,
     )
     monkeypatch.setattr(
-        analyzer_module, 'result_action_min_contrast', lambda *_args: action_contrast
+        analyzer_module, 'result_frame_quality', lambda *_args: frame_quality
     )
 
     statuses = analyzer._classify_afk_statuses(
@@ -2079,9 +2193,7 @@ def test_afk_classifier_error_abstains_instead_of_marking_players_active(
     monkeypatch.setattr(
         analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
     )
-    monkeypatch.setattr(
-        analyzer_module, 'result_action_min_contrast', lambda *_args: 100
-    )
+    monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
 
     statuses = analyzer._classify_afk_statuses(
         frame, hit(0).layout, _complete_afk_result()

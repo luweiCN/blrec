@@ -85,7 +85,6 @@ from .vision import (
     jpeg_bytes,
     normalize_gameplay_frame,
     png_bytes,
-    result_action_min_contrast,
     result_avatar_slots,
     result_frame_quality,
     select_gameplay_hud_centers,
@@ -2528,6 +2527,7 @@ class VaingloryVideoAnalyzer:
         key_screen_reason: str,
         detector_reason: str,
         chunk_ms: int = 45_000,
+        preview_first: bool = False,
     ) -> _ResultBackscan:
         if end_ms <= start_ms:
             return _ResultBackscan()
@@ -2541,7 +2541,14 @@ class VaingloryVideoAnalyzer:
             )
             scanned_ms += window.end_ms - window.start_ms
             window_hits = 0
-            for timed in self._sampler.fine_frames(path, window):
+            window_hit_start = len(hits)
+            preview_frames = getattr(self._sampler, 'result_preview_frames', None)
+            frames = (
+                preview_frames(path, window, keyframes_only=False)
+                if preview_first and preview_frames is not None
+                else self._sampler.fine_frames(path, window)
+            )
+            for timed in frames:
                 self._raise_if_cancelled(cancelled)
                 decoded_frames += 1
                 detection_started = time.monotonic()
@@ -2619,6 +2626,18 @@ class VaingloryVideoAnalyzer:
                         prefer_lower_confidence=True,
                     )
             if window_hits:
+                if preview_first:
+                    preview_hits = tuple(hits[window_hit_start:])
+                    refined_hits, refinement_frames, _refinement_windows = (
+                        self._refine_preview_hits(
+                            path, window, preview_hits, cancelled=cancelled
+                        )
+                    )
+                    decoded_frames += refinement_frames
+                    if refined_hits:
+                        del hits[window_hit_start:]
+                        hits.extend(refined_hits)
+                        window_hits = len(refined_hits)
                 return _ResultBackscan(
                     hit_count=window_hits,
                     decoded_frames=decoded_frames,
@@ -2641,6 +2660,7 @@ class VaingloryVideoAnalyzer:
         cancelled: Optional[Callable[[], bool]] = None,
         training_candidates: Optional[List[TrainingCandidate]] = None,
         strict_gameplay_exit: bool = False,
+        preview_first: bool = False,
     ) -> int:
         """退出信号回归扫描。
 
@@ -2683,6 +2703,7 @@ class VaingloryVideoAnalyzer:
         if not exit_frames:
             return 0
         added = 0
+        covered_until_by_start: Dict[int, int] = {}
         for exit_item in exit_frames:
             anchor_start = next(
                 (
@@ -2701,6 +2722,11 @@ class VaingloryVideoAnalyzer:
                 anchor_start = run[0].at_ms if run is not None else 0
             scan_start = max(0, anchor_start, exit_item.at_ms - 30 * 60_000)
             scan_end = exit_item.at_ms
+            coverage_key = scan_start
+            covered_until = covered_until_by_start.get(coverage_key, scan_start)
+            if covered_until >= scan_end:
+                continue
+            scan_start = max(scan_start, covered_until)
             if scan_end <= scan_start:
                 continue
             if (strict_gameplay_exit or has_confirmed_anchor) and any(
@@ -2716,7 +2742,12 @@ class VaingloryVideoAnalyzer:
                 training_candidates=training_candidates,
                 key_screen_reason=('worker 退出回归扫描命中，保留为结算页复核候选'),
                 detector_reason='退出回归命中，预填结算面板框',
+                preview_first=preview_first,
             )
+            if not regression.hit_count:
+                covered_until_by_start[coverage_key] = max(
+                    covered_until_by_start.get(coverage_key, coverage_key), scan_end
+                )
             added += regression.hit_count
             logger.info(
                 'Vainglory regression scan: exit_at_ms={} scan_start_ms={} '
@@ -2737,6 +2768,7 @@ class VaingloryVideoAnalyzer:
         *,
         cancelled: Optional[Callable[[], bool]] = None,
         training_candidates: Optional[List[TrainingCandidate]] = None,
+        preview_first: bool = False,
     ) -> int:
         """段尾窗口无命中时的自动回归。
 
@@ -2773,6 +2805,7 @@ class VaingloryVideoAnalyzer:
                 training_candidates=training_candidates,
                 key_screen_reason=('worker 段尾回归扫描命中，保留为结算页复核候选'),
                 detector_reason='段尾回归命中，预填结算面板框',
+                preview_first=preview_first,
             )
             added += regression.hit_count
             logger.info(
@@ -2801,6 +2834,9 @@ class VaingloryVideoAnalyzer:
         classifier = self._stage_classifier
         model_package_id = str(getattr(classifier, 'model_version', ''))
         using_model_package = bool(model_package_id and model_package_id != 'multi-v2')
+        result_page_mode_only = bool(
+            getattr(classifier, 'result_page_mode_only', False)
+        )
         timeline_stage = 'timeline_scan' if using_model_package else 'coarse_scan'
         result_stage = 'result_scan' if using_model_package else 'fine_scan'
         result_model_version = str(
@@ -3200,7 +3236,11 @@ class VaingloryVideoAnalyzer:
         )
         mode_conflicts: Tuple[_ModeConflict, ...] = ()
         if using_model_package:
-            run_modes = _model_package_run_modes(observations, run_gap_ms=run_gap_ms)
+            run_modes = (
+                {}
+                if result_page_mode_only
+                else _model_package_run_modes(observations, run_gap_ms=run_gap_ms)
+            )
             training_candidates: Tuple[TrainingCandidate, ...] = ()
         else:
             run_modes, training_candidates = self._probe_run_modes(
@@ -3215,7 +3255,7 @@ class VaingloryVideoAnalyzer:
         segment_anchors = _confirmed_anchors(_pre_match_anchors(smoothed), smoothed)
         initial_mode_conflicts = (
             _model_package_mode_conflicts(observations, anchor_segments, run_modes)
-            if using_model_package
+            if using_model_package and not result_page_mode_only
             else ()
         )
         segment_hud_lineups = (
@@ -3228,17 +3268,17 @@ class VaingloryVideoAnalyzer:
                 frame_cache=full_frame_cache,
                 mode_conflicts=initial_mode_conflicts,
             )
-            if using_model_package
+            if using_model_package and not result_page_mode_only
             else {}
         )
         avatar_screen_candidates = (
             self._probe_avatar_screen_candidates(
                 part.path, anchor_segments, run_modes, cancelled=cancelled
             )
-            if using_model_package
+            if using_model_package and not result_page_mode_only
             else ()
         )
-        if using_model_package:
+        if using_model_package and not result_page_mode_only:
             run_modes = _apply_hud_team_size_evidence(run_modes, segment_hud_lineups)
             mode_conflicts = _model_package_mode_conflicts(
                 observations, anchor_segments, run_modes
@@ -3455,29 +3495,31 @@ class VaingloryVideoAnalyzer:
                 hud_lineup_candidate_count=len(segment_hud_lineups),
             ),
         )
-        tail_regression_added = self._tail_regression(
-            part.path,
-            hits,
-            (
-                tuple(
-                    (start_ms, end_ms)
-                    for start_ms, end_ms in anchor_segments
-                    if any(
-                        item.at_ms > end_ms
-                        and (
-                            item.content != CONTENT_VAINGLORY
-                            or item.stage in (STAGE_OUT_OF_MATCH, STAGE_TRANSITION)
+        tail_regression_added = 0
+        if not result_page_mode_only:
+            tail_regression_added = self._tail_regression(
+                part.path,
+                hits,
+                (
+                    tuple(
+                        (start_ms, end_ms)
+                        for start_ms, end_ms in anchor_segments
+                        if any(
+                            item.at_ms > end_ms
+                            and (
+                                item.content != CONTENT_VAINGLORY
+                                or item.stage in (STAGE_OUT_OF_MATCH, STAGE_TRANSITION)
+                            )
+                            for item in smoothed
                         )
-                        for item in smoothed
                     )
-                )
-                if using_model_package
-                else anchor_segments
-            ),
-            segment_anchors,
-            cancelled=cancelled,
-            training_candidates=key_screen_candidates,
-        )
+                    if using_model_package
+                    else anchor_segments
+                ),
+                segment_anchors,
+                cancelled=cancelled,
+                training_candidates=key_screen_candidates,
+            )
         if tail_regression_added:
             logger.info(
                 'Vainglory tail regression added hits: part_id={} extra={}',
@@ -3491,6 +3533,7 @@ class VaingloryVideoAnalyzer:
             cancelled=cancelled,
             training_candidates=key_screen_candidates,
             strict_gameplay_exit=using_model_package,
+            preview_first=result_page_mode_only,
         )
         if exit_regression_added:
             logger.info(
@@ -4782,10 +4825,10 @@ class VaingloryVideoAnalyzer:
             return abstain('slots_incomplete')
         if layout.confidence < 0.8:
             return abstain('layout_low_confidence')
-        if visible_result_portrait_count(frame, slots) != expected:
+        if visible_result_portrait_count(frame, slots) < expected - 1:
             return abstain('avatars_not_all_visible')
-        if result_action_min_contrast(frame, layout) < 60:
-            return abstain('panel_low_contrast')
+        if result_frame_quality(frame, layout) < 1.3:
+            return abstain('panel_low_quality')
         contexts = extract_result_afk_contexts(frame, slots)
         try:
             predictions = tuple(
@@ -5785,6 +5828,53 @@ class VaingloryVideoAnalyzer:
         frames: List[Tuple[RgbFrame, ResultLayout]] = []
         attempted_at: List[int] = []
         accepted_at: List[int] = []
+        preview_frames = getattr(self._sampler, 'result_preview_frames', None)
+        if preview_frames is not None:
+            preview_candidates = []
+            window = ScanWindow(
+                start_ms=max(0, at_ms - 5_000), end_ms=min(duration_ms, at_ms + 5_001)
+            )
+            for timed in preview_frames(path, window, keyframes_only=False):
+                if timed.at_ms == at_ms:
+                    continue
+                layout = self._detect_result_layout(timed.frame)
+                if layout is None:
+                    continue
+                preview_candidates.append(
+                    (result_frame_quality(timed.frame, layout), timed.at_ms)
+                )
+            selected_at = tuple(
+                at_ms_value
+                for _quality, at_ms_value in sorted(preview_candidates, reverse=True)[
+                    :3
+                ]
+            )
+            for candidate_at in selected_at:
+                attempted_at.append(candidate_at)
+                try:
+                    frame = self._sampler.frame_at(path, candidate_at)
+                except RuntimeError as error:
+                    logger.warning(
+                        'Skipped unreadable optional Vainglory nearby frame: '
+                        'at_ms={} error={}',
+                        candidate_at,
+                        error,
+                    )
+                    continue
+                layout = self._detect_result_layout(frame)
+                if layout is None:
+                    continue
+                frames.append((frame, layout))
+                accepted_at.append(candidate_at)
+            logger.debug(
+                'Vainglory nearby OCR frames: at_ms={} preview_candidates={} '
+                'sampled_at={} accepted={}',
+                at_ms,
+                len(preview_candidates),
+                tuple(attempted_at),
+                tuple(accepted_at),
+            )
+            return tuple(frames)
         offsets_ms = (
             -5_000,
             -3_000,

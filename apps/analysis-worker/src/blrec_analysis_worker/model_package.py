@@ -189,14 +189,14 @@ class OnnxClassificationModel:
     ) -> Tuple[ClassificationPrediction, ...]:
         if not frames:
             return ()
-        if self._fixed_batch_size == 1 and len(frames) > 1:
-            return tuple(self._predict_batch((frame,))[0] for frame in frames)
-        if self._fixed_batch_size not in (None, len(frames)):
-            raise RuntimeError(
-                '{} 模型固定 batch={}，无法处理 {} 个槽位'.format(
-                    self._spec.role, self._fixed_batch_size, len(frames)
-                )
-            )
+        if self._fixed_batch_size is not None:
+            predictions = []
+            for start in range(0, len(frames), self._fixed_batch_size):
+                batch = list(frames[start : start + self._fixed_batch_size])
+                actual_size = len(batch)
+                batch.extend([batch[-1]] * (self._fixed_batch_size - actual_size))
+                predictions.extend(self._predict_batch(batch)[:actual_size])
+            return tuple(predictions)
         return self._predict_batch(frames)
 
     def _predict_batch(
@@ -421,8 +421,10 @@ class PackageStageClassifier:
         hero_select: Any,
         match_mode: Any,
         thresholds: Mapping[str, float],
+        result_page_mode_only: bool = False,
     ) -> None:
         self.model_version = package_id
+        self.result_page_mode_only = result_page_mode_only
         self._match_flow = match_flow
         self._hero_select = hero_select
         self._match_mode = match_mode
@@ -430,6 +432,25 @@ class PackageStageClassifier:
 
     def classify(self, frame: RgbFrame) -> StagePrediction:
         flow = self._match_flow.predict(frame)
+        flow_threshold = float(self._thresholds.get('match_flow', 0.55))
+        if self.result_page_mode_only:
+            if flow.confidence < flow_threshold:
+                stage = STAGE_TRANSITION
+            elif flow.label == 'match_flow':
+                stage = STAGE_GAMEPLAY
+            else:
+                stage = STAGE_OUT_OF_MATCH
+            return StagePrediction(
+                content=CONTENT_VAINGLORY,
+                content_conf=flow.confidence,
+                stage=stage,
+                stage_conf=flow.confidence,
+                mode=MODE_3V3,
+                mode_conf=0.0,
+                model_version=self.model_version,
+                match_flow_label=flow.label,
+                match_flow_conf=flow.confidence,
+            )
         selection = self._hero_select.predict(frame)
         selected_mode = _selection_mode(selection.label)
         if selected_mode and selection.confidence >= float(
@@ -450,7 +471,6 @@ class PackageStageClassifier:
                 match_mode_label=selected_mode,
                 match_mode_conf=selection.confidence,
             )
-        flow_threshold = float(self._thresholds.get('match_flow', 0.55))
         if flow.confidence < flow_threshold:
             return StagePrediction(
                 content=CONTENT_VAINGLORY,
@@ -514,7 +534,7 @@ def build_package_runtime(
 ) -> PackageRuntime:
     classifiers: Dict[str, OnnxClassificationModel] = {
         role: OnnxClassificationModel(package.model(role), providers=providers)
-        for role in ('match_flow', 'hero_select', 'match_mode', 'result_mode')
+        for role in ('match_flow', 'result_mode')
     }
     result_spec = package.model('result_panel')
     if result_spec.kind != 'detection':
@@ -531,9 +551,10 @@ def build_package_runtime(
     stage_classifier = PackageStageClassifier(
         package_id=package.package_id,
         match_flow=classifiers['match_flow'],
-        hero_select=classifiers['hero_select'],
-        match_mode=classifiers['match_mode'],
+        hero_select=None,
+        match_mode=None,
         thresholds=package.runtime.thresholds,
+        result_page_mode_only=True,
     )
     hero_avatar_detector = OnnxHeroAvatarDetector(
         package.model('hero_avatar'),

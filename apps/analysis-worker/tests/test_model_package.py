@@ -205,6 +205,30 @@ def test_package_stage_classifier_finds_selection_outside_match_flow() -> None:
     assert selection.hero_select_label == 'select_aram'
 
 
+def test_result_page_mode_pipeline_only_runs_match_flow_during_timeline() -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class UnexpectedClassifier:
+        def predict(self, _frame: RgbFrame) -> ClassificationPrediction:
+            raise AssertionError('结算图定模式管线不应运行开局或局内模式模型')
+
+    classifier = PackageStageClassifier(
+        package_id='vision-package',
+        match_flow=_Classifier('match_flow', 0.9),
+        hero_select=UnexpectedClassifier(),
+        match_mode=UnexpectedClassifier(),
+        thresholds={'match_flow': 0.55},
+        result_page_mode_only=True,
+    )
+
+    prediction = classifier.classify(frame)
+
+    assert prediction.stage == STAGE_GAMEPLAY
+    assert prediction.match_flow_label == 'match_flow'
+    assert prediction.hero_select_label == ''
+    assert prediction.match_mode_label == ''
+
+
 def test_package_hero_and_player_classifiers_keep_low_confidence_as_unknown() -> None:
     frame = RgbFrame(1, 1, b'\x00\x00\x00')
     hero = PackageHeroRecognizer(_Classifier('Kestrel', 0.91), threshold=0.5)
@@ -295,6 +319,34 @@ def test_afk_onnx_classifier_serializes_a_fixed_batch_one_model(monkeypatch) -> 
     assert session.batch_sizes == [1] * 6
 
 
+def test_afk_onnx_classifier_pads_three_v_three_to_fixed_batch_ten(monkeypatch) -> None:
+    numpy = pytest.importorskip('numpy')
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+    model = _bare_onnx_classifier(fixed_batch_size=10)
+
+    class Session:
+        def __init__(self) -> None:
+            self.batch_sizes = []
+
+        def run(self, _outputs, inputs):
+            batch = next(iter(inputs.values())).shape[0]
+            self.batch_sizes.append(batch)
+            return [numpy.asarray([[0.7, 0.3]] * batch, dtype=numpy.float32)]
+
+    session = Session()
+    model._session = session
+    monkeypatch.setattr(
+        model_package_module,
+        '_classification_tensor',
+        lambda _frame, _spec: numpy.zeros((1, 3, 1, 1), dtype=numpy.float32),
+    )
+
+    predictions = model.predict_many((frame,) * 6)
+
+    assert len(predictions) == 6
+    assert session.batch_sizes == [10]
+
+
 def test_package_runtime_instantiates_afk_status_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -325,4 +377,7 @@ def test_package_runtime_instantiates_afk_status_model(
     runtime = build_package_runtime(package)
 
     assert 'afk_status' in created_roles
+    assert 'hero_select' not in created_roles
+    assert 'match_mode' not in created_roles
+    assert runtime.stage_classifier.result_page_mode_only is True
     assert runtime.afk_status_classifier is runtime.classifiers['afk_status']
