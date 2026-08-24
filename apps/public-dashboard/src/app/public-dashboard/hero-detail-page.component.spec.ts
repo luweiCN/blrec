@@ -33,6 +33,10 @@ describe('HeroDetailPageComponent', () => {
           useValue: {
             snapshot: TEST_DASHBOARD_SNAPSHOT,
             revision$: new Subject<string>(),
+            ensureAllStandings: () => Promise.resolve(false),
+            ensureStandings: () => Promise.resolve(false),
+            ensureEnvironment: () => Promise.resolve(false),
+            ensureAllEnvironments: () => Promise.resolve(false),
           },
         },
         {

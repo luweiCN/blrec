@@ -56,7 +56,7 @@ export class HeroRankingsPageComponent implements OnDestroy {
   constructor(
     private readonly data: DashboardDataService,
     dashboardMode: DashboardModeService,
-    changeDetector: ChangeDetectorRef,
+    private readonly changeDetector: ChangeDetectorRef,
   ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
     this.activeMode = dashboardMode.mode;
@@ -66,11 +66,11 @@ export class HeroRankingsPageComponent implements OnDestroy {
       }
       this.activeMode = mode;
       this.currentPage = 1;
-      changeDetector.markForCheck();
+      this.changeDetector.markForCheck();
     });
     this.revisionSubscription = data.revision$.subscribe(() => {
       this.clampPage();
-      changeDetector.markForCheck();
+      this.changeDetector.markForCheck();
     });
   }
 
@@ -149,6 +149,7 @@ export class HeroRankingsPageComponent implements OnDestroy {
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
     this.currentPage = 1;
+    void this.loadSeason();
   }
 
   selectSort(sort: HeroRankingSort): void {
@@ -159,6 +160,9 @@ export class HeroRankingsPageComponent implements OnDestroy {
   selectScope(scope: HeroDataScope): void {
     this.activeScope = scope;
     this.currentPage = 1;
+    if (scope === 'environment') {
+      void this.loadEnvironment();
+    }
   }
 
   updateSearch(event: Event): void {
@@ -212,5 +216,19 @@ export class HeroRankingsPageComponent implements OnDestroy {
 
   private clampPage(): void {
     this.currentPage = Math.min(this.currentPage, this.totalPages);
+  }
+
+  private async loadSeason(): Promise<void> {
+    await this.data.ensureStandings(this.activeSeason);
+    if (this.activeScope === 'environment') {
+      await this.data.ensureEnvironment(this.activeSeason);
+    }
+    this.changeDetector.markForCheck();
+  }
+
+  private async loadEnvironment(): Promise<void> {
+    if (await this.data.ensureEnvironment(this.activeSeason)) {
+      this.changeDetector.markForCheck();
+    }
   }
 }

@@ -91,7 +91,7 @@ export class HeroDetailPageComponent implements OnDestroy {
     private readonly data: DashboardDataService,
     private readonly route: ActivatedRoute,
     dashboardMode: DashboardModeService,
-    changeDetector: ChangeDetectorRef,
+    private readonly changeDetector: ChangeDetectorRef,
   ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
     this.activeMode = dashboardMode.mode;
@@ -100,11 +100,12 @@ export class HeroDetailPageComponent implements OnDestroy {
         return;
       }
       this.activeMode = mode;
-      changeDetector.markForCheck();
+      this.changeDetector.markForCheck();
     });
     this.revisionSubscription = data.revision$.subscribe(() => {
-      changeDetector.markForCheck();
+      this.changeDetector.markForCheck();
     });
+    void this.loadDetailResources();
   }
 
   ngOnDestroy(): void {
@@ -273,10 +274,14 @@ export class HeroDetailPageComponent implements OnDestroy {
 
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
+    void this.loadSeason();
   }
 
   selectScope(scope: HeroDataScope): void {
     this.activeScope = scope;
+    if (scope === 'environment') {
+      void this.loadAllEnvironments();
+    }
   }
 
   heroImage(heroName: string): string {
@@ -314,5 +319,23 @@ export class HeroDetailPageComponent implements OnDestroy {
 
   trackSynergy(_index: number, synergy: HeroSynergy): string {
     return synergy.name;
+  }
+
+  private async loadDetailResources(): Promise<void> {
+    await this.data.ensureAllStandings();
+    await this.data.ensureEnvironment(this.activeSeason);
+    this.changeDetector.markForCheck();
+  }
+
+  private async loadSeason(): Promise<void> {
+    await this.data.ensureStandings(this.activeSeason);
+    await this.data.ensureEnvironment(this.activeSeason);
+    this.changeDetector.markForCheck();
+  }
+
+  private async loadAllEnvironments(): Promise<void> {
+    if (await this.data.ensureAllEnvironments()) {
+      this.changeDetector.markForCheck();
+    }
   }
 }

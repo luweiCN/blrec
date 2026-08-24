@@ -5,10 +5,16 @@ import {
 } from './dashboard-realtime.service';
 
 class FakeEventSource implements DashboardEventSource {
-  readonly listeners = new Map<string, Array<() => void>>();
+  readonly listeners = new Map<
+    string,
+    Array<(event: { readonly data: string }) => void>
+  >();
   closed = false;
 
-  addEventListener(type: string, listener: () => void): void {
+  addEventListener(
+    type: string,
+    listener: (event: { readonly data: string }) => void,
+  ): void {
     const listeners = this.listeners.get(type) ?? [];
     listeners.push(listener);
     this.listeners.set(type, listeners);
@@ -18,9 +24,9 @@ class FakeEventSource implements DashboardEventSource {
     this.closed = true;
   }
 
-  emit(type: string): void {
+  emit(type: string, data = ''): void {
     for (const listener of this.listeners.get(type) ?? []) {
-      listener();
+      listener({ data });
     }
   }
 }
@@ -39,7 +45,7 @@ describe('DashboardRealtimeService', () => {
       .createSpy('eventSourceFactory')
       .and.returnValue(source);
     const service = new DashboardRealtimeService(factory);
-    const updates: string[] = [];
+    const updates: unknown[] = [];
     service.updates$.subscribe((update) => updates.push(update));
 
     service.start();
@@ -48,11 +54,30 @@ describe('DashboardRealtimeService', () => {
     source.emit('dashboard');
     source.emit('live_rooms');
     source.emit('matches');
+    source.emit(
+      'resource',
+      JSON.stringify({
+        resource: 'standings',
+        seasonId: '2026-summer',
+        revision: 'standings-2',
+      }),
+    );
 
     expect(factory).toHaveBeenCalledOnceWith(
       'https://vg-api.luwei.host/v1/events',
     );
-    expect(updates).toEqual(['resync', 'dashboard', 'live_rooms', 'matches']);
+    expect(updates).toEqual([
+      'resync',
+      'dashboard',
+      'live_rooms',
+      'matches',
+      {
+        kind: 'resource',
+        resource: 'standings',
+        seasonId: '2026-summer',
+        revision: 'standings-2',
+      },
+    ]);
 
     service.stop();
     expect(source.closed).toBeTrue();

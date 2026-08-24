@@ -134,7 +134,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
     private readonly data: DashboardDataService,
     private readonly route: ActivatedRoute,
     dashboardMode: DashboardModeService,
-    changeDetector: ChangeDetectorRef,
+    private readonly changeDetector: ChangeDetectorRef,
   ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
     this.activeMode = dashboardMode.mode;
@@ -143,11 +143,14 @@ export class PlayerDetailPageComponent implements OnDestroy {
         return;
       }
       this.activeMode = mode;
-      changeDetector.markForCheck();
+      void this.loadTrends();
+      this.changeDetector.markForCheck();
     });
     this.revisionSubscription = data.revision$.subscribe(() => {
-      changeDetector.markForCheck();
+      void this.loadTrends();
+      this.changeDetector.markForCheck();
     });
+    void this.loadDetailResources();
   }
 
   ngOnDestroy(): void {
@@ -468,6 +471,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
     this.activeTrendRange = 'all';
+    void this.loadSeason();
   }
 
   selectHeroSort(sort: PlayerHeroSort): void {
@@ -543,5 +547,31 @@ export class PlayerDetailPageComponent implements OnDestroy {
       ),
       skillTier,
     };
+  }
+
+  private async loadDetailResources(): Promise<void> {
+    await this.data.ensureAllStandings();
+    await this.loadTrends();
+    this.changeDetector.markForCheck();
+  }
+
+  private async loadSeason(): Promise<void> {
+    await this.data.ensureStandings(this.activeSeason);
+    await this.loadTrends();
+    this.changeDetector.markForCheck();
+  }
+
+  private async loadTrends(): Promise<void> {
+    const playerId = this.playerId;
+    if (
+      playerId !== null &&
+      (await this.data.ensureTrends(
+        this.activeSeason,
+        this.activeMode,
+        [playerId],
+      ))
+    ) {
+      this.changeDetector.markForCheck();
+    }
   }
 }

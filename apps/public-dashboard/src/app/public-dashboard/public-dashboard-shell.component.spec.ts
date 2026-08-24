@@ -11,7 +11,10 @@ import { Subject } from 'rxjs';
 
 import { DashboardModeService } from './dashboard-mode.service';
 import { DashboardOwnerAccessService } from './dashboard-owner-access.service';
-import { DashboardRealtimeService } from './dashboard-realtime.service';
+import {
+  DashboardRealtimeService,
+  DashboardResourceRealtimeUpdate,
+} from './dashboard-realtime.service';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PlayerLiveStatusService } from './player-live-status.service';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
@@ -21,7 +24,16 @@ import { SiteStatsService } from './site-stats.service';
 describe('PublicDashboardShellComponent', () => {
   let fixture: ComponentFixture<PublicDashboardShellComponent>;
   let realtimeUpdates: Subject<
-    'resync' | 'dashboard' | 'live_rooms' | 'matches'
+    | 'resync'
+    | 'dashboard'
+    | 'live_rooms'
+    | 'matches'
+    | {
+        readonly kind: 'resource';
+        readonly resource: 'standings';
+        readonly seasonId: string;
+        readonly revision: string;
+      }
   >;
   let data: {
     state: { kind: 'loading' | 'ready' };
@@ -29,6 +41,10 @@ describe('PublicDashboardShellComponent', () => {
     load: jasmine.Spy<() => Promise<void>>;
     refresh: jasmine.Spy<() => Promise<boolean>>;
     notifyMatchDataChanged: jasmine.Spy<() => void>;
+    refreshResource: jasmine.Spy<
+      (update: DashboardResourceRealtimeUpdate) => Promise<boolean>
+    >;
+    usesV2: boolean;
   };
 
   beforeEach(async () => {
@@ -39,6 +55,8 @@ describe('PublicDashboardShellComponent', () => {
       load: jasmine.createSpy('load').and.resolveTo(),
       refresh: jasmine.createSpy('refresh').and.resolveTo(false),
       notifyMatchDataChanged: jasmine.createSpy('notifyMatchDataChanged'),
+      refreshResource: jasmine.createSpy('refreshResource').and.resolveTo(false),
+      usesV2: false,
     };
     await TestBed.configureTestingModule({
       declarations: [PublicDashboardShellComponent],
@@ -166,6 +184,30 @@ describe('PublicDashboardShellComponent', () => {
     flushMicrotasks();
 
     expect(data.refresh).toHaveBeenCalledTimes(1);
+    tick(1800);
+  }));
+
+  it('refreshes only the visible v2 resource and ignores the legacy dashboard event', fakeAsync(() => {
+    data.state = { kind: 'ready' };
+    data.usesV2 = true;
+    data.refresh.calls.reset();
+
+    realtimeUpdates.next('dashboard');
+    realtimeUpdates.next({
+      kind: 'resource',
+      resource: 'standings',
+      seasonId: '2026-summer',
+      revision: 'standings-2',
+    });
+    flushMicrotasks();
+
+    expect(data.refresh).not.toHaveBeenCalled();
+    expect(data.refreshResource).toHaveBeenCalledOnceWith({
+      kind: 'resource',
+      resource: 'standings',
+      seasonId: '2026-summer',
+      revision: 'standings-2',
+    });
     tick(1800);
   }));
 

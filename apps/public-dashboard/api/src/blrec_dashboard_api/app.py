@@ -24,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .assets import IdempotencyConflict, apply_asset_batch
 from .dashboard_cache import PostgresDashboardRepository
+from .dashboard_resources import DashboardResourceCache, ResourcePayload
 from .database import database_session, initialize_database, is_postgres
 from .direct import DirectDashboardRepository
 from .models import (
@@ -160,6 +161,18 @@ def _hero_filters(value: str) -> tuple[str, ...]:
     return heroes
 
 
+def _player_ids(value: str) -> tuple[int, ...]:
+    try:
+        result = tuple(
+            sorted({int(item.strip()) for item in value.split(',') if item.strip()})
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail='invalid playerIds') from error
+    if len(result) > 100 or any(player_id <= 0 for player_id in result):
+        raise HTTPException(status_code=422, detail='invalid playerIds')
+    return result
+
+
 def _etag_matches(if_none_match: Optional[str], revision: str) -> bool:
     expected = '"{}"'.format(revision)
     for candidate in (if_none_match or '').split(','):
@@ -207,8 +220,20 @@ def create_app(
         active_repository.refresh(force=True)
     public_dashboard_cache = _DashboardResponseCache()
     owner_dashboard_cache = _DashboardResponseCache()
-    public_dashboard_cache.replace(active_repository.dashboard_payload())
-    owner_dashboard_cache.replace(active_repository.dashboard_payload(owner_view=True))
+    resource_cache = DashboardResourceCache()
+
+    def refresh_response_caches() -> Tuple[Mapping[str, Any], ...]:
+        public = active_repository.dashboard_payload()
+        owner = active_repository.dashboard_payload(owner_view=True)
+        public_dashboard_cache.replace(public)
+        owner_dashboard_cache.replace(owner)
+        try:
+            return resource_cache.replace(public, owner)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            LOGGER.exception('dashboard v2 resource cache build failed')
+            return ()
+
+    refresh_response_caches()
     app = FastAPI(
         title='BLREC Vainglory Dashboard API',
         version='2.0.0',
@@ -238,16 +263,13 @@ def create_app(
                     changed = await run_in_threadpool(active_repository.refresh)
                     if not changed:
                         continue
-                    public_dashboard_cache.replace(
-                        active_repository.dashboard_payload()
-                    )
-                    owner_dashboard_cache.replace(
-                        active_repository.dashboard_payload(owner_view=True)
-                    )
+                    resource_changes = refresh_response_caches()
                     revision = active_repository.dashboard_payload()[1]
                     await realtime_broker.publish('dashboard', {'revision': revision})
                     await realtime_broker.publish('live_rooms', {'revision': revision})
                     await realtime_broker.publish('matches', {'revision': revision})
+                    for change in resource_changes:
+                        await realtime_broker.publish('resource', change)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -358,14 +380,13 @@ def create_app(
                 partial(active_repository.refresh, force=True)
             )
             if changed:
-                public_dashboard_cache.replace(active_repository.dashboard_payload())
-                owner_dashboard_cache.replace(
-                    active_repository.dashboard_payload(owner_view=True)
-                )
+                resource_changes = refresh_response_caches()
                 revision = active_repository.dashboard_payload()[1]
                 await realtime_broker.publish('dashboard', {'revision': revision})
                 await realtime_broker.publish('live_rooms', {'revision': revision})
                 await realtime_broker.publish('matches', {'revision': revision})
+                for change in resource_changes:
+                    await realtime_broker.publish('resource', change)
         return result
 
     @app.post('/v1/replay-visibility/claim')
@@ -464,6 +485,102 @@ def create_app(
         if _etag_matches(if_none_match, revision):
             return Response(status_code=304, headers=headers)
         return Response(content=payload, media_type='application/json', headers=headers)
+
+    def v2_response(
+        resource: ResourcePayload, *, owner_view: bool, if_none_match: Optional[str]
+    ) -> Response:
+        if owner_view:
+            return Response(
+                content=resource.payload,
+                media_type='application/json',
+                headers={'Cache-Control': 'private, no-store', 'Vary': 'Authorization'},
+            )
+        headers = {
+            'Cache-Control': 'public, no-cache',
+            'ETag': '"{}"'.format(resource.revision),
+            'Vary': 'Authorization',
+        }
+        if _etag_matches(if_none_match, resource.revision):
+            return Response(status_code=304, headers=headers)
+        return Response(
+            content=resource.payload, media_type='application/json', headers=headers
+        )
+
+    @app.get('/v2/dashboard/summary')
+    def dashboard_summary_v2(
+        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match'),
+        authorization: Optional[str] = Header(default=None),
+    ) -> Response:
+        owner_view = _owner_view(authorization, active_settings)
+        document = resource_cache.current(owner_view=owner_view)
+        return v2_response(
+            document.summary, owner_view=owner_view, if_none_match=if_none_match
+        )
+
+    @app.get('/v2/standings')
+    def standings_v2(
+        season_id: str = Query(
+            alias='seasonId', regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$'
+        ),
+        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match'),
+        authorization: Optional[str] = Header(default=None),
+    ) -> Response:
+        owner_view = _owner_view(authorization, active_settings)
+        try:
+            resource = resource_cache.current(owner_view=owner_view).standings(
+                season_id
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail='season not found') from error
+        return v2_response(resource, owner_view=owner_view, if_none_match=if_none_match)
+
+    @app.get('/v2/environment')
+    def environment_v2(
+        season_id: str = Query(
+            alias='seasonId', regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$'
+        ),
+        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match'),
+        authorization: Optional[str] = Header(default=None),
+    ) -> Response:
+        owner_view = _owner_view(authorization, active_settings)
+        try:
+            resource = resource_cache.current(owner_view=owner_view).environment(
+                season_id
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail='season not found') from error
+        return v2_response(resource, owner_view=owner_view, if_none_match=if_none_match)
+
+    @app.get('/v2/trends')
+    def trends_v2(
+        season_id: str = Query(
+            alias='seasonId', regex=r'^(all-time|\d{4}-(spring|summer|autumn|winter))$'
+        ),
+        mode: Literal['all', '3v3', 'brawl', '5v5'] = 'all',
+        player_ids: str = Query(default='', alias='playerIds', max_length=1200),
+        from_date: Optional[str] = Query(
+            default=None, alias='from', regex=r'^\d{4}-\d{2}-\d{2}$'
+        ),
+        to_date: Optional[str] = Query(
+            default=None, alias='to', regex=r'^\d{4}-\d{2}-\d{2}$'
+        ),
+        if_none_match: Optional[str] = Header(default=None, alias='If-None-Match'),
+        authorization: Optional[str] = Header(default=None),
+    ) -> Response:
+        owner_view = _owner_view(authorization, active_settings)
+        try:
+            resource = resource_cache.current(owner_view=owner_view).trends(
+                season_id=season_id,
+                mode=mode,
+                player_ids=_player_ids(player_ids),
+                from_date=from_date,
+                to_date=to_date,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail='season not found') from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return v2_response(resource, owner_view=owner_view, if_none_match=if_none_match)
 
     @app.get('/v1/live-rooms')
     def live_rooms(

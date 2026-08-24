@@ -30,6 +30,8 @@ describe('HeroRankingsPageComponent', () => {
           useValue: {
             snapshot: TEST_DASHBOARD_SNAPSHOT,
             revision$: new Subject<string>(),
+            ensureStandings: () => Promise.resolve(false),
+            ensureEnvironment: () => Promise.resolve(false),
           },
         },
         {

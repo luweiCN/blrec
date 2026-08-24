@@ -51,6 +51,9 @@ describe('PlayerDetailPageComponent', () => {
     trends: DashboardTrends;
     revision$: Subject<string>;
     matchRevision$: Subject<void>;
+    ensureAllStandings: () => Promise<boolean>;
+    ensureStandings: () => Promise<boolean>;
+    ensureTrends: () => Promise<boolean>;
   };
 
   beforeEach(async () => {
@@ -59,6 +62,9 @@ describe('PlayerDetailPageComponent', () => {
       trends: TEST_DASHBOARD_TRENDS,
       revision$: new Subject<string>(),
       matchRevision$: new Subject<void>(),
+      ensureAllStandings: () => Promise.resolve(false),
+      ensureStandings: () => Promise.resolve(false),
+      ensureTrends: () => Promise.resolve(false),
     };
     await TestBed.configureTestingModule({
       declarations: [

@@ -254,7 +254,17 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   ): Promise<void> {
     this.beginRealtimeRefresh();
     try {
-      if (update === 'resync' || update === 'dashboard') {
+      if (typeof update === 'object') {
+        const changed = await this.data.refreshResource(update);
+        if (changed && !this.destroyed) {
+          this.changeDetector.markForCheck();
+        }
+        return;
+      }
+      if (
+        update === 'resync' ||
+        (update === 'dashboard' && !this.data.usesV2)
+      ) {
         await this.refreshDashboard();
       }
       if (update === 'resync' || update === 'live_rooms') {

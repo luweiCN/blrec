@@ -3,6 +3,7 @@ import { Subject } from 'rxjs';
 
 import { environment } from '../../environments/environment';
 import { dashboardRequestInit } from './dashboard-owner-access.service';
+import { DashboardResourceRealtimeUpdate } from './dashboard-realtime.service';
 import {
   DashboardMatch,
   DashboardMatchPlayer,
@@ -21,6 +22,7 @@ import {
   isModeFilter,
   isSeasonKey,
   MODE_FILTERS,
+  ModeFilter,
   Performance,
   PlayerStanding,
   RatingForecast,
@@ -28,6 +30,10 @@ import {
   RatingModel,
   SeasonOption,
 } from './public-dashboard.models';
+import type {
+  DashboardV2Client,
+  DashboardV2Data,
+} from './public-dashboard-v2.data';
 
 const MAX_TREND_PUBLICATIONS = 180;
 
@@ -48,6 +54,11 @@ export class DashboardDataService {
   readonly revision$ = this.revisionSubject.asObservable();
   readonly matchRevision$ = this.matchRevisionSubject.asObservable();
   private refreshPromise: Promise<boolean> | null = null;
+  private v2Client: DashboardV2Client | null = null;
+
+  get usesV2(): boolean {
+    return environment.useDashboardV2;
+  }
 
   get snapshot(): DashboardSnapshot {
     if (this.state.kind !== 'ready') {
@@ -72,14 +83,18 @@ export class DashboardDataService {
       if (apiBaseUrl === '') {
         throw new Error('dashboard API is not configured');
       }
-      const document = parseDashboardApiDocument(
-        await fetchJson(`${apiBaseUrl}/dashboard`, 'no-cache'),
-      );
-      this.state = {
-        kind: 'ready',
-        snapshot: document.snapshot,
-        trends: document.trends,
-      };
+      if (this.usesV2) {
+        await this.loadV2(apiBaseUrl);
+      } else {
+        const document = parseDashboardApiDocument(
+          await fetchJson(`${apiBaseUrl}/dashboard`, 'no-cache'),
+        );
+        this.state = {
+          kind: 'ready',
+          snapshot: document.snapshot,
+          trends: document.trends,
+        };
+      }
       this.emitRevisionIfChanged(previousRevision);
     } catch (error: unknown) {
       console.error('Unable to load dashboard data', error);
@@ -104,9 +119,91 @@ export class DashboardDataService {
     this.matchRevisionSubject.next();
   }
 
+  async ensureStandings(seasonId: SeasonOption['key']): Promise<boolean> {
+    const data = this.v2Data();
+    return data === null
+      ? false
+      : this.applyV2(await this.v2Client!.ensureStandings(data, seasonId));
+  }
+
+  async ensureAllStandings(): Promise<boolean> {
+    const data = this.v2Data();
+    return data === null
+      ? false
+      : this.applyV2(await this.v2Client!.ensureAllStandings(data));
+  }
+
+  async ensureEnvironment(seasonId: SeasonOption['key']): Promise<boolean> {
+    const data = this.v2Data();
+    return data === null
+      ? false
+      : this.applyV2(await this.v2Client!.ensureEnvironment(data, seasonId));
+  }
+
+  async ensureAllEnvironments(): Promise<boolean> {
+    const data = this.v2Data();
+    return data === null
+      ? false
+      : this.applyV2(await this.v2Client!.ensureAllEnvironments(data));
+  }
+
+  async ensureTrends(
+    seasonId: SeasonOption['key'],
+    mode: ModeFilter,
+    playerIds: readonly number[],
+  ): Promise<boolean> {
+    const data = this.v2Data();
+    return data === null
+      ? false
+      : this.applyV2(
+          await this.v2Client!.ensureTrends(
+            data,
+            seasonId,
+            mode,
+            playerIds,
+          ),
+        );
+  }
+
+  async refreshResource(
+    update: DashboardResourceRealtimeUpdate,
+  ): Promise<boolean> {
+    const data = this.v2Data();
+    if (data === null) {
+      return false;
+    }
+    try {
+      const changed = this.applyV2(
+        await this.v2Client!.refreshResource(data, update),
+      );
+      if (changed) {
+        this.revisionSubject.next(`resource:${update.resource}:${update.revision}`);
+      }
+      return changed;
+    } catch (error: unknown) {
+      console.warn(`Unable to refresh dashboard ${update.resource}`, error);
+      return false;
+    }
+  }
+
   private async refreshReadyState(): Promise<boolean> {
     if (this.state.kind !== 'ready') {
       return false;
+    }
+    if (this.usesV2) {
+      try {
+        const data = this.v2Data();
+        const changed =
+          data !== null &&
+          this.applyV2(await this.v2Client!.resync(data));
+        if (changed) {
+          this.revisionSubject.next(this.readyRevision() ?? 'v2-resync');
+        }
+        return changed;
+      } catch (error: unknown) {
+        console.warn('Unable to refresh dashboard data', error);
+        return false;
+      }
     }
     const previous = this.state;
     try {
@@ -150,7 +247,30 @@ export class DashboardDataService {
       this.revisionSubject.next(nextRevision);
     }
   }
+
+  private async loadV2(apiBaseUrl: string): Promise<void> {
+    const { DashboardV2Client } = await import('./public-dashboard-v2.data');
+    this.v2Client = new DashboardV2Client(apiBaseUrl);
+    const data = await this.v2Client.load();
+    this.state = { kind: 'ready', ...data };
+  }
+
+  private v2Data(): DashboardV2Data | null {
+    return this.usesV2 && this.v2Client !== null && this.state.kind === 'ready'
+      ? { snapshot: this.state.snapshot, trends: this.state.trends }
+      : null;
+  }
+
+  private applyV2(data: DashboardV2Data | null): boolean {
+    if (data === null) {
+      return false;
+    }
+    this.state = { kind: 'ready', ...data };
+    return true;
+  }
+
 }
+
 
 function parseDashboardApiDocument(value: unknown): {
   readonly snapshot: DashboardSnapshot;

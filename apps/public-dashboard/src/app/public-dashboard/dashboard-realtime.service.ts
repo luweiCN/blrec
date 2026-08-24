@@ -3,14 +3,33 @@ import { Subject } from 'rxjs';
 
 import { environment } from '../../environments/environment';
 
-export type DashboardRealtimeUpdate =
+export type DashboardLegacyRealtimeUpdate =
   | 'resync'
   | 'dashboard'
   | 'live_rooms'
   | 'matches';
 
+export interface DashboardResourceRealtimeUpdate {
+  readonly kind: 'resource';
+  readonly resource: 'summary' | 'standings' | 'trends' | 'environment';
+  readonly revision: string;
+  readonly seasonId?: string;
+  readonly mode?: string;
+}
+
+export type DashboardRealtimeUpdate =
+  | DashboardLegacyRealtimeUpdate
+  | DashboardResourceRealtimeUpdate;
+
+export interface DashboardEventMessage {
+  readonly data: string;
+}
+
 export interface DashboardEventSource {
-  addEventListener(type: string, listener: () => void): void;
+  addEventListener(
+    type: string,
+    listener: (event: DashboardEventMessage) => void,
+  ): void;
   close(): void;
 }
 
@@ -57,6 +76,12 @@ export class DashboardRealtimeService {
         this.updatesSubject.next(update);
       });
     }
+    eventSource.addEventListener('resource', (event) => {
+      const update = parseResourceUpdate(event.data);
+      if (update !== null) {
+        this.updatesSubject.next(update);
+      }
+    });
     this.eventSource = eventSource;
   }
 
@@ -64,4 +89,40 @@ export class DashboardRealtimeService {
     this.eventSource?.close();
     this.eventSource = null;
   }
+}
+
+function parseResourceUpdate(value: string): DashboardResourceRealtimeUpdate | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!isRecord(parsed)) {
+      return null;
+    }
+    const resource = parsed['resource'];
+    const revision = parsed['revision'];
+    if (
+      (resource !== 'summary' &&
+        resource !== 'standings' &&
+        resource !== 'trends' &&
+        resource !== 'environment') ||
+      typeof revision !== 'string' ||
+      revision === ''
+    ) {
+      return null;
+    }
+    const seasonId = parsed['seasonId'];
+    const mode = parsed['mode'];
+    return {
+      kind: 'resource',
+      resource,
+      revision,
+      ...(typeof seasonId === 'string' ? { seasonId } : {}),
+      ...(typeof mode === 'string' ? { mode } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

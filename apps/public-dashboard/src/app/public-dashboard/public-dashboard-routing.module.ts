@@ -73,12 +73,7 @@ const routes: Routes = [
 ];
 
 @NgModule({
-  imports: [
-    RouterModule.forRoot(routes, {
-      anchorScrolling: 'enabled',
-      scrollPositionRestoration: 'enabled',
-    }),
-  ],
+  imports: [RouterModule.forChild(routes)],
   exports: [RouterModule],
 })
 export class PublicDashboardRoutingModule {}

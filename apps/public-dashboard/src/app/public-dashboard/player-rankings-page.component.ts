@@ -56,7 +56,7 @@ export class PlayerRankingsPageComponent implements OnDestroy {
   constructor(
     private readonly data: DashboardDataService,
     dashboardMode: DashboardModeService,
-    changeDetector: ChangeDetectorRef,
+    private readonly changeDetector: ChangeDetectorRef,
   ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
     this.activeMode = dashboardMode.mode;
@@ -66,12 +66,15 @@ export class PlayerRankingsPageComponent implements OnDestroy {
       }
       this.activeMode = mode;
       this.currentPage = 1;
-      changeDetector.markForCheck();
+      void this.loadTrends();
+      this.changeDetector.markForCheck();
     });
     this.revisionSubscription = data.revision$.subscribe(() => {
       this.clampPage();
-      changeDetector.markForCheck();
+      void this.loadTrends();
+      this.changeDetector.markForCheck();
     });
+    void this.loadTrends();
   }
 
   ngOnDestroy(): void {
@@ -164,6 +167,7 @@ export class PlayerRankingsPageComponent implements OnDestroy {
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
     this.currentPage = 1;
+    void this.loadSeason();
   }
 
   selectSort(sort: PlayerRankingSort): void {
@@ -230,5 +234,24 @@ export class PlayerRankingsPageComponent implements OnDestroy {
 
   private clampPage(): void {
     this.currentPage = Math.min(this.currentPage, this.totalPages);
+  }
+
+  private async loadSeason(): Promise<void> {
+    await this.data.ensureStandings(this.activeSeason);
+    await this.loadTrends();
+    this.changeDetector.markForCheck();
+  }
+
+  private async loadTrends(): Promise<void> {
+    const playerIds = this.visibleRows.map((row) => row.player.id);
+    if (
+      await this.data.ensureTrends(
+        this.activeSeason,
+        this.activeMode,
+        playerIds,
+      )
+    ) {
+      this.changeDetector.markForCheck();
+    }
   }
 }

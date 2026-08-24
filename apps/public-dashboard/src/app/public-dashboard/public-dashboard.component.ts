@@ -90,13 +90,16 @@ export class PublicDashboardComponent implements OnDestroy {
       }
       this.activeMode = mode;
       void this.loadRecentMatches();
+      void this.loadTrends();
       this.changeDetector.markForCheck();
     });
     this.revisionSubscription = data.revision$.subscribe(() => {
       void this.loadRecentMatches();
+      void this.loadTrends();
       this.changeDetector.markForCheck();
     });
     void this.loadRecentMatches();
+    void this.loadTrends();
   }
 
   ngOnDestroy(): void {
@@ -327,5 +330,18 @@ export class PublicDashboardComponent implements OnDestroy {
     }
     this.apiRecentMatches = page?.items ?? null;
     this.changeDetector.markForCheck();
+  }
+
+  private async loadTrends(): Promise<void> {
+    const playerIds = this.overviewRankings.map((player) => player.id);
+    if (
+      await this.data.ensureTrends(
+        this.activeSeason,
+        this.activeMode,
+        playerIds,
+      )
+    ) {
+      this.changeDetector.markForCheck();
+    }
   }
 }

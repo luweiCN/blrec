@@ -59,6 +59,8 @@ describe('PlayerRankingsPageComponent', () => {
             snapshot: TEST_DASHBOARD_SNAPSHOT,
             trends: TEST_DASHBOARD_TRENDS,
             revision$: new Subject<string>(),
+            ensureStandings: () => Promise.resolve(false),
+            ensureTrends: () => Promise.resolve(false),
           },
         },
         {
