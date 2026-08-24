@@ -4786,21 +4786,6 @@ class VaingloryVideoAnalyzer:
             return abstain('avatars_not_all_visible')
         if result_action_min_contrast(frame, layout) < 60:
             return abstain('panel_low_contrast')
-        if any(
-            not (player.name or player.raw_name)
-            or player.confidence < 0.55
-            or any(
-                value is None
-                for value in (
-                    player.stats.kills,
-                    player.stats.deaths,
-                    player.stats.assists,
-                    player.stats.economy,
-                )
-            )
-            for player in recognized.players
-        ):
-            return abstain('ocr_low_quality')
         contexts = extract_result_afk_contexts(frame, slots)
         try:
             predictions = tuple(

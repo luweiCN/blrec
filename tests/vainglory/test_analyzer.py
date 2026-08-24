@@ -1977,6 +1977,55 @@ def test_afk_classifier_batches_every_result_slot_after_quality_gate(
     assert all(not status.gate_reason for status in statuses)
 
 
+def test_afk_classifier_does_not_treat_incomplete_ocr_as_visual_occlusion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
+    recognized = _complete_afk_result()
+    recognized = replace(
+        recognized,
+        players=tuple(
+            replace(
+                player,
+                name='',
+                raw_name='',
+                confidence=0.1,
+                stats=PlayerStats(None, None, None, None),
+            )
+            for player in recognized.players
+        ),
+    )
+
+    class Classifier:
+        model_version = 'afk-run-1'
+
+        def predict_many(self, frames):
+            return tuple(
+                SimpleNamespace(
+                    label='active',
+                    confidence=0.9,
+                    scores=(('active', 0.9), ('afk', 0.1)),
+                )
+                for _frame in frames
+            )
+
+    analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
+    monkeypatch.setattr(
+        analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
+    )
+    monkeypatch.setattr(
+        analyzer_module, 'result_action_min_contrast', lambda *_args: 100
+    )
+
+    statuses = analyzer._classify_afk_statuses(
+        frame, hit(0).layout, recognized
+    )
+
+    assert len(statuses) == 6
+    assert {status.status for status in statuses} == {'active'}
+    assert all(not status.gate_reason for status in statuses)
+
+
 @pytest.mark.parametrize(
     ('visible_portraits', 'action_contrast', 'reason'),
     ((5, 100, 'avatars_not_all_visible'), (6, 36, 'panel_low_contrast')),
