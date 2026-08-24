@@ -123,10 +123,10 @@ class TestTrainingRuns(unittest.TestCase):
         self.assertNotIn('input', metadata)
         self.assertEqual(metadata['preprocessing']['resize'], 'letterbox')
 
-    def test_afk_onnx_export_supports_dynamic_slot_batch(self):
+    def test_afk_onnx_export_uses_fixed_ten_slot_batch(self):
         self.assertEqual(
             training_runner._onnx_export_options('afk_status', [224, 224]),
-            {'format': 'onnx', 'imgsz': [224, 224], 'dynamic': True},
+            {'format': 'onnx', 'imgsz': [224, 224], 'batch': 10},
         )
         self.assertEqual(
             training_runner._onnx_export_options('match_flow', [288, 512]),

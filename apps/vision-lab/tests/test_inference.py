@@ -219,6 +219,44 @@ class TestClassificationPreprocessing(unittest.TestCase):
             [item['top1']['class'] for item in results], ['active', 'afk', 'active']
         )
 
+    def test_artifact_batch_pads_fixed_ten_batch_and_discards_padding(self):
+        class Input:
+            name = 'images'
+            shape = [10, 3, 224, 224]
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            @staticmethod
+            def get_inputs():
+                return [Input()]
+
+            def run(self, _outputs, inputs):
+                self.calls.append(inputs['images'].shape)
+                return [
+                    np.asarray(
+                        [[0.9, 0.1], [0.2, 0.8]] + [[0.9, 0.1]] * 8, dtype=np.float32
+                    )
+                ]
+
+        session = Session()
+        images = [Image.new('RGB', (320, 80), 'white') for _ in range(2)]
+        with mock.patch.object(inference, '_load_session_path', return_value=session):
+            results = inference.run_artifact_batch(
+                Path('/tmp/afk-static-ten.onnx'),
+                {
+                    'task_id': 'afk_status',
+                    'kind': 'classify',
+                    'imgsz': 224,
+                    'classes': {'0': 'active', '1': 'afk'},
+                },
+                images,
+            )
+
+        self.assertEqual(session.calls, [(10, 3, 224, 224)])
+        self.assertEqual([item['top1']['class'] for item in results], ['active', 'afk'])
+
 
 class TestDetectParse(unittest.TestCase):
     def test_parse_detection_output(self):

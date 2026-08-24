@@ -45,7 +45,11 @@ def _artifact_input_metadata(
 def _onnx_export_options(task_id: str, export_size: Any) -> Dict[str, Any]:
     options: Dict[str, Any] = {'format': 'onnx', 'imgsz': export_size}
     if task_id == 'afk_status':
-        options['dynamic'] = True
+        # Ultralytics 8.4 的分类模型在 dynamic=True 时会把空间维度也改为
+        # 动态，AdaptiveAvgPool 导出的图在 ONNX Runtime 中会退化为近似
+        # 常量输出。结算页最多十个槽位，固定 batch=10 既能一次推理全部
+        # 头像，又能保持导出结果与 PyTorch 验证一致。
+        options['batch'] = 10
     return options
 
 

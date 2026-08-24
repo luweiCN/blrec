@@ -46,12 +46,7 @@ STAGE_LABELS = {
     'post_match': '赛后(结算/胜负动画)',
 }
 MODE_LABELS = {'3v3': '3v3', 'aram': '大乱斗', '5v5': '5v5'}
-RESULT_MODE_LABELS = {
-    '3v3': '3V3',
-    'aram': '大乱斗',
-    '5v5': '5V5',
-    'blitz': '闪电战',
-}
+RESULT_MODE_LABELS = {'3v3': '3V3', 'aram': '大乱斗', '5v5': '5V5', 'blitz': '闪电战'}
 CONTENT_LABELS = {'vainglory': '虚荣', 'not_vainglory': '非虚荣'}
 BP_CLASSES = ['bp_3v3', 'bp_5v5', 'bp_aram', 'not_bp']
 BP_LABELS = {
@@ -441,7 +436,16 @@ def _run_classify_session(
         resize=str(preprocessing_values.get('resize') or 'shortest_edge_center_crop'),
         pad_value=int(114 if recorded_pad_value is None else recorded_pad_value),
     )
-    logits = sess.run(None, {sess.get_inputs()[0].name: x})[0][0]
+    input_info = sess.get_inputs()[0]
+    input_shape = getattr(input_info, 'shape', None)
+    fixed_batch = (
+        int(input_shape[0])
+        if input_shape and isinstance(input_shape[0], int) and int(input_shape[0]) > 0
+        else 1
+    )
+    if fixed_batch > 1:
+        x = np.repeat(x, fixed_batch, axis=0)
+    logits = sess.run(None, {input_info.name: x})[0][0]
     probs = _finalize_probs(logits)
     order = probs.argsort()[::-1]
     scores = [
@@ -508,14 +512,24 @@ def run_artifact_batch(
     ]
     input_info = session.get_inputs()[0]
     input_shape = getattr(input_info, 'shape', None)
-    fixed_single_batch = bool(
-        input_shape and isinstance(input_shape[0], int) and int(input_shape[0]) == 1
+    fixed_batch = (
+        int(input_shape[0])
+        if input_shape and isinstance(input_shape[0], int) and int(input_shape[0]) > 0
+        else None
     )
-    if fixed_single_batch and len(tensors) > 1:
+    if fixed_batch == 1 and len(tensors) > 1:
         raw_batch = np.concatenate(
             [session.run(None, {input_info.name: tensor})[0] for tensor in tensors],
             axis=0,
         )
+    elif fixed_batch is not None and fixed_batch > 1:
+        if len(tensors) > fixed_batch:
+            raise ValueError(
+                f'分类模型固定批次为 {fixed_batch}，输入裁剪为 {len(tensors)}'
+            )
+        padded = tensors + [tensors[-1]] * (fixed_batch - len(tensors))
+        batch = np.concatenate(padded, axis=0)
+        raw_batch = session.run(None, {input_info.name: batch})[0][: len(tensors)]
     else:
         batch = np.concatenate(tensors, axis=0)
         raw_batch = session.run(None, {input_info.name: batch})[0]
