@@ -806,7 +806,13 @@ def result_avatar_slots(
 def visible_result_portrait_count(
     frame: RgbFrame, slots: Sequence[ResultAvatarSlot]
 ) -> int:
-    return sum(_looks_like_portrait(frame.crop(slot.rect)) for slot in slots)
+    return sum(result_portrait_visibility(frame, slots))
+
+
+def result_portrait_visibility(
+    frame: RgbFrame, slots: Sequence[ResultAvatarSlot]
+) -> Tuple[bool, ...]:
+    return tuple(_looks_like_portrait(frame.crop(slot.rect)) for slot in slots)
 
 
 def extract_result_afk_contexts(

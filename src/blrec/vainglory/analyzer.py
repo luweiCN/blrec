@@ -87,8 +87,8 @@ from .vision import (
     png_bytes,
     result_avatar_slots,
     result_frame_quality,
+    result_portrait_visibility,
     select_gameplay_hud_centers,
-    visible_result_portrait_count,
 )
 
 
@@ -4832,10 +4832,9 @@ class VaingloryVideoAnalyzer:
             return abstain('slots_incomplete')
         if layout.confidence < 0.8:
             return abstain('layout_low_confidence')
-        if visible_result_portrait_count(frame, slots) < expected:
-            return abstain('avatars_not_all_visible')
         if result_frame_quality(frame, layout) < 1.3:
             return abstain('panel_low_quality')
+        portrait_visibility = result_portrait_visibility(frame, slots)
         contexts = extract_result_afk_contexts(frame, slots)
         try:
             predictions = tuple(
@@ -4851,7 +4850,9 @@ class VaingloryVideoAnalyzer:
         if len(predictions) != expected:
             return abstain('model_output_incomplete')
         statuses = []
-        for slot, prediction in zip(slots, predictions):
+        for slot, prediction, portrait_visible in zip(
+            slots, predictions, portrait_visibility
+        ):
             scores = dict(prediction.scores)
             probability = scores.get('afk')
             label = str(prediction.label)
@@ -4872,6 +4873,9 @@ class VaingloryVideoAnalyzer:
                 resolved_status = 'afk'
             else:
                 resolved_status = 'active'
+            if not portrait_visible and resolved_status != 'afk':
+                accepted = False
+                gate_reason = 'avatar_not_visible'
             statuses.append(
                 AnalyzedAfkStatus(
                     side=slot.side,

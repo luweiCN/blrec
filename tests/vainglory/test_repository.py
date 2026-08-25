@@ -1097,7 +1097,7 @@ async def test_afk_predictions_persist_with_revision_and_separate_manual_overrid
 
 @pytest.mark.asyncio
 async def test_afk_backfill_claim_is_durable_and_preserves_manual_override(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
@@ -1164,6 +1164,13 @@ async def test_afk_backfill_claim_is_durable_and_preserves_manual_override(
             == 'completed'
         )
         assert await repository.claim_next_afk_status_backfill() is None
+
+        previous_version = repository.AFK_STATUS_DETECTION_VERSION
+        monkeypatch.setattr(
+            VaingloryRepository, 'AFK_STATUS_DETECTION_VERSION', previous_version + 1
+        )
+        replacement = await repository.claim_next_afk_status_backfill()
+        assert replacement is not None and replacement.match_id == stored.id
     finally:
         await database.close()
 

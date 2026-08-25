@@ -2079,7 +2079,7 @@ def test_afk_classifier_batches_every_result_slot_after_quality_gate(
     classifier = Classifier()
     analyzer = VaingloryVideoAnalyzer(afk_status_classifier=classifier)
     monkeypatch.setattr(
-        analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
+        analyzer_module, 'result_portrait_visibility', lambda *_args: (True,) * 6
     )
     monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
 
@@ -2093,6 +2093,84 @@ def test_afk_classifier_batches_every_result_slot_after_quality_gate(
     assert statuses[1].probability == pytest.approx(0.9)
     assert {status.model_version for status in statuses} == {'afk-run-1'}
     assert all(not status.gate_reason for status in statuses)
+
+
+def test_afk_classifier_allows_invisible_high_confidence_afk_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
+
+    class Classifier:
+        model_version = 'afk-run-1'
+
+        def predict_many(self, frames):
+            return tuple(
+                SimpleNamespace(
+                    label='afk' if index == 1 else 'active',
+                    confidence=0.99,
+                    scores=(
+                        (('active', 0.01), ('afk', 0.99))
+                        if index == 1
+                        else (('active', 0.99), ('afk', 0.01))
+                    ),
+                )
+                for index, _frame in enumerate(frames)
+            )
+
+    analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
+    monkeypatch.setattr(
+        analyzer_module,
+        'result_portrait_visibility',
+        lambda *_args: (True, False, True, True, True, True),
+    )
+    monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
+
+    statuses = analyzer._classify_afk_statuses(
+        frame, hit(0).layout, _complete_afk_result()
+    )
+
+    assert statuses[1].status == 'afk'
+    assert statuses[1].probability == pytest.approx(0.99)
+    assert all(
+        status.status == 'active' for index, status in enumerate(statuses) if index != 1
+    )
+
+
+def test_afk_classifier_only_abstains_for_invisible_active_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
+
+    class Classifier:
+        model_version = 'afk-run-1'
+
+        def predict_many(self, frames):
+            return tuple(
+                SimpleNamespace(
+                    label='active',
+                    confidence=0.99,
+                    scores=(('active', 0.99), ('afk', 0.01)),
+                )
+                for _frame in frames
+            )
+
+    analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
+    monkeypatch.setattr(
+        analyzer_module,
+        'result_portrait_visibility',
+        lambda *_args: (True, False, True, True, True, True),
+    )
+    monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
+
+    statuses = analyzer._classify_afk_statuses(
+        frame, hit(0).layout, _complete_afk_result()
+    )
+
+    assert statuses[1].status == 'unknown'
+    assert statuses[1].gate_reason == 'avatar_not_visible'
+    assert all(
+        status.status == 'active' for index, status in enumerate(statuses) if index != 1
+    )
 
 
 def test_result_layout_hint_breaks_equal_confidence_tie() -> None:
@@ -2144,7 +2222,7 @@ def test_afk_classifier_does_not_treat_incomplete_ocr_as_visual_occlusion(
 
     analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
     monkeypatch.setattr(
-        analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
+        analyzer_module, 'result_portrait_visibility', lambda *_args: (True,) * 6
     )
     monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
 
@@ -2155,19 +2233,8 @@ def test_afk_classifier_does_not_treat_incomplete_ocr_as_visual_occlusion(
     assert all(not status.gate_reason for status in statuses)
 
 
-@pytest.mark.parametrize(
-    ('visible_portraits', 'frame_quality', 'reason'),
-    (
-        (4, 1.5, 'avatars_not_all_visible'),
-        (5, 1.5, 'avatars_not_all_visible'),
-        (6, 1.1, 'panel_low_quality'),
-    ),
-)
 def test_afk_classifier_abstains_on_low_quality_result(
     monkeypatch: pytest.MonkeyPatch,
-    visible_portraits: int,
-    frame_quality: float,
-    reason: str,
 ) -> None:
     frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
 
@@ -2179,13 +2246,9 @@ def test_afk_classifier_abstains_on_low_quality_result(
 
     analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
     monkeypatch.setattr(
-        analyzer_module,
-        'visible_result_portrait_count',
-        lambda *_args: visible_portraits,
+        analyzer_module, 'result_portrait_visibility', lambda *_args: (True,) * 6
     )
-    monkeypatch.setattr(
-        analyzer_module, 'result_frame_quality', lambda *_args: frame_quality
-    )
+    monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.1)
 
     statuses = analyzer._classify_afk_statuses(
         frame, hit(0).layout, _complete_afk_result()
@@ -2193,7 +2256,7 @@ def test_afk_classifier_abstains_on_low_quality_result(
 
     assert len(statuses) == 6
     assert {status.status for status in statuses} == {'unknown'}
-    assert {status.gate_reason for status in statuses} == {reason}
+    assert {status.gate_reason for status in statuses} == {'panel_low_quality'}
     assert all(status.probability is None for status in statuses)
 
 
@@ -2221,7 +2284,7 @@ def test_afk_classifier_keeps_low_positive_probability_for_manual_review(
 
     analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
     monkeypatch.setattr(
-        analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
+        analyzer_module, 'result_portrait_visibility', lambda *_args: (True,) * 6
     )
     monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
 
@@ -2261,7 +2324,7 @@ def test_afk_classifier_abstains_when_active_prediction_is_not_decisive(
 
     analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
     monkeypatch.setattr(
-        analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
+        analyzer_module, 'result_portrait_visibility', lambda *_args: (True,) * 6
     )
     monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
 
@@ -2287,7 +2350,7 @@ def test_afk_classifier_error_abstains_instead_of_marking_players_active(
 
     analyzer = VaingloryVideoAnalyzer(afk_status_classifier=Classifier())
     monkeypatch.setattr(
-        analyzer_module, 'visible_result_portrait_count', lambda *_args: 6
+        analyzer_module, 'result_portrait_visibility', lambda *_args: (True,) * 6
     )
     monkeypatch.setattr(analyzer_module, 'result_frame_quality', lambda *_args: 1.5)
 
