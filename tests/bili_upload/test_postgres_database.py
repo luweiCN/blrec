@@ -267,7 +267,7 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
 
         assert migrate_postgres_schema(
             schema_url, expected_database=database_name, expected_schema=schema
-        ) == (77, 78, 79, 80, 81)
+        ) == (77, 78, 79, 80, 81, 82)
 
         with psycopg.connect(schema_url, autocommit=True) as connection:
             assert connection.execute(
@@ -295,7 +295,7 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
             ).fetchall() == [('owner', None), ('owner', None)]
             assert connection.execute(
                 'SELECT MAX(version) FROM schema_migrations'
-            ).fetchone() == (81,)
+            ).fetchone() == (82,)
             columns = {
                 row[0]
                 for row in connection.execute(
@@ -344,7 +344,7 @@ async def test_postgres_backend_migrates_schema_and_preserves_writes(
         expected_schema='core',
         backup_directory=tmp_path / 'backups',
     )
-    assert len(copied) == 70
+    assert len(copied) == 71
     with psycopg.connect(core_database_url, autocommit=True) as connection:
         connection.execute(POSTGRES_COMPATIBILITY_SQL)
 
