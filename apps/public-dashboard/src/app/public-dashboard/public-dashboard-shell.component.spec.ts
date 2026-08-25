@@ -132,6 +132,11 @@ describe('PublicDashboardShellComponent', () => {
     expect(dialog?.textContent).toContain(
       '十段单局涨跌改为随当前分数变化',
     );
+    expect(dialog?.textContent).toContain(
+      '挂机对局开始按实际参战人数修正排位分',
+    );
+    expect(dialog?.textContent).toContain('少人一方输掉对局不扣排位分');
+    expect(dialog?.textContent).toContain('挂机本人无论胜负都会受到额外扣分');
     expect(dialog?.textContent).toContain('十段铜胜一局');
     expect(dialog?.textContent).toContain('失败通常扣 6～12 分');
     expect(dialog?.textContent).toContain('隐藏实力不再参与单局加减');

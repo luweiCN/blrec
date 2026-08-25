@@ -362,9 +362,8 @@ def _advance_rating_with_afk_adjustment(
         return rating
     if adjustment.kind == 'self_afk':
         normal = _advance_rating(rating, 'L')
-        normal_display_delta = (
-            round(normal.score * _DISPLAY_SCORE_MULTIPLIER)
-            - round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
+        normal_display_delta = round(normal.score * _DISPLAY_SCORE_MULTIPLIER) - round(
+            rating.score * _DISPLAY_SCORE_MULTIPLIER
         )
         adjusted_display_delta = -_round_display_adjustment(
             abs(normal_display_delta) * 1.8
@@ -373,16 +372,13 @@ def _advance_rating_with_afk_adjustment(
         if result != 'W':
             raise ValueError('undermanned win adjustment requires a win')
         normal = _advance_rating(rating, result)
-        normal_display_delta = (
-            round(normal.score * _DISPLAY_SCORE_MULTIPLIER)
-            - round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
+        normal_display_delta = round(normal.score * _DISPLAY_SCORE_MULTIPLIER) - round(
+            rating.score * _DISPLAY_SCORE_MULTIPLIER
         )
         if normal_display_delta <= 0:
             adjusted_display_delta = 0
         else:
-            factor = 1.0 + adjustment.net_player_deficit / (
-                adjustment.team_size - 1
-            )
+            factor = 1.0 + adjustment.net_player_deficit / (adjustment.team_size - 1)
             adjusted_display_delta = max(
                 _round_display_adjustment(normal_display_delta * factor),
                 normal_display_delta + adjustment.net_player_deficit,

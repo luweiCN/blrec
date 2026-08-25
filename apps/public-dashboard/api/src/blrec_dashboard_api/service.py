@@ -816,6 +816,13 @@ def apply_ingest_batch(
             _rebuild_match_search(connection, changed_match_ids)
         if batch.publish and active_revision == 0:
             rating_player_ids.update(current_player_ids)
+        if rating_player_ids and (batch.publish or active_revision > 0):
+            rating_player_ids = {
+                int(row['player_id'])
+                for row in connection.execute(
+                    'SELECT DISTINCT player_id FROM matches'
+                ).fetchall()
+            }
         rating_event_count = (
             _recompute_ratings(connection, rating_player_ids)
             if rating_player_ids and (batch.publish or active_revision > 0)

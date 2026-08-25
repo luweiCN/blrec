@@ -568,6 +568,41 @@ def test_ingest_recomputes_rating_when_afk_status_changes(tmp_path: Path) -> Non
     assert int(ordinary['model_version']) == 8
 
 
+def test_ingest_recomputes_all_players_when_one_match_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database_path = tmp_path / 'dashboard.sqlite3'
+    initialize_database(database_path)
+    first = cache_batch(source_revision=7)
+    second_player = dict(first['players'][0])
+    second_player.update({'id': 8, 'name': '另一位主播'})
+    second_match = json.loads(json.dumps(first['matches'][0]))
+    second_match.update({'id': 2, 'playerId': 8})
+    first['players'].append(second_player)
+    first['matches'].append(second_match)
+    first['sourceLastMatchId'] = 2
+    apply_ingest_batch(
+        database_path, idempotency_key='cache-7', batch=IngestBatch.parse_obj(first)
+    )
+
+    recomputed: list[set[int]] = []
+
+    def record_recomputed_players(_connection: Any, player_ids: Iterable[int]) -> int:
+        recomputed.append(set(player_ids))
+        return 0
+
+    monkeypatch.setattr(service_module, '_recompute_ratings', record_recomputed_players)
+    second = cache_batch(source_revision=8)
+    second['players'].append(second_player)
+    second['matches'][0]['result'] = 'L'
+
+    apply_ingest_batch(
+        database_path, idempotency_key='cache-8', batch=IngestBatch.parse_obj(second)
+    )
+
+    assert recomputed == [{7, 8}]
+
+
 def test_incremental_search_rebuild_uses_bounded_database_round_trips(
     tmp_path: Path,
 ) -> None:
