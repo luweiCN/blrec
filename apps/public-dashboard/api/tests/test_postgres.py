@@ -361,7 +361,7 @@ def test_postgres_backend_applies_and_reads_incremental_cache() -> None:
     assert updated['status'] == 'applied'
     assert repository.dashboard_payload()[1] == '22'
     assert listed['total'] == 1
-    assert listed['items'][0]['rating']['modelVersion'] == 7
+    assert listed['items'][0]['rating']['modelVersion'] == 8
 
 
 @pytest.mark.skipif(
