@@ -612,6 +612,7 @@ class RecordedPlayerBackfillClaim:
 @dataclass(frozen=True)
 class AfkStatusBackfillClaim:
     match_id: int
+    team_size: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -6358,7 +6359,8 @@ class VaingloryRepository:
                 ),
             )
             row = connection.execute(
-                'SELECT job.match_id FROM vainglory_afk_backfill_jobs job '
+                'SELECT job.match_id,match.team_size '
+                'FROM vainglory_afk_backfill_jobs job '
                 'JOIN vainglory_matches match ON match.id=job.match_id '
                 "WHERE job.state='pending' AND job.detection_version=? "
                 'AND match.afk_detection_version<? '
@@ -6377,7 +6379,10 @@ class VaingloryRepository:
             )
             if changed.rowcount != 1:
                 return None
-            return AfkStatusBackfillClaim(match_id=match_id)
+            return AfkStatusBackfillClaim(
+                match_id=match_id,
+                team_size=(None if row['team_size'] is None else int(row['team_size'])),
+            )
 
         return await self._database.write(claim)
 

@@ -46,6 +46,7 @@ from blrec.vainglory.repository import (
     ZeroMatchSessionPage,
     ZeroMatchSessionRecord,
 )
+from blrec.vainglory.service import RemoteAnalysisClaim
 from blrec.web.routers import vainglory
 
 
@@ -1459,6 +1460,38 @@ def test_worker_reads_desired_concurrency() -> None:
         pipeline_version='timeline-v2',
         concurrency=2,
     )
+
+
+def test_worker_afk_claim_includes_expected_team_size() -> None:
+    service = SimpleNamespace()
+    service.claim_remote_work = AsyncMock(
+        return_value=RemoteAnalysisClaim(
+            kind='afk_status_backfill',
+            item_id=7,
+            frame_png=b'result-frame',
+            team_size=5,
+        )
+    )
+    application = FastAPI()
+    application.include_router(vainglory.router, prefix='/api/v1')
+    application.dependency_overrides[
+        vainglory.security.authenticated_analysis_worker
+    ] = lambda: 'analysis-worker'
+    application.dependency_overrides[vainglory.get_service] = lambda: service
+
+    with TestClient(application) as client:
+        response = client.post(
+            '/api/v1/vainglory/worker/claim',
+            json={
+                'workerId': 'mac-studio',
+                'modelPackageId': 'vg-vision-v3',
+                'pipelineVersion': 'timeline-v2',
+                'concurrency': 1,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()['teamSize'] == 5
 
 
 def test_worker_completion_forwards_efficiency_metrics() -> None:

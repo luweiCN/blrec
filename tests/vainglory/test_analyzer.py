@@ -2095,6 +2095,21 @@ def test_afk_classifier_batches_every_result_slot_after_quality_gate(
     assert all(not status.gate_reason for status in statuses)
 
 
+def test_result_layout_hint_breaks_equal_confidence_tie() -> None:
+    analyzer = VaingloryVideoAnalyzer()
+    frame = RgbFrame(320, 180, b'\x00\x00\x00' * 320 * 180)
+    three_player = hit(0).layout
+    five_player = replace(three_player, team_size=5)
+    analyzer._detect_result_layouts = lambda _frame: (  # type: ignore[method-assign]
+        three_player,
+        five_player,
+    )
+
+    layout = analyzer._detect_result_layout(frame, expected_team_size=5)
+
+    assert layout is five_player
+
+
 def test_afk_classifier_does_not_treat_incomplete_ocr_as_visual_occlusion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

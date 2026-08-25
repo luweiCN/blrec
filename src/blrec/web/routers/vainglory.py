@@ -1306,6 +1306,7 @@ async def claim_analysis_work(
         'partDurationSeconds': claim.part_duration_seconds,
         'recordingDurationSeconds': claim.recording_duration_seconds,
         'anchorName': claim.anchor_name,
+        'teamSize': claim.team_size,
     }
     if claim.part is not None:
         payload['part'] = {

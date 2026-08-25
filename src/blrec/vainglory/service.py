@@ -80,6 +80,7 @@ class RemoteAnalysisClaim:
     result_at_ms: Optional[int] = None
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
     frame_png: bytes = b''
+    team_size: Optional[int] = None
     part_duration_seconds: Optional[int] = None
     recording_duration_seconds: Optional[int] = None
     anchor_name: str = ''
@@ -765,6 +766,7 @@ class VaingloryIndexService:
                             kind='afk_status_backfill',
                             item_id=afk_status.match_id,
                             frame_png=path.read_bytes(),
+                            team_size=afk_status.team_size,
                         ),
                         worker_id,
                         deadline,

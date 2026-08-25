@@ -5812,10 +5812,12 @@ class VaingloryVideoAnalyzer:
         return detected or detect_recorded_player(frame, layout)
 
     def classify_saved_afk_statuses(
-        self, content: bytes
+        self, content: bytes, *, expected_team_size: Optional[TeamSize] = None
     ) -> Tuple[AnalyzedAfkStatus, ...]:
         frame = self._sampler.decode_image(content)
-        layout = self._detect_result_layout(frame)
+        layout = self._detect_result_layout(
+            frame, expected_team_size=expected_team_size
+        )
         if layout is None:
             raise ValueError('保存的图片不是可识别的结算画面')
         return self._classify_afk_statuses(frame, layout)
@@ -5997,8 +5999,14 @@ class VaingloryVideoAnalyzer:
             return tuple(previous)
         return tuple(left or right for left, right in zip(previous, current))
 
-    def _detect_result_layout(self, frame: RgbFrame) -> Optional[ResultLayout]:
+    def _detect_result_layout(
+        self, frame: RgbFrame, *, expected_team_size: Optional[TeamSize] = None
+    ) -> Optional[ResultLayout]:
         layouts = self._detect_result_layouts(frame)
+        if expected_team_size is not None:
+            layouts = tuple(
+                layout for layout in layouts if layout.team_size == expected_team_size
+            )
         if not layouts:
             return None
         return max(layouts, key=lambda layout: layout.confidence)

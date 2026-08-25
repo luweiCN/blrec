@@ -1118,6 +1118,7 @@ async def test_afk_backfill_claim_is_durable_and_preserves_manual_override(
         claim = await repository.claim_next_afk_status_backfill()
 
         assert claim is not None and claim.match_id == stored.id
+        assert claim.team_size == 3
         assert await repository.claim_next_afk_status_backfill() is None
         statuses = tuple(
             AnalyzedAfkStatus(

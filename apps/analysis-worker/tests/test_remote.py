@@ -33,6 +33,7 @@ class Analyzer:
         self.block = block
         self.completed = 0
         self.max_active = 0
+        self.afk_team_sizes: List[Optional[int]] = []
         self._active = 0
         self._lock = threading.Lock()
 
@@ -78,8 +79,11 @@ class Analyzer:
     ) -> tuple:
         return ()
 
-    def classify_saved_afk_statuses(self, content: bytes) -> tuple:
+    def classify_saved_afk_statuses(
+        self, content: bytes, *, expected_team_size: Optional[int] = None
+    ) -> tuple:
         assert content == b'result-frame'
+        self.afk_team_sizes.append(expected_team_size)
         return tuple(
             AnalyzedAfkStatus(
                 side=side,
@@ -434,6 +438,7 @@ def test_worker_processes_afk_status_backfill_without_downloading_video(
             {
                 'kind': 'afk_status_backfill',
                 'itemId': 7,
+                'teamSize': 5,
                 'framePng': base64.b64encode(b'result-frame').decode('ascii'),
             }
         ]
@@ -448,6 +453,7 @@ def test_worker_processes_afk_status_backfill_without_downloading_video(
     payload = clients[0].completed_payloads[0]
     assert payload['kind'] == 'afk_status_backfill'
     assert payload['itemId'] == 7
+    assert worker._analyzer.afk_team_sizes == [5]
     assert payload['afkStatuses'][4] == {
         'side': 'right',
         'slot': 2,

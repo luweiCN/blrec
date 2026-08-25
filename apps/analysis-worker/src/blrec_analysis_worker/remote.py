@@ -39,6 +39,7 @@ from blrec.vainglory.analyzer import (
     VideoPart,
 )
 from blrec.vainglory.sampling import UnusableVideoError
+from blrec.vainglory.vision import TeamSize
 
 
 def _analysis_summary(dense: DenseScanResult) -> Dict[str, Any]:
@@ -732,7 +733,13 @@ class RemoteAnalysisWorker:
             }
         if kind == 'afk_status_backfill':
             content = base64.b64decode(str(claim['framePng']), validate=True)
-            statuses = self._analyzer.classify_saved_afk_statuses(content)
+            team_size_value = int(claim.get('teamSize') or 0)
+            expected_team_size = (
+                cast(TeamSize, team_size_value) if team_size_value in (3, 5) else None
+            )
+            statuses = self._analyzer.classify_saved_afk_statuses(
+                content, expected_team_size=expected_team_size
+            )
             logger.info(
                 'Vainglory 小任务耗时明细：kind={} item_id={} total={:.3f}s',
                 kind,
