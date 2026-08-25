@@ -226,6 +226,7 @@ def test_rating_timeline_replays_an_inserted_historical_result() -> None:
             2,
         ),
         ('W', 'active', ('afk', 'active'), ('afk', 'active', 'active'), 'none', 0),
+        ('L', 'active', ('afk', 'active'), ('afk', 'active', 'active'), 'none', 0),
         (
             'W',
             'afk',
@@ -277,7 +278,7 @@ def test_teammate_afk_loss_freezes_visible_and_hidden_rating() -> None:
 
 @pytest.mark.parametrize(
     ('team_size', 'deficit', 'expected_delta'),
-    ((3, 1, 8), (3, 2, 9), (5, 1, 7), (5, 2, 8), (5, 3, 8), (5, 4, 9)),
+    ((3, 1, 9), (3, 2, 12), (5, 1, 8), (5, 2, 9), (5, 3, 11), (5, 4, 12)),
 )
 def test_undermanned_win_scales_the_existing_win_delta(
     team_size: int, deficit: int, expected_delta: int
@@ -303,7 +304,7 @@ def test_undermanned_win_scales_the_existing_win_delta(
     assert timeline[0].score_delta == expected_delta
 
 
-def test_self_afk_always_applies_double_normal_loss() -> None:
+def test_self_afk_always_applies_one_point_eight_normal_loss() -> None:
     normal_loss = calculate_virtual_match_rating_timeline(
         results=['L'],
         previous_ability=expected_win_probability(2160),
@@ -319,8 +320,34 @@ def test_self_afk_always_applies_double_normal_loss() -> None:
     )[0]
 
     assert normal_loss.score_delta == -12
-    assert afk_win.score_delta == -24
+    assert afk_win.score_delta == -22
     assert afk_win.rating_after.ability < afk_win.rating_before.ability
+
+
+@pytest.mark.parametrize(('deficit', 'expected_delta'), ((1, 2), (2, 3)))
+def test_undermanned_win_keeps_deficits_distinct_at_one_point_gain(
+    deficit: int, expected_delta: int
+) -> None:
+    rating = VirtualMatchRating(
+        ability=expected_win_probability(2930),
+        evidence=CARRYOVER_MATCH_CAP,
+        score=2930 / 3,
+        provisional=False,
+    )
+
+    timeline = calculate_virtual_match_rating_timeline(
+        results=['W'],
+        previous_ability=rating.ability,
+        previous_evidence=rating.evidence,
+        reset_visible_score=False,
+        afk_adjustments=[
+            RatingAfkAdjustment(
+                kind='undermanned_win', team_size=3, net_player_deficit=deficit
+            )
+        ],
+    )
+
+    assert timeline[0].score_delta == expected_delta
 
 
 def test_afk_adjustment_length_must_match_results() -> None:
