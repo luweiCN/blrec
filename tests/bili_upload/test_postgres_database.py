@@ -181,6 +181,16 @@ def test_postgres_schema_migration_81_has_afk_prediction_fields() -> None:
     assert 'vainglory_match_players_afk_prediction_idx' in statements[5]
 
 
+def test_postgres_schema_migration_82_has_afk_backfill_queue() -> None:
+    statements = tuple(_migration_statements(82))
+
+    assert len(statements) == 4
+    assert 'ADD COLUMN afk_detection_version BIGINT' in statements[0]
+    assert 'CREATE TABLE vainglory_afk_backfill_jobs' in statements[1]
+    assert 'vainglory_afk_backfill_jobs_claim_idx' in statements[2]
+    assert 'INSERT INTO vainglory_afk_backfill_jobs' in statements[3]
+
+
 def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() -> None:
     database_url = os.environ.get('BLREC_TEST_POSTGRES_URL', '').strip()
     if not database_url:

@@ -2,7 +2,11 @@ from dataclasses import replace
 
 import pytest
 
-from blrec.vainglory.analysis_protocol import decode_match, encode_match
+from blrec.vainglory.analysis_protocol import (
+    decode_afk_statuses,
+    decode_match,
+    encode_match,
+)
 from blrec.vainglory.analyzer import AnalyzedAfkStatus, AnalyzedMatch
 from blrec.vainglory.ocr import ResultHeader, ResultOcr
 from blrec.vainglory.vision import ResultLayout
@@ -52,3 +56,19 @@ def test_match_protocol_rejects_partial_afk_slot_predictions() -> None:
 
     with pytest.raises(ValueError, match='完整覆盖'):
         decode_match(payload)
+
+
+def test_standalone_afk_protocol_keeps_low_positive_probability_for_review() -> None:
+    payload = encode_match(_match())['afk_statuses']
+    payload[4] = {
+        **payload[4],
+        'status': 'unknown',
+        'probability': 0.527,
+        'gate_reason': 'model_low_positive_probability',
+    }
+
+    statuses = decode_afk_statuses(payload)
+
+    assert statuses[4].status == 'unknown'
+    assert statuses[4].probability == pytest.approx(0.527)
+    assert statuses[4].gate_reason == 'model_low_positive_probability'

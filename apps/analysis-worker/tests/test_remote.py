@@ -15,6 +15,7 @@ from blrec_analysis_worker.remote import (
 
 from blrec.vainglory.analyzer import (
     AnalysisStatus,
+    AnalyzedAfkStatus,
     DenseScanResult,
     ResultScanWindow,
     ScannedPart,
@@ -76,6 +77,25 @@ class Analyzer:
         debug_dir: Optional[Path] = None,
     ) -> tuple:
         return ()
+
+    def classify_saved_afk_statuses(self, content: bytes) -> tuple:
+        assert content == b'result-frame'
+        return tuple(
+            AnalyzedAfkStatus(
+                side=side,
+                slot=slot,
+                status=('unknown' if (side, slot) == ('right', 2) else 'active'),
+                probability=(0.527 if (side, slot) == ('right', 2) else 0.01),
+                model_version='afk-status-test',
+                gate_reason=(
+                    'model_low_positive_probability'
+                    if (side, slot) == ('right', 2)
+                    else ''
+                ),
+            )
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        )
 
 
 class Client:
@@ -402,6 +422,40 @@ def test_single_worker_processes_claim_then_polls(tmp_path: Path) -> None:
     worker.run(once=True)
     assert analyzer.completed == 1
     assert clients[0].closed
+
+
+def test_worker_processes_afk_status_backfill_without_downloading_video(
+    tmp_path: Path,
+) -> None:
+    import base64
+
+    queue, lock = _shared_queue(
+        [
+            {
+                'kind': 'afk_status_backfill',
+                'itemId': 7,
+                'framePng': base64.b64encode(b'result-frame').decode('ascii'),
+            }
+        ]
+    )
+    clients: List[Client] = []
+    worker = RemoteAnalysisWorker(
+        lambda: _tracked_client(clients, queue, lock), Analyzer(), cache_dir=tmp_path
+    )
+
+    worker.run(once=True)
+
+    payload = clients[0].completed_payloads[0]
+    assert payload['kind'] == 'afk_status_backfill'
+    assert payload['itemId'] == 7
+    assert payload['afkStatuses'][4] == {
+        'side': 'right',
+        'slot': 2,
+        'status': 'unknown',
+        'probability': 0.527,
+        'model_version': 'afk-status-test',
+        'gate_reason': 'model_low_positive_probability',
+    }
 
 
 def test_concurrency_validation(tmp_path: Path) -> None:

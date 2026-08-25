@@ -22,6 +22,7 @@ from blrec.bili_upload.remote_media import (
 from blrec.logging.audit import audit
 from blrec.utils.string import camel_case
 from blrec.vainglory.analysis_protocol import (
+    decode_afk_statuses,
     decode_hero,
     decode_match,
     decode_matches,
@@ -103,7 +104,13 @@ class AnalysisWorkerHeartbeatRequest(ApiModel):
     model_package_id: str = Field('', max_length=100)
     pipeline_version: str = Field('', max_length=40)
     concurrency: int = Field(0, ge=0, le=64)
-    kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
+    kind: Literal[
+        'part',
+        'match_rerun',
+        'hero_rematch',
+        'recorded_player_backfill',
+        'afk_status_backfill',
+    ]
     item_id: int = Field(..., ge=1)
     progress: float = Field(0, ge=0, le=0.99)
     runtime_status: Optional[Dict[str, Any]] = None
@@ -234,12 +241,19 @@ class AnalysisWorkerCompleteRequest(ApiModel):
     model_package_id: str = Field('', max_length=100)
     pipeline_version: str = Field('', max_length=40)
     concurrency: int = Field(0, ge=0, le=64)
-    kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
+    kind: Literal[
+        'part',
+        'match_rerun',
+        'hero_rematch',
+        'recorded_player_backfill',
+        'afk_status_backfill',
+    ]
     item_id: int = Field(..., ge=1)
     candidate_count: int = Field(0, ge=0)
     matches: List[Dict[str, Any]] = Field(default_factory=list)
     heroes: List[Dict[str, Any]] = Field(default_factory=list)
     recorded_player: Optional[Dict[str, Any]] = None
+    afk_statuses: List[Dict[str, Any]] = Field(default_factory=list, max_items=10)
     training_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     analysis_summary: Optional[AnalysisWorkerSummaryRequest] = None
     video_duration_seconds: Optional[float] = Field(None, gt=0)
@@ -251,7 +265,13 @@ class AnalysisWorkerFailureRequest(ApiModel):
     model_package_id: str = Field('', max_length=100)
     pipeline_version: str = Field('', max_length=40)
     concurrency: int = Field(0, ge=0, le=64)
-    kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
+    kind: Literal[
+        'part',
+        'match_rerun',
+        'hero_rematch',
+        'recorded_player_backfill',
+        'afk_status_backfill',
+    ]
     item_id: int = Field(..., ge=1)
     error: str = Field(..., min_length=1, max_length=500)
     failure_kind: Literal['task_error', 'unusable_media'] = 'task_error'
@@ -1508,6 +1528,10 @@ async def complete_analysis_work(
         elif payload.kind == 'hero_rematch':
             await index.complete_remote_hero_rematch(
                 payload.item_id, tuple(decode_hero(hero) for hero in payload.heroes)
+            )
+        elif payload.kind == 'afk_status_backfill':
+            await index.complete_remote_afk_status_backfill(
+                payload.item_id, decode_afk_statuses(payload.afk_statuses)
             )
         else:
             await index.complete_remote_recorded_player_backfill(

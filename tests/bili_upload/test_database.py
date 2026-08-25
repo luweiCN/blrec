@@ -63,6 +63,7 @@ REQUIRED_TABLES = {
     'vainglory_match_rerun_jobs',
     'vainglory_match_review_suppressions',
     'vainglory_analysis_revisions',
+    'vainglory_afk_backfill_jobs',
     'vainglory_match_players',
     'vainglory_players',
     'vainglory_player_aliases',
@@ -2364,6 +2365,40 @@ async def test_migration_81_adds_afk_prediction_and_manual_override_fields(
             'afk_manual_override',
         }.issubset(columns)
         assert 'vainglory_match_players_afk_prediction_idx' in indexes
+        assert await database.scalar('PRAGMA quick_check') == 'ok'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_82_queues_result_frames_for_afk_backfill(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        match_columns = {
+            str(row['name'])
+            for row in await database.fetchall('PRAGMA table_info(vainglory_matches)')
+        }
+        job_columns = {
+            str(row['name'])
+            for row in await database.fetchall(
+                'PRAGMA table_info(vainglory_afk_backfill_jobs)'
+            )
+        }
+
+        assert 'afk_detection_version' in match_columns
+        assert {
+            'match_id',
+            'detection_version',
+            'state',
+            'error',
+            'requested_at',
+            'started_at',
+            'completed_at',
+            'updated_at',
+        }.issubset(job_columns)
         assert await database.scalar('PRAGMA quick_check') == 'ok'
     finally:
         await database.close()

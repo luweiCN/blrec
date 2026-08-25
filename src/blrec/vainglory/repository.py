@@ -608,6 +608,11 @@ class RecordedPlayerBackfillClaim:
 
 
 @dataclass(frozen=True)
+class AfkStatusBackfillClaim:
+    match_id: int
+
+
+@dataclass(frozen=True)
 class MatchRerunClaim:
     match_id: int
     session_id: int
@@ -1121,6 +1126,7 @@ class VaingloryRepository:
     ALGORITHM_VERSION = 18
     HERO_RECOGNITION_VERSION = 5
     RECORDED_PLAYER_DETECTION_VERSION = 3
+    AFK_STATUS_DETECTION_VERSION = 1
     _REALTIME_WINDOW_SECONDS = 48 * 60 * 60
     _PUBLICATION_ANALYSIS_DEBT = (
         '(EXISTS(SELECT 1 FROM vainglory_publications publication '
@@ -1673,9 +1679,15 @@ class VaingloryRepository:
                 "WHERE state='running'",
                 (now,),
             ).rowcount
+            afk_count = connection.execute(
+                "UPDATE vainglory_afk_backfill_jobs SET state='pending',"
+                'started_at=NULL,error=NULL,updated_at=? '
+                "WHERE state='running'",
+                (now,),
+            ).rowcount
             for row in session_rows:
                 self._refresh_session_job(connection, int(row['session_id']), now)
-            return ocr_count + part_count + rerun_count
+            return ocr_count + part_count + rerun_count + afk_count
 
         return await self._database.write(prepare)
 
@@ -1703,9 +1715,15 @@ class VaingloryRepository:
                 "WHERE state='running' AND updated_at<?",
                 (now, cutoff),
             ).rowcount
+            afk_count = connection.execute(
+                "UPDATE vainglory_afk_backfill_jobs SET state='pending',"
+                'started_at=NULL,error=NULL,updated_at=? '
+                "WHERE state='running' AND updated_at<?",
+                (now, cutoff),
+            ).rowcount
             for row in session_rows:
                 self._refresh_session_job(connection, int(row['session_id']), now)
-            return part_count + rerun_count
+            return part_count + rerun_count + afk_count
 
         return await self._database.write(recover)
 
@@ -4746,11 +4764,12 @@ class VaingloryRepository:
                     'left_kills,right_kills,left_economy,right_economy,confidence,'
                     'created_at,game_mode,team_size,started_at_ms,'
                     'result_frame_path,hero_recognition_version,'
+                    'afk_detection_version,'
                     'recorded_player_side,recorded_player_slot,'
                     'recorded_player_confidence,'
                     'recorded_player_detection_version,match_kind,view_context,'
                     'stats_eligible,stats_exclusion_reason) '
-                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (
                         session_id,
                         match.part_id,
@@ -4772,6 +4791,12 @@ class VaingloryRepository:
                         started_at_ms,
                         result_frame_path,
                         self.HERO_RECOGNITION_VERSION,
+                        (
+                            self.AFK_STATUS_DETECTION_VERSION
+                            if len(match.afk_statuses)
+                            == (normalized_team_size or 0) * 2
+                            else 0
+                        ),
                         (None if recorded_player is None else recorded_player.side),
                         (None if recorded_player is None else recorded_player.slot),
                         (
@@ -5668,6 +5693,7 @@ class VaingloryRepository:
                 'started_at_ms=?',
                 'result_frame_path=?',
                 'hero_recognition_version=?',
+                'afk_detection_version=?',
                 'match_kind=?',
                 'view_context=?',
                 'stats_eligible=?',
@@ -5691,6 +5717,11 @@ class VaingloryRepository:
                 started_at_ms,
                 result_frame_path,
                 self.HERO_RECOGNITION_VERSION,
+                (
+                    self.AFK_STATUS_DETECTION_VERSION
+                    if len(recognized.afk_statuses) == (normalized_team_size or 0) * 2
+                    else 0
+                ),
                 match_kind,
                 view_context,
                 1 if stats_eligible else 0,
@@ -5724,6 +5755,28 @@ class VaingloryRepository:
                 ),
                 tuple(values) + (int(match_id),),
             )
+            has_complete_afk_statuses = (
+                len(recognized.afk_statuses) == (normalized_team_size or 0) * 2
+            )
+            if has_complete_afk_statuses:
+                connection.execute(
+                    "UPDATE vainglory_afk_backfill_jobs SET state='completed',"
+                    'detection_version=?,error=NULL,completed_at=?,updated_at=? '
+                    'WHERE match_id=?',
+                    (self.AFK_STATUS_DETECTION_VERSION, now, now, int(match_id)),
+                )
+            elif result_frame_path is not None:
+                connection.execute(
+                    'INSERT INTO vainglory_afk_backfill_jobs('
+                    'match_id,detection_version,state,error,requested_at,'
+                    'started_at,completed_at,updated_at) '
+                    "VALUES(?,?,'pending',NULL,?,NULL,NULL,?) "
+                    'ON CONFLICT(match_id) DO UPDATE SET '
+                    "detection_version=excluded.detection_version,state='pending',"
+                    'error=NULL,requested_at=excluded.requested_at,'
+                    'started_at=NULL,completed_at=NULL,updated_at=excluded.updated_at',
+                    (int(match_id), self.AFK_STATUS_DETECTION_VERSION, now, now),
+                )
             connection.execute(
                 'DELETE FROM vainglory_match_players WHERE match_id=?', (int(match_id),)
             )
@@ -6278,6 +6331,132 @@ class VaingloryRepository:
             return selected is not None
 
         return await self._database.write(complete)
+
+    async def claim_next_afk_status_backfill(self) -> Optional[AfkStatusBackfillClaim]:
+        now = self._now()
+
+        def claim(connection: sqlite3.Connection) -> Optional[AfkStatusBackfillClaim]:
+            connection.execute(
+                'INSERT INTO vainglory_afk_backfill_jobs('
+                'match_id,detection_version,state,error,requested_at,started_at,'
+                'completed_at,updated_at) '
+                "SELECT id,?,'pending',NULL,created_at,NULL,NULL,? "
+                'FROM vainglory_matches WHERE afk_detection_version<? '
+                'AND result_frame_path IS NOT NULL '
+                'ON CONFLICT(match_id) DO UPDATE SET '
+                'detection_version=excluded.detection_version,state=\'pending\','
+                'error=NULL,requested_at=excluded.requested_at,started_at=NULL,'
+                'completed_at=NULL,updated_at=excluded.updated_at '
+                'WHERE vainglory_afk_backfill_jobs.detection_version'
+                '<excluded.detection_version',
+                (
+                    self.AFK_STATUS_DETECTION_VERSION,
+                    now,
+                    self.AFK_STATUS_DETECTION_VERSION,
+                ),
+            )
+            row = connection.execute(
+                'SELECT job.match_id FROM vainglory_afk_backfill_jobs job '
+                'JOIN vainglory_matches match ON match.id=job.match_id '
+                "WHERE job.state='pending' AND job.detection_version=? "
+                'AND match.afk_detection_version<? '
+                'AND match.result_frame_path IS NOT NULL '
+                'ORDER BY job.requested_at,job.match_id LIMIT 1',
+                (self.AFK_STATUS_DETECTION_VERSION, self.AFK_STATUS_DETECTION_VERSION),
+            ).fetchone()
+            if row is None:
+                return None
+            match_id = int(row['match_id'])
+            changed = connection.execute(
+                "UPDATE vainglory_afk_backfill_jobs SET state='running',"
+                'started_at=?,completed_at=NULL,error=NULL,updated_at=? '
+                "WHERE match_id=? AND state='pending'",
+                (now, now, match_id),
+            )
+            if changed.rowcount != 1:
+                return None
+            return AfkStatusBackfillClaim(match_id=match_id)
+
+        return await self._database.write(claim)
+
+    async def requeue_afk_status_backfill(self, match_id: int) -> None:
+        now = self._now()
+        await self._database.execute(
+            "UPDATE vainglory_afk_backfill_jobs SET state='pending',"
+            'started_at=NULL,error=NULL,updated_at=? '
+            "WHERE match_id=? AND state='running'",
+            (now, int(match_id)),
+        )
+
+    async def touch_afk_status_backfill(self, match_id: int) -> None:
+        await self._database.execute(
+            'UPDATE vainglory_afk_backfill_jobs SET updated_at=? '
+            "WHERE match_id=? AND state='running'",
+            (self._now(), int(match_id)),
+        )
+
+    async def fail_afk_status_backfill(self, match_id: int, error: str) -> None:
+        now = self._now()
+        await self._database.execute(
+            "UPDATE vainglory_afk_backfill_jobs SET state='failed',error=?,"
+            'completed_at=?,updated_at=? WHERE match_id=?',
+            (error.strip()[:500] or '挂机状态补跑失败', now, now, int(match_id)),
+        )
+
+    async def complete_afk_status_backfill(
+        self, match_id: int, statuses: Sequence[AnalyzedAfkStatus]
+    ) -> None:
+        now = self._now()
+
+        def complete(connection: sqlite3.Connection) -> None:
+            match = connection.execute(
+                'SELECT session_id FROM vainglory_matches WHERE id=?', (int(match_id),)
+            ).fetchone()
+            if match is None:
+                raise VaingloryNotFound('对局不存在')
+            rows = connection.execute(
+                'SELECT side,slot FROM vainglory_match_players '
+                'WHERE match_id=? ORDER BY side,slot',
+                (int(match_id),),
+            ).fetchall()
+            expected_positions = {(str(row['side']), int(row['slot'])) for row in rows}
+            predictions = {
+                (status.side, int(status.slot)): status for status in statuses
+            }
+            if (
+                len(predictions) != len(statuses)
+                or not expected_positions
+                or set(predictions) != expected_positions
+            ):
+                raise VaingloryConflict('挂机预测必须完整覆盖结算页槽位')
+            for side, slot in sorted(expected_positions):
+                values = _afk_prediction_values(predictions, side=side, slot=slot)
+                connection.execute(
+                    'UPDATE vainglory_match_players SET '
+                    'afk_prediction_status=?,afk_prediction_probability=?,'
+                    'afk_prediction_model_version=?,afk_prediction_gate_reason=? '
+                    'WHERE match_id=? AND side=? AND slot=?',
+                    (*values, int(match_id), side, slot),
+                )
+            connection.execute(
+                'UPDATE vainglory_matches SET afk_detection_version=? WHERE id=?',
+                (self.AFK_STATUS_DETECTION_VERSION, int(match_id)),
+            )
+            changed = connection.execute(
+                "UPDATE vainglory_afk_backfill_jobs SET state='completed',"
+                'error=NULL,completed_at=?,updated_at=? '
+                "WHERE match_id=? AND state='running'",
+                (now, now, int(match_id)),
+            )
+            if changed.rowcount != 1:
+                raise VaingloryConflict('挂机状态补跑任务当前不能写入结果')
+            connection.execute(
+                'UPDATE vainglory_publications SET needs_refresh=1 '
+                'WHERE session_id=?',
+                (int(match['session_id']),),
+            )
+
+        await self._database.write(complete)
 
     async def set_recorded_player(
         self, match_id: int, *, side: str, slot: int

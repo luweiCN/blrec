@@ -1095,6 +1095,78 @@ async def test_afk_predictions_persist_with_revision_and_separate_manual_overrid
         await database.close()
 
 
+@pytest.mark.asyncio
+async def test_afk_backfill_claim_is_durable_and_preserves_manual_override(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        stored = (await repository.list_matches()).items[0]
+        await repository.update_match_fields(
+            stored.id,
+            {'players': [{'side': 'left', 'slot': 1, 'afk_manual_override': True}]},
+        )
+
+        claim = await repository.claim_next_afk_status_backfill()
+
+        assert claim is not None and claim.match_id == stored.id
+        assert await repository.claim_next_afk_status_backfill() is None
+        statuses = tuple(
+            AnalyzedAfkStatus(
+                side=side,
+                slot=slot,
+                status=('unknown' if (side, slot) == ('right', 2) else 'active'),
+                probability=(0.527 if (side, slot) == ('right', 2) else 0.01),
+                model_version='afk-status-test',
+                gate_reason=(
+                    'model_low_positive_probability'
+                    if (side, slot) == ('right', 2)
+                    else ''
+                ),
+            )
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        )
+
+        await repository.complete_afk_status_backfill(stored.id, statuses)
+
+        refreshed = (await repository.list_matches()).items[0]
+        assert refreshed.players[0].afk_manual_override is True
+        right_two = next(
+            player
+            for player in refreshed.players
+            if player.side == 'right' and player.slot == 2
+        )
+        assert right_two.afk_prediction_status == 'unknown'
+        assert right_two.afk_probability == pytest.approx(0.527)
+        assert right_two.afk_gate_reason == 'model_low_positive_probability'
+        assert (
+            await database.scalar(
+                'SELECT afk_detection_version FROM vainglory_matches WHERE id=?',
+                (stored.id,),
+            )
+            == repository.AFK_STATUS_DETECTION_VERSION
+        )
+        assert (
+            await database.scalar(
+                'SELECT state FROM vainglory_afk_backfill_jobs WHERE match_id=?',
+                (stored.id,),
+            )
+            == 'completed'
+        )
+        assert await repository.claim_next_afk_status_backfill() is None
+    finally:
+        await database.close()
+
+
 def distinct_hero_references() -> tuple[HeroReference, ...]:
     return tuple(
         HeroReference(

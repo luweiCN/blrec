@@ -29,6 +29,7 @@ from blrec.bili_upload.remote_media import (
 from .analyzer import (
     AnalysisCancelled,
     AnalysisStatus,
+    AnalyzedAfkStatus,
     AnalyzedHero,
     AnalyzedMatch,
     TrainingCandidate,
@@ -66,7 +67,13 @@ from .vision import RecordedPlayer
 
 @dataclass(frozen=True)
 class RemoteAnalysisClaim:
-    kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
+    kind: Literal[
+        'part',
+        'match_rerun',
+        'hero_rematch',
+        'recorded_player_backfill',
+        'afk_status_backfill',
+    ]
     item_id: int
     part: Optional[VideoPart] = None
     session_id: Optional[int] = None
@@ -749,6 +756,23 @@ class VaingloryIndexService:
             )
 
         if not await self._repository.has_realtime_pending():
+            afk_status = await self._repository.claim_next_afk_status_backfill()
+            if afk_status is not None:
+                path = await self._repository.result_frame_path(afk_status.match_id)
+                if path is not None:
+                    return await self._finish_remote_claim(
+                        RemoteAnalysisClaim(
+                            kind='afk_status_backfill',
+                            item_id=afk_status.match_id,
+                            frame_png=path.read_bytes(),
+                        ),
+                        worker_id,
+                        deadline,
+                    )
+                await self._repository.fail_afk_status_backfill(
+                    afk_status.match_id, '结算图文件不存在'
+                )
+
             recorded_player = await self._repository.next_recorded_player_backfill()
             if recorded_player is not None:
                 path = await self._repository.result_frame_path(
@@ -809,6 +833,8 @@ class VaingloryIndexService:
             await self._repository.requeue(claim.item_id)
         elif claim.kind == 'match_rerun':
             await self._repository.requeue_match_rerun(claim.item_id)
+        elif claim.kind == 'afk_status_backfill':
+            await self._repository.requeue_afk_status_backfill(claim.item_id)
         return None
 
     async def heartbeat_remote_work(
@@ -836,6 +862,8 @@ class VaingloryIndexService:
                 self._record_runtime_status(item_id, status)
         elif kind == 'match_rerun':
             await self._repository.touch_match_rerun(item_id)
+        elif kind == 'afk_status_backfill':
+            await self._repository.touch_afk_status_backfill(item_id)
 
     async def complete_remote_part(
         self,
@@ -888,6 +916,15 @@ class VaingloryIndexService:
             'recorded_player_backfill', match_id, succeeded=True
         )
 
+    async def complete_remote_afk_status_backfill(
+        self, match_id: int, statuses: Sequence[AnalyzedAfkStatus]
+    ) -> None:
+        self._require_remote_worker()
+        await self._repository.complete_afk_status_backfill(match_id, statuses)
+        await self._record_remote_work_result(
+            'afk_status_backfill', match_id, succeeded=True
+        )
+
     async def fail_remote_work(
         self,
         kind: str,
@@ -908,6 +945,8 @@ class VaingloryIndexService:
             await self._repository.complete_hero_rematch(item_id, ())
         elif kind == 'recorded_player_backfill':
             await self._repository.complete_recorded_player_backfill(item_id, None)
+        elif kind == 'afk_status_backfill':
+            await self._repository.fail_afk_status_backfill(item_id, error)
         await self._record_remote_work_result(kind, item_id, succeeded=False)
 
     async def request_scan(self, session_id: int) -> ScanJob:

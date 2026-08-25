@@ -4793,7 +4793,10 @@ class VaingloryVideoAnalyzer:
         )
 
     def _classify_afk_statuses(
-        self, frame: RgbFrame, layout: ResultLayout, recognized: ResultOcr
+        self,
+        frame: RgbFrame,
+        layout: ResultLayout,
+        recognized: Optional[ResultOcr] = None,
     ) -> Tuple[AnalyzedAfkStatus, ...]:
         classifier = self._afk_status_classifier
         slots = result_avatar_slots(
@@ -4818,14 +4821,16 @@ class VaingloryVideoAnalyzer:
             return abstain('model_unavailable')
         expected = layout.team_size * 2
         expected_positions = {(slot.side, slot.slot) for slot in slots}
-        observed_positions = {
-            (str(player.side), int(player.slot)) for player in recognized.players
-        }
+        observed_positions = (
+            expected_positions
+            if recognized is None
+            else {(str(player.side), int(player.slot)) for player in recognized.players}
+        )
         if len(slots) != expected or observed_positions != expected_positions:
             return abstain('slots_incomplete')
         if layout.confidence < 0.8:
             return abstain('layout_low_confidence')
-        if visible_result_portrait_count(frame, slots) < expected - 1:
+        if visible_result_portrait_count(frame, slots) < expected:
             return abstain('avatars_not_all_visible')
         if result_frame_quality(frame, layout) < 1.3:
             return abstain('panel_low_quality')
@@ -4852,14 +4857,27 @@ class VaingloryVideoAnalyzer:
             if label not in ('active', 'afk') or probability is None:
                 return abstain('model_output_invalid')
             accepted = confidence >= self._minimum_afk_confidence
+            gate_reason = '' if accepted else 'model_low_confidence'
+            resolved_status = label
+            if 0.10 < float(probability) < 0.90:
+                accepted = False
+                gate_reason = (
+                    'model_low_positive_probability'
+                    if label == 'afk'
+                    else 'model_low_active_confidence'
+                )
+            elif float(probability) >= 0.90:
+                resolved_status = 'afk'
+            else:
+                resolved_status = 'active'
             statuses.append(
                 AnalyzedAfkStatus(
                     side=slot.side,
                     slot=slot.slot,
-                    status=cast(Any, label if accepted else 'unknown'),
+                    status=cast(Any, resolved_status if accepted else 'unknown'),
                     probability=max(0.0, min(1.0, float(probability))),
                     model_version=model_version,
-                    gate_reason='' if accepted else 'model_low_confidence',
+                    gate_reason=gate_reason,
                 )
             )
         logger.info(
@@ -5790,6 +5808,15 @@ class VaingloryVideoAnalyzer:
             else self._recorded_player_detector.detect(frame, layout)
         )
         return detected or detect_recorded_player(frame, layout)
+
+    def classify_saved_afk_statuses(
+        self, content: bytes
+    ) -> Tuple[AnalyzedAfkStatus, ...]:
+        frame = self._sampler.decode_image(content)
+        layout = self._detect_result_layout(frame)
+        if layout is None:
+            raise ValueError('保存的图片不是可识别的结算画面')
+        return self._classify_afk_statuses(frame, layout)
 
     def _recognize_hero_variant(
         self,

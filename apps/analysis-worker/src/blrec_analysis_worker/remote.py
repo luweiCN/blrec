@@ -26,6 +26,7 @@ import requests
 from loguru import logger
 
 from blrec.vainglory.analysis_protocol import (
+    encode_afk_status,
     encode_hero,
     encode_match,
     encode_recorded_player,
@@ -728,6 +729,20 @@ class RemoteAnalysisWorker:
                 'kind': kind,
                 'itemId': item_id,
                 'recordedPlayer': encode_recorded_player(player),
+            }
+        if kind == 'afk_status_backfill':
+            content = base64.b64decode(str(claim['framePng']), validate=True)
+            statuses = self._analyzer.classify_saved_afk_statuses(content)
+            logger.info(
+                'Vainglory 小任务耗时明细：kind={} item_id={} total={:.3f}s',
+                kind,
+                item_id,
+                time.monotonic() - started,
+            )
+            return {
+                'kind': kind,
+                'itemId': item_id,
+                'afkStatuses': [encode_afk_status(value) for value in statuses],
             }
 
         part_payload = cast(Mapping[str, Any], claim['part'])
