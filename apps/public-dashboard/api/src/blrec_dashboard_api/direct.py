@@ -17,6 +17,7 @@ from blrec_dashboard_publisher.deduplication import exact_match_fingerprint
 from blrec_dashboard_publisher.rating import (
     RATING_MODEL_VERSION,
     calculate_virtual_match_rating_timeline,
+    resolve_afk_rating_adjustment,
 )
 from blrec_dashboard_publisher.snapshot import SHANGHAI, build_dashboard_runtime_source
 from pypinyin import Style, lazy_pinyin
@@ -176,7 +177,36 @@ def _rating_value(
         'scoreAfter': int(transition.score_after),
         'provisional': bool(after.provisional),
         'modelVersion': RATING_MODEL_VERSION,
+        'afkAdjustment': transition.afk_adjustment.kind,
+        'afkPlayerDeficit': transition.afk_adjustment.net_player_deficit,
     }
+
+
+def _match_afk_adjustment(match: Mapping[str, Any]) -> Any:
+    ally_players = tuple(match['ally']['players'])
+    enemy_players = tuple(match['enemy']['players'])
+    recorded = next(
+        (player for player in ally_players if player.get('isRecordedPlayer')), None
+    )
+    if recorded is None:
+        return resolve_afk_rating_adjustment(
+            result=str(match['result']),
+            recorded_status='unknown',
+            teammate_statuses=(),
+            enemy_statuses=(),
+        )
+    return resolve_afk_rating_adjustment(
+        result=str(match['result']),
+        recorded_status=str(recorded.get('afkStatus', 'unknown')),
+        teammate_statuses=tuple(
+            str(player.get('afkStatus', 'unknown'))
+            for player in ally_players
+            if player is not recorded
+        ),
+        enemy_statuses=tuple(
+            str(player.get('afkStatus', 'unknown')) for player in enemy_players
+        ),
+    )
 
 
 def _rating_events(
@@ -221,6 +251,9 @@ def _rating_events(
                 season_matches = list(season_group)
                 timeline = calculate_virtual_match_rating_timeline(
                     results=[str(match['result']) for match in season_matches],
+                    afk_adjustments=[
+                        _match_afk_adjustment(match) for match in season_matches
+                    ],
                     previous_ability=previous_ability,
                     previous_evidence=previous_evidence,
                     reset_visible_score=True,
@@ -240,6 +273,7 @@ def _rating_events(
                     previous_evidence = final.evidence
             timeline = calculate_virtual_match_rating_timeline(
                 results=[str(match['result']) for match in scoped],
+                afk_adjustments=[_match_afk_adjustment(match) for match in scoped],
                 reset_visible_score=False,
             )
             for number, (match, transition) in enumerate(
@@ -403,6 +437,15 @@ def _dataset(
 
     def match_value(source: Mapping[str, Any]) -> Mapping[str, Any]:
         value = dict(source)
+        for team_name in ('ally', 'enemy'):
+            team = dict(value[team_name])
+            players = []
+            for source_player in team['players']:
+                player = dict(source_player)
+                player.setdefault('afkStatus', 'unknown')
+                players.append(player)
+            team['players'] = players
+            value[team_name] = team
         access = str(value.pop('replayAccess', 'public'))
         if not owner_view and access != 'public':
             value.pop('replay', None)

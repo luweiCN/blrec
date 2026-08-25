@@ -143,7 +143,7 @@ def test_latest_schema_keeps_incremental_columns_for_rollback(tmp_path: Path) ->
     finally:
         connection.close()
 
-    assert version == 11
+    assert version == 12
     assert 'public_visible' in player_columns
     assert {
         'stats_eligible',
@@ -495,9 +495,77 @@ def test_rating_timeline_batches_event_inserts() -> None:
 
     assert len(connection.rows) == 2
     assert [int(row[0]) for row in connection.rows] == [1, 2]
-    assert all(int(row[-1]) == 7 for row in connection.rows)
+    assert all(int(row[12]) == 8 for row in connection.rows)
     assert final_ability is not None
     assert final_evidence is not None
+
+
+def test_ingest_recomputes_rating_when_afk_status_changes(tmp_path: Path) -> None:
+    database_path = tmp_path / 'dashboard.sqlite3'
+    initialize_database(database_path)
+    source = cache_batch(source_revision=8)
+    match = source['matches'][0]
+    match['result'] = 'L'
+    for role, statuses in (
+        ('ally', ('active', 'afk', 'active')),
+        ('enemy', ('active', 'active', 'active')),
+    ):
+        team = match[role]
+        team['players'] = [
+            {
+                'slot': slot,
+                'name': '{}-{}'.format(role, slot),
+                'heroName': '英雄-{}-{}'.format(role, slot),
+                'kills': 1,
+                'deaths': 1,
+                'assists': 1,
+                'economy': 1000,
+                'lastHits': 10,
+                'isRecordedPlayer': role == 'ally' and slot == 1,
+                'afkStatus': status,
+            }
+            for slot, status in enumerate(statuses, start=1)
+        ]
+    apply_ingest_batch(
+        database_path,
+        idempotency_key='afk-protected',
+        batch=IngestBatch.parse_obj(source),
+    )
+    connection = connect_database(database_path)
+    try:
+        protected = connection.execute(
+            "SELECT score_delta,afk_adjustment FROM rating_events "
+            "WHERE match_id=1 AND scope='all' "
+            "AND season_key='2026-summer'"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert protected is not None
+    assert int(protected['score_delta']) == 0
+    assert str(protected['afk_adjustment']) == 'protected_loss'
+
+    source['sourceRevision'] = 9
+    source['matches'][0]['ally']['players'][1]['afkStatus'] = 'active'
+    apply_ingest_batch(
+        database_path,
+        idempotency_key='afk-cleared',
+        batch=IngestBatch.parse_obj(source),
+    )
+    connection = connect_database(database_path)
+    try:
+        ordinary = connection.execute(
+            "SELECT score_delta,afk_adjustment,model_version "
+            "FROM rating_events WHERE match_id=1 AND scope='all' "
+            "AND season_key='2026-summer'"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert ordinary is not None
+    assert int(ordinary['score_delta']) == -5
+    assert str(ordinary['afk_adjustment']) == 'none'
+    assert int(ordinary['model_version']) == 8
 
 
 def test_incremental_search_rebuild_uses_bounded_database_round_trips(

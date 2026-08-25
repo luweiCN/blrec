@@ -3,12 +3,14 @@ from typing import Optional
 import pytest
 from blrec_dashboard_publisher.rating import (
     CARRYOVER_MATCH_CAP,
+    RatingAfkAdjustment,
     VirtualMatchRating,
     _advance_rating,
     calculate_rating_forecast,
     calculate_virtual_match_rating,
     calculate_virtual_match_rating_timeline,
     expected_win_probability,
+    resolve_afk_rating_adjustment,
 )
 
 
@@ -194,6 +196,138 @@ def test_rating_timeline_replays_an_inserted_historical_result() -> None:
     assert backfilled[0] == original[0]
     assert backfilled[2].score_before == backfilled[1].score_after
     assert backfilled[2].score_after != original[1].score_after
+
+
+@pytest.mark.parametrize(
+    ('result', 'recorded', 'teammates', 'enemies', 'kind', 'deficit'),
+    (
+        (
+            'L',
+            'active',
+            ('afk', 'active'),
+            ('active', 'active', 'active'),
+            'protected_loss',
+            0,
+        ),
+        (
+            'W',
+            'active',
+            ('afk', 'active'),
+            ('active', 'active', 'active'),
+            'undermanned_win',
+            1,
+        ),
+        (
+            'W',
+            'active',
+            ('afk', 'afk'),
+            ('active', 'active', 'active'),
+            'undermanned_win',
+            2,
+        ),
+        ('W', 'active', ('afk', 'active'), ('afk', 'active', 'active'), 'none', 0),
+        (
+            'W',
+            'afk',
+            ('active', 'active'),
+            ('active', 'active', 'active'),
+            'self_afk',
+            0,
+        ),
+        ('L', 'afk', ('afk', 'active'), ('active', 'active', 'active'), 'self_afk', 0),
+        (
+            'L',
+            'active',
+            ('unknown', 'active'),
+            ('active', 'active', 'active'),
+            'none',
+            0,
+        ),
+    ),
+)
+def test_resolve_afk_rating_adjustment(
+    result: str,
+    recorded: str,
+    teammates: tuple[str, ...],
+    enemies: tuple[str, ...],
+    kind: str,
+    deficit: int,
+) -> None:
+    adjustment = resolve_afk_rating_adjustment(
+        result=result,
+        recorded_status=recorded,
+        teammate_statuses=teammates,
+        enemy_statuses=enemies,
+    )
+
+    assert adjustment.kind == kind
+    assert adjustment.net_player_deficit == deficit
+
+
+def test_teammate_afk_loss_freezes_visible_and_hidden_rating() -> None:
+    timeline = calculate_virtual_match_rating_timeline(
+        results=['L'], afk_adjustments=[RatingAfkAdjustment(kind='protected_loss')]
+    )
+
+    transition = timeline[0]
+    assert transition.score_delta == 0
+    assert transition.rating_after.ability == transition.rating_before.ability
+    assert transition.rating_after.evidence == transition.rating_before.evidence
+
+
+@pytest.mark.parametrize(
+    ('team_size', 'deficit', 'expected_delta'),
+    ((3, 1, 8), (3, 2, 9), (5, 1, 7), (5, 2, 8), (5, 3, 8), (5, 4, 9)),
+)
+def test_undermanned_win_scales_the_existing_win_delta(
+    team_size: int, deficit: int, expected_delta: int
+) -> None:
+    rating = VirtualMatchRating(
+        ability=expected_win_probability(2400),
+        evidence=CARRYOVER_MATCH_CAP,
+        score=800.0,
+        provisional=False,
+    )
+    timeline = calculate_virtual_match_rating_timeline(
+        results=['W'],
+        previous_ability=rating.ability,
+        previous_evidence=rating.evidence,
+        reset_visible_score=False,
+        afk_adjustments=[
+            RatingAfkAdjustment(
+                kind='undermanned_win', team_size=team_size, net_player_deficit=deficit
+            )
+        ],
+    )
+
+    assert timeline[0].score_delta == expected_delta
+
+
+def test_self_afk_always_applies_double_normal_loss() -> None:
+    normal_loss = calculate_virtual_match_rating_timeline(
+        results=['L'],
+        previous_ability=expected_win_probability(2160),
+        previous_evidence=CARRYOVER_MATCH_CAP,
+        reset_visible_score=False,
+    )[0]
+    afk_win = calculate_virtual_match_rating_timeline(
+        results=['W'],
+        previous_ability=expected_win_probability(2160),
+        previous_evidence=CARRYOVER_MATCH_CAP,
+        reset_visible_score=False,
+        afk_adjustments=[RatingAfkAdjustment(kind='self_afk')],
+    )[0]
+
+    assert normal_loss.score_delta == -12
+    assert afk_win.score_delta == -24
+    assert afk_win.rating_after.ability < afk_win.rating_before.ability
+
+
+def test_afk_adjustment_length_must_match_results() -> None:
+    with pytest.raises(ValueError, match='adjustments'):
+        calculate_virtual_match_rating_timeline(
+            results=['W', 'L'], afk_adjustments=[RatingAfkAdjustment(kind='none')]
+        )
 
 
 def test_forecast_projects_the_exact_next_result() -> None:
