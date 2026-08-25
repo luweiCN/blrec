@@ -121,6 +121,7 @@ class AnalysisWorkerClaimRequest(ApiModel):
     model_package_id: str = Field('', max_length=100)
     pipeline_version: str = Field('', max_length=40)
     concurrency: int = Field(0, ge=0, le=64)
+    queue: Literal['video', 'image'] = 'video'
 
 
 class AnalysisWorkerCreateRequest(ApiModel):
@@ -1291,6 +1292,7 @@ async def claim_analysis_work(
                 '' if registration is None else registration.pipeline_version
             ),
             concurrency=0 if registration is None else registration.concurrency,
+            queue='video' if registration is None else registration.queue,
         )
     except VaingloryConflict as error:
         _raise_repository_error(error)

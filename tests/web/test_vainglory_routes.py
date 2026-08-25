@@ -1487,11 +1487,19 @@ def test_worker_afk_claim_includes_expected_team_size() -> None:
                 'modelPackageId': 'vg-vision-v3',
                 'pipelineVersion': 'timeline-v2',
                 'concurrency': 1,
+                'queue': 'image',
             },
         )
 
     assert response.status_code == 200
     assert response.json()['teamSize'] == 5
+    service.claim_remote_work.assert_awaited_once_with(
+        worker_id='mac-studio',
+        model_package_id='vg-vision-v3',
+        pipeline_version='timeline-v2',
+        concurrency=1,
+        queue='image',
+    )
 
 
 def test_worker_completion_forwards_efficiency_metrics() -> None:

@@ -2,7 +2,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Literal, Mapping, Optional
 from unittest import mock
 
 import pytest
@@ -110,7 +110,10 @@ class Client:
         self.completed_payloads: List[Mapping[str, Any]] = []
         self.failures: List[Mapping[str, Any]] = []
 
-    def claim(self) -> Optional[Dict[str, Any]]:
+    def claim(
+        self, *, queue: Literal['video', 'image'] = 'video'
+    ) -> Optional[Dict[str, Any]]:
+        del queue
         with self._lock:
             if not self._queue:
                 return None
@@ -205,6 +208,7 @@ def test_client_reports_loaded_model_while_polling_for_work() -> None:
             'modelPackageId': 'vg-vision-v2',
             'pipelineVersion': 'timeline-v2',
             'concurrency': 0,
+            'queue': 'video',
         },
         timeout=(10, 30),
     )
@@ -462,6 +466,74 @@ def test_worker_processes_afk_status_backfill_without_downloading_video(
         'model_version': 'afk-status-test',
         'gate_reason': 'model_low_positive_probability',
     }
+
+
+def test_video_and_image_workers_use_independent_claim_queues(tmp_path: Path) -> None:
+    import base64
+
+    class SplitClient(Client):
+        def __init__(self) -> None:
+            super().__init__([], threading.Lock())
+            self.claimed_queues: List[str] = []
+            self.video_claims = [_claim(1)]
+            self.image_claims = [
+                {
+                    'kind': 'afk_status_backfill',
+                    'itemId': 7,
+                    'teamSize': 3,
+                    'framePng': base64.b64encode(b'result-frame').decode('ascii'),
+                }
+            ]
+
+        def claim(
+            self, *, queue: Literal['video', 'image'] = 'video'
+        ) -> Optional[Dict[str, Any]]:
+            with self._lock:
+                self.claimed_queues.append(queue)
+                claims = self.video_claims if queue == 'video' else self.image_claims
+                return dict(claims.pop(0)) if claims else None
+
+    clients: List[SplitClient] = []
+
+    def client_factory() -> SplitClient:
+        client = SplitClient()
+        clients.append(client)
+        return client
+
+    worker = RemoteAnalysisWorker(
+        client_factory,
+        Analyzer(),
+        cache_dir=tmp_path,
+        poll_seconds=0.01,
+        concurrency=1,
+        image_concurrency=1,
+    )
+    thread = threading.Thread(target=worker.run, daemon=True)
+    thread.start()
+    assert _wait_until(
+        lambda: any(
+            payload.get('kind') == 'part'
+            for client in clients
+            for payload in client.completed_payloads
+        )
+        and any(
+            payload.get('kind') == 'afk_status_backfill'
+            for client in clients
+            for payload in client.completed_payloads
+        )
+    )
+    worker.stop()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert any(
+        client.claimed_queues and set(client.claimed_queues) == {'video'}
+        for client in clients
+    )
+    assert any(
+        client.claimed_queues and set(client.claimed_queues) == {'image'}
+        for client in clients
+    )
 
 
 def test_concurrency_validation(tmp_path: Path) -> None:

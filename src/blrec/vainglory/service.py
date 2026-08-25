@@ -578,6 +578,7 @@ class VaingloryIndexService:
         model_package_id: str = '',
         pipeline_version: str = '',
         concurrency: int = 0,
+        queue: Literal['video', 'image'] = 'video',
     ) -> Optional[RemoteAnalysisClaim]:
         deadline = time.monotonic() + self._remote_claim_deadline_seconds
         try:
@@ -595,6 +596,7 @@ class VaingloryIndexService:
                 model_package_id=model_package_id,
                 pipeline_version=pipeline_version,
                 concurrency=concurrency,
+                queue=queue,
                 deadline=deadline,
             )
         finally:
@@ -703,6 +705,7 @@ class VaingloryIndexService:
         model_package_id: str,
         pipeline_version: str,
         concurrency: int,
+        queue: Literal['video', 'image'],
         deadline: float,
     ) -> Optional[RemoteAnalysisClaim]:
         if worker_id:
@@ -741,22 +744,7 @@ class VaingloryIndexService:
             if time.monotonic() >= deadline:
                 return None
 
-        rerun = await self._repository.claim_next_match_rerun()
-        if rerun is not None:
-            return await self._finish_remote_claim(
-                RemoteAnalysisClaim(
-                    kind='match_rerun',
-                    item_id=rerun.match_id,
-                    part=rerun.part,
-                    session_id=rerun.session_id,
-                    result_at_ms=rerun.result_at_ms,
-                    view_context=rerun.view_context,
-                ),
-                worker_id,
-                deadline,
-            )
-
-        if not await self._repository.has_realtime_pending():
+        if queue == 'image':
             afk_status = await self._repository.claim_next_afk_status_backfill()
             if afk_status is not None:
                 path = await self._repository.result_frame_path(afk_status.match_id)
@@ -808,6 +796,23 @@ class VaingloryIndexService:
                         deadline,
                     )
                 await self._repository.complete_hero_rematch(hero.match_id, ())
+
+            return None
+
+        rerun = await self._repository.claim_next_match_rerun()
+        if rerun is not None:
+            return await self._finish_remote_claim(
+                RemoteAnalysisClaim(
+                    kind='match_rerun',
+                    item_id=rerun.match_id,
+                    part=rerun.part,
+                    session_id=rerun.session_id,
+                    result_at_ms=rerun.result_at_ms,
+                    view_context=rerun.view_context,
+                ),
+                worker_id,
+                deadline,
+            )
 
         claim = await self._repository.claim_next(discover=False)
         if claim is None:

@@ -64,6 +64,12 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument('--poll-seconds', type=float, default=5)
     run.add_argument('--concurrency', type=int, default=1)
     run.add_argument(
+        '--image-concurrency',
+        type=int,
+        default=2,
+        help='挂机、英雄和主播本人等图片回填任务的独立并发数',
+    )
+    run.add_argument(
         '--worker-id',
         default=os.environ.get('BLREC_ANALYSIS_WORKER_ID', socket.gethostname()),
         help='管理后台登记的 Worker ID；默认使用当前机器名',
@@ -293,6 +299,8 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
         raise ValueError('Mac Worker 必须配置本机 OCR 服务地址')
     if not 1 <= arguments.concurrency <= 8:
         raise ValueError('并发任务数必须在 1 到 8 之间')
+    if not 0 <= arguments.image_concurrency <= 8:
+        raise ValueError('图片回填并发任务数必须在 0 到 8 之间')
     worker_id = str(arguments.worker_id).strip()
     if not worker_id:
         raise ValueError('Worker ID 不能为空')
@@ -321,6 +329,7 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
         cache_dir=arguments.cache_dir,
         poll_seconds=arguments.poll_seconds,
         concurrency=arguments.concurrency,
+        image_concurrency=arguments.image_concurrency,
         concurrency_state=concurrency,
         worker_id=worker_id,
         debug_dir=arguments.debug_dir,

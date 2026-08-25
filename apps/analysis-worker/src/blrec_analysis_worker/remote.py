@@ -178,11 +178,13 @@ class AnalysisWorkerClient:
             raise ValueError('NAS 返回的 Worker 配置无效')
         return WorkerConcurrency._validated(int(payload['desiredConcurrency']))
 
-    def claim(self) -> Optional[Dict[str, Any]]:
+    def claim(
+        self, *, queue: Literal['video', 'image'] = 'video'
+    ) -> Optional[Dict[str, Any]]:
         response = self._session.post(
             self._url('api/v1/vainglory/worker/claim'),
             headers=self._headers,
-            json=self._registration_payload(),
+            json={**self._registration_payload(), 'queue': queue},
             timeout=(10, 30),
         )
         if response.status_code == 204:
@@ -412,6 +414,7 @@ class RemoteAnalysisWorker:
         cache_dir: Path,
         poll_seconds: float = 5,
         concurrency: int = 1,
+        image_concurrency: int = 0,
         concurrency_state: Optional[WorkerConcurrency] = None,
         worker_id: str = '',
         debug_dir: Optional[Path] = None,
@@ -420,11 +423,14 @@ class RemoteAnalysisWorker:
             raise ValueError('轮询间隔必须为正数')
         if concurrency < 1:
             raise ValueError('并发任务数必须大于 0')
+        if not 0 <= image_concurrency <= 8:
+            raise ValueError('图片回填并发任务数必须在 0 到 8 之间')
         self._client_factory = client_factory
         self._analyzer = analyzer
         self._cache_dir = cache_dir.expanduser().resolve()
         self._poll_seconds = poll_seconds
         self._concurrency = concurrency_state or WorkerConcurrency(concurrency)
+        self._image_concurrency = image_concurrency
         self._worker_id = worker_id.strip() or socket.gethostname()
         self._debug_dir = (
             None if debug_dir is None else Path(debug_dir).expanduser().resolve()
@@ -437,10 +443,12 @@ class RemoteAnalysisWorker:
     def run(self, *, once: bool = False) -> None:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
-            'Mac 分析 Worker 已启动：worker_id={} cache={} concurrency={}',
+            'Mac 分析 Worker 已启动：worker_id={} cache={} '
+            'video_concurrency={} image_concurrency={}',
             self._worker_id,
             self._cache_dir,
             self._concurrency.get(),
+            self._image_concurrency,
         )
         if once:
             client = self._client_factory()
@@ -458,6 +466,17 @@ class RemoteAnalysisWorker:
             target=self._live_worker_thread, name='analysis-worker-live', daemon=True
         )
         live_thread.start()
+        image_threads = [
+            threading.Thread(
+                target=self._image_worker_thread,
+                args=(worker_id,),
+                name='analysis-worker-image-{}'.format(worker_id),
+                daemon=True,
+            )
+            for worker_id in range(self._image_concurrency)
+        ]
+        for image_thread in image_threads:
+            image_thread.start()
         self._resize_workers(workers, retired, self._concurrency.get())
         try:
             while not self._stop.is_set():
@@ -490,6 +509,8 @@ class RemoteAnalysisWorker:
                 worker_stop.set()
                 retired.append(thread)
             live_thread.join()
+            for image_thread in image_threads:
+                image_thread.join()
             for thread in retired:
                 thread.join()
             control_client.close()
@@ -535,6 +556,19 @@ class RemoteAnalysisWorker:
         finally:
             client.close()
 
+    def _image_worker_thread(self, worker_id: int) -> None:
+        client = self._client_factory()
+        try:
+            self._run_loop(
+                client,
+                worker_id=worker_id,
+                once=False,
+                worker_stop=self._stop,
+                claim_queue='image',
+            )
+        finally:
+            client.close()
+
     def _run_loop(
         self,
         client: AnalysisWorkerClient,
@@ -542,13 +576,17 @@ class RemoteAnalysisWorker:
         worker_id: int,
         once: bool,
         worker_stop: threading.Event,
+        claim_queue: Literal['video', 'image'] = 'video',
     ) -> None:
         logger.info(
-            '分析 Worker 线程已启动：worker_id={} worker={}', self._worker_id, worker_id
+            '分析 Worker 线程已启动：worker_id={} queue={} worker={}',
+            self._worker_id,
+            claim_queue,
+            worker_id,
         )
         while not self._stop.is_set() and not worker_stop.is_set():
             try:
-                claim = client.claim()
+                claim = client.claim(queue=claim_queue)
             except requests.RequestException as error:
                 logger.warning(
                     'Worker {} 无法从 NAS 领取分析任务：{!r}', worker_id, error

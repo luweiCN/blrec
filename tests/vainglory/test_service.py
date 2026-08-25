@@ -2,6 +2,7 @@ import asyncio
 import time
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from loguru import logger
@@ -518,6 +519,90 @@ async def test_remote_claim_throttles_queue_maintenance() -> None:
     assert repository.recovery_calls == 1
     assert repository.discovery_calls == 1
     assert repository.claim_discovery_flags == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_video_claim_does_not_consume_image_backfill() -> None:
+    class SplitRepository:
+        def __init__(self) -> None:
+            self.afk_claim_calls = 0
+            self.part_claims = [
+                ScanClaim(
+                    session_id=1,
+                    part=VideoPart(id=7, index=1, path='/unused'),
+                    realtime=False,
+                )
+            ]
+
+        async def register_analysis_worker(
+            self, worker_id: str, **_metadata: object
+        ) -> AnalysisWorkerRecord:
+            return enabled_worker(worker_id)
+
+        async def recover_stale_remote_work(self, _timeout: int) -> int:
+            return 0
+
+        async def discover_ready_parts(self) -> int:
+            return 0
+
+        async def claim_next_match_rerun(self):
+            return None
+
+        async def claim_next(self, *, discover: bool = True):
+            assert discover is False
+            return self.part_claims.pop(0) if self.part_claims else None
+
+        async def claim_next_afk_status_backfill(self):
+            self.afk_claim_calls += 1
+            raise AssertionError('视频领取通道不得读取图片回填队列')
+
+    repository = SplitRepository()
+    service = VaingloryIndexService(
+        repository, remote_worker_enabled=True  # type: ignore[arg-type]
+    )
+
+    claim = await service.claim_remote_work(worker_id='mac-studio', queue='video')
+
+    assert claim is not None
+    assert claim.kind == 'part'
+    assert repository.afk_claim_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_image_claim_processes_afk_while_video_queue_is_pending(
+    tmp_path: Path,
+) -> None:
+    frame = tmp_path / 'result.png'
+    frame.write_bytes(b'result-frame')
+
+    class SplitRepository:
+        async def register_analysis_worker(
+            self, worker_id: str, **_metadata: object
+        ) -> AnalysisWorkerRecord:
+            return enabled_worker(worker_id)
+
+        async def recover_stale_remote_work(self, _timeout: int) -> int:
+            return 0
+
+        async def discover_ready_parts(self) -> int:
+            return 0
+
+        async def claim_next_afk_status_backfill(self):
+            return SimpleNamespace(match_id=8, team_size=3)
+
+        async def result_frame_path(self, _match_id: int) -> Path:
+            return frame
+
+    service = VaingloryIndexService(
+        SplitRepository(), remote_worker_enabled=True  # type: ignore[arg-type]
+    )
+
+    claim = await service.claim_remote_work(worker_id='mac-studio', queue='image')
+
+    assert claim is not None
+    assert claim.kind == 'afk_status_backfill'
+    assert claim.item_id == 8
+    assert claim.frame_png == b'result-frame'
 
 
 @pytest.mark.asyncio
