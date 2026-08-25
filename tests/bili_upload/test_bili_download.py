@@ -1,8 +1,40 @@
+import asyncio
 import stat
 from pathlib import Path
+from typing import List
 
-from blrec.bili_upload.bili_download import YtDlpMediaDownloader
+import pytest
+
+from blrec.bili_upload.bili_download import (
+    YtDlpMediaDownloader,
+    _LatestProgressReporter,
+)
 from blrec.bili_upload.crypto import CookieRecord
+
+
+class FakeStdout:
+    def __init__(self, lines: List[bytes]) -> None:
+        self._lines = list(lines)
+        self.readline_calls = 0
+
+    async def readline(self) -> bytes:
+        self.readline_calls += 1
+        return self._lines.pop(0) if self._lines else b''
+
+
+class FakeStderr:
+    async def read(self, _size: int) -> bytes:
+        return b''
+
+
+class FakeProcess:
+    def __init__(self, stdout: FakeStdout) -> None:
+        self.stdout = stdout
+        self.stderr = FakeStderr()
+        self.returncode = 0
+
+    async def wait(self) -> int:
+        return 0
 
 
 def test_builds_resource_friendly_highest_quality_command_on_selected_ip(
@@ -118,3 +150,65 @@ def test_parses_only_private_progress_protocol() -> None:
         None,
     )
     assert YtDlpMediaDownloader.parse_progress('[download] 50%') is None
+
+
+@pytest.mark.asyncio
+async def test_slow_progress_callback_does_not_block_yt_dlp_stdout() -> None:
+    progress_lines = [
+        'BLREC_PROGRESS:80:{}:100\n'.format(downloaded).encode()
+        for downloaded in range(1, 101)
+    ]
+    stdout = FakeStdout(progress_lines + [b'BLREC_FILE:/tmp/downloaded.mp4\n'])
+    process = FakeProcess(stdout)
+    callback_started = asyncio.Event()
+    release_callback = asyncio.Event()
+    calls = []
+
+    async def slow_progress(downloaded: int, total: int) -> None:
+        calls.append((downloaded, total))
+        if len(calls) == 1:
+            callback_started.set()
+            await release_callback.wait()
+
+    monitor = asyncio.create_task(
+        YtDlpMediaDownloader()._monitor(
+            process, slow_progress, interface_name=None  # type: ignore[arg-type]
+        )
+    )
+    try:
+        await asyncio.wait_for(callback_started.wait(), timeout=1)
+        readline_calls_while_blocked = stdout.readline_calls
+    finally:
+        release_callback.set()
+
+    output_path, error = await asyncio.wait_for(monitor, timeout=1)
+
+    assert readline_calls_while_blocked == len(progress_lines) + 2
+    assert output_path == '/tmp/downloaded.mp4'
+    assert error == ''
+    assert calls[-1] == (100, 112)
+    assert len(calls) <= 2
+
+
+@pytest.mark.asyncio
+async def test_progress_reporter_rate_limits_and_flushes_latest_value() -> None:
+    calls = []
+    first_callback = asyncio.Event()
+
+    async def progress(downloaded: int, total: int) -> None:
+        calls.append((downloaded, total))
+        first_callback.set()
+
+    reporter = _LatestProgressReporter(progress, interval_seconds=60)
+    reporter.update(1, 100)
+    await asyncio.wait_for(first_callback.wait(), timeout=1)
+
+    for downloaded in range(2, 101):
+        reporter.update(downloaded, 100)
+    await asyncio.sleep(0)
+
+    assert calls == [(1, 100)]
+
+    await asyncio.wait_for(reporter.close(), timeout=1)
+
+    assert calls == [(1, 100), (100, 100)]

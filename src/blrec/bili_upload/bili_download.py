@@ -32,10 +32,64 @@ class BiliDownloadRoutePaused(RuntimeError):
     pass
 
 
+class _LatestProgressReporter:
+    def __init__(
+        self,
+        callback: Callable[[int, Optional[int]], Awaitable[None]],
+        *,
+        interval_seconds: float,
+    ) -> None:
+        self._callback = callback
+        self._interval_seconds = max(0.0, float(interval_seconds))
+        self._latest: Optional[Tuple[int, Optional[int]]] = None
+        self._last_sent: Optional[Tuple[int, Optional[int]]] = None
+        self._next_allowed_at = 0.0
+        self._wake = asyncio.Event()
+        self._closing = asyncio.Event()
+        self._closed = False
+        self._task = asyncio.create_task(self._run())
+
+    def update(self, downloaded_bytes: int, total_bytes: Optional[int]) -> None:
+        if self._closed:
+            raise RuntimeError('下载进度报告器已经关闭')
+        self._latest = (int(downloaded_bytes), total_bytes)
+        self._wake.set()
+
+    async def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._closing.set()
+            self._wake.set()
+        await self._task
+
+    async def _run(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            await self._wake.wait()
+            self._wake.clear()
+            while self._latest is not None:
+                delay = self._next_allowed_at - loop.time()
+                if delay > 0 and not self._closed:
+                    try:
+                        await asyncio.wait_for(self._closing.wait(), timeout=delay)
+                    except asyncio.TimeoutError:
+                        pass
+                current = self._latest
+                self._latest = None
+                if current == self._last_sent:
+                    continue
+                await self._callback(*current)
+                self._last_sent = current
+                self._next_allowed_at = loop.time() + self._interval_seconds
+            if self._closed:
+                return
+
+
 class YtDlpMediaDownloader:
     _PROGRESS_PREFIX = 'BLREC_PROGRESS:'
     _FILE_PREFIX = 'BLREC_FILE:'
     _MAX_ERROR_BYTES = 32 * 1024
+    _PROGRESS_REPORT_INTERVAL_SECONDS = 5.0
 
     def __init__(
         self,
@@ -459,6 +513,9 @@ class YtDlpMediaDownloader:
         phase_downloaded = 0
         phase_total = 0
         traffic_observed = 0
+        progress_reporter = _LatestProgressReporter(
+            progress, interval_seconds=self._PROGRESS_REPORT_INTERVAL_SECONDS
+        )
 
         async def read_stdout() -> None:
             nonlocal output_path
@@ -499,7 +556,7 @@ class YtDlpMediaDownloader:
                     if combined_total <= 0
                     else max(observed + 1, int(math.ceil(float(combined_total) / 0.9)))
                 )
-                await progress(observed, reserved_total)
+                progress_reporter.update(observed, reserved_total)
 
         async def read_stderr() -> str:
             kept = bytearray()
@@ -514,9 +571,12 @@ class YtDlpMediaDownloader:
 
         stdout_task = asyncio.create_task(read_stdout())
         stderr_task = asyncio.create_task(read_stderr())
-        await process.wait()
-        await stdout_task
-        error = await stderr_task
+        try:
+            await process.wait()
+            await stdout_task
+            error = await stderr_task
+        finally:
+            await progress_reporter.close()
         return output_path, error
 
     async def _monitor_with_route_control(
