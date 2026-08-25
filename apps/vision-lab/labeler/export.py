@@ -1330,9 +1330,7 @@ def export_result_mode_classifier(
             state: sum(sample['panel_render_state'] == state for sample in samples)
             for state in ('clear', 'translucent', 'unknown')
         },
-        'occluded': sum(
-            sample['result_occlusion'] == 'occluded' for sample in samples
-        ),
+        'occluded': sum(sample['result_occlusion'] == 'occluded' for sample in samples),
         'by_split': {
             name: sum(sample['split'] == name for sample in samples)
             for name in ('train', 'val', 'test')
@@ -1393,10 +1391,14 @@ def confirmed_afk_status_samples(conn: Any) -> List[Dict[str, Any]]:
         'FROM training_review_hero_slots slot '
         'JOIN training_review_hero_lineups lineup '
         'ON lineup.frame_id = slot.frame_id '
+        'JOIN training_review_items review '
+        'ON review.frame_id = slot.frame_id '
         'JOIN frames f ON f.id = slot.frame_id '
         'JOIN videos v ON v.id = f.video_id '
         "WHERE lineup.review_status = 'confirmed' "
         "AND lineup.screen_type = 'result_page' "
+        "AND review.panel_render_state = 'clear' "
+        "AND review.result_occlusion = 'none' "
         'AND slot.is_afk IS NOT NULL '
         'ORDER BY f.video_id, f.timestamp_ms, f.id, '
         "CASE slot.side WHEN 'left' THEN 0 ELSE 1 END, slot.slot"

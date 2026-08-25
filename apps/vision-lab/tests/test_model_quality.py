@@ -272,6 +272,19 @@ class TestModelQuality:
         assert total == 1
         assert [item['frame_id'] for item in filtered] == [frame_id]
 
+        predicted[0]['afk_prediction_probability'] = 0.527
+        db.apply_training_review_afk_predictions(
+            self.conn, frame_id=frame_id, model_run_id='afk-run-v1', slots=predicted
+        )
+        assert db.training_review_afk_prediction_frame_ids(self.conn, 'uncertain') == {
+            frame_id
+        }
+        assert db.training_review_afk_prediction_frame_ids(self.conn, 'afk') == set()
+        predicted[0]['afk_prediction_probability'] = 0.94
+        db.apply_training_review_afk_predictions(
+            self.conn, frame_id=frame_id, model_run_id='afk-run-v1', slots=predicted
+        )
+
         db.save_training_review_hero_lineup(
             self.conn,
             frame_id=frame_id,

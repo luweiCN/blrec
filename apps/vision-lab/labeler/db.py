@@ -5909,10 +5909,13 @@ def training_review_material_suggestions(
         'THEN lineup.frame_id END) AS legacy_candidate_count '
         'FROM training_review_hero_lineups lineup '
         'JOIN training_review_hero_slots slot ON slot.frame_id=lineup.frame_id '
+        'JOIN training_review_items review ON review.frame_id=lineup.frame_id '
         'JOIN training_review_material_index material '
         'ON material.frame_id=lineup.frame_id '
         "WHERE lineup.review_status='confirmed' "
         "AND lineup.screen_type='result_page' "
+        "AND review.panel_render_state='clear' "
+        "AND review.result_occlusion='none' "
         'AND material.result_group_representative_frame_id=lineup.frame_id'
     ).fetchone()
     active_count = int(afk_row['active_count'] or 0)
@@ -8585,8 +8588,13 @@ def _training_review_afk_prediction_status_rows(
                SUM(CASE WHEN slot.afk_prediction_status='succeeded' THEN 1 ELSE 0 END)
                    AS succeeded_count,
                SUM(CASE WHEN slot.afk_prediction_status='succeeded'
-                         AND slot.afk_prediction_label='afk' THEN 1 ELSE 0 END)
-                   AS afk_count,
+                         AND slot.afk_prediction_label='afk'
+                         AND slot.afk_prediction_probability>=0.9
+                        THEN 1 ELSE 0 END) AS afk_count,
+               SUM(CASE WHEN slot.afk_prediction_status='succeeded'
+                         AND slot.afk_prediction_probability>0.1
+                         AND slot.afk_prediction_probability<0.9
+                        THEN 1 ELSE 0 END) AS uncertain_count,
                COUNT(*) AS slot_count
         FROM training_review_hero_lineups lineup
         JOIN training_review_hero_slots slot ON slot.frame_id=lineup.frame_id
@@ -8605,17 +8613,22 @@ def _training_review_afk_prediction_status(row: sqlite3.Row) -> str:
     succeeded = int(row['succeeded_count'] or 0)
     slots = int(row['slot_count'] or 0)
     afk = int(row['afk_count'] or 0)
+    uncertain = int(row['uncertain_count'] or 0)
     return (
         'failed'
         if failed
-        else ('pending' if succeeded != slots else ('afk' if afk else 'active'))
+        else (
+            'pending'
+            if succeeded != slots
+            else ('uncertain' if uncertain else ('afk' if afk else 'active'))
+        )
     )
 
 
 def training_review_afk_prediction_frame_ids(
     conn: sqlite3.Connection, status: str
 ) -> set[int]:
-    if status not in {'afk', 'active', 'pending', 'failed'}:
+    if status not in {'afk', 'uncertain', 'active', 'pending', 'failed'}:
         raise ValueError('挂机预测筛选无效')
     matching = set()
     for row in _training_review_afk_prediction_status_rows(conn):
@@ -8625,7 +8638,9 @@ def training_review_afk_prediction_frame_ids(
 
 
 def training_review_afk_prediction_stats(conn: sqlite3.Connection) -> Dict[str, int]:
-    result = {status: 0 for status in ('afk', 'active', 'pending', 'failed')}
+    result = {
+        status: 0 for status in ('afk', 'uncertain', 'active', 'pending', 'failed')
+    }
     for row in _training_review_afk_prediction_status_rows(conn):
         result[_training_review_afk_prediction_status(row)] += 1
     return result
