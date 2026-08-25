@@ -10,7 +10,9 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from blrec_dashboard_publisher.deduplication import exact_match_fingerprint
 from blrec_dashboard_publisher.rating import (
     RATING_MODEL_VERSION,
+    RatingAfkAdjustment,
     calculate_virtual_match_rating_timeline,
+    resolve_afk_rating_adjustment,
 )
 from pypinyin import Style, lazy_pinyin
 
@@ -267,8 +269,8 @@ def _insert_team(connection: Any, match_id: int, team: IngestMatchTeam) -> None:
     connection.executemany(
         'INSERT INTO match_participants('
         'match_id,team_role,slot,player_name,hero_name,kills,deaths,assists,'
-        'economy,last_hits,is_recorded_player'
-        ') VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        'economy,last_hits,is_recorded_player,afk_status'
+        ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
         (
             (
                 match_id,
@@ -282,6 +284,7 @@ def _insert_team(connection: Any, match_id: int, team: IngestMatchTeam) -> None:
                 player.economy,
                 player.last_hits,
                 int(player.is_recorded_player),
+                player.afk_status,
             )
             for player in team.players
         ),
@@ -386,6 +389,7 @@ def _insert_bootstrap_matches(
                     player.economy,
                     player.last_hits,
                     int(player.is_recorded_player),
+                    player.afk_status,
                 )
                 for player in team.players
             )
@@ -420,8 +424,8 @@ def _insert_bootstrap_matches(
     connection.executemany(
         'INSERT INTO match_participants('
         'match_id,team_role,slot,player_name,hero_name,kills,deaths,assists,'
-        'economy,last_hits,is_recorded_player'
-        ') VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        'economy,last_hits,is_recorded_player,afk_status'
+        ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
         participant_rows,
     )
     connection.executemany(
@@ -516,6 +520,53 @@ def _rebuild_match_search(connection: Any, match_ids: Iterable[int]) -> None:
         )
 
 
+def _afk_adjustments_by_match(
+    connection: Any, match_ids: Sequence[int]
+) -> Mapping[int, RatingAfkAdjustment]:
+    if not match_ids:
+        return {}
+    rows = []
+    for start in range(0, len(match_ids), 500):
+        batch = tuple(match_ids[start : start + 500])
+        placeholders = ','.join('?' for _ in batch)
+        rows.extend(
+            connection.execute(
+                'SELECT participant.match_id,participant.team_role,'
+                'participant.is_recorded_player,participant.afk_status,match.result '
+                'FROM match_participants participant JOIN matches match '
+                'ON match.source_match_id=participant.match_id '
+                'WHERE participant.match_id IN ({}) '
+                'ORDER BY participant.match_id,participant.team_role,'
+                'participant.slot'.format(placeholders),
+                batch,
+            ).fetchall()
+        )
+    participants: Dict[int, Dict[str, List[Any]]] = {}
+    for row in rows:
+        participants.setdefault(int(row['match_id']), {}).setdefault(
+            str(row['team_role']), []
+        ).append(row)
+    adjustments: Dict[int, RatingAfkAdjustment] = {}
+    for match_id, teams in participants.items():
+        allies = teams.get('ally', [])
+        enemies = teams.get('enemy', [])
+        recorded = next(
+            (row for row in allies if bool(row['is_recorded_player'])), None
+        )
+        if recorded is None:
+            adjustments[match_id] = RatingAfkAdjustment()
+            continue
+        adjustments[match_id] = resolve_afk_rating_adjustment(
+            result=str(recorded['result']),
+            recorded_status=str(recorded['afk_status']),
+            teammate_statuses=tuple(
+                str(row['afk_status']) for row in allies if row is not recorded
+            ),
+            enemy_statuses=tuple(str(row['afk_status']) for row in enemies),
+        )
+    return adjustments
+
+
 def _insert_rating_timeline(
     connection: Any,
     rows: Sequence[Any],
@@ -525,9 +576,11 @@ def _insert_rating_timeline(
     previous_ability: Optional[float],
     previous_evidence: Optional[float],
     reset_visible_score: bool,
+    afk_adjustments: Optional[Sequence[RatingAfkAdjustment]] = None,
 ) -> Tuple[Optional[float], Optional[float]]:
     timeline = calculate_virtual_match_rating_timeline(
         results=[str(row['result']) for row in rows],
+        afk_adjustments=afk_adjustments,
         previous_ability=previous_ability,
         previous_evidence=previous_evidence,
         reset_visible_score=reset_visible_score,
@@ -550,6 +603,8 @@ def _insert_rating_timeline(
                 after.evidence,
                 int(after.provisional),
                 RATING_MODEL_VERSION,
+                transition.afk_adjustment.kind,
+                transition.afk_adjustment.net_player_deficit,
             )
         )
     if rating_rows:
@@ -557,8 +612,8 @@ def _insert_rating_timeline(
             'INSERT INTO rating_events('
             'match_id,player_id,season_key,scope,match_number,result,'
             'score_before,score_delta,score_after,ability_after,evidence_after,'
-            'provisional,model_version'
-            ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            'provisional,model_version,afk_adjustment,afk_player_deficit'
+            ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             rating_rows,
         )
     if not timeline:
@@ -583,6 +638,9 @@ def _recompute_ratings(connection: Any, player_ids: Iterable[int]) -> int:
         'ORDER BY player_id,played_at_epoch,source_match_id'.format(placeholders),
         parameters,
     ).fetchall()
+    adjustments = _afk_adjustments_by_match(
+        connection, tuple(int(row['source_match_id']) for row in all_rows)
+    )
     inserted = 0
     for player_id, player_group in groupby(
         all_rows, key=lambda row: int(row['player_id'])
@@ -623,6 +681,12 @@ def _recompute_ratings(connection: Any, player_ids: Iterable[int]) -> int:
                     previous_ability=previous_ability,
                     previous_evidence=previous_evidence,
                     reset_visible_score=True,
+                    afk_adjustments=[
+                        adjustments.get(
+                            int(row['source_match_id']), RatingAfkAdjustment()
+                        )
+                        for row in season_rows
+                    ],
                 )
                 inserted += len(season_rows)
             _insert_rating_timeline(
@@ -633,6 +697,10 @@ def _recompute_ratings(connection: Any, player_ids: Iterable[int]) -> int:
                 previous_ability=None,
                 previous_evidence=None,
                 reset_visible_score=False,
+                afk_adjustments=[
+                    adjustments.get(int(row['source_match_id']), RatingAfkAdjustment())
+                    for row in scoped_rows
+                ],
             )
             inserted += len(scoped_rows)
     return inserted
@@ -890,7 +958,8 @@ def _rows_matches(
         }
     for participant in connection.execute(
         'SELECT match_id,team_role,slot,player_name,hero_name,kills,deaths,'
-        'assists,economy,last_hits,is_recorded_player FROM match_participants '
+        'assists,economy,last_hits,is_recorded_player,afk_status '
+        'FROM match_participants '
         'WHERE match_id IN ('
         + match_placeholders
         + ') ORDER BY match_id,team_role,slot',
@@ -909,6 +978,7 @@ def _rows_matches(
                 'economy': participant['economy'],
                 'lastHits': participant['last_hits'],
                 'isRecordedPlayer': bool(participant['is_recorded_player']),
+                'afkStatus': str(participant['afk_status']),
             }
         )
 
@@ -921,8 +991,8 @@ def _rows_matches(
         (int(rating['match_id']), str(rating['season_key'])): rating
         for rating in connection.execute(
             'SELECT match_id,season_key,score_before,score_delta,score_after,'
-            'match_number,provisional,model_version FROM rating_events '
-            + rating_conditions,
+            'match_number,provisional,model_version,afk_adjustment,'
+            'afk_player_deficit FROM rating_events ' + rating_conditions,
             rating_parameters,
         ).fetchall()
     }
@@ -981,6 +1051,8 @@ def _rows_matches(
                         'scoreAfter': int(rating['score_after']),
                         'provisional': bool(rating['provisional']),
                         'modelVersion': int(rating['model_version']),
+                        'afkAdjustment': str(rating['afk_adjustment']),
+                        'afkPlayerDeficit': int(rating['afk_player_deficit']),
                     }
                 ),
                 'resultImage': assets.get(match_id),

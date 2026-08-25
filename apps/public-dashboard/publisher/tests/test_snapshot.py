@@ -989,7 +989,7 @@ async def test_historical_backfill_recalculates_every_later_season(
             with_autumn, '2026-summer', 20
         )
         assert rating(with_autumn, '2026-summer', 10) != spring_strong
-        assert with_autumn['ratingModel'] == {'version': 7}
+        assert with_autumn['ratingModel'] == {'version': 8}
     finally:
         await database.close()
 

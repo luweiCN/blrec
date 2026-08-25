@@ -77,6 +77,12 @@ class IngestMatchPlayer(StrictModel):
     economy: Optional[int] = Field(default=None, ge=0)
     last_hits: Optional[int] = Field(default=None, alias='lastHits', ge=0)
     is_recorded_player: bool = Field(alias='isRecordedPlayer')
+    afk_status: Literal['unknown', 'active', 'afk'] = Field(
+        default='unknown', alias='afkStatus'
+    )
+    afk_status: Literal['unknown', 'active', 'afk'] = Field(
+        default='unknown', alias='afkStatus'
+    )
 
 
 class IngestMatchTeam(StrictModel):

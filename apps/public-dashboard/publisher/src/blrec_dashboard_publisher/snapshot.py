@@ -26,11 +26,13 @@ from typing import (
 from .deduplication import exact_match_fingerprint
 from .rating import (
     RATING_MODEL_VERSION,
+    RatingAfkAdjustment,
     RatingForecast,
     RatingGoalForecast,
     VirtualMatchRating,
     calculate_rating_forecast,
     calculate_virtual_match_rating_timeline,
+    resolve_afk_rating_adjustment,
 )
 from .source_database import connect_source_database
 
@@ -163,6 +165,7 @@ class _Performance:
     matches: int = 0
     wins: int = 0
     results: Optional[List[str]] = None
+    afk_adjustments: Optional[List[RatingAfkAdjustment]] = None
     heroes: Optional[MutableMapping[str, _HeroUsageTotals]] = None
 
     def add(
@@ -174,6 +177,7 @@ class _Performance:
         assists: Optional[int],
         economy: Optional[int],
         duration_seconds: Optional[int],
+        afk_adjustment: RatingAfkAdjustment = RatingAfkAdjustment(),
     ) -> None:
         self.matches += 1
         if result == 'W':
@@ -181,6 +185,9 @@ class _Performance:
         if self.results is None:
             self.results = []
         self.results.append(result)
+        if self.afk_adjustments is None:
+            self.afk_adjustments = []
+        self.afk_adjustments.append(afk_adjustment)
         if not hero_name:
             return
         if self.heroes is None:
@@ -550,7 +557,15 @@ def _lineups_by_match(
             "COALESCE(participant.player_name,'') AS player_name,"
             "COALESCE(hero.label,'') AS hero_name,participant.kills,"
             'participant.deaths,participant.assists,participant.economy,'
-            'participant.last_hits FROM vainglory_match_players participant '
+            'participant.last_hits,'
+            "CASE WHEN participant.afk_manual_override=1 THEN 'afk' "
+            "WHEN participant.afk_manual_override=0 THEN 'active' "
+            "WHEN participant.afk_prediction_status='afk' "
+            'AND participant.afk_prediction_probability>=0.90 '
+            "THEN 'afk' WHEN participant.afk_prediction_status='active' "
+            'AND participant.afk_prediction_probability<=0.10 '
+            "THEN 'active' ELSE 'unknown' END AS afk_status "
+            'FROM vainglory_match_players participant '
             'LEFT JOIN vainglory_heroes hero ON hero.id=participant.hero_id '
             'WHERE participant.match_id IN ('
             + placeholders
@@ -784,6 +799,7 @@ def _public_matches(
                         else int(participant[source])
                     )
                 player_value['lastHits'] = None
+                player_value['afkStatus'] = str(participant['afk_status'])
                 players.append(player_value)
             return {
                 'role': 'ally' if side == recorded_side else 'enemy',
@@ -1443,12 +1459,71 @@ def _standings_for_rows(
         duration_seconds = (
             None if row['duration_seconds'] is None else int(row['duration_seconds'])
         )
+        participants = lineups.get(int(row['match_id']), ())
+        recorded_slot = row.get('recorded_player_slot')
+        if recorded_slot is None:
+            recorded_slot = next(
+                (
+                    int(participant['slot'])
+                    for participant in participants
+                    if _true_flag(participant.get('is_recorded_player', False))
+                ),
+                None,
+            )
+        recorded_position = (
+            None
+            if recorded_slot is None
+            else (str(row['recorded_player_side']), int(recorded_slot))
+        )
+        recorded_status = next(
+            (
+                str(participant.get('afk_status', 'unknown'))
+                for participant in participants
+                if recorded_position is not None
+                if (str(participant['side']), int(participant['slot']))
+                == recorded_position
+            ),
+            'unknown',
+        )
+        teammate_statuses = tuple(
+            str(participant.get('afk_status', 'unknown'))
+            for participant in participants
+            if recorded_position is not None
+            and str(participant['side']) == recorded_position[0]
+            and int(participant['slot']) != recorded_position[1]
+        )
+        enemy_statuses = tuple(
+            str(participant.get('afk_status', 'unknown'))
+            for participant in participants
+            if recorded_position is not None
+            and str(participant['side']) != recorded_position[0]
+        )
+        afk_adjustment = resolve_afk_rating_adjustment(
+            result=result,
+            recorded_status=recorded_status,
+            teammate_statuses=teammate_statuses,
+            enemy_statuses=enemy_statuses,
+        )
         modes = player_modes.setdefault(player_id, _empty_player_modes())
         modes[public_mode].add(
-            result, hero_name, kills, deaths, assists, economy, duration_seconds
+            result,
+            hero_name,
+            kills,
+            deaths,
+            assists,
+            economy,
+            duration_seconds,
+            afk_adjustment,
         )
         modes['all'].add(
-            result, hero_name, kills, deaths, assists, economy, duration_seconds
+            result,
+            hero_name,
+            kills,
+            deaths,
+            assists,
+            economy,
+            duration_seconds,
+            afk_adjustment,
         )
         if not hero_name:
             continue
@@ -1467,6 +1542,7 @@ def _standings_for_rows(
             performance = modes[mode]
             timeline = calculate_virtual_match_rating_timeline(
                 results=performance.results or (),
+                afk_adjustments=performance.afk_adjustments,
                 previous_ability=(previous.ability if previous is not None else None),
                 previous_evidence=(previous.evidence if previous is not None else None),
                 reset_visible_score=reset_visible_score,

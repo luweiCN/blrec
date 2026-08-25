@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 __all__ = (
     'CARRYOVER_MATCH_CAP',
@@ -12,6 +12,7 @@ __all__ = (
     'PROBABILITY_SCALE',
     'PROVISIONAL_MATCHES',
     'RATING_MODEL_VERSION',
+    'RatingAfkAdjustment',
     'RatingForecast',
     'RatingGoalForecast',
     'RatingTransition',
@@ -23,6 +24,7 @@ __all__ = (
     'calculate_virtual_match_rating',
     'calculate_virtual_match_rating_timeline',
     'expected_win_probability',
+    'resolve_afk_rating_adjustment',
 )
 
 
@@ -34,7 +36,7 @@ NEW_PLAYER_DISPLAY_SCORE = 1000
 SEASON_RESET_ANCHOR_DISPLAY_SCORE = 1200
 SEASON_RESET_CARRYOVER_RATE = 0.5
 PROBABILITY_SCALE = 1800
-RATING_MODEL_VERSION = 7
+RATING_MODEL_VERSION = 8
 
 _NEUTRAL_ABILITY = 0.5
 _DISPLAY_SCORE_MULTIPLIER = 3
@@ -96,10 +98,27 @@ class VirtualMatchRating:
 
 
 @dataclass(frozen=True)
+class RatingAfkAdjustment:
+    kind: Literal['none', 'protected_loss', 'undermanned_win', 'self_afk'] = 'none'
+    team_size: int = 0
+    net_player_deficit: int = 0
+
+    def __post_init__(self) -> None:
+        if self.kind == 'undermanned_win':
+            if self.team_size not in (3, 5):
+                raise ValueError('undermanned win team size must be 3 or 5')
+            if not 1 <= self.net_player_deficit < self.team_size:
+                raise ValueError('undermanned win player deficit is invalid')
+        elif self.team_size != 0 or self.net_player_deficit != 0:
+            raise ValueError('only undermanned wins may carry a player deficit')
+
+
+@dataclass(frozen=True)
 class RatingTransition:
     result: str
     rating_before: VirtualMatchRating
     rating_after: VirtualMatchRating
+    afk_adjustment: RatingAfkAdjustment = RatingAfkAdjustment()
 
     @property
     def score_before(self) -> int:
@@ -137,6 +156,39 @@ def expected_win_probability(display_score: float) -> float:
         1.0
         + math.pow(10.0, (NEUTRAL_DISPLAY_SCORE - display_score) / PROBABILITY_SCALE)
     )
+
+
+def resolve_afk_rating_adjustment(
+    *,
+    result: str,
+    recorded_status: str,
+    teammate_statuses: Sequence[str],
+    enemy_statuses: Sequence[str],
+) -> RatingAfkAdjustment:
+    if result not in ('W', 'L'):
+        raise ValueError('virtual match rating result must be W or L')
+    team_size = len(teammate_statuses) + 1
+    statuses = (recorded_status, *teammate_statuses, *enemy_statuses)
+    if (
+        team_size not in (3, 5)
+        or len(enemy_statuses) != team_size
+        or any(status not in ('active', 'afk') for status in statuses)
+    ):
+        return RatingAfkAdjustment()
+    if recorded_status == 'afk':
+        return RatingAfkAdjustment(kind='self_afk')
+    teammate_afks = sum(status == 'afk' for status in teammate_statuses)
+    enemy_afks = sum(status == 'afk' for status in enemy_statuses)
+    if result == 'L' and teammate_afks:
+        return RatingAfkAdjustment(kind='protected_loss')
+    net_player_deficit = teammate_afks - enemy_afks
+    if result == 'W' and net_player_deficit > 0:
+        return RatingAfkAdjustment(
+            kind='undermanned_win',
+            team_size=team_size,
+            net_player_deficit=net_player_deficit,
+        )
+    return RatingAfkAdjustment()
 
 
 def _display_score_for_ability(ability: float) -> float:
@@ -299,6 +351,34 @@ def _advance_rating(rating: VirtualMatchRating, result: str) -> VirtualMatchRati
     )
 
 
+def _advance_rating_with_afk_adjustment(
+    rating: VirtualMatchRating, result: str, adjustment: RatingAfkAdjustment
+) -> VirtualMatchRating:
+    if adjustment.kind == 'none':
+        return _advance_rating(rating, result)
+    if adjustment.kind == 'protected_loss':
+        if result != 'L':
+            raise ValueError('AFK loss protection requires a loss')
+        return rating
+    if adjustment.kind == 'self_afk':
+        normal = _advance_rating(rating, 'L')
+        factor = 2.0
+    else:
+        if result != 'W':
+            raise ValueError('undermanned win adjustment requires a win')
+        normal = _advance_rating(rating, result)
+        factor = 1.0 + min(
+            0.5, 0.5 * adjustment.net_player_deficit / (adjustment.team_size - 1)
+        )
+    score = rating.score + (normal.score - rating.score) * factor
+    return VirtualMatchRating(
+        ability=normal.ability,
+        evidence=normal.evidence,
+        score=max(0.0, min(float(_INTERNAL_SCORE_MAXIMUM), score)),
+        provisional=rating.provisional,
+    )
+
+
 def _advance_expected_rating(
     rating: VirtualMatchRating, win_rate: float
 ) -> VirtualMatchRating:
@@ -458,12 +538,14 @@ def calculate_virtual_match_rating(
     previous_ability: Optional[float] = None,
     previous_evidence: Optional[float] = None,
     reset_visible_score: bool = True,
+    afk_adjustments: Optional[Sequence[RatingAfkAdjustment]] = None,
 ) -> Optional[VirtualMatchRating]:
     timeline = calculate_virtual_match_rating_timeline(
         results=results,
         previous_ability=previous_ability,
         previous_evidence=previous_evidence,
         reset_visible_score=reset_visible_score,
+        afk_adjustments=afk_adjustments,
     )
     return None if not timeline else timeline[-1].rating_after
 
@@ -474,11 +556,19 @@ def calculate_virtual_match_rating_timeline(
     previous_ability: Optional[float] = None,
     previous_evidence: Optional[float] = None,
     reset_visible_score: bool = True,
+    afk_adjustments: Optional[Sequence[RatingAfkAdjustment]] = None,
 ) -> tuple[RatingTransition, ...]:
     if any(result not in ('W', 'L') for result in results):
         raise ValueError('virtual match rating result must be W or L')
     if not results:
         return ()
+    adjustments = (
+        tuple(RatingAfkAdjustment() for _ in results)
+        if afk_adjustments is None
+        else tuple(afk_adjustments)
+    )
+    if len(adjustments) != len(results):
+        raise ValueError('virtual match AFK adjustments must match results')
 
     prior_ability, prior_evidence = _initial_evidence(
         previous_ability, previous_evidence
@@ -499,8 +589,10 @@ def calculate_virtual_match_rating_timeline(
         provisional=True,
     )
     transitions = []
-    for match_number, result in enumerate(results, start=1):
-        after = _advance_rating(rating, result)
+    for match_number, (result, adjustment) in enumerate(
+        zip(results, adjustments), start=1
+    ):
+        after = _advance_rating_with_afk_adjustment(rating, result, adjustment)
         after = VirtualMatchRating(
             ability=after.ability,
             evidence=after.evidence,
@@ -508,7 +600,12 @@ def calculate_virtual_match_rating_timeline(
             provisional=match_number < PROVISIONAL_MATCHES,
         )
         transitions.append(
-            RatingTransition(result=result, rating_before=rating, rating_after=after)
+            RatingTransition(
+                result=result,
+                rating_before=rating,
+                rating_after=after,
+                afk_adjustment=adjustment,
+            )
         )
         rating = after
     return tuple(transitions)
