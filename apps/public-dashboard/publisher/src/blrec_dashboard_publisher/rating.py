@@ -179,9 +179,9 @@ def resolve_afk_rating_adjustment(
         return RatingAfkAdjustment(kind='self_afk')
     teammate_afks = sum(status == 'afk' for status in teammate_statuses)
     enemy_afks = sum(status == 'afk' for status in enemy_statuses)
-    if result == 'L' and teammate_afks:
-        return RatingAfkAdjustment(kind='protected_loss')
     net_player_deficit = teammate_afks - enemy_afks
+    if result == 'L' and net_player_deficit > 0:
+        return RatingAfkAdjustment(kind='protected_loss')
     if result == 'W' and net_player_deficit > 0:
         return RatingAfkAdjustment(
             kind='undermanned_win',
@@ -362,15 +362,33 @@ def _advance_rating_with_afk_adjustment(
         return rating
     if adjustment.kind == 'self_afk':
         normal = _advance_rating(rating, 'L')
-        factor = 2.0
+        normal_display_delta = (
+            round(normal.score * _DISPLAY_SCORE_MULTIPLIER)
+            - round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
+        )
+        adjusted_display_delta = -_round_display_adjustment(
+            abs(normal_display_delta) * 1.8
+        )
     else:
         if result != 'W':
             raise ValueError('undermanned win adjustment requires a win')
         normal = _advance_rating(rating, result)
-        factor = 1.0 + min(
-            0.5, 0.5 * adjustment.net_player_deficit / (adjustment.team_size - 1)
+        normal_display_delta = (
+            round(normal.score * _DISPLAY_SCORE_MULTIPLIER)
+            - round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
         )
-    score = rating.score + (normal.score - rating.score) * factor
+        if normal_display_delta <= 0:
+            adjusted_display_delta = 0
+        else:
+            factor = 1.0 + adjustment.net_player_deficit / (
+                adjustment.team_size - 1
+            )
+            adjusted_display_delta = max(
+                _round_display_adjustment(normal_display_delta * factor),
+                normal_display_delta + adjustment.net_player_deficit,
+            )
+    display_score = round(rating.score * _DISPLAY_SCORE_MULTIPLIER)
+    score = (display_score + adjusted_display_delta) / _DISPLAY_SCORE_MULTIPLIER
     return VirtualMatchRating(
         ability=normal.ability,
         evidence=normal.evidence,
