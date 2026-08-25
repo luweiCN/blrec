@@ -1480,6 +1480,42 @@ def test_result_frame_mode_skips_opening_rescan_when_confident() -> None:
     assert mode == 'aram'
 
 
+def test_result_only_pipeline_skips_obsolete_opening_rescan() -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class Sampler:
+        def fine_frames(self, _path: str, _window: ScanWindow):
+            raise AssertionError('result-only pipeline cannot use opening frames')
+
+    class ModeClassifier:
+        def predict(self, _frame: RgbFrame):
+            return SimpleNamespace(label='aram', confidence=0.60)
+
+    class ResultOnlyStageClassifier:
+        result_page_mode_only = True
+
+        def classify(self, _frame: RgbFrame):
+            raise AssertionError('result-only pipeline cannot classify hero selection')
+
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=Sampler(),  # type: ignore[arg-type]
+        stage_classifier=ResultOnlyStageClassifier(),  # type: ignore[arg-type]
+        match_mode_classifier=ModeClassifier(),  # type: ignore[arg-type]
+        minimum_result_mode_confidence=0.75,
+    )
+
+    mode = analyzer._detect_game_mode(
+        'unused',
+        result_at_ms=600_000,
+        duration_seconds=590,
+        video_duration_ms=700_000,
+        team_size=3,
+        result_frame=frame,
+    )
+
+    assert mode == '3v3'
+
+
 def test_result_frame_mode_conflict_keeps_existing_fallback() -> None:
     frame = RgbFrame(1, 1, b'\x00\x00\x00')
 

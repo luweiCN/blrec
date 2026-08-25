@@ -4955,6 +4955,8 @@ class VaingloryVideoAnalyzer:
                 video_duration_ms=video_duration_ms,
             )
         classifier = self._stage_classifier
+        if bool(getattr(classifier, 'result_page_mode_only', False)):
+            return '3v3'
         window_start = max(0, estimated_start_ms - 180_000)
         window_end = min(video_duration_ms, estimated_start_ms)
         if window_end <= window_start:
