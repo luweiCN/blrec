@@ -4820,11 +4820,13 @@ class VaingloryVideoAnalyzer:
         if classifier is None:
             return abstain('model_unavailable')
         expected = layout.team_size * 2
-        expected_positions = {(slot.side, slot.slot) for slot in slots}
+        expected_positions: Set[Tuple[str, int]] = {
+            (str(slot.side), slot.slot) for slot in slots
+        }
         observed_positions = (
             expected_positions
             if recognized is None
-            else {(player.side, int(player.slot)) for player in recognized.players}
+            else {(str(player.side), int(player.slot)) for player in recognized.players}
         )
         if len(slots) != expected or observed_positions != expected_positions:
             return abstain('slots_incomplete')

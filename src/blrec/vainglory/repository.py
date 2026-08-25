@@ -44,7 +44,7 @@ from .exclusions import EXCLUDED_TITLE_MARKER, is_excluded_title
 from .hero_recognition import HeroReference
 from .ocr import clean_player_name, normalize_player_name
 from .title_time import current_season_started_at
-from .vision import RecordedPlayer, TeamSide
+from .vision import RecordedPlayer
 
 # MediaLibrary uses this sentinel for an external import without a source room.
 _EXTERNAL_IMPORT_ROOM_ID = 2_147_483_647
@@ -160,15 +160,14 @@ def _analysis_revision_snapshot(matches: Sequence[AnalyzedMatch]) -> Tuple[str, 
 
 def _afk_predictions_by_position(
     match: AnalyzedMatch,
-) -> Dict[Tuple[TeamSide, int], AnalyzedAfkStatus]:
-    return {(status.side, int(status.slot)): status for status in match.afk_statuses}
+) -> Dict[Tuple[str, int], AnalyzedAfkStatus]:
+    return {
+        (str(status.side), int(status.slot)): status for status in match.afk_statuses
+    }
 
 
 def _afk_prediction_values(
-    predictions: Mapping[Tuple[TeamSide, int], AnalyzedAfkStatus],
-    *,
-    side: TeamSide,
-    slot: int,
+    predictions: Mapping[Tuple[str, int], AnalyzedAfkStatus], *, side: str, slot: int
 ) -> Tuple[str, Optional[float], str, str]:
     prediction = predictions.get((side, int(slot)))
     if prediction is None:
@@ -6422,11 +6421,9 @@ class VaingloryRepository:
                 'WHERE match_id=? ORDER BY side,slot',
                 (int(match_id),),
             ).fetchall()
-            expected_positions = {
-                (cast(TeamSide, str(row['side'])), int(row['slot'])) for row in rows
-            }
+            expected_positions = {(str(row['side']), int(row['slot'])) for row in rows}
             predictions = {
-                (status.side, int(status.slot)): status for status in statuses
+                (str(status.side), int(status.slot)): status for status in statuses
             }
             if (
                 len(predictions) != len(statuses)
