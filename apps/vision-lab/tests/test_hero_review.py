@@ -1053,6 +1053,36 @@ class TestHeroTrainingExport(unittest.TestCase):
                     (scoreboard_frame,),
                 )
 
+        excluded_result_frames = []
+        for offset, (render_state, occlusion) in enumerate(
+            (('translucent', 'none'), ('clear', 'occluded')), start=1
+        ):
+            index += 1
+            frame_id = self._confirmed_lineup(video_id, index, 'result_page')
+            excluded_result_frames.append(frame_id)
+            lineup = db.get_training_review_hero_lineup(self.conn, frame_id)
+            db.save_training_review_hero_lineup(
+                self.conn,
+                frame_id=frame_id,
+                labels=[
+                    {
+                        'side': slot['side'],
+                        'slot': slot['slot'],
+                        'hero_label': slot['confirmed_label'],
+                        'is_afk': False,
+                    }
+                    for slot in lineup['slots']
+                ],
+                allowed_labels={'Adagio', 'Alpha'},
+            )
+            with self.conn:
+                self.conn.execute(
+                    'UPDATE training_review_items '
+                    'SET panel_render_state=?,result_occlusion=? '
+                    'WHERE frame_id=?',
+                    (render_state, occlusion, frame_id),
+                )
+
         summary = next(
             item
             for item in training.task_summaries(self.conn)
@@ -1063,6 +1093,7 @@ class TestHeroTrainingExport(unittest.TestCase):
             for item in db.training_review_material_suggestions(self.conn)
             if item['kind'] == 'afk_status'
         )
+        confirmed_samples = export.confirmed_afk_status_samples(self.conn)
         snapshot = export.export_afk_status_classifier(self.conn)
 
         self.assertTrue(summary['ready'])
@@ -1073,6 +1104,11 @@ class TestHeroTrainingExport(unittest.TestCase):
         self.assertEqual(suggestion['afk_target_count'], 200)
         self.assertEqual(snapshot['total'], 12)
         self.assertEqual(snapshot['by_label'], {'active': 10, 'afk': 2})
+        self.assertTrue(
+            set(excluded_result_frames).isdisjoint(
+                {sample['frame_id'] for sample in confirmed_samples}
+            )
+        )
         version = next(
             item
             for item in db.list_dataset_versions(self.conn)
