@@ -4824,7 +4824,7 @@ class VaingloryVideoAnalyzer:
         observed_positions = (
             expected_positions
             if recognized is None
-            else {(str(player.side), int(player.slot)) for player in recognized.players}
+            else {(player.side, int(player.slot)) for player in recognized.players}
         )
         if len(slots) != expected or observed_positions != expected_positions:
             return abstain('slots_incomplete')
