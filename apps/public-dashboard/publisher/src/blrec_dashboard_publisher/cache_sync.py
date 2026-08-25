@@ -205,12 +205,7 @@ def sync_dashboard_cache_once(
             source_revision=source_revision,
         )
     bootstrap = previous_revision == 0
-    if not bootstrap and len(changed_matches) > max_batch_matches:
-        raise DashboardCacheSyncError(
-            '排行榜缓存增量超过单批上限，需要在 direct 模式重新引导'
-        )
-    if bootstrap:
-        changed_matches = _order_match_dependencies(changed_matches)
+    changed_matches = _order_match_dependencies(changed_matches)
     chunks = [
         changed_matches[index : index + max_batch_matches]
         for index in range(0, len(changed_matches), max_batch_matches)

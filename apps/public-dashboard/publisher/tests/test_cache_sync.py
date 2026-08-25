@@ -133,3 +133,47 @@ def test_cache_sync_emits_an_empty_fast_forward_batch_for_revision_only_change(
     assert posted[0][1]['matches'] == []
     assert posted[0][1]['reset'] is False
     assert posted[0][1]['publish'] is True
+
+
+def test_cache_sync_splits_large_incremental_update_into_bounded_batches(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / 'source.sqlite3'
+    state_directory = tmp_path / 'state'
+    _database(database_path, 7)
+    posted = []
+    source = _source(1201)
+
+    def post_batch(key: str, content: bytes) -> Mapping[str, Any]:
+        posted.append((key, json.loads(content)))
+        return {'status': 'applied'}
+
+    sync_dashboard_cache_once(
+        database_path=database_path,
+        state_directory=state_directory,
+        post_batch=post_batch,
+        source_builder=lambda _connection: source,
+        max_batch_matches=500,
+    )
+    posted.clear()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute('UPDATE dashboard_source_state SET revision=8')
+    changed = _source(1201)
+    for match in changed['matches']:
+        match['revisionMarker'] = 'changed'
+
+    result = sync_dashboard_cache_once(
+        database_path=database_path,
+        state_directory=state_directory,
+        post_batch=post_batch,
+        source_builder=lambda _connection: changed,
+        max_batch_matches=500,
+    )
+
+    assert result.synced is True
+    assert result.batch_count == 3
+    assert result.match_count == 1201
+    assert [len(batch['matches']) for _key, batch in posted] == [500, 500, 201]
+    assert [batch['reset'] for _key, batch in posted] == [False, False, False]
+    assert [batch['publish'] for _key, batch in posted] == [False, False, True]
+    assert all(batch['sourceRevision'] == 8 for _key, batch in posted)
