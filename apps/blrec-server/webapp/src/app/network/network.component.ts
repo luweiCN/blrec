@@ -69,8 +69,8 @@ export class NetworkComponent implements OnInit, OnDestroy {
     },
     {
       key: 'database',
-      name: '云端主数据库',
-      help: '通过加密隧道连接移动云 PostgreSQL；固定使用所选线路，整次连接不会中途切换出口。',
+      name: '旧云数据库回滚',
+      help: '生产主库已通过局域网直连 PVE；仅在明确回滚到旧云 SSH 隧道时使用此线路。',
     },
     {
       key: 'cloudCost',

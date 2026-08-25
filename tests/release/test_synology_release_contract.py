@@ -8,7 +8,7 @@ def test_synology_compose_pulls_one_pinned_public_image() -> None:
     assert 'build:' not in compose
     assert (
         'ghcr.io/luweicn/blrec-server:'
-        '${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.114}' in compose
+        '${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.126}' in compose
     )
     assert 'container_name: blrec-next' in compose
     assert 'network_mode: host' in compose
@@ -20,7 +20,7 @@ def test_synology_compose_pulls_one_pinned_public_image() -> None:
 
 def test_environment_example_contains_no_credential() -> None:
     example = (ROOT / 'synology.env.example').read_text(encoding='utf8')
-    assert 'BLREC_SERVER_IMAGE_TAG=3.0.0-beta.114' in example
+    assert 'BLREC_SERVER_IMAGE_TAG=3.0.0-beta.126' in example
     assert 'BLREC_ADMIN_USERNAME=admin' in example
     assert 'BLREC_API_KEY=\n' in example
     assert 'BLREC_CREDENTIAL_KEY=' not in example
@@ -45,6 +45,28 @@ def test_postgres_overlay_uses_a_fixed_encrypted_tunnel() -> None:
     assert 'BLREC_DATABASE_SCHEMA: ${BLREC_DATABASE_SCHEMA:-core}' in compose
 
 
+def test_lan_postgres_overlay_uses_the_pve_database_directly() -> None:
+    compose = (ROOT / 'compose.lan-postgres.yml').read_text(encoding='utf8')
+    environment = (ROOT / 'synology.lan-postgres.env.example').read_text(
+        encoding='utf8'
+    )
+    assert 'blrec-database-tunnel' not in compose
+    assert 'BLREC_DATABASE_URL: ${BLREC_DATABASE_URL:?' in compose
+    assert 'BLREC_DATABASE_NAME: ${BLREC_DATABASE_NAME:-blrec_dashboard}' in compose
+    assert 'BLREC_DATABASE_SCHEMA: ${BLREC_DATABASE_SCHEMA:-core}' in compose
+    assert '@192.168.50.62:5432/blrec_dashboard' in environment
+    assert 'options=-csearch_path%3Dcore' in environment
+    assert 'replace-me' in environment
+
+
+def test_server_release_uploads_the_lan_postgres_contract() -> None:
+    workflow = (ROOT / '.github/workflows/release-server.yml').read_text(
+        encoding='utf8'
+    )
+    assert 'compose.lan-postgres.yml' in workflow
+    assert 'synology.lan-postgres.env.example' in workflow
+
+
 def test_postgres_runbook_has_backup_cutover_and_rollback() -> None:
     document = (ROOT / 'docs/operations/postgresql-main-database.md').read_text(
         encoding='utf8'
@@ -53,7 +75,8 @@ def test_postgres_runbook_has_backup_cutover_and_rollback() -> None:
         assert heading in document
     assert 'backup_blrec_database.py' in document
     assert 'migrate_blrec_sqlite_to_postgres.py' in document
-    assert '-f compose.synology.yml -f compose.postgres.yml' in document
+    assert '-f compose.synology.yml -f compose.lan-postgres.yml' in document
+    assert 'PVE PostgreSQL' in document
     assert '不能让 PostgreSQL 和 SQLite 同时写入' in document
 
 
@@ -116,7 +139,8 @@ def test_upgrade_stops_on_error_and_verifies_secure_backups() -> None:
     for command in required:
         assert command in upgrade
     assert upgrade.index('set -eu') < upgrade.index(
-        'docker compose --env-file .env -f compose.synology.yml stop'
+        'docker compose --env-file .env -f compose.synology.yml '
+        '-f compose.lan-postgres.yml stop'
     )
     assert upgrade.index('cp .env "$backup_env"') < upgrade.index(
         'test -s "$backup_env"'
@@ -149,8 +173,9 @@ def test_rollback_validates_and_stages_restore_before_replacing_config() -> None
         'test -s "$backup_env"',
         "grep -Eq '^BLREC_SERVER_IMAGE_TAG=[^[:space:]]+$' \"$backup_env\"",
         'docker compose --env-file "$backup_env" '
-        '-f compose.synology.yml config >/dev/null',
-        'docker compose --env-file "$backup_env" ' '-f compose.synology.yml pull',
+        '-f compose.synology.yml -f compose.lan-postgres.yml config >/dev/null',
+        'docker compose --env-file "$backup_env" '
+        '-f compose.synology.yml -f compose.lan-postgres.yml pull',
         'cp -a "$backup_config_dir" "$restore_candidate"',
         'test -s "$restore_candidate/credential.key"',
         'mv "$config_dir" "${config_dir}.failed-${failed_id}"',
@@ -161,7 +186,8 @@ def test_rollback_validates_and_stages_restore_before_replacing_config() -> None
     for command in required:
         assert command in rollback
     pull = rollback.index(
-        'docker compose --env-file "$backup_env" ' '-f compose.synology.yml pull'
+        'docker compose --env-file "$backup_env" '
+        '-f compose.synology.yml -f compose.lan-postgres.yml pull'
     )
     replace = rollback.index('mv "$config_dir" "${config_dir}.failed-${failed_id}"')
     assert rollback.index('set -eu') < pull < replace

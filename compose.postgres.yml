@@ -1,6 +1,7 @@
+# 仅用于已备份的旧云紧急回滚；PVE 生产环境使用 compose.lan-postgres.yml。
 services:
   blrec-next:
-    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.114}
+    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.126}
     depends_on:
       blrec-database-tunnel:
         condition: service_healthy
@@ -10,7 +11,7 @@ services:
       BLREC_DATABASE_SCHEMA: ${BLREC_DATABASE_SCHEMA:-core}
 
   blrec-database-tunnel:
-    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.114}
+    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.126}
     pull_policy: always
     container_name: blrec-database-tunnel
     network_mode: host
@@ -18,7 +19,7 @@ services:
     entrypoint: ['python', '-m', 'blrec.networking.postgres_tunnel']
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      BLREC_DATABASE_SSH_HOST: ${BLREC_DATABASE_SSH_HOST:?请设置移动云固定 IP}
+      BLREC_DATABASE_SSH_HOST: ${BLREC_DATABASE_SSH_HOST:?请设置旧云回滚固定 IP}
       BLREC_DATABASE_SSH_PORT: ${BLREC_DATABASE_SSH_PORT:-22}
       BLREC_DATABASE_SSH_USER: ${BLREC_DATABASE_SSH_USER:?请设置隧道用户}
       BLREC_DATABASE_SSH_KEY_PATH: /cfg/postgres-tunnel.key

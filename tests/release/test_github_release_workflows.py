@@ -47,7 +47,14 @@ def test_server_release_has_independent_exact_image_contract() -> None:
     assert ':latest' not in workflow
     assert 'gh release create' in workflow
     assert 'browser-extension' not in workflow
-    assert 'compose.synology.yml compose.postgres.yml synology.env.example' in workflow
+    for asset in (
+        'compose.synology.yml',
+        'compose.lan-postgres.yml',
+        'compose.postgres.yml',
+        'synology.env.example',
+        'synology.lan-postgres.env.example',
+    ):
+        assert asset in workflow
 
 
 def test_vision_lab_has_independent_test_and_release_workflows() -> None:

@@ -7,16 +7,17 @@
 直接从 GHCR 拉取；Container Manager“项目”导入的也是同一份 Compose，不要另建
 容器配置。
 
-生产业务库迁到移动云 PostgreSQL 后，必须同时叠加 `compose.postgres.yml`。该文件只
-增加固定出口的加密数据库隧道和主库环境，不改变 `/cfg`、`/log`、`/rec`、
+生产业务库迁到 PVE PostgreSQL 后，必须同时叠加 `compose.lan-postgres.yml`。该文件只
+增加 LAN 主库环境，不启动公网数据库隧道，也不改变 `/cfg`、`/log`、`/rec`、
 `/favorites`、`/clips` 与 `/result-frames` 的挂载。完整迁移与回滚步骤见
-[移动云 PostgreSQL 主库](postgresql-main-database.md)。
+[PVE PostgreSQL 主库](postgresql-main-database.md)。
 
 ## 前置设置
 
 1. 在 DSM“控制面板 → 网络 → 常规”中启用多网关，并确认两个内网均能访问 NAS。
 2. 安装 Container Manager，或确认 SSH 终端中的 `docker compose version` 可正常执行。
-3. 将 `compose.synology.yml` 和 `synology.env.example` 放在同一个工作目录。
+3. 将 `compose.synology.yml`、`compose.lan-postgres.yml`、
+   `synology.env.example` 和 `synology.lan-postgres.env.example` 放在同一个工作目录。
 
 不需要额外执行 `docker network create`，也不要在项目中配置 `ports`：`network_mode: host` 已直接使用群晖网络栈。
 
@@ -45,15 +46,22 @@ test -s .env
 
 把 `openssl rand -hex 32` 的输出填入 `.env` 的 `BLREC_API_KEY`，并按需修改管理员用户名和五个宿主目录。若 `.env` 已存在，`test ! -e .env` 会停止安装以避免覆盖，请先确认并妥善迁移原文件。API Key 只用于首次创建管理员和密码恢复，不要提交 `.env`；原始凭据密钥只保存在 `/cfg/credential.key`，不要写入环境变量。
 
+再按 `synology.lan-postgres.env.example` 填写同一 `.env` 中的三项数据库变量；必须把
+`replace-me` 换成权限受限的真实密码，并确认端点是 `192.168.50.62:5432`、数据库是
+`blrec_dashboard`、`search_path=core`。`.env` 继续保持 `0600`，数据库 URL 不得写入
+Compose 正文或日志。
+
 通过 SSH 启动：
 
 ```bash
 set -eu
-docker compose --env-file .env -f compose.synology.yml pull
-docker compose --env-file .env -f compose.synology.yml up -d
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml pull
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml up -d
 ```
 
-也可以在 Container Manager 的“项目”中导入包含上述两个文件的目录。项目必须使用同一份 `compose.synology.yml`，并把 `.env` 中的值作为项目环境变量；不要改成 `build`，也不要添加端口映射。
+也可以在 Container Manager 的“项目”中导入上述两份 Compose。项目必须使用同一份
+`compose.synology.yml` 和 `compose.lan-postgres.yml`，并把 `.env` 中的值作为项目环境
+变量；不要改成 `build`，也不要添加端口映射。
 
 `BLREC_FORWARDED_ALLOW_IPS` 默认只信任 `127.0.0.1`。只有通过群晖反向代理访问，并且确认代理连接来源地址后，才把该地址加入此变量；不要设置为 `*`，否则客户端可伪造来源 IP 绕过登录限速。
 
@@ -96,7 +104,7 @@ test -s "$config_dir/credential.key"
 test -s .env
 test ! -e "$backup_config_dir"
 test ! -e "$backup_env"
-docker compose --env-file .env -f compose.synology.yml stop
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml stop
 cp -a "$config_dir" "$backup_config_dir"
 cp .env "$backup_env"
 chmod 600 "$backup_env"
@@ -125,9 +133,9 @@ test -d "$favorites_dir"
 
 ```bash
 set -eu
-docker compose --env-file .env -f compose.synology.yml config >/dev/null
-docker compose --env-file .env -f compose.synology.yml pull
-docker compose --env-file .env -f compose.synology.yml up -d
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml config >/dev/null
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml pull
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml up -d
 ```
 
 Container Manager 的操作顺序相同：先停止项目并通过 File Station 备份配置目录，再备份项目环境、修改 `BLREC_SERVER_IMAGE_TAG`，最后重新构建项目。不要只使用 `latest`；固定标签才能执行可重复的回滚。
@@ -151,21 +159,21 @@ test -s "$backup_env"
 grep -Eq '^BLREC_SERVER_IMAGE_TAG=[^[:space:]]+$' "$backup_env"
 test ! -e "$restore_candidate"
 test ! -e "${config_dir}.failed-${failed_id}"
-docker compose --env-file "$backup_env" -f compose.synology.yml config >/dev/null
-docker compose --env-file "$backup_env" -f compose.synology.yml pull
+docker compose --env-file "$backup_env" -f compose.synology.yml -f compose.lan-postgres.yml config >/dev/null
+docker compose --env-file "$backup_env" -f compose.synology.yml -f compose.lan-postgres.yml pull
 cp -a "$backup_config_dir" "$restore_candidate"
 test -d "$restore_candidate"
 test -s "$restore_candidate/credential.key"
 cmp -s "$backup_config_dir/credential.key" "$restore_candidate/credential.key"
-docker compose --env-file .env -f compose.synology.yml down
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml down
 mv "$config_dir" "${config_dir}.failed-${failed_id}"
 mv "$restore_candidate" "$config_dir"
 cp "$backup_env" .env
 chmod 600 .env
 test -s .env
 cmp -s "$backup_env" .env
-docker compose --env-file .env -f compose.synology.yml config >/dev/null
-docker compose --env-file .env -f compose.synology.yml up -d
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml config >/dev/null
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml up -d
 ```
 
 恢复的 `.env` 会重新选中已预拉取的旧 `BLREC_SERVER_IMAGE_TAG`，恢复的配置目录同时带回旧设置、状态和 `credential.key`。任一校验、复制、拉取或移动失败时，`set -eu` 都会阻止后续启动，避免以空配置或不匹配配置启动。在 Container Manager 中也必须先验证配置和环境备份、确认旧镜像可用，再同时还原配置目录和项目环境中的旧标签，最后重新构建项目。
@@ -175,9 +183,9 @@ docker compose --env-file .env -f compose.synology.yml up -d
 先确认 Compose 只解析出一个服务，再检查容器状态和日志：
 
 ```bash
-docker compose --env-file .env -f compose.synology.yml config --services
-docker compose --env-file .env -f compose.synology.yml ps
-docker compose --env-file .env -f compose.synology.yml logs --tail=200 blrec-next
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml config --services
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml ps
+docker compose --env-file .env -f compose.synology.yml -f compose.lan-postgres.yml logs --tail=200 blrec-next
 ```
 
 启动后分别访问 `http://<NAS-网络1-IP>:2233` 和 `http://<NAS-网络2-IP>:2233`。首次访问时用 `.env` 中的管理员用户名和 API Key 创建管理员密码。进入“网络管理”，执行“检测全部线路”，确认两块真实网卡的源地址、网关、公网出口 IP 和连通性，并禁用 `docker0` 等容器虚拟网卡。再分别为房间状态轮询、弹幕 WebSocket、录像下载、视频上传及其他 B 站请求选择固定线路或轮换模式。

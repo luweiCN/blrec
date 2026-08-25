@@ -87,7 +87,9 @@ jobs:
             notes=(--notes-file "docs/releases/${version}.md")
           fi
           gh release create "$GITHUB_REF_NAME" \
-            compose.synology.yml compose.postgres.yml synology.env.example \
+            compose.synology.yml compose.lan-postgres.yml \
+            compose.postgres.yml synology.env.example \
+            synology.lan-postgres.env.example \
             --verify-tag \
             --prerelease \
             --title "BLREC Server ${version}" \
