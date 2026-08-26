@@ -129,7 +129,9 @@ jobs:
 
   deploy-internal-admin:
     name: Deploy internal admin on PVE
-    if: github.ref == 'refs/heads/master'
+    if: >-
+      ${{ always() && github.ref == 'refs/heads/master' &&
+          needs.deploy.result != 'cancelled' }}
     needs: deploy
     runs-on: [self-hosted, linux, x64, blrec-platform]
     environment:
