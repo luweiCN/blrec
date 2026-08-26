@@ -226,7 +226,22 @@ def test_rating_timeline_replays_an_inserted_historical_result() -> None:
             2,
         ),
         ('W', 'active', ('afk', 'active'), ('afk', 'active', 'active'), 'none', 0),
-        ('L', 'active', ('afk', 'active'), ('afk', 'active', 'active'), 'none', 0),
+        (
+            'L',
+            'active',
+            ('afk', 'active'),
+            ('afk', 'active', 'active'),
+            'protected_loss',
+            0,
+        ),
+        (
+            'L',
+            'active',
+            ('afk', 'active'),
+            ('afk', 'afk', 'active'),
+            'protected_loss',
+            0,
+        ),
         (
             'W',
             'afk',

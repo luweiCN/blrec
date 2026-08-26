@@ -186,7 +186,7 @@ def resolve_afk_rating_adjustment(
     teammate_afks = sum(status == 'afk' for status in teammate_statuses)
     enemy_afks = sum(status == 'afk' for status in enemy_statuses)
     net_player_deficit = teammate_afks - enemy_afks
-    if result == 'L' and net_player_deficit > 0:
+    if result == 'L' and teammate_afks > 0:
         return RatingAfkAdjustment(kind='protected_loss')
     if result == 'W' and net_player_deficit > 0:
         return RatingAfkAdjustment(
