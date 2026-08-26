@@ -4,6 +4,7 @@ from typing import Awaitable, Callable, Optional
 
 import pytest
 
+from blrec.bili_upload.bili_download import BiliDownloadContractError
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.remote_media import RemoteMediaCache
 
@@ -687,6 +688,170 @@ async def test_rejects_unsafe_remote_download_concurrency(tmp_path: Path) -> Non
             await cache.update_downloads_per_interface(0)
         with pytest.raises(ValueError, match='1 到 8'):
             await cache.update_downloads_per_interface(9)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_download_failure_retries_on_another_interface(
+    tmp_path: Path,
+) -> None:
+    class RetryDownloader:
+        def __init__(self) -> None:
+            self.interfaces = []
+
+        async def download_on_interface(
+            self,
+            bundle: object,
+            *,
+            bvid: str,
+            cid: int,
+            page: int,
+            target: Path,
+            progress: Callable[[int, Optional[int]], Awaitable[None]],
+            interface_name: str,
+            affinity_key: str,
+        ) -> None:
+            self.interfaces.append(interface_name)
+            if len(self.interfaces) == 1:
+                raise BiliDownloadContractError(
+                    'yt-dlp 下载失败：source-bound DNS resolution failed'
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b'video123')
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    now = [1_000]
+    downloader = RetryDownloader()
+    try:
+        await seed_remote_part(database, tmp_path / 'deleted.mp4')
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=downloader,
+            download_interfaces=('wan-a', 'wan-b'),
+            clock=lambda: now[0],
+        )
+        assert (await cache.request(1, force_remote=True)).state == 'pending'
+
+        assert await cache.run_once(network_interface='wan-a') is True
+        scheduled = await database.fetchone(
+            'SELECT state,attempt_count,next_attempt_at,last_attempt_error '
+            'FROM vainglory_video_sources WHERE part_id=1'
+        )
+        assert scheduled is not None
+        assert dict(scheduled) == {
+            'state': 'pending',
+            'attempt_count': 1,
+            'next_attempt_at': 1_030,
+            'last_attempt_error': 'BiliDownloadContractError: yt-dlp 下载失败：'
+            'source-bound DNS resolution failed',
+        }
+        assert await cache.run_once(network_interface='wan-b') is False
+
+        now[0] = 1_030
+        assert await cache.run_once(network_interface='wan-a') is False
+        assert await cache.run_once(network_interface='wan-b') is True
+        assert (await cache.status(1)).state == 'ready'
+        assert downloader.interfaces == ['wan-a', 'wan-b']
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_download_failure_stops_after_three_attempts(
+    tmp_path: Path,
+) -> None:
+    class FailingDownloader:
+        async def download(
+            self,
+            bundle: object,
+            *,
+            bvid: str,
+            cid: int,
+            page: int,
+            target: Path,
+            progress: Callable[[int, Optional[int]], Awaitable[None]],
+        ) -> None:
+            raise BiliDownloadContractError(
+                'yt-dlp 下载失败：bytes read, more expected'
+            )
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    now = [1_000]
+    try:
+        await seed_remote_part(database, tmp_path / 'deleted.mp4')
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=FailingDownloader(),
+            clock=lambda: now[0],
+        )
+        assert (await cache.request(1, force_remote=True)).state == 'pending'
+
+        assert await cache.run_once() is True
+        now[0] = 1_030
+        assert await cache.run_once() is True
+        now[0] = 1_150
+        assert await cache.run_once() is True
+
+        failed = await database.fetchone(
+            'SELECT state,attempt_count,next_attempt_at,error '
+            'FROM vainglory_video_sources WHERE part_id=1'
+        )
+        assert failed is not None
+        assert str(failed['state']) == 'failed'
+        assert int(failed['attempt_count']) == 3
+        assert int(failed['next_attempt_at']) == 0
+        assert 'bytes read, more expected' in str(failed['error'])
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_permanent_download_contract_error_does_not_retry(tmp_path: Path) -> None:
+    class InvalidSourceDownloader:
+        async def download(
+            self,
+            bundle: object,
+            *,
+            bvid: str,
+            cid: int,
+            page: int,
+            target: Path,
+            progress: Callable[[int, Optional[int]], Awaitable[None]],
+        ) -> None:
+            raise BiliDownloadContractError('B 站稿件分 P 信息无效')
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_remote_part(database, tmp_path / 'deleted.mp4')
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=InvalidSourceDownloader(),
+            clock=lambda: 1_000,
+        )
+        assert (await cache.request(1, force_remote=True)).state == 'pending'
+
+        assert await cache.run_once() is True
+
+        failed = await database.fetchone(
+            'SELECT state,attempt_count,next_attempt_at '
+            'FROM vainglory_video_sources WHERE part_id=1'
+        )
+        assert failed is not None
+        assert dict(failed) == {
+            'state': 'failed',
+            'attempt_count': 1,
+            'next_attempt_at': 0,
+        }
     finally:
         await database.close()
 

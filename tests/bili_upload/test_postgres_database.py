@@ -198,6 +198,19 @@ def test_postgres_schema_migration_83_has_hero_prediction_probability() -> None:
     assert 'ADD COLUMN hero_prediction_probability DOUBLE PRECISION' in statements[0]
 
 
+def test_postgres_schema_migration_84_has_remote_download_retry_fields() -> None:
+    statements = tuple(_migration_statements(84))
+
+    assert len(statements) == 6
+    assert 'ADD COLUMN attempt_count BIGINT' in statements[0]
+    assert 'ADD COLUMN next_attempt_at BIGINT' in statements[1]
+    assert 'ADD COLUMN last_attempt_error TEXT' in statements[2]
+    assert 'ADD COLUMN last_attempt_interface TEXT' in statements[3]
+    assert "SET state='pending'" in statements[4]
+    assert "error LIKE 'BiliDownloadContractError:%'" in statements[4]
+    assert 'vainglory_video_sources_retry_idx' in statements[5]
+
+
 def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() -> None:
     database_url = os.environ.get('BLREC_TEST_POSTGRES_URL', '').strip()
     if not database_url:

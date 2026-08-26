@@ -2420,3 +2420,106 @@ async def test_migration_83_adds_hero_prediction_probability(tmp_path: Path) -> 
         assert await database.scalar('PRAGMA quick_check') == 'ok'
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_84_adds_remote_download_retry_fields(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        columns = {
+            str(row['name'])
+            for row in await database.fetchall(
+                'PRAGMA table_info(vainglory_video_sources)'
+            )
+        }
+        indexes = {
+            str(row['name'])
+            for row in await database.fetchall(
+                'PRAGMA index_list(vainglory_video_sources)'
+            )
+        }
+
+        assert {
+            'attempt_count',
+            'next_attempt_at',
+            'last_attempt_error',
+            'last_attempt_interface',
+        }.issubset(columns)
+        assert 'vainglory_video_sources_retry_idx' in indexes
+        assert await database.scalar('PRAGMA quick_check') == 'ok'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_84_requeues_existing_transient_download_failures(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 84):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'账号',X'00',1,'key','active',1,1)"
+        )
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(1,100,'session:1','closed',1,'历史稿件')"
+        )
+        connection.execute(
+            "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+            "VALUES('run:1',1,'finished',1,2)"
+        )
+        connection.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,record_start_time,'
+            'artifact_state,created_at,updated_at) '
+            "VALUES(1,1,'run:1',1,'/missing.mp4',1,'missing',1,1)"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_video_sources('
+            'part_id,account_id,bvid,cid,page,origin,state,retention_kind,'
+            'progress,downloaded_bytes,original_artifact_state,error,'
+            'created_at,updated_at) '
+            "VALUES(1,1,'BV1abcdefgh',123,1,'archive','failed','analysis',"
+            "0,0,'missing','BiliDownloadContractError: DNS failed',1,1)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        row = await database.fetchone(
+            'SELECT state,error,attempt_count,next_attempt_at,last_attempt_error '
+            'FROM vainglory_video_sources WHERE part_id=1'
+        )
+
+        assert row is not None
+        assert dict(row) == {
+            'state': 'pending',
+            'error': None,
+            'attempt_count': 0,
+            'next_attempt_at': 0,
+            'last_attempt_error': 'BiliDownloadContractError: DNS failed',
+        }
+    finally:
+        await database.close()

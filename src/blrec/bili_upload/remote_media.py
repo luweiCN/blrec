@@ -13,7 +13,7 @@ from loguru import logger
 
 from blrec.networking.manager import NetworkRouteManager
 
-from .bili_download import BiliDownloadRoutePaused
+from .bili_download import BiliDownloadContractError, BiliDownloadRoutePaused
 from .database import BiliUploadDatabase
 
 __all__ = (
@@ -30,6 +30,18 @@ __all__ = (
 _TEN_DAYS_SECONDS = 10 * 24 * 60 * 60
 _DEFAULT_DOWNLOADS_PER_INTERFACE = 3
 _MAX_DOWNLOADS_PER_INTERFACE = 8
+_MAX_DOWNLOAD_ATTEMPTS = 3
+_DOWNLOAD_RETRY_DELAYS_SECONDS = (30, 120)
+_SAME_INTERFACE_RETRY_GRACE_SECONDS = 30
+_PERMANENT_DOWNLOAD_ERRORS = (
+    'B 站稿件分 P 信息无效',
+    'NAS 容器中没有可用的 yt-dlp',
+    '账号 Cookie 格式无效',
+    '账号没有可用于下载的有效 Cookie',
+    '远程视频缓存路径无效',
+    'yt-dlp 返回的文件路径越界',
+    'yt-dlp 返回了意外的文件路径',
+)
 
 
 class RemoteMediaNotFound(ValueError):
@@ -299,7 +311,8 @@ class RemoteMediaCache:
             'AS page_count,COALESCE(archive.title,\'P\' || source.page) '
             'AS part_title,source.state AS source_state,'
             'analysis.state AS analysis_state,source.progress,'
-            'source.downloaded_bytes,source.total_bytes,source.error,'
+            'source.downloaded_bytes,source.total_bytes,'
+            'COALESCE(source.error,source.last_attempt_error) AS error,'
             'source.updated_at'
             + joins
             + 'WHERE '
@@ -370,7 +383,9 @@ class RemoteMediaCache:
         now = self._now()
         changed = await self._database.execute(
             "UPDATE vainglory_video_sources SET state='pending',progress=0,"
-            "downloaded_bytes=0,total_bytes=NULL,error=NULL,updated_at=? "
+            'downloaded_bytes=0,total_bytes=NULL,error=NULL,attempt_count=0,'
+            'next_attempt_at=0,last_attempt_error=NULL,'
+            'last_attempt_interface=NULL,updated_at=? '
             "WHERE part_id=? AND state IN ('missing','failed')",
             (now, int(part_id)),
         )
@@ -452,8 +467,8 @@ class RemoteMediaCache:
             else:
                 await self._pause_download(part_id, network_interface)
         except BaseException as error:
-            await self._mark_failed(
-                part_id, '{}: {}'.format(type(error).__name__, error)
+            await self._handle_download_failure(
+                claim, error, network_interface=network_interface
             )
         finally:
             self._download_speeds.pop(part_id, None)
@@ -636,7 +651,10 @@ class RemoteMediaCache:
                     'ON archive.recording_part_id=source.part_id '
                     'LEFT JOIN vainglory_archive_imports imported '
                     'ON imported.id=archive.import_id '
-                    "WHERE source.state='pending' "
+                    "WHERE source.state='pending' AND source.next_attempt_at<=? "
+                    'AND (? IS NULL OR source.last_attempt_interface IS NULL '
+                    'OR source.last_attempt_interface!=? '
+                    'OR source.next_attempt_at+?<=?) '
                     "AND (imported.id IS NULL OR imported.state!='skipped') "
                     'AND NOT EXISTS(SELECT 1 '
                     'FROM archive_migration_items migration '
@@ -663,7 +681,14 @@ class RemoteMediaCache:
                     'imported.published_at,imported.created_at,'
                     'source.updated_at) DESC,archive.import_id,archive.page,'
                     'source.updated_at,source.part_id LIMIT 1',
-                    excluded,
+                    (
+                        now,
+                        network_interface,
+                        network_interface,
+                        _SAME_INTERFACE_RETRY_GRACE_SECONDS,
+                        now,
+                        *excluded,
+                    ),
                 ).fetchone()
                 if row is None:
                     return None
@@ -761,7 +786,9 @@ class RemoteMediaCache:
             connection.execute(
                 "UPDATE vainglory_video_sources SET state='ready',progress=1,"
                 'downloaded_bytes=?,total_bytes=?,cache_path=?,cached_at=?,'
-                'expires_at=?,error=NULL,updated_at=? WHERE part_id=?',
+                'expires_at=?,error=NULL,next_attempt_at=0,'
+                'last_attempt_error=NULL,last_attempt_interface=NULL,'
+                'updated_at=? WHERE part_id=?',
                 (int(size), int(size), str(target), now, expires_at, now, int(part_id)),
             )
 
@@ -799,7 +826,9 @@ class RemoteMediaCache:
             connection.execute(
                 "UPDATE vainglory_video_sources SET state='missing',progress=0,"
                 'downloaded_bytes=0,total_bytes=NULL,cache_path=NULL,cached_at=NULL,'
-                'expires_at=NULL,error=NULL,updated_at=? WHERE part_id=?',
+                'expires_at=NULL,error=NULL,attempt_count=0,next_attempt_at=0,'
+                'last_attempt_error=NULL,last_attempt_interface=NULL,'
+                'updated_at=? WHERE part_id=?',
                 (now, int(part_id)),
             )
             return 1
@@ -823,9 +852,71 @@ class RemoteMediaCache:
         message = error.strip()[:500] or '远程视频下载失败'
         await self._database.execute(
             "UPDATE vainglory_video_sources SET state='failed',progress=0,"
-            'error=?,updated_at=? WHERE part_id=?',
+            'error=?,next_attempt_at=0,updated_at=? WHERE part_id=?',
             (message, self._now(), int(part_id)),
         )
+
+    async def _handle_download_failure(
+        self,
+        claim: sqlite3.Row,
+        error: BaseException,
+        *,
+        network_interface: Optional[str],
+    ) -> None:
+        part_id = int(claim['part_id'])
+        attempt_count = int(claim['attempt_count']) + 1
+        message = '{}: {}'.format(type(error).__name__, error).strip()[:500]
+        retryable = self._download_error_is_retryable(error)
+        if retryable and attempt_count < _MAX_DOWNLOAD_ATTEMPTS:
+            delay = _DOWNLOAD_RETRY_DELAYS_SECONDS[attempt_count - 1]
+            now = self._now()
+            await self._database.execute(
+                "UPDATE vainglory_video_sources SET state='pending',progress=0,"
+                'downloaded_bytes=0,total_bytes=NULL,error=NULL,attempt_count=?,'
+                'next_attempt_at=?,last_attempt_error=?,'
+                'last_attempt_interface=?,updated_at=? '
+                "WHERE part_id=? AND state='downloading'",
+                (
+                    attempt_count,
+                    now + delay,
+                    message or '远程视频下载失败',
+                    network_interface,
+                    now,
+                    part_id,
+                ),
+            )
+            logger.warning(
+                'remote media download will retry: part_id={}, attempt={}, '
+                'delay_seconds={}, interface={}',
+                part_id,
+                attempt_count,
+                delay,
+                network_interface,
+            )
+            self._wake.set()
+            return
+        await self._database.execute(
+            "UPDATE vainglory_video_sources SET state='failed',progress=0,"
+            'error=?,attempt_count=?,next_attempt_at=0,last_attempt_error=?,'
+            'last_attempt_interface=?,updated_at=? WHERE part_id=?',
+            (
+                message or '远程视频下载失败',
+                attempt_count,
+                message or '远程视频下载失败',
+                network_interface,
+                self._now(),
+                part_id,
+            ),
+        )
+
+    @staticmethod
+    def _download_error_is_retryable(error: BaseException) -> bool:
+        if isinstance(error, RemoteMediaUnavailable):
+            return True
+        if not isinstance(error, BiliDownloadContractError):
+            return False
+        message = str(error)
+        return not any(value in message for value in _PERMANENT_DOWNLOAD_ERRORS)
 
     async def _run(self) -> None:
         interfaces: Tuple[Optional[str], ...] = (
