@@ -157,6 +157,7 @@ describe('MatchExplorerComponent', () => {
   it('shows the fourth edit action only in internal admin mode', () => {
     expect(fixture.nativeElement.querySelector('.match-edit-link')).toBeNull();
     spyOnProperty(component.adminApi, 'enabled', 'get').and.returnValue(true);
+    fixture.componentRef.setInput('matches', [...TEST_DASHBOARD_MATCHES]);
     fixture.detectChanges();
 
     const editButton = fixture.nativeElement.querySelector(
