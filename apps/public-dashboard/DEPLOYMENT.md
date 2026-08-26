@@ -5,12 +5,13 @@
 | 链路 | 运行位置 | 职责 | 触发方式 |
 | --- | --- | --- | --- |
 | 页面发布 | GitHub Actions | OSS 页面与静态资源，不含榜单数据文件 | `master` 页面变更或手动触发 |
-| API 发布 | GitHub Actions / 阿里云 ECS | 直接读取 PostgreSQL `core`、提供 HTTP API 与 SSE | `master` API 变更或手动触发 |
+| API 发布 | GitHub Actions / PVE BLREC Platform | 直接读取 PostgreSQL `core`、提供 HTTP API 与 SSE | `master` API 变更或手动触发 |
+| 内网站长页面 | GitHub Actions / PVE BLREC Platform | 修改 AI/OCR 对局事实、回流训练纠错样本 | `master` 页面变更或手动触发 |
 | 图片资产 | 群晖 NAS Publisher | 结算图上传 OSS，并写入结构化图片元数据 | revision 变化或每日校验 |
 
 ## 数据读写路径
 
-- BLREC 和 Worker 直接写移动云 PostgreSQL `core` schema；它是玩家、对局、阵容和
+- BLREC 和 Worker 直接写 PVE PostgreSQL `core` schema；它是玩家、对局、阵容和
   直播状态的唯一数据源。
 - API 使用受限只读权限直接读取 `core`，按 revision 刷新进程内的 public/owner 榜单与
   对局查询缓存；页面请求不等待 NAS Publisher。
@@ -50,6 +51,15 @@ API 的构建和部署流程见 [`api/deploy/README.md`](api/deploy/README.md)�
 2. 备份并校验 `public` schema；
 3. 在新 release 中完成结构化趋势和图片表迁移；
 4. 健康检查、榜单和对局接口通过后再切换流量。
+
+API 只运行在 PVE；阿里云不安装 API、不保存数据库连接，也不存在数据库 SSH 隧道。
+阿里云只继续承担公开静态站点的 OSS/CDN 和公网到 PVE 的反向代理入口。
+
+## 内网站长页面
+
+同一页面源码另行构建为 PVE 内网版本，部署和可信反代边界见
+[`deploy/pve-admin/README.md`](deploy/pve-admin/README.md)。公开构建不包含编辑入口，
+管理密钥不会进入浏览器。
 
 ## NAS 图片资产 Publisher
 

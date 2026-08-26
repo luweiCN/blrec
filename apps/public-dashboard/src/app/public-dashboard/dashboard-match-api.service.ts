@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 
 import { environment } from '../../environments/environment';
-import { dashboardRequestInit } from './dashboard-owner-access.service';
+import { dashboardRequestInit } from './dashboard-request';
 import { isDashboardMatch } from './public-dashboard-data.service';
 import {
   DashboardMatch,

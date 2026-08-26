@@ -92,6 +92,224 @@
       </section>
     </div>
 
+    <section *ngIf="adminEditorOpen" class="match-admin-editor">
+      <header>
+        <div>
+          <p>内网站长纠错</p>
+          <h3>修改 AI / OCR 识别结果</h3>
+        </div>
+        <button type="button" [disabled]="adminSaving" (click)="closeAdminEditor()">
+          收起
+        </button>
+      </header>
+
+      <p *ngIf="adminLoading" class="match-admin-status">正在加载模型原值和置信度…</p>
+      <p *ngIf="adminError" class="match-admin-status error" role="alert">
+        {{ adminError }}
+      </p>
+      <p *ngIf="adminSaved" class="match-admin-status saved" role="status">
+        已保存；纠错样本已送入 Vision Lab，排行榜正在按完整时间线重新计算。
+      </p>
+
+      <ng-container *ngIf="adminMatch as editable">
+        <p class="match-admin-evidence">
+          结算识别 {{ (editable.confidence * 100).toFixed(1) }}% · 主播位置
+          {{ editable.recordedPlayerSource === "manual" ? "人工指定" : "模型" }}
+          {{ editable.recordedPlayerConfidence === null ? "" : (editable.recordedPlayerConfidence * 100).toFixed(1) + "%" }}
+        </p>
+        <div class="match-admin-fields">
+          <label class="wide">
+            <span>对局标题</span>
+            <input
+              type="text"
+              maxlength="200"
+              [value]="editable.title"
+              (input)="editable.title = $any($event.target).value"
+            />
+          </label>
+          <label>
+            <span>模式</span>
+            <select
+              [value]="editable.gameMode"
+              (change)="editable.gameMode = $any($event.target).value"
+            >
+              <option value="3v3">3V3</option>
+              <option value="5v5">5V5</option>
+              <option value="aram">大乱斗</option>
+              <option value="other">其他</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label>
+            <span>胜负</span>
+            <select
+              [value]="editable.winnerColor"
+              (change)="editable.winnerColor = $any($event.target).value"
+            >
+              <option value="teal">主播方胜</option>
+              <option value="orange">主播方负</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label>
+            <span>时长（秒）</span>
+            <input
+              type="number"
+              min="1"
+              [value]="editable.durationSeconds === null ? '' : editable.durationSeconds"
+              (input)="editable.durationSeconds = $any($event.target).value === '' ? null : +$any($event.target).value"
+            />
+          </label>
+          <label>
+            <span>结束方式</span>
+            <select
+              [value]="editable.endReason"
+              (change)="editable.endReason = $any($event.target).value"
+            >
+              <option value="normal">正常结束</option>
+              <option value="surrender">投降</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label>
+            <span>主播使用英雄</span>
+            <select
+              [value]="adminRecordedPlayer"
+              (change)="adminRecordedPlayer = $any($event.target).value"
+            >
+              <option value="">未确认</option>
+              <option
+                *ngFor="let player of adminRecordedCandidates()"
+                [value]="player.side + ':' + player.slot"
+              >
+                {{ player.side === "left" ? "左" : "右" }}{{ player.slot }} ·
+                {{ adminHeroName(player.heroId) }} · {{ player.name || "未知玩家" }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>对局类型</span>
+            <select
+              [value]="editable.matchKind"
+              (change)="editable.matchKind = $any($event.target).value"
+            >
+              <option value="pvp">玩家对战</option>
+              <option value="bot">人机</option>
+              <option value="practice">单人练习</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label>
+            <span>画面来源</span>
+            <select
+              [value]="editable.viewContext"
+              (change)="editable.viewContext = $any($event.target).value"
+            >
+              <option value="played">本人对局</option>
+              <option value="observed">观战 / 回放</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label>
+            <span>计入排行榜</span>
+            <select
+              [value]="editable.statsEligible ? 'yes' : 'no'"
+              (change)="editable.statsEligible = $any($event.target).value === 'yes'"
+            >
+              <option value="yes">计入</option>
+              <option value="no">不计入</option>
+            </select>
+          </label>
+          <label>
+            <span>结果文字</span>
+            <input
+              type="text"
+              maxlength="32"
+              [value]="editable.resultText"
+              (input)="editable.resultText = $any($event.target).value"
+            />
+          </label>
+          <label>
+            <span>左 / 右击杀</span>
+            <span class="match-admin-pair">
+              <input type="number" min="0" [value]="editable.leftKills === null ? '' : editable.leftKills" (input)="editable.leftKills = $any($event.target).value === '' ? null : +$any($event.target).value" />
+              <input type="number" min="0" [value]="editable.rightKills === null ? '' : editable.rightKills" (input)="editable.rightKills = $any($event.target).value === '' ? null : +$any($event.target).value" />
+            </span>
+          </label>
+          <label>
+            <span>左 / 右经济</span>
+            <span class="match-admin-pair">
+              <input type="number" min="0" [value]="editable.leftEconomy === null ? '' : editable.leftEconomy" (input)="editable.leftEconomy = $any($event.target).value === '' ? null : +$any($event.target).value" />
+              <input type="number" min="0" [value]="editable.rightEconomy === null ? '' : editable.rightEconomy" (input)="editable.rightEconomy = $any($event.target).value === '' ? null : +$any($event.target).value" />
+            </span>
+          </label>
+        </div>
+
+        <div class="match-admin-players">
+          <article *ngFor="let player of editable.players">
+            <header>
+              <strong>{{ player.side === "left" ? "左" : "右" }}{{ player.slot }}</strong>
+              <span>OCR {{ (player.confidence * 100).toFixed(1) }}%</span>
+            </header>
+            <label>
+              <span>玩家名</span>
+              <input type="text" maxlength="80" [value]="player.name" (input)="player.name = $any($event.target).value" />
+            </label>
+            <label>
+              <span>
+                英雄 · {{ player.heroSource === "manual" ? "人工" : "模型" }} · 模型原概率
+                {{ player.heroProbability === null ? "历史未保存" : (player.heroProbability * 100).toFixed(1) + "%" }}
+              </span>
+              <select [value]="player.heroId === null ? '' : player.heroId" (change)="player.heroId = $any($event.target).value === '' ? null : +$any($event.target).value">
+                <option value="">未识别</option>
+                <option *ngFor="let hero of adminHeroes" [value]="hero.id">
+                  {{ hero.label }}
+                </option>
+              </select>
+            </label>
+            <span class="match-admin-kda">
+              <label><span>K</span><input type="number" min="0" [value]="player.kills === null ? '' : player.kills" (input)="player.kills = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+              <label><span>D</span><input type="number" min="0" [value]="player.deaths === null ? '' : player.deaths" (input)="player.deaths = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+              <label><span>A</span><input type="number" min="0" [value]="player.assists === null ? '' : player.assists" (input)="player.assists = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+            </span>
+            <span class="match-admin-extra">
+              <label>
+                <span>经济</span>
+                <input type="number" min="0" [value]="player.economy === null ? '' : player.economy" (input)="player.economy = $any($event.target).value === '' ? null : +$any($event.target).value" />
+              </label>
+              <label>
+                <span>第三项</span>
+                <input type="number" min="0" [value]="player.lastHits === null ? '' : player.lastHits" (input)="player.lastHits = $any($event.target).value === '' ? null : +$any($event.target).value" />
+              </label>
+            </span>
+            <label>
+              <span>
+                挂机 · 模型
+                {{ player.afkProbability === null ? "—" : (player.afkProbability * 100).toFixed(1) + "%" }}
+              </span>
+              <select [value]="player.afkManualOverride === null ? 'model' : player.afkManualOverride ? 'afk' : 'active'" (change)="player.afkManualOverride = $any($event.target).value === 'model' ? null : $any($event.target).value === 'afk'">
+                <option value="model">采用模型</option>
+                <option value="active">未挂机</option>
+                <option value="afk">挂机</option>
+              </select>
+            </label>
+          </article>
+        </div>
+
+        <footer>
+          <p>保存后会保留人工覆盖，重新扫描不会改回；改前和改后数据都会进入训练纠错记录。</p>
+          <button
+            type="button"
+            class="match-admin-save"
+            [disabled]="adminSaving"
+            (click)="saveAdminCorrection()"
+          >
+            {{ adminSaving ? "正在保存并重算…" : "保存修正" }}
+          </button>
+        </footer>
+      </ng-container>
+    </section>
+
     <figure *ngIf="match.resultImage as resultImage" class="match-result-image">
       <figcaption>
         <strong>战绩结算图</strong>
@@ -116,6 +334,12 @@
       <p>
         {{ match.mode === "brawl" ? "阵容与 KDA" : "阵容、KDA 与经济" }}来自结算画面识别，空缺项显示为“—”。
       </p>
+      <button
+        *ngIf="adminApi.enabled"
+        type="button"
+        class="match-admin-open"
+        (click)="openAdminEditor()"
+      >编辑识别数据</button>
       <a
         *ngIf="match.replay as replay"
         [href]="replay.url"

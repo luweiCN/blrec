@@ -1,5 +1,6 @@
 import {
   AfterViewInit,
+  ChangeDetectorRef,
   ChangeDetectionStrategy,
   Component,
   ElementRef,
@@ -12,6 +13,12 @@ import {
   ViewChild,
 } from '@angular/core';
 
+import {
+  DashboardAdminApiService,
+  DashboardAdminHero,
+  DashboardAdminMatch,
+  DashboardAdminMatchPlayer,
+} from './dashboard-admin-api.service';
 import {
   formatEconomy,
   heroImage,
@@ -40,9 +47,22 @@ export class MatchDetailModalComponent
   @ViewChild('dialog') private dialog?: ElementRef<HTMLElement>;
   @ViewChild('closeButton') private closeButton?: ElementRef<HTMLButtonElement>;
   imageExpanded = false;
+  adminEditorOpen = false;
+  adminLoading = false;
+  adminSaving = false;
+  adminError = '';
+  adminSaved = false;
+  adminMatch: DashboardAdminMatch | null = null;
+  adminHeroes: readonly DashboardAdminHero[] = [];
+  adminRecordedPlayer = '';
 
   private readonly restoreFocusTo = document.activeElement as HTMLElement | null;
   private readonly previousBodyOverflow = document.body.style.overflow;
+
+  constructor(
+    readonly adminApi: DashboardAdminApiService,
+    private readonly changeDetector: ChangeDetectorRef,
+  ) {}
 
   ngOnInit(): void {
     this.imageExpanded = this.initialImageExpanded;
@@ -112,6 +132,121 @@ export class MatchDetailModalComponent
       return;
     }
     this.imageExpanded = false;
+  }
+
+  async openAdminEditor(): Promise<void> {
+    if (!this.adminApi.enabled || this.adminLoading) {
+      return;
+    }
+    this.adminEditorOpen = true;
+    this.adminLoading = true;
+    this.adminError = '';
+    this.adminSaved = false;
+    this.changeDetector.markForCheck();
+    try {
+      const [match, heroes] = await Promise.all([
+        this.adminApi.getMatch(this.match.id),
+        this.adminApi.listHeroes(),
+      ]);
+      this.adminMatch = match;
+      this.adminHeroes = heroes;
+      const recorded = match.players.find((player) => player.isRecordedPlayer);
+      this.adminRecordedPlayer =
+        recorded === undefined ? '' : `${recorded.side}:${recorded.slot}`;
+    } catch (error: unknown) {
+      console.warn('Unable to load internal match editor', error);
+      this.adminError = '识别原始数据加载失败，请稍后重试。';
+    } finally {
+      this.adminLoading = false;
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  closeAdminEditor(): void {
+    if (this.adminSaving) {
+      return;
+    }
+    this.adminEditorOpen = false;
+    this.adminError = '';
+    this.changeDetector.markForCheck();
+  }
+
+  async saveAdminCorrection(): Promise<void> {
+    const match = this.adminMatch;
+    if (match === null || this.adminSaving) {
+      return;
+    }
+    this.adminSaving = true;
+    this.adminError = '';
+    this.adminSaved = false;
+    this.changeDetector.markForCheck();
+    try {
+      const separator = this.adminRecordedPlayer.indexOf(':');
+      const recordedSide = this.adminRecordedPlayer.slice(0, separator);
+      const recordedSlot = Number(this.adminRecordedPlayer.slice(separator + 1));
+      let recordedPlayer:
+        | Readonly<{ side: 'left' | 'right'; slot: number }>
+        | undefined;
+      if (
+        separator > 0 &&
+        (recordedSide === 'left' || recordedSide === 'right') &&
+        Number.isInteger(recordedSlot)
+      ) {
+        recordedPlayer = { side: recordedSide, slot: recordedSlot };
+      }
+      const saved = await this.adminApi.updateMatch(match.id, {
+        title: match.title,
+        gameMode: match.gameMode,
+        durationSeconds: match.durationSeconds,
+        resultText: match.resultText,
+        endReason: match.endReason,
+        matchKind: match.matchKind,
+        viewContext: match.viewContext,
+        statsEligible: match.statsEligible,
+        winnerColor: match.winnerColor,
+        leftKills: match.leftKills,
+        rightKills: match.rightKills,
+        leftEconomy: match.leftEconomy,
+        rightEconomy: match.rightEconomy,
+        recordedPlayer,
+        players: match.players.map((player) => ({
+          side: player.side,
+          slot: player.slot,
+          name: player.name,
+          heroId: player.heroId,
+          kills: player.kills,
+          deaths: player.deaths,
+          assists: player.assists,
+          economy: player.economy,
+          lastHits: player.lastHits,
+          afkManualOverride: player.afkManualOverride,
+        })),
+      });
+      this.adminMatch = saved;
+      this.adminSaved = true;
+    } catch (error: unknown) {
+      console.warn('Unable to save internal match correction', error);
+      this.adminError = '保存失败，原数据没有被改动。';
+    } finally {
+      this.adminSaving = false;
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  adminHeroName(heroId: number | null): string {
+    if (heroId === null) {
+      return '未识别';
+    }
+    return this.adminHeroes.find((hero) => hero.id === heroId)?.label ?? `#${heroId}`;
+  }
+
+  adminRecordedCandidates(): readonly DashboardAdminMatchPlayer[] {
+    const match = this.adminMatch;
+    if (match === null) {
+      return [];
+    }
+    const tealSide = match.leftColor === 'teal' ? 'left' : 'right';
+    return match.players.filter((player) => player.side === tealSide);
   }
 
   onImageBackdropClick(event: MouseEvent): void {

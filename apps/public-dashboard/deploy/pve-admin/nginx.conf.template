@@ -1,0 +1,56 @@
+map $http_origin $blrec_internal_admin_origin_allowed {
+    default 0;
+    "" 1;
+    "http://__BLREC_INTERNAL_ADMIN_LISTEN_ADDRESS__:8790" 1;
+}
+
+server {
+    listen __BLREC_INTERNAL_ADMIN_LISTEN_ADDRESS__:8790;
+    server_name _;
+
+    root /opt/blrec-dashboard-admin/current/site;
+    index index.html;
+    client_max_body_size 2m;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header X-Frame-Options "DENY" always;
+
+    location /dashboard-api/ {
+        if ($blrec_internal_admin_origin_allowed = 0) {
+            return 403;
+        }
+        proxy_pass http://127.0.0.1:8787/;
+        proxy_http_version 1.1;
+        proxy_set_header Host vg-api.luwei.host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_set_header Authorization __BLREC_DASHBOARD_OWNER_AUTHORIZATION__;
+        proxy_set_header Cookie "";
+        proxy_buffering off;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+    location /internal-api/ {
+        if ($blrec_internal_admin_origin_allowed = 0) {
+            return 403;
+        }
+        proxy_pass __BLREC_INTERNAL_ADMIN_BACKEND__/api/v1/vainglory/;
+        proxy_http_version 1.1;
+        proxy_set_header Host __BLREC_INTERNAL_ADMIN_BACKEND_HOST__;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_set_header X-API-Key __BLREC_INTERNAL_ADMIN_API_KEY__;
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

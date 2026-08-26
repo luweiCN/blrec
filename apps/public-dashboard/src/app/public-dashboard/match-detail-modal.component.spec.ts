@@ -74,4 +74,13 @@ describe('MatchDetailModalComponent', () => {
       '队友挂机，本局失败不扣分',
     );
   });
+
+  it('does not expose editing controls in the public build', () => {
+    component.match = TEST_DASHBOARD_MATCHES[0];
+    fixture.detectChanges();
+
+    expect(
+      (fixture.nativeElement as HTMLElement).querySelector('.match-admin-open'),
+    ).toBeNull();
+  });
 });

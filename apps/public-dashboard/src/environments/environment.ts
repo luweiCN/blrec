@@ -3,4 +3,6 @@ export const environment = {
   dataBaseUrl: 'data',
   apiBaseUrl: '',
   useDashboardV2: false,
+  adminMode: false,
+  adminApiBaseUrl: '',
 };

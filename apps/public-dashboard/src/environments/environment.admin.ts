@@ -1,8 +1,8 @@
 export const environment = {
   production: true,
   dataBaseUrl: 'data',
-  apiBaseUrl: 'https://vg-api.luwei.host/v1',
+  apiBaseUrl: '/dashboard-api/v1',
   useDashboardV2: true,
-  adminMode: false,
-  adminApiBaseUrl: '',
+  adminMode: true,
+  adminApiBaseUrl: '/internal-api',
 };

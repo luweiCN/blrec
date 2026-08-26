@@ -15,6 +15,7 @@ on:
       - apps/public-dashboard/deploy/aliyun/deploy_site.py
       - apps/public-dashboard/deploy/aliyun/page-deploy-ram-policy.json
       - apps/public-dashboard/deploy/aliyun/site-deploy-requirements.txt
+      - apps/public-dashboard/deploy/pve-admin/**
       - apps/public-dashboard/tests/test_site_deploy.py
       - .github/workflows/deploy-public-dashboard.yml
   workflow_dispatch:
@@ -75,7 +76,28 @@ jobs:
         run: npm run lint
 
       - name: Build
-        run: npm run build
+        run: |
+          npm run build
+          npm run build -- --configuration internal-admin
+
+      - name: Package immutable internal admin release
+        shell: bash
+        run: |
+          release_root="$(mktemp -d)"
+          mkdir -p "$release_root/site" "$release_root/deploy"
+          cp -R dist-admin/. "$release_root/site/"
+          cp deploy/pve-admin/nginx.conf.template "$release_root/deploy/"
+          tar --create --gzip \
+            --file dashboard-admin-release.tgz \
+            -C "$release_root" .
+
+      - name: Upload immutable internal admin release
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-admin-release
+          path: apps/public-dashboard/dashboard-admin-release.tgz
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Assert that page build contains no dashboard data
         shell: bash
@@ -104,3 +126,27 @@ jobs:
             --output /dev/null \
             "https://vg.luwei.host/?deployment=${GITHUB_SHA}"
           grep -qi '^cache-control: .*no-cache' "$response_headers"
+
+  deploy-internal-admin:
+    name: Deploy internal admin on PVE
+    if: github.ref == 'refs/heads/master'
+    needs: deploy
+    runs-on: [self-hosted, linux, x64, blrec-platform]
+    environment:
+      name: vainglory-dashboard-internal-admin
+
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+
+      - name: Download immutable release
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-admin-release
+
+      - name: Install release on PVE
+        shell: bash
+        run: |
+          sudo -n bash apps/public-dashboard/deploy/pve-admin/install-release.sh \
+            "$PWD/dashboard-admin-release.tgz" \
+            "${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

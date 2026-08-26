@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { Subject } from 'rxjs';
 
 import { environment } from '../../environments/environment';
-import { dashboardRequestInit } from './dashboard-owner-access.service';
+import { dashboardRequestInit } from './dashboard-request';
 import { DashboardResourceRealtimeUpdate } from './dashboard-realtime.service';
 import {
   DashboardMatch,

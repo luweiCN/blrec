@@ -1,5 +1,4 @@
 import { environment } from '../../environments/environment';
-import { DASHBOARD_OWNER_TOKEN_STORAGE_KEY } from './dashboard-owner-access.service';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { DashboardTrends } from './public-dashboard.models';
 import {
@@ -82,7 +81,6 @@ describe('DashboardDataService', () => {
   afterEach(() => {
     environment.apiBaseUrl = originalApiBaseUrl;
     environment.useDashboardV2 = originalUseDashboardV2;
-    window.sessionStorage.removeItem(DASHBOARD_OWNER_TOKEN_STORAGE_KEY);
   });
 
   it('loads only v2 summary and current-season standings on the first view', async () => {
@@ -238,26 +236,6 @@ describe('DashboardDataService', () => {
     expect(
       service.trends?.publications[0].standings[seasonId]['3v3'][0].playerId,
     ).toBe(playerId);
-  });
-
-  it('adds the session owner credential without putting it in the URL', async () => {
-    environment.apiBaseUrl = 'https://vg-api.luwei.host/v1';
-    const token = 'c'.repeat(64);
-    window.sessionStorage.setItem(DASHBOARD_OWNER_TOKEN_STORAGE_KEY, token);
-    const fetchSpy = spyOn(window, 'fetch').and.returnValue(
-      Promise.resolve(jsonResponse(apiDocument())),
-    );
-    const service = new DashboardDataService();
-
-    await service.load();
-
-    expect(fetchSpy).toHaveBeenCalledOnceWith(
-      'https://vg-api.luwei.host/v1/dashboard',
-      {
-        cache: 'no-cache',
-        headers: { Authorization: `Bearer ${token}` },
-      },
-    );
   });
 
   it('loads the database-backed dashboard API directly', async () => {

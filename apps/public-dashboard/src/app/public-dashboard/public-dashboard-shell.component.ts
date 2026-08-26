@@ -10,12 +10,12 @@ import {
 import { Router } from '@angular/router';
 import { Subscription } from 'rxjs';
 
+import { environment } from '../../environments/environment';
 import {
   DashboardRealtimeService,
   DashboardRealtimeUpdate,
 } from './dashboard-realtime.service';
 import { DashboardModeService } from './dashboard-mode.service';
-import { DashboardOwnerAccessService } from './dashboard-owner-access.service';
 import { PlayerLiveStatusService } from './player-live-status.service';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { seasonOption } from './public-dashboard.data';
@@ -30,17 +30,13 @@ import { SiteStatsService } from './site-stats.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PublicDashboardShellComponent implements OnInit, OnDestroy {
+  readonly internalAdmin = environment.adminMode;
   @ViewChild('updateNotesDialog')
   private updateNotesDialog?: ElementRef<HTMLDialogElement>;
-  @ViewChild('ownerAccessDialog')
-  private ownerAccessDialog?: ElementRef<HTMLDialogElement>;
 
   siteStatsState: SiteStatsState = { kind: 'loading' };
   realtimeRefreshState: 'idle' | 'refreshing' | 'updated' = 'idle';
   updateNotesOpen = false;
-  ownerToken = '';
-  ownerAccessError = '';
-  ownerAccessLoading = false;
 
   private destroyed = false;
   private activeRealtimeRefreshes = 0;
@@ -56,7 +52,6 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   constructor(
     readonly data: DashboardDataService,
     readonly dashboardMode: DashboardModeService,
-    readonly ownerAccess: DashboardOwnerAccessService,
     private readonly router: Router,
     private readonly siteAnalytics: SiteAnalyticsService,
     private readonly siteStats: SiteStatsService,
@@ -147,87 +142,8 @@ export class PublicDashboardShellComponent implements OnInit, OnDestroy {
     }
   }
 
-  openOwnerAccess(): void {
-    const dialog = this.ownerAccessDialog?.nativeElement;
-    if (dialog === undefined || dialog.open) {
-      return;
-    }
-    this.ownerToken = '';
-    this.ownerAccessError = '';
-    dialog.showModal();
-    this.changeDetector.markForCheck();
-  }
-
-  closeOwnerAccess(): void {
-    const dialog = this.ownerAccessDialog?.nativeElement;
-    if (dialog?.open) {
-      dialog.close();
-    }
-    this.ownerToken = '';
-    this.ownerAccessError = '';
-    this.changeDetector.markForCheck();
-  }
-
-  setOwnerToken(event: Event): void {
-    this.ownerToken = (event.target as HTMLInputElement).value;
-  }
-
-  async unlockOwner(event: Event): Promise<void> {
-    event.preventDefault();
-    if (this.ownerAccessLoading) {
-      return;
-    }
-    this.ownerAccessLoading = true;
-    this.ownerAccessError = '';
-    this.changeDetector.markForCheck();
-    try {
-      if (!(await this.ownerAccess.unlock(this.ownerToken))) {
-        this.ownerAccessError = '站长访问密钥不正确。';
-        return;
-      }
-      await this.reloadAccessView();
-      this.closeOwnerAccess();
-    } catch (error: unknown) {
-      console.warn('Unable to unlock dashboard owner view', error);
-      this.ownerAccessError = '暂时无法验证站长身份，请稍后重试。';
-    } finally {
-      this.ownerAccessLoading = false;
-      this.changeDetector.markForCheck();
-    }
-  }
-
-  async lockOwner(): Promise<void> {
-    if (this.ownerAccessLoading) {
-      return;
-    }
-    this.ownerAccess.lock();
-    await this.reloadAccessView();
-    this.closeOwnerAccess();
-  }
-
-  onOwnerAccessBackdropClick(event: MouseEvent): void {
-    if (event.target === event.currentTarget) {
-      this.closeOwnerAccess();
-    }
-  }
-
   private async initializeDashboard(): Promise<void> {
-    if (this.ownerAccess.active) {
-      try {
-        await this.ownerAccess.validateStored();
-      } catch (error: unknown) {
-        console.warn('Unable to validate stored dashboard owner view', error);
-        this.ownerAccess.lock();
-      }
-    }
     await this.loadDashboard();
-  }
-
-  private async reloadAccessView(): Promise<void> {
-    await this.loadDashboard();
-    this.playerLiveStatus.stop();
-    this.playerLiveStatus.start();
-    this.data.notifyMatchDataChanged();
   }
 
   private async loadDashboard(): Promise<void> {

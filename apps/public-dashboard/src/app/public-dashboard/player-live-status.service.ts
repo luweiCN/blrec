@@ -2,7 +2,7 @@ import { Injectable, OnDestroy } from '@angular/core';
 import { BehaviorSubject, Observable } from 'rxjs';
 
 import { environment } from '../../environments/environment';
-import { dashboardRequestInit } from './dashboard-owner-access.service';
+import { dashboardRequestInit } from './dashboard-request';
 
 export interface PlayerLiveRoomStatus {
   readonly roomId: number;

@@ -183,8 +183,7 @@ button {
   font-weight: 760;
 }
 
-.update-notes-dialog,
-.owner-access-dialog {
+.update-notes-dialog {
   margin: auto;
   padding: 0;
   border: 1px solid var(--line);
@@ -530,107 +529,6 @@ footer {
   }
 }
 
-.owner-access-dialog {
-  width: min(470px, calc(100% - 32px));
-  overflow: hidden;
-
-  > header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 20px 22px;
-    border-bottom: 1px solid var(--line-soft);
-
-    p,
-    h2 {
-      margin: 0;
-    }
-
-    p {
-      color: var(--gold);
-      font-size: var(--type-label);
-      font-weight: 780;
-      letter-spacing: 0.12em;
-    }
-
-    h2 {
-      margin-top: 4px;
-      font-size: 1.5rem;
-    }
-
-    button {
-      width: 38px;
-      height: 38px;
-      border: 1px solid var(--line);
-      border-radius: 50%;
-      background: var(--surface-2);
-      color: var(--ink-soft);
-      cursor: pointer;
-      font: inherit;
-      font-size: 1.5rem;
-    }
-  }
-
-  form,
-  .owner-access-active {
-    display: grid;
-    gap: 12px;
-    padding: 24px 22px 26px;
-  }
-
-  label,
-  strong {
-    color: var(--ink);
-    font-size: var(--type-secondary);
-  }
-
-  input {
-    min-height: 46px;
-    padding: 0 13px;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-control);
-    outline: 0;
-    background: var(--surface-0);
-    color: var(--ink);
-    font: inherit;
-
-    &:focus {
-      border-color: var(--cyan-strong);
-      box-shadow: 0 0 0 3px var(--cyan-wash);
-    }
-  }
-
-  form > p,
-  .owner-access-active p {
-    margin: 0;
-    color: var(--ink-muted);
-    font-size: var(--type-label);
-    line-height: 1.6;
-  }
-
-  .owner-access-error {
-    color: var(--rose);
-  }
-
-  form > button,
-  .owner-access-active > button {
-    min-height: 44px;
-    margin-top: 4px;
-    border: 1px solid var(--cyan-strong);
-    border-radius: var(--radius-control);
-    background: var(--cyan-wash);
-    color: var(--cyan);
-    cursor: pointer;
-    font: inherit;
-    font-weight: 760;
-
-    &:disabled {
-      cursor: not-allowed;
-      opacity: 0.46;
-    }
-  }
-}
-
 @media (max-width: 1040px) {
   .site-header {
     grid-template-areas:
@@ -755,13 +653,6 @@ footer {
     width: 100%;
     max-width: none;
     max-height: 92dvh;
-    margin: auto 0 0;
-    border-radius: var(--radius-panel) var(--radius-panel) 0 0;
-  }
-
-  .owner-access-dialog {
-    width: 100%;
-    max-width: none;
     margin: auto 0 0;
     border-radius: var(--radius-panel) var(--radius-panel) 0 0;
   }

@@ -1,4 +1,4 @@
-import { dashboardRequestInit } from './dashboard-owner-access.service';
+import { dashboardRequestInit } from './dashboard-request';
 import type { DashboardResourceRealtimeUpdate } from './dashboard-realtime.service';
 import {
   DashboardSnapshot,
