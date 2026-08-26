@@ -64,6 +64,12 @@ def test_postgres_sql_preserves_sqlite_null_safe_equality() -> None:
     )
 
 
+def test_postgres_sql_preserves_explicit_null_parameter_type() -> None:
+    assert postgres_sql('SELECT CAST(? AS TEXT) IS NULL') == (
+        'SELECT CAST(%s AS TEXT) IS NULL'
+    )
+
+
 def test_postgres_sql_translates_immediate_transaction() -> None:
     assert postgres_sql('BEGIN IMMEDIATE') == 'BEGIN'
 

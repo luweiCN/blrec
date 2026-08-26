@@ -652,7 +652,8 @@ class RemoteMediaCache:
                     'LEFT JOIN vainglory_archive_imports imported '
                     'ON imported.id=archive.import_id '
                     "WHERE source.state='pending' AND source.next_attempt_at<=? "
-                    'AND (? IS NULL OR source.last_attempt_interface IS NULL '
+                    'AND (CAST(? AS TEXT) IS NULL '
+                    'OR source.last_attempt_interface IS NULL '
                     'OR source.last_attempt_interface!=? '
                     'OR source.next_attempt_at+?<=?) '
                     "AND (imported.id IS NULL OR imported.state!='skipped') "
