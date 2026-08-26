@@ -20,6 +20,7 @@ from blrec.web.auth_store import AdminAuthStore
 from blrec.web.middlewares.security_headers import SecurityHeadersMiddleware
 from blrec.web.password_work import PasswordWorkCoordinator, PasswordWorkSaturated
 from blrec.web.routers import auth as auth_router
+from blrec.web.routers.bili_accounts import authenticated_manager_subject
 
 
 @pytest.fixture
@@ -41,6 +42,30 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
     @api.post('/api/v1/protected')
     async def protected_post() -> dict:
+        return {'ok': True}
+
+    @api.get('/api/v1/vainglory/heroes')
+    async def trusted_heroes(
+        _subject: str = Depends(authenticated_manager_subject),
+    ) -> dict:
+        return {'ok': True}
+
+    @api.get('/api/v1/vainglory/matches/{match_id}')
+    async def trusted_match(
+        match_id: int, _subject: str = Depends(authenticated_manager_subject)
+    ) -> dict:
+        return {'id': match_id}
+
+    @api.patch('/api/v1/vainglory/matches/{match_id}')
+    async def update_trusted_match(
+        match_id: int, _subject: str = Depends(authenticated_manager_subject)
+    ) -> dict:
+        return {'id': match_id}
+
+    @api.get('/api/v1/vainglory/analysis-queue')
+    async def unrelated_vainglory_resource(
+        _subject: str = Depends(authenticated_manager_subject),
+    ) -> dict:
         return {'ok': True}
 
     with TestClient(api, base_url='https://testserver') as value:
@@ -286,6 +311,29 @@ def test_session_auth_and_csrf_replace_api_key_header(client: TestClient) -> Non
     assert (
         client.get(
             '/api/v1/protected', headers={'x-api-key': 'bootstrap-key'}
+        ).status_code
+        == 401
+    )
+
+
+def test_trusted_proxy_key_is_scoped_to_internal_match_editor_resources(
+    client: TestClient,
+) -> None:
+    headers = {'x-api-key': 'bootstrap-key'}
+
+    assert client.get('/api/v1/vainglory/heroes', headers=headers).status_code == 200
+    assert client.get('/api/v1/vainglory/matches/3', headers=headers).status_code == 200
+    assert (
+        client.patch('/api/v1/vainglory/matches/3', headers=headers).status_code == 200
+    )
+    assert (
+        client.get('/api/v1/vainglory/analysis-queue', headers=headers).status_code
+        == 401
+    )
+    assert client.get('/api/v1/protected', headers=headers).status_code == 401
+    assert (
+        client.get(
+            '/api/v1/vainglory/heroes', headers={'x-api-key': 'wrong-key'}
         ).status_code
         == 401
     )

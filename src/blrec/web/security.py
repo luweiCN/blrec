@@ -42,6 +42,12 @@ _RECORDING_THUMBNAIL_PATH = re.compile(
 )
 _HIGHLIGHT_MEDIA_PATH = re.compile(r'^/api/v1/highlights/clips/(\d+)/media$')
 _ANALYSIS_WORKER_PATH_PREFIX = '/api/v1/vainglory/worker/'
+_TRUSTED_PROXY_READ_PATHS = (
+    re.compile(r'^/api/v1/vainglory/heroes$'),
+    re.compile(r'^/api/v1/vainglory/heroes/\d+/thumbnail$'),
+    re.compile(r'^/api/v1/vainglory/matches/\d+$'),
+)
+_TRUSTED_PROXY_WRITE_PATHS = (re.compile(r'^/api/v1/vainglory/matches/\d+$'),)
 
 
 def configure(
@@ -132,6 +138,8 @@ async def authenticate(
         or request.url.path in _PUBLIC_AUTH_PATHS
         or request.url.path.startswith('/api/v1/browser-extension/')
     ):
+        return
+    if _valid_trusted_proxy_request(request, x_api_key):
         return
     if request.method == 'GET' and request.url.path.startswith(
         '/api/v1/control-operations/'
@@ -225,6 +233,17 @@ def _valid_analysis_worker_request(request: Request) -> bool:
         and token
         and secrets.compare_digest(token, analysis_worker_token)
     )
+
+
+def _valid_trusted_proxy_request(request: Request, x_api_key: Optional[str]) -> bool:
+    if not valid_api_key(x_api_key):
+        return False
+    patterns = (
+        _TRUSTED_PROXY_READ_PATHS
+        if request.method in {'GET', 'HEAD'}
+        else _TRUSTED_PROXY_WRITE_PATHS if request.method == 'PATCH' else ()
+    )
+    return any(pattern.fullmatch(request.url.path) for pattern in patterns)
 
 
 def _signed_media_resource_id(path: str) -> Optional[int]:
