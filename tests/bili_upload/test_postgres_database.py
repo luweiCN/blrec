@@ -274,6 +274,11 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
                 'visibility_verified_at BIGINT,public_visible_at BIGINT,'
                 'updated_at BIGINT)'
             )
+            connection.execute(
+                'CREATE TABLE vainglory_video_sources('
+                'part_id BIGINT PRIMARY KEY,state TEXT NOT NULL,error TEXT,'
+                'updated_at BIGINT NOT NULL)'
+            )
             connection.execute("INSERT INTO vainglory_players VALUES(1,'玩家')")
             connection.execute('INSERT INTO vainglory_archive_syncs VALUES(1,500,1000)')
             connection.execute('INSERT INTO archive_migration_jobs VALUES(1,500,1000)')
@@ -288,10 +293,14 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
                 "1,1,1,'BV1upload001','upload','public',2,2,2),"
                 "(2,2,NULL,'BV1archive01','archive','public',3,3,3)"
             )
+            connection.execute(
+                'INSERT INTO vainglory_video_sources VALUES('
+                "1,'failed','BiliDownloadContractError: DNS failed',1)"
+            )
 
         assert migrate_postgres_schema(
             schema_url, expected_database=database_name, expected_schema=schema
-        ) == (77, 78, 79, 80, 81, 82, 83)
+        ) == (77, 78, 79, 80, 81, 82, 83, 84)
 
         with psycopg.connect(schema_url, autocommit=True) as connection:
             assert connection.execute(
@@ -319,7 +328,19 @@ def test_postgres_schema_migration_77_repairs_privacy_and_extends_daily_limit() 
             ).fetchall() == [('owner', None), ('owner', None)]
             assert connection.execute(
                 'SELECT MAX(version) FROM schema_migrations'
-            ).fetchone() == (83,)
+            ).fetchone() == (84,)
+            assert connection.execute(
+                'SELECT state,error,attempt_count,next_attempt_at,'
+                'last_attempt_error,last_attempt_interface '
+                'FROM vainglory_video_sources WHERE part_id=1'
+            ).fetchone() == (
+                'pending',
+                None,
+                0,
+                0,
+                'BiliDownloadContractError: DNS failed',
+                None,
+            )
             columns = {
                 row[0]
                 for row in connection.execute(
