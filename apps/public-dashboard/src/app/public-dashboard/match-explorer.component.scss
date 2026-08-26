@@ -439,13 +439,6 @@ summary {
   white-space: nowrap;
 }
 
-.match-time .match-rating-reason {
-  color: var(--gold);
-  font-weight: 720;
-  line-height: 1.4;
-  white-space: normal;
-}
-
 .match-player-link {
   position: relative;
   z-index: 2;
@@ -554,7 +547,15 @@ summary {
     }
 
     .match-rating-delta {
+      position: relative;
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
       font-weight: 740;
+
+      &.protected {
+        color: var(--gold);
+      }
     }
 
     &.positive {
@@ -569,6 +570,53 @@ summary {
       }
     }
   }
+}
+
+.match-rating-help {
+  position: relative;
+  display: inline-grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  color: var(--gold) !important;
+  font-size: 0.62rem !important;
+  font-weight: 850;
+  pointer-events: auto;
+
+  &:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  &:hover .match-rating-tooltip,
+  &:focus .match-rating-tooltip {
+    visibility: visible;
+    opacity: 1;
+  }
+}
+
+.match-rating-tooltip {
+  position: absolute;
+  z-index: 4;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  width: max-content;
+  max-width: min(300px, 70vw);
+  padding: 7px 9px;
+  visibility: hidden;
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--surface-0) !important;
+  font-size: var(--type-caption) !important;
+  font-weight: 680;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  transform: translateX(-50%);
+  white-space: normal;
 }
 
 .match-row-meta {
@@ -672,6 +720,7 @@ summary {
   .match-list.refreshing {
     transition: none;
   }
+
 }
 
 .match-empty {

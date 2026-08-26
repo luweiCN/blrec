@@ -7,6 +7,7 @@ import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
+import { MatchAdminEditorModalComponent } from './match-admin-editor-modal.component';
 import { MatchDetailModalComponent } from './match-detail-modal.component';
 import { MatchExplorerComponent } from './match-explorer.component';
 import { MatchesPageComponent } from './matches-page.component';
@@ -33,6 +34,7 @@ import { SkillTierBadgeComponent } from './skill-tier-badge.component';
     PlayerAvatarComponent,
     PlayerRatingTrendChartComponent,
     PlayerRoomLinksComponent,
+    MatchAdminEditorModalComponent,
     MatchDetailModalComponent,
     MatchExplorerComponent,
     MatchesPageComponent,

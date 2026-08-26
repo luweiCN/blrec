@@ -2,8 +2,92 @@ import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
+import {
+  DashboardAdminHero,
+  DashboardAdminMatch,
+} from './dashboard-admin-api.service';
+import { MatchAdminEditorModalComponent } from './match-admin-editor-modal.component';
 import { MatchDetailModalComponent } from './match-detail-modal.component';
 import { TEST_DASHBOARD_MATCHES } from './public-dashboard.test-data';
+
+const ADMIN_HEROES: readonly DashboardAdminHero[] = [
+  {
+    id: 7,
+    label: '斯凯伊 · Skye',
+    thumbnailUrl: '/api/v1/vainglory/heroes/7/thumbnail',
+  },
+  {
+    id: 11,
+    label: '鹰眼 · Kestrel',
+    thumbnailUrl: '/api/v1/vainglory/heroes/11/thumbnail',
+  },
+];
+
+const ADMIN_MATCH: DashboardAdminMatch = {
+  id: 1001,
+  title: '测试对局',
+  gameMode: '3v3',
+  durationSeconds: 989,
+  resultText: '战败',
+  endReason: 'normal',
+  matchKind: 'pvp',
+  viewContext: 'played',
+  statsEligible: true,
+  winnerColor: 'orange',
+  leftColor: 'teal',
+  rightColor: 'orange',
+  leftKills: 10,
+  rightKills: 3,
+  leftEconomy: 42_800,
+  rightEconomy: 31_600,
+  confidence: 0.953,
+  recordedPlayerConfidence: 1,
+  recordedPlayerSource: 'automatic',
+  players: [
+    {
+      side: 'left',
+      slot: 1,
+      name: '主播',
+      heroId: 7,
+      heroLabel: '斯凯伊',
+      heroSource: 'automatic',
+      heroProbability: 0.926,
+      kills: 4,
+      deaths: 2,
+      assists: 6,
+      economy: 14_000,
+      lastHits: 100,
+      confidence: 0.9,
+      isRecordedPlayer: true,
+      afkPredictionStatus: 'active',
+      afkProbability: 0,
+      afkModelVersion: 'afk-v1',
+      afkGateReason: '',
+      afkManualOverride: null,
+    },
+    {
+      side: 'right',
+      slot: 1,
+      name: '对手',
+      heroId: 11,
+      heroLabel: '鹰眼',
+      heroSource: 'automatic',
+      heroProbability: 0.934,
+      kills: 2,
+      deaths: 4,
+      assists: 3,
+      economy: 10_000,
+      lastHits: 80,
+      confidence: 0.91,
+      isRecordedPlayer: false,
+      afkPredictionStatus: 'active',
+      afkProbability: 0,
+      afkModelVersion: 'afk-v1',
+      afkGateReason: '',
+      afkManualOverride: null,
+    },
+  ],
+};
 
 describe('MatchDetailModalComponent', () => {
   let fixture: ComponentFixture<MatchDetailModalComponent>;
@@ -11,7 +95,7 @@ describe('MatchDetailModalComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [MatchDetailModalComponent],
+      declarations: [MatchAdminEditorModalComponent, MatchDetailModalComponent],
       imports: [CommonModule, RouterTestingModule],
     }).compileComponents();
 
@@ -85,5 +169,40 @@ describe('MatchDetailModalComponent', () => {
     expect(
       (fixture.nativeElement as HTMLElement).querySelector('.match-admin-open'),
     ).toBeNull();
+  });
+
+  it('opens a separate admin editor with the result image and hero portraits', async () => {
+    spyOnProperty(component.adminApi, 'enabled', 'get').and.returnValue(true);
+    spyOn(component.adminApi, 'getMatch').and.resolveTo(ADMIN_MATCH);
+    spyOn(component.adminApi, 'listHeroes').and.resolveTo(ADMIN_HEROES);
+    component.match = {
+      ...TEST_DASHBOARD_MATCHES[0],
+      id: ADMIN_MATCH.id,
+      resultImage: {
+        url: '/data/result.webp',
+        width: 1600,
+        height: 900,
+      },
+    };
+    fixture.detectChanges();
+
+    component.openAdminEditor();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const page = fixture.nativeElement as HTMLElement;
+    const editor = page.querySelector('.match-admin-dialog') as HTMLElement;
+
+    expect(editor).not.toBeNull();
+    expect(page.querySelectorAll('[role="dialog"]').length).toBe(2);
+    expect(page.querySelector('.match-admin-editor')).toBeNull();
+    expect(
+      editor.querySelector('.match-admin-proof-image img')?.getAttribute('src'),
+    ).toBe('/data/result.webp');
+    expect(editor.querySelectorAll('.match-admin-hero-avatar img').length).toBe(
+      2,
+    );
+    expect(editor.textContent).toContain('K / D / A');
+    expect(editor.textContent).toContain('英雄模型 92.6%');
   });
 });

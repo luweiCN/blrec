@@ -132,10 +132,6 @@
               >{{ playerName(match.playerId) }}</a>
               <span aria-hidden="true"> · </span>{{ formatDuration(match.durationSeconds) }}
             </small>
-            <small
-              *ngIf="match.rating && matchRatingAdjustmentLabel(match.rating) as adjustment"
-              class="match-rating-reason"
-            >{{ adjustment }}</small>
             <small *ngIf="match.streamTitle" class="match-stream-title" [title]="match.streamTitle">
               {{ match.streamTitle }}
             </small>
@@ -189,8 +185,20 @@
                 <span class="match-rating-arrow">→</span>
                 <span class="match-rating-after">{{ rating.scoreAfter | number: "1.0-0" }}</span>
               </span>
-              <span class="match-rating-delta" aria-hidden="true">
+              <span
+                class="match-rating-delta"
+                [class.protected]="rating.scoreDelta === 0 && !!matchRatingAdjustmentLabel(rating)"
+              >
                 本局 {{ rating.scoreDelta > 0 ? "+" : "" }}{{ rating.scoreDelta }}
+                <span
+                  *ngIf="matchRatingAdjustmentLabel(rating) as adjustment"
+                  class="match-rating-help"
+                  tabindex="0"
+                  [attr.aria-label]="adjustment"
+                >
+                  <span aria-hidden="true">!</span>
+                  <span class="match-rating-tooltip" role="tooltip">{{ adjustment }}</span>
+                </span>
               </span>
             </small>
           </span>

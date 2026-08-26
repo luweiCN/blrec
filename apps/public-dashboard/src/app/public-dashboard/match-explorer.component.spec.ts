@@ -251,7 +251,7 @@ describe('MatchExplorerComponent', () => {
     expect(row.querySelector('.match-image-lightbox')).not.toBeNull();
   });
 
-  it('explains an AFK-protected loss directly in the match list', () => {
+  it('keeps an AFK-protected loss compact and explains it from the score', () => {
     const match = TEST_DASHBOARD_MATCHES[0];
     fixture.componentRef.setInput('matches', [
       {
@@ -273,11 +273,17 @@ describe('MatchExplorerComponent', () => {
     ]);
     fixture.detectChanges();
 
-    expect(
-      (fixture.nativeElement as HTMLElement).querySelector(
-        '.match-rating-reason',
-      )?.textContent,
-    ).toContain('己方队友挂机，触发失败保护，本局不扣排位分');
+    const page = fixture.nativeElement as HTMLElement;
+    expect(page.querySelector('.match-rating-reason')).toBeNull();
+    expect(page.querySelector('.match-rating-delta.protected')?.textContent).toContain(
+      '本局 0',
+    );
+    expect(page.querySelector('.match-rating-help')?.getAttribute('aria-label')).toBe(
+      '己方队友挂机，触发失败保护，本局不扣排位分',
+    );
+    expect(page.querySelector('.match-rating-tooltip')?.textContent).toContain(
+      '己方队友挂机，触发失败保护，本局不扣排位分',
+    );
   });
 
   it('shows a local loading skeleton while the API page is pending', async () => {
