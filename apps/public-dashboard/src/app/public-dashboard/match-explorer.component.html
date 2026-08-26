@@ -196,7 +196,18 @@
                   tabindex="0"
                   [attr.aria-label]="adjustment"
                 >
-                  <span aria-hidden="true">!</span>
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                  >
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M12 8v4m0 4h.01"></path>
+                  </svg>
                   <span class="match-rating-tooltip" role="tooltip">{{ adjustment }}</span>
                 </span>
               </span>
@@ -236,6 +247,13 @@
           <ng-template #resultImageUnavailable>
             <span class="match-image-link disabled" aria-label="暂无战绩图">战绩</span>
           </ng-template>
+
+          <button
+            *ngIf="adminApi.enabled"
+            type="button"
+            class="match-edit-link available"
+            (click)="openAdminEditor(match)"
+          >编辑</button>
         </div>
       </div>
     </li>
@@ -269,3 +287,10 @@
   [initialImageExpanded]="expandSelectedResultImage"
   (closeModal)="closeMatch()"
 ></app-match-detail-modal>
+
+<app-match-admin-editor-modal
+  *ngIf="selectedAdminMatch as match"
+  [match]="match"
+  [streamerName]="playerName(match.playerId)"
+  (closeEditor)="closeAdminEditor()"
+></app-match-admin-editor-modal>

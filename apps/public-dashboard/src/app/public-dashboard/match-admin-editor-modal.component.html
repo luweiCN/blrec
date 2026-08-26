@@ -31,7 +31,8 @@
       </p>
 
       <ng-container *ngIf="editableMatch as editable">
-        <section class="match-admin-proof" aria-labelledby="match-admin-proof-title">
+        <div class="match-admin-overview">
+          <section class="match-admin-proof" aria-labelledby="match-admin-proof-title">
           <header>
             <div>
               <h3 id="match-admin-proof-title">结算图对照</h3>
@@ -56,9 +57,9 @@
               <p>本局没有可用的结算原图，请依据模型原值谨慎修改。</p>
             </ng-template>
           </div>
-        </section>
+          </section>
 
-        <section class="match-admin-section" aria-labelledby="match-admin-basic-title">
+          <section class="match-admin-basic" aria-labelledby="match-admin-basic-title">
           <header>
             <h3 id="match-admin-basic-title">基本信息</h3>
             <p>先确认模式、胜负与主播本人，再核对双方阵容。</p>
@@ -86,15 +87,11 @@
                 <option value="unknown">未知</option>
               </select>
             </label>
-            <label>
-              <span>主播使用英雄</span>
-              <select [value]="recordedPlayer" (change)="recordedPlayer = $any($event.target).value">
-                <option value="">未确认</option>
-                <option *ngFor="let player of recordedCandidates()" [value]="player.side + ':' + player.slot">
-                  {{ player.side === "left" ? "左" : "右" }}{{ player.slot }} · {{ heroName(player.heroId) }} · {{ player.name || "未知玩家" }}
-                </option>
-              </select>
-            </label>
+            <div class="match-admin-recorded-summary">
+              <span>主播本人</span>
+              <strong>{{ recordedPlayerLabel() }}</strong>
+              <small>在下方阵容中点击“设为主播”修改</small>
+            </div>
             <label>
               <span>时长（秒）</span>
               <input type="number" min="1" [value]="editable.durationSeconds === null ? '' : editable.durationSeconds" (input)="editable.durationSeconds = $any($event.target).value === '' ? null : +$any($event.target).value" />
@@ -150,7 +147,8 @@
               </span>
             </label>
           </div>
-        </section>
+          </section>
+        </div>
 
         <section class="match-admin-section" aria-labelledby="match-admin-players-title">
           <header>
@@ -171,54 +169,65 @@
                     英雄{{ player.heroSource === "manual" ? "人工" : "模型" }}
                     {{ player.heroProbability === null ? "历史未保存" : (player.heroProbability * 100).toFixed(1) + "%" }}
                   </span>
+                  <button
+                    type="button"
+                    class="match-admin-recorded-toggle"
+                    [class.selected]="isRecordedPlayer(player)"
+                    [attr.aria-pressed]="isRecordedPlayer(player)"
+                    (click)="setRecordedPlayer(player)"
+                  >{{ isRecordedPlayer(player) ? "主播本人" : "设为主播" }}</button>
                 </header>
                 <div class="match-admin-player-body">
-                  <span class="match-admin-hero-avatar">
-                    <img
-                      *ngIf="heroThumbnail(player.heroId) as thumbnail"
-                      [src]="thumbnail"
-                      [alt]="heroName(player.heroId)"
-                    />
-                    <span *ngIf="!heroThumbnail(player.heroId)" aria-label="英雄未识别">?</span>
-                  </span>
-                  <div class="match-admin-player-content">
-                    <div class="match-admin-player-identity">
-                      <label>
-                        <span>玩家名</span>
-                        <input type="text" maxlength="80" [value]="player.name" (input)="player.name = $any($event.target).value" />
-                      </label>
-                      <label>
-                        <span>英雄</span>
-                        <select [value]="player.heroId === null ? '' : player.heroId" (change)="player.heroId = $any($event.target).value === '' ? null : +$any($event.target).value">
-                          <option value="">未识别</option>
-                          <option *ngFor="let hero of heroes" [value]="hero.id">{{ hero.label }}</option>
-                        </select>
-                      </label>
+                  <div class="match-admin-player-identity">
+                    <label>
+                      <span>玩家名</span>
+                      <input type="text" maxlength="80" [value]="player.name" (input)="player.name = $any($event.target).value" />
+                    </label>
+                    <div class="match-admin-hero-field">
+                      <span>英雄</span>
+                      <button
+                        type="button"
+                        class="match-admin-hero-trigger"
+                        (click)="openHeroPicker(player)"
+                      >
+                        <span class="match-admin-hero-avatar">
+                          <img
+                            *ngIf="heroThumbnail(player.heroId) as thumbnail"
+                            [src]="thumbnail"
+                            [alt]="heroName(player.heroId)"
+                          />
+                          <span *ngIf="!heroThumbnail(player.heroId)" aria-label="英雄未识别">?</span>
+                        </span>
+                        <span class="match-admin-hero-copy">
+                          <strong>{{ heroName(player.heroId) }}</strong>
+                          <small>点击更换</small>
+                        </span>
+                      </button>
                     </div>
-                    <div class="match-admin-player-stats">
-                      <fieldset class="match-admin-kda">
-                        <legend>K / D / A</legend>
-                        <label><span>K</span><input type="number" min="0" [value]="player.kills === null ? '' : player.kills" (input)="player.kills = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
-                        <label><span>D</span><input type="number" min="0" [value]="player.deaths === null ? '' : player.deaths" (input)="player.deaths = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
-                        <label><span>A</span><input type="number" min="0" [value]="player.assists === null ? '' : player.assists" (input)="player.assists = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
-                      </fieldset>
-                      <label>
-                        <span>经济</span>
-                        <input type="number" min="0" [value]="player.economy === null ? '' : player.economy" (input)="player.economy = $any($event.target).value === '' ? null : +$any($event.target).value" />
-                      </label>
-                      <label>
-                        <span>第三项</span>
-                        <input type="number" min="0" [value]="player.lastHits === null ? '' : player.lastHits" (input)="player.lastHits = $any($event.target).value === '' ? null : +$any($event.target).value" />
-                      </label>
-                      <label>
-                        <span>挂机 · 模型 {{ player.afkProbability === null ? "—" : (player.afkProbability * 100).toFixed(1) + "%" }}</span>
-                        <select [value]="player.afkManualOverride === null ? 'model' : player.afkManualOverride ? 'afk' : 'active'" (change)="player.afkManualOverride = $any($event.target).value === 'model' ? null : $any($event.target).value === 'afk'">
-                          <option value="model">采用模型</option>
-                          <option value="active">未挂机</option>
-                          <option value="afk">挂机</option>
-                        </select>
-                      </label>
-                    </div>
+                  </div>
+                  <div class="match-admin-player-stats">
+                    <fieldset class="match-admin-kda">
+                      <legend>K / D / A</legend>
+                      <label><span>K</span><input type="number" min="0" [value]="player.kills === null ? '' : player.kills" (input)="player.kills = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+                      <label><span>D</span><input type="number" min="0" [value]="player.deaths === null ? '' : player.deaths" (input)="player.deaths = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+                      <label><span>A</span><input type="number" min="0" [value]="player.assists === null ? '' : player.assists" (input)="player.assists = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+                    </fieldset>
+                    <label>
+                      <span>经济</span>
+                      <input type="number" min="0" [value]="player.economy === null ? '' : player.economy" (input)="player.economy = $any($event.target).value === '' ? null : +$any($event.target).value" />
+                    </label>
+                    <label>
+                      <span>第三项</span>
+                      <input type="number" min="0" [value]="player.lastHits === null ? '' : player.lastHits" (input)="player.lastHits = $any($event.target).value === '' ? null : +$any($event.target).value" />
+                    </label>
+                    <label>
+                      <span>挂机 · 模型 {{ player.afkProbability === null ? "—" : (player.afkProbability * 100).toFixed(1) + "%" }}</span>
+                      <select [value]="player.afkManualOverride === null ? 'model' : player.afkManualOverride ? 'afk' : 'active'" (change)="player.afkManualOverride = $any($event.target).value === 'model' ? null : $any($event.target).value === 'afk'">
+                        <option value="model">采用模型</option>
+                        <option value="active">未挂机</option>
+                        <option value="afk">挂机</option>
+                      </select>
+                    </label>
                   </div>
                 </div>
               </article>
@@ -237,5 +246,51 @@
         </button>
       </div>
     </footer>
+
+    <div
+      *ngIf="heroPickerPlayer as player"
+      class="match-admin-hero-picker-backdrop"
+      (mousedown)="onHeroPickerBackdropClick($event)"
+    >
+      <aside class="match-admin-hero-picker" aria-label="选择英雄">
+        <header>
+          <div>
+            <strong>选择英雄</strong>
+            <span>{{ player.side === "left" ? "左" : "右" }}{{ player.slot }} · {{ player.name || "未知玩家" }}</span>
+          </div>
+          <button type="button" aria-label="关闭英雄选择" (click)="closeHeroPicker()">×</button>
+        </header>
+        <label>
+          <span>搜索英雄</span>
+          <input
+            #heroSearch
+            type="search"
+            [value]="heroQuery"
+            placeholder="输入中文名或英文名"
+            (input)="heroQuery = $any($event.target).value"
+          />
+        </label>
+        <div class="match-admin-hero-grid">
+          <button
+            type="button"
+            class="unknown"
+            [class.selected]="player.heroId === null"
+            (click)="selectHero(null)"
+          >
+            <span>?</span>
+            <strong>未识别</strong>
+          </button>
+          <button
+            *ngFor="let hero of filteredHeroes"
+            type="button"
+            [class.selected]="player.heroId === hero.id"
+            (click)="selectHero(hero.id)"
+          >
+            <img [src]="heroOptionThumbnail(hero)" alt="" />
+            <strong>{{ hero.label }}</strong>
+          </button>
+        </div>
+      </aside>
+    </div>
   </section>
 </div>

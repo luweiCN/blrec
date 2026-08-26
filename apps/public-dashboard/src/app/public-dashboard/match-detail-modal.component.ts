@@ -1,6 +1,5 @@
 import {
   AfterViewInit,
-  ChangeDetectorRef,
   ChangeDetectionStrategy,
   Component,
   ElementRef,
@@ -13,9 +12,6 @@ import {
   ViewChild,
 } from '@angular/core';
 
-import {
-  DashboardAdminApiService,
-} from './dashboard-admin-api.service';
 import {
   afkRatingAdjustmentLabel,
   formatEconomy,
@@ -45,15 +41,9 @@ export class MatchDetailModalComponent
   @ViewChild('dialog') private dialog?: ElementRef<HTMLElement>;
   @ViewChild('closeButton') private closeButton?: ElementRef<HTMLButtonElement>;
   imageExpanded = false;
-  adminEditorOpen = false;
 
   private readonly restoreFocusTo = document.activeElement as HTMLElement | null;
   private readonly previousBodyOverflow = document.body.style.overflow;
-
-  constructor(
-    readonly adminApi: DashboardAdminApiService,
-    private readonly changeDetector: ChangeDetectorRef,
-  ) {}
 
   ngOnInit(): void {
     this.imageExpanded = this.initialImageExpanded;
@@ -71,9 +61,6 @@ export class MatchDetailModalComponent
 
   @HostListener('document:keydown', ['$event'])
   onDocumentKeydown(event: KeyboardEvent): void {
-    if (this.adminEditorOpen) {
-      return;
-    }
     if (event.key === 'Escape') {
       event.preventDefault();
       if (this.imageExpanded) {
@@ -126,19 +113,6 @@ export class MatchDetailModalComponent
       return;
     }
     this.imageExpanded = false;
-  }
-
-  openAdminEditor(): void {
-    if (!this.adminApi.enabled) {
-      return;
-    }
-    this.adminEditorOpen = true;
-    this.changeDetector.markForCheck();
-  }
-
-  closeAdminEditor(): void {
-    this.adminEditorOpen = false;
-    this.changeDetector.markForCheck();
   }
 
   onImageBackdropClick(event: MouseEvent): void {

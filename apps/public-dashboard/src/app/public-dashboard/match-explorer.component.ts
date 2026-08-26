@@ -8,6 +8,7 @@ import {
 } from '@angular/core';
 import { Subscription } from 'rxjs';
 
+import { DashboardAdminApiService } from './dashboard-admin-api.service';
 import {
   DashboardMatchApiService,
   DashboardMatchPage,
@@ -67,6 +68,7 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   selectedHeroes: readonly string[] = [];
   page = 1;
   selectedMatch: DashboardMatch | null = null;
+  selectedAdminMatch: DashboardMatch | null = null;
   expandSelectedResultImage = false;
   requestState: MatchPageState = { kind: 'local' };
   readonly loadingRows = Array.from({ length: 6 }, (_, index) => index);
@@ -78,6 +80,7 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
 
   constructor(
     private readonly matchApi: DashboardMatchApiService,
+    readonly adminApi: DashboardAdminApiService,
     dashboardData: DashboardDataService,
     private readonly changeDetector: ChangeDetectorRef,
   ) {
@@ -91,6 +94,7 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   ngOnChanges(): void {
     this.page = 1;
     this.selectedMatch = null;
+    this.selectedAdminMatch = null;
     this.expandSelectedResultImage = false;
     this.trimHeroSelection();
     void this.loadApiPage();
@@ -270,6 +274,16 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
     this.expandSelectedResultImage = false;
   }
 
+  openAdminEditor(match: DashboardMatch): void {
+    if (this.adminApi.enabled) {
+      this.selectedAdminMatch = match;
+    }
+  }
+
+  closeAdminEditor(): void {
+    this.selectedAdminMatch = null;
+  }
+
   retryApiPage(): void {
     void this.loadApiPage();
   }
@@ -408,6 +422,12 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
       this.selectedMatch =
         response.items.find((match) => match.id === this.selectedMatch?.id) ??
         this.selectedMatch;
+    }
+    if (this.selectedAdminMatch !== null) {
+      this.selectedAdminMatch =
+        response.items.find(
+          (match) => match.id === this.selectedAdminMatch?.id,
+        ) ?? this.selectedAdminMatch;
     }
     if (this.page > this.pageCount) {
       this.page = this.pageCount;

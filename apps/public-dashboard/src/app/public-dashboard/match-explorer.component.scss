@@ -574,16 +574,15 @@ summary {
 
 .match-rating-help {
   position: relative;
-  display: inline-grid;
-  width: 17px;
-  height: 17px;
-  place-items: center;
-  border: 1px solid currentColor;
-  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
   color: var(--gold) !important;
-  font-size: 0.62rem !important;
-  font-weight: 850;
   pointer-events: auto;
+
+  svg {
+    width: 16px;
+    height: 16px;
+  }
 
   &:focus-visible {
     outline: 2px solid var(--focus);
@@ -601,21 +600,18 @@ summary {
   position: absolute;
   z-index: 4;
   bottom: calc(100% + 8px);
-  left: 50%;
-  width: max-content;
-  max-width: min(300px, 70vw);
-  padding: 7px 9px;
+  right: 0;
+  width: 244px;
+  padding: 9px 10px;
   visibility: hidden;
+  border: 1px solid var(--line);
   border-radius: 7px;
-  background: var(--ink);
-  color: var(--surface-0) !important;
+  background: var(--surface-raised);
+  color: var(--ink-soft) !important;
   font-size: var(--type-caption) !important;
-  font-weight: 680;
   line-height: 1.35;
   opacity: 0;
   pointer-events: none;
-  text-align: left;
-  transform: translateX(-50%);
   white-space: normal;
 }
 
@@ -626,12 +622,14 @@ summary {
 
 .match-row-actions {
   display: grid;
-  grid-template-columns: repeat(2, 72px);
+  grid-auto-columns: 72px;
+  grid-auto-flow: column;
   align-items: stretch;
 }
 
 .match-replay-link,
-.match-image-link {
+.match-image-link,
+.match-edit-link {
   display: grid;
   min-width: 0;
   padding: 0;

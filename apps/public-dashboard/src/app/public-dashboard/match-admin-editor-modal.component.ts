@@ -36,6 +36,7 @@ export class MatchAdminEditorModalComponent
   @ViewChild('dialog') private dialog?: ElementRef<HTMLElement>;
   @ViewChild('closeButton')
   private closeButton?: ElementRef<HTMLButtonElement>;
+  @ViewChild('heroSearch') private heroSearch?: ElementRef<HTMLInputElement>;
 
   loading = true;
   saving = false;
@@ -44,6 +45,8 @@ export class MatchAdminEditorModalComponent
   editableMatch: DashboardAdminMatch | null = null;
   heroes: readonly DashboardAdminHero[] = [];
   recordedPlayer = '';
+  heroPickerPlayer: DashboardAdminMatchPlayer | null = null;
+  heroQuery = '';
   readonly sides = ['left', 'right'] as const;
 
   private readonly restoreFocusTo = document.activeElement as HTMLElement | null;
@@ -69,6 +72,10 @@ export class MatchAdminEditorModalComponent
   onDocumentKeydown(event: KeyboardEvent): void {
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (this.heroPickerPlayer !== null) {
+        this.closeHeroPicker();
+        return;
+      }
       this.close();
       return;
     }
@@ -184,13 +191,68 @@ export class MatchAdminEditorModalComponent
     return hero === undefined ? '' : this.adminApi.heroThumbnail(hero);
   }
 
-  recordedCandidates(): readonly DashboardAdminMatchPlayer[] {
-    const match = this.editableMatch;
-    if (match === null) {
-      return [];
+  heroOptionThumbnail(hero: DashboardAdminHero): string {
+    return this.adminApi.heroThumbnail(hero);
+  }
+
+  get filteredHeroes(): readonly DashboardAdminHero[] {
+    const query = this.heroQuery.trim().toLocaleLowerCase('zh-CN');
+    return query === ''
+      ? this.heroes
+      : this.heroes.filter((hero) =>
+          hero.label.toLocaleLowerCase('zh-CN').includes(query),
+        );
+  }
+
+  openHeroPicker(player: DashboardAdminMatchPlayer): void {
+    this.heroPickerPlayer = player;
+    this.heroQuery = '';
+    this.changeDetector.markForCheck();
+    setTimeout(() => {
+      this.heroSearch?.nativeElement.focus({ preventScroll: true });
+    });
+  }
+
+  closeHeroPicker(): void {
+    this.heroPickerPlayer = null;
+    this.heroQuery = '';
+    this.changeDetector.markForCheck();
+  }
+
+  onHeroPickerBackdropClick(event: MouseEvent): void {
+    if (event.target === event.currentTarget) {
+      this.closeHeroPicker();
     }
-    const tealSide = match.leftColor === 'teal' ? 'left' : 'right';
-    return match.players.filter((player) => player.side === tealSide);
+  }
+
+  selectHero(heroId: number | null): void {
+    if (this.heroPickerPlayer !== null) {
+      this.heroPickerPlayer.heroId = heroId;
+    }
+    this.closeHeroPicker();
+  }
+
+  isRecordedPlayer(player: DashboardAdminMatchPlayer): boolean {
+    return this.recordedPlayer === `${player.side}:${player.slot}`;
+  }
+
+  setRecordedPlayer(player: DashboardAdminMatchPlayer): void {
+    const candidate = `${player.side}:${player.slot}`;
+    this.recordedPlayer = this.recordedPlayer === candidate ? '' : candidate;
+  }
+
+  recordedPlayerLabel(): string {
+    const match = this.editableMatch;
+    if (match === null || this.recordedPlayer === '') {
+      return '未确认';
+    }
+    const player = match.players.find(
+      (candidate) =>
+        `${candidate.side}:${candidate.slot}` === this.recordedPlayer,
+    );
+    return player === undefined
+      ? '未确认'
+      : `${player.side === 'left' ? '左' : '右'}${player.slot} · ${this.heroName(player.heroId)} · ${player.name || '未知玩家'}`;
   }
 
   players(side: 'left' | 'right'): readonly DashboardAdminMatchPlayer[] {

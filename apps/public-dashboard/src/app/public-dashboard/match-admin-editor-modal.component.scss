@@ -116,7 +116,15 @@ select {
   }
 }
 
+.match-admin-overview {
+  display: grid;
+  grid-template-columns: minmax(620px, 1.15fr) minmax(460px, 0.85fr);
+  gap: 20px;
+  align-items: flex-start;
+}
+
 .match-admin-proof,
+.match-admin-basic,
 .match-admin-section {
   display: grid;
   gap: 12px;
@@ -156,7 +164,7 @@ select {
 .match-admin-proof-image {
   display: grid;
   min-height: 180px;
-  max-height: 300px;
+  max-height: 420px;
   overflow: hidden;
   place-items: center;
   border-radius: 10px;
@@ -166,7 +174,7 @@ select {
     display: block;
     width: 100%;
     height: 100%;
-    max-height: 300px;
+    max-height: 420px;
     object-fit: contain;
   }
 
@@ -182,13 +190,45 @@ select {
   border-top: 1px solid var(--line-soft);
 }
 
+.match-admin-basic {
+  align-content: start;
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--surface-0);
+}
+
 .match-admin-fields {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 12px;
 
   .wide {
     grid-column: span 2;
+  }
+}
+
+.match-admin-recorded-summary {
+  display: grid;
+  gap: 3px;
+  align-content: center;
+  min-height: 58px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+
+  span,
+  small {
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  strong {
+    overflow: hidden;
+    color: var(--ink-soft);
+    font-size: var(--type-label);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
@@ -281,11 +321,29 @@ select {
   }
 }
 
+.match-admin-recorded-toggle {
+  min-height: 30px;
+  margin-left: auto;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: var(--type-caption);
+  font-weight: 720;
+
+  &:hover,
+  &.selected {
+    border-color: var(--cyan-strong);
+    background: var(--cyan-wash);
+    color: var(--cyan);
+  }
+}
+
 .match-admin-player-body {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
+  gap: 9px;
 }
 
 .match-admin-hero-avatar {
@@ -306,16 +364,70 @@ select {
   }
 }
 
-.match-admin-player-content {
-  display: grid;
-  gap: 9px;
-  min-width: 0;
-}
-
 .match-admin-player-identity {
   display: grid;
   grid-template-columns: minmax(110px, 1fr) minmax(140px, 1.15fr);
   gap: 8px;
+}
+
+.match-admin-hero-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+
+  & > span {
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+    font-weight: 680;
+  }
+}
+
+.match-admin-hero-trigger {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  min-height: 48px;
+  padding: 5px 9px 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  cursor: pointer;
+  text-align: left;
+
+  &:hover {
+    border-color: var(--cyan-strong);
+  }
+
+  .match-admin-hero-avatar {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+.match-admin-hero-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+
+  strong,
+  small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: var(--ink-soft);
+    font-size: var(--type-label);
+  }
+
+  small {
+    color: var(--ink-muted);
+    font-size: 0.68rem;
+  }
 }
 
 .match-admin-player-stats {
@@ -399,7 +511,113 @@ select {
   }
 }
 
-@media (max-width: 980px) {
+.match-admin-hero-picker-backdrop {
+  position: fixed;
+  z-index: 3;
+  display: grid;
+  inset: 0;
+  padding: 72px 24px;
+  align-items: flex-start;
+  justify-items: flex-end;
+  background: oklch(3% 0.02 278 / 0.44);
+}
+
+.match-admin-hero-picker {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 14px;
+  width: min(460px, 100%);
+  max-height: 100%;
+  padding: 16px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+
+  & > header {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    justify-content: space-between;
+
+    div {
+      display: grid;
+      gap: 3px;
+    }
+
+    strong {
+      color: var(--ink);
+      font-size: var(--type-secondary);
+    }
+
+    span {
+      color: var(--ink-muted);
+      font-size: var(--type-caption);
+    }
+
+    button {
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: var(--surface-2);
+      color: var(--ink-soft);
+      cursor: pointer;
+      font-size: 1.25rem;
+    }
+  }
+}
+
+.match-admin-hero-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  overflow-y: auto;
+
+  button {
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1fr);
+    gap: 7px;
+    align-items: center;
+    min-width: 0;
+    min-height: 44px;
+    padding: 5px 7px;
+    border: 1px solid var(--line-soft);
+    border-radius: 7px;
+    background: var(--surface-1);
+    color: var(--ink-muted);
+    cursor: pointer;
+    text-align: left;
+
+    &:hover,
+    &.selected {
+      border-color: var(--cyan-strong);
+      background: var(--cyan-wash);
+      color: var(--cyan);
+    }
+  }
+
+  img,
+  button > span {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--surface-2);
+    object-fit: cover;
+  }
+
+  strong {
+    overflow: hidden;
+    font-size: 0.68rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 1180px) {
   .match-admin-backdrop {
     padding: 10px;
   }
@@ -408,19 +626,16 @@ select {
     max-height: calc(100vh - 20px);
   }
 
-  .match-admin-fields,
+  .match-admin-overview,
   .match-admin-teams {
     grid-template-columns: 1fr;
   }
 
-  .match-admin-fields .wide {
-    grid-column: auto;
-  }
-
   .match-admin-proof > header,
+  .match-admin-basic > header,
   .match-admin-section > header {
     display: grid;
-    align-items: start;
+    align-items: flex-start;
   }
 
   .match-admin-evidence {
@@ -447,7 +662,7 @@ select {
 
   .match-admin-footer {
     display: grid;
-    align-items: start;
+    align-items: flex-start;
 
     div,
     button {
@@ -462,5 +677,17 @@ select {
 
   .match-admin-kda {
     grid-column: 1 / -1;
+  }
+
+  .match-admin-hero-picker-backdrop {
+    padding: 56px 12px;
+  }
+
+  .match-admin-hero-picker {
+    width: 100%;
+  }
+
+  .match-admin-hero-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

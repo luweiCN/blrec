@@ -117,12 +117,6 @@
       <p>
         {{ match.mode === "brawl" ? "阵容与 KDA" : "阵容、KDA 与经济" }}来自结算画面识别，空缺项显示为“—”。
       </p>
-      <button
-        *ngIf="adminApi.enabled"
-        type="button"
-        class="match-admin-open"
-        (click)="openAdminEditor()"
-      >编辑</button>
       <a
         *ngIf="match.replay as replay"
         [href]="replay.url"
@@ -142,13 +136,6 @@
     </footer>
   </section>
 </div>
-
-<app-match-admin-editor-modal
-  *ngIf="adminEditorOpen"
-  [match]="match"
-  [streamerName]="streamerName"
-  (closeEditor)="closeAdminEditor()"
-></app-match-admin-editor-modal>
 
 <div
   *ngIf="imageExpanded && match.resultImage as resultImage"

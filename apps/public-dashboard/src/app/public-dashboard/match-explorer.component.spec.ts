@@ -12,6 +12,7 @@ import {
   DashboardMatchApiService,
   DashboardMatchPage,
 } from './dashboard-match-api.service';
+import { MatchAdminEditorModalComponent } from './match-admin-editor-modal.component';
 import { MatchDetailModalComponent } from './match-detail-modal.component';
 import { MatchExplorerComponent } from './match-explorer.component';
 import { DashboardDataService } from './public-dashboard-data.service';
@@ -35,7 +36,11 @@ describe('MatchExplorerComponent', () => {
       list: jasmine.createSpy('list'),
     };
     await TestBed.configureTestingModule({
-      declarations: [MatchDetailModalComponent, MatchExplorerComponent],
+      declarations: [
+        MatchAdminEditorModalComponent,
+        MatchDetailModalComponent,
+        MatchExplorerComponent,
+      ],
       imports: [CommonModule, RouterTestingModule],
       providers: [
         { provide: DashboardMatchApiService, useValue: matchApi },
@@ -147,6 +152,22 @@ describe('MatchExplorerComponent', () => {
     expect(page.querySelector('.match-row')?.textContent).not.toContain(
       '含战绩图',
     );
+  });
+
+  it('shows the fourth edit action only in internal admin mode', () => {
+    expect(fixture.nativeElement.querySelector('.match-edit-link')).toBeNull();
+    spyOnProperty(component.adminApi, 'enabled', 'get').and.returnValue(true);
+    fixture.detectChanges();
+
+    const editButton = fixture.nativeElement.querySelector(
+      '.match-edit-link',
+    ) as HTMLButtonElement;
+    expect(editButton).not.toBeNull();
+    editButton.click();
+    expect(component.selectedAdminMatch?.id).toBe(
+      TEST_DASHBOARD_MATCHES[0].id,
+    );
+    expect(fixture.nativeElement.querySelector('app-match-detail-modal')).toBeNull();
   });
 
   it('keeps live preanalysis outside the compact result badge', () => {

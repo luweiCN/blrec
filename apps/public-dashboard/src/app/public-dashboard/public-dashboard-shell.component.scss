@@ -177,10 +177,14 @@ button {
 }
 
 .owner-view-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid oklch(70% 0.115 77 / 0.62);
   background: var(--gold-wash);
   color: var(--gold);
   font-weight: 760;
+  line-height: 1;
 }
 
 .update-notes-dialog {
