@@ -112,6 +112,14 @@ jobs:
           destination="${SSH_USER}@${SSH_HOST}"
           remote_archive="/tmp/blrec-dashboard-api-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tgz"
           ssh_options=(-o ServerAliveInterval=15 -o ServerAliveCountMax=40 -o TCPKeepAlive=yes)
+          remote_hostname="$(
+            ssh "${ssh_options[@]}" -p "$SSH_PORT" -i ~/.ssh/dashboard-api \
+              "$destination" hostname
+          )"
+          if [[ "$remote_hostname" != 'blrec-platform' ]]; then
+            echo "Dashboard API deployment target is not blrec-platform" >&2
+            exit 1
+          fi
           scp "${ssh_options[@]}" -P "$SSH_PORT" -i ~/.ssh/dashboard-api dashboard-api-release.tgz \
             "${destination}:${remote_archive}"
           ssh "${ssh_options[@]}" -p "$SSH_PORT" -i ~/.ssh/dashboard-api "$destination" \
