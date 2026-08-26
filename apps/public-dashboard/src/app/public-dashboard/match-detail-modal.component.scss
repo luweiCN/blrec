@@ -185,6 +185,13 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.match-afk-adjustment {
+  margin: 0;
+  padding: 10px 28px;
+  color: var(--rose);
+  text-align: center;
+}
+
 .match-team {
   min-width: 0;
   padding: 0 22px 22px;
@@ -236,6 +243,7 @@
         box-shadow: 0 0 0 1px oklch(78% 0.16 83 / 0.28);
       }
     }
+
   }
 
   &--kda-only li {
@@ -282,6 +290,11 @@
   font-size: 0.62rem;
   line-height: 1.35;
   vertical-align: 1px;
+}
+
+.match-player-name strong .afk-badge {
+  border-color: var(--rose);
+  color: var(--rose);
 }
 
 .match-player-kda,

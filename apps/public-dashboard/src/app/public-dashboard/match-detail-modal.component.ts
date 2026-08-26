@@ -167,6 +167,19 @@ export class MatchDetailModalComponent
     return `${minutes}:${String(remaining).padStart(2, '0')}`;
   }
 
+  afkAdjustmentLabel(): string {
+    switch (this.match.rating?.afkAdjustment) {
+      case 'protected_loss':
+        return '队友挂机，本局失败不扣分';
+      case 'undermanned_win':
+        return '少打多获胜，本局获得额外加分';
+      case 'self_afk':
+        return '本人挂机，本局按挂机惩罚计分';
+      default:
+        return '';
+    }
+  }
+
   trackPlayer(_index: number, player: DashboardMatchPlayer): string {
     return `${player.name}:${player.heroName}`;
   }

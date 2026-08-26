@@ -591,7 +591,10 @@ function isMatchPlayer(value: unknown): value is DashboardMatchPlayer {
     isNullableNonNegativeInteger(value['assists']) &&
     isNullableNonNegativeInteger(value['economy']) &&
     isNullableNonNegativeInteger(value['lastHits']) &&
-    typeof value['isRecordedPlayer'] === 'boolean'
+    typeof value['isRecordedPlayer'] === 'boolean' &&
+    (value['afkStatus'] === 'unknown' ||
+      value['afkStatus'] === 'active' ||
+      value['afkStatus'] === 'afk')
   );
 }
 
@@ -641,7 +644,14 @@ function isMatchRating(value: unknown): boolean {
       Number(value['scoreBefore']) + Number(value['scoreDelta']) &&
     typeof value['provisional'] === 'boolean' &&
     isNonNegativeInteger(value['modelVersion']) &&
-    value['modelVersion'] > 0
+    value['modelVersion'] > 0 &&
+    (value['afkAdjustment'] === undefined ||
+      value['afkAdjustment'] === 'none' ||
+      value['afkAdjustment'] === 'protected_loss' ||
+      value['afkAdjustment'] === 'undermanned_win' ||
+      value['afkAdjustment'] === 'self_afk') &&
+    (value['afkPlayerDeficit'] === undefined ||
+      isNonNegativeInteger(value['afkPlayerDeficit']))
   );
 }
 

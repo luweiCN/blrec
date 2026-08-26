@@ -97,6 +97,7 @@ function matchPlayer(
     economy,
     lastHits: Math.round(economy / 28),
     isRecordedPlayer,
+    afkStatus: 'active',
   };
 }
 

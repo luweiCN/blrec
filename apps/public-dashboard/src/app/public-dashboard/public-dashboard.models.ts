@@ -202,6 +202,7 @@ export interface DashboardMatchPlayer {
   readonly economy: number | null;
   readonly lastHits: number | null;
   readonly isRecordedPlayer: boolean;
+  readonly afkStatus: 'unknown' | 'active' | 'afk';
 }
 
 export interface DashboardMatchTeam {
@@ -233,6 +234,12 @@ export interface DashboardMatchRating {
   readonly scoreAfter: number;
   readonly provisional: boolean;
   readonly modelVersion: number;
+  readonly afkAdjustment?:
+    | 'none'
+    | 'protected_loss'
+    | 'undermanned_win'
+    | 'self_afk';
+  readonly afkPlayerDeficit?: number;
 }
 
 export interface DashboardMatch {

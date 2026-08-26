@@ -39,4 +39,39 @@ describe('MatchDetailModalComponent', () => {
     expect(dialog.textContent).toContain('经济');
     expect(dialog.textContent).not.toContain('补刀');
   });
+
+  it('marks the AFK hero and explains the applied rating adjustment', () => {
+    const match = TEST_DASHBOARD_MATCHES[0];
+    component.match = {
+      ...match,
+      ally: {
+        ...match.ally,
+        players: match.ally.players.map((player, index) => ({
+          ...player,
+          afkStatus: index === 1 ? 'afk' : 'active',
+        })),
+      },
+      rating: {
+        scope: 'all',
+        seasonKey: '2026-summer',
+        matchNumber: 1,
+        scoreBefore: 1000,
+        scoreDelta: 0,
+        scoreAfter: 1000,
+        provisional: false,
+        modelVersion: 8,
+        afkAdjustment: 'protected_loss',
+        afkPlayerDeficit: 0,
+      },
+    };
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement as HTMLElement;
+
+    const afkRows = dialog.querySelectorAll('.match-player--afk');
+    expect(afkRows.length).toBe(1);
+    expect(afkRows[0].textContent).toContain('挂机');
+    expect(dialog.querySelector('.match-afk-adjustment')?.textContent).toContain(
+      '队友挂机，本局失败不扣分',
+    );
+  });
 });

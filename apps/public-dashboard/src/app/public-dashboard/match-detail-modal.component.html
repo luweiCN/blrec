@@ -42,6 +42,10 @@
       </div>
     </div>
 
+    <p *ngIf="afkAdjustmentLabel() as label" class="match-afk-adjustment">
+      {{ label }}
+    </p>
+
     <div class="match-team-columns">
       <section
         *ngFor="let team of [match.ally, match.enemy]"
@@ -60,12 +64,14 @@
           <li
             *ngFor="let player of team.players; trackBy: trackPlayer"
             [class.recorded-player]="player.isRecordedPlayer"
+            [class.match-player--afk]="player.afkStatus === 'afk'"
           >
             <img [src]="heroImage(player.heroName)" alt="" />
             <div class="match-player-name">
               <strong>
                 {{ player.name }}
                 <small *ngIf="player.isRecordedPlayer">主播</small>
+                <small *ngIf="player.afkStatus === 'afk'" class="afk-badge">挂机</small>
               </strong>
               <span>{{ heroName(player.heroName) }}</span>
             </div>
