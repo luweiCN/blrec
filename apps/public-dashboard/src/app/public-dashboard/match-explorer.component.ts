@@ -13,6 +13,7 @@ import {
   DashboardMatchPage,
 } from './dashboard-match-api.service';
 import {
+  afkRatingAdjustmentLabel,
   formatEconomy,
   heroImage,
   modeLabel,
@@ -316,6 +317,10 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
           ? `减少 ${Math.abs(rating.scoreDelta)}`
           : '不变';
     return `排位分从 ${rating.scoreBefore} 变为 ${rating.scoreAfter}，本局${change}`;
+  }
+
+  matchRatingAdjustmentLabel(rating: DashboardMatchRating): string {
+    return afkRatingAdjustmentLabel(rating.afkAdjustment);
   }
 
   matchAriaLabel(match: DashboardMatch): string {

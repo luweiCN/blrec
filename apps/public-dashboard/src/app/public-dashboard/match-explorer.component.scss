@@ -439,6 +439,13 @@ summary {
   white-space: nowrap;
 }
 
+.match-time .match-rating-reason {
+  color: var(--gold);
+  font-weight: 720;
+  line-height: 1.4;
+  white-space: normal;
+}
+
 .match-player-link {
   position: relative;
   z-index: 2;

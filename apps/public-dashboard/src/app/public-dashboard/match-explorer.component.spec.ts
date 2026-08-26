@@ -251,6 +251,35 @@ describe('MatchExplorerComponent', () => {
     expect(row.querySelector('.match-image-lightbox')).not.toBeNull();
   });
 
+  it('explains an AFK-protected loss directly in the match list', () => {
+    const match = TEST_DASHBOARD_MATCHES[0];
+    fixture.componentRef.setInput('matches', [
+      {
+        ...match,
+        result: 'L',
+        rating: {
+          scope: '3v3',
+          seasonKey: '2026-summer',
+          matchNumber: 13,
+          scoreBefore: 2058,
+          scoreDelta: 0,
+          scoreAfter: 2058,
+          provisional: false,
+          modelVersion: 8,
+          afkAdjustment: 'protected_loss',
+          afkPlayerDeficit: 1,
+        },
+      },
+    ]);
+    fixture.detectChanges();
+
+    expect(
+      (fixture.nativeElement as HTMLElement).querySelector(
+        '.match-rating-reason',
+      )?.textContent,
+    ).toContain('己方队友挂机，触发失败保护，本局不扣排位分');
+  });
+
   it('shows a local loading skeleton while the API page is pending', async () => {
     let resolvePage!: (page: DashboardMatchPage) => void;
     const pending = new Promise<DashboardMatchPage>((resolve) => {

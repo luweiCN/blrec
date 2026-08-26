@@ -71,7 +71,10 @@ describe('MatchDetailModalComponent', () => {
     expect(afkRows.length).toBe(1);
     expect(afkRows[0].textContent).toContain('挂机');
     expect(dialog.querySelector('.match-afk-adjustment')?.textContent).toContain(
-      '队友挂机，本局失败不扣分',
+      '己方队友挂机，触发失败保护，本局不扣排位分',
+    );
+    expect(dialog.querySelector('.match-afk-adjustment')?.textContent).toContain(
+      '计分说明',
     );
   });
 

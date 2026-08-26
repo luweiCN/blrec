@@ -132,6 +132,10 @@
               >{{ playerName(match.playerId) }}</a>
               <span aria-hidden="true"> · </span>{{ formatDuration(match.durationSeconds) }}
             </small>
+            <small
+              *ngIf="match.rating && matchRatingAdjustmentLabel(match.rating) as adjustment"
+              class="match-rating-reason"
+            >{{ adjustment }}</small>
             <small *ngIf="match.streamTitle" class="match-stream-title" [title]="match.streamTitle">
               {{ match.streamTitle }}
             </small>

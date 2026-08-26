@@ -3,6 +3,7 @@ import {
   COMPETITIVE_MODE_OPTIONS,
   DashboardSnapshot,
   DashboardSummary,
+  DashboardMatchRating,
   DashboardTrendPublication,
   DashboardTrendStanding,
   DashboardTrends,
@@ -25,6 +26,21 @@ export const HERO_MIN_MATCHES = 20;
 export const PLAYER_WIN_RATE_MIN_MATCHES = 20;
 export const OVERVIEW_LIMIT = 10;
 export const DETAIL_PAGE_SIZE = 10;
+
+export function afkRatingAdjustmentLabel(
+  adjustment: DashboardMatchRating['afkAdjustment'],
+): string {
+  switch (adjustment) {
+    case 'protected_loss':
+      return '己方队友挂机，触发失败保护，本局不扣排位分';
+    case 'undermanned_win':
+      return '己方队友挂机仍获胜，本局获得少打多加分';
+    case 'self_afk':
+      return '主播本人挂机，本局按挂机惩罚计分';
+    default:
+      return '';
+  }
+}
 
 export type HeroRankingSort = 'win-rate' | 'usage';
 export type PlayerRankingSort = 'rating' | 'matches' | 'wins' | 'win-rate';

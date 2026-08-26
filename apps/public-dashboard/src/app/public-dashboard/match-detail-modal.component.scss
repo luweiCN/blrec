@@ -186,10 +186,19 @@
 }
 
 .match-afk-adjustment {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  justify-content: center;
   margin: 0;
   padding: 10px 28px;
-  color: var(--rose);
+  color: var(--ink-soft);
   text-align: center;
+
+  strong {
+    color: var(--gold);
+    white-space: nowrap;
+  }
 }
 
 .match-team {
@@ -604,6 +613,12 @@
 }
 
 @media (max-width: 520px) {
+  .match-afk-adjustment {
+    align-items: flex-start;
+    padding-inline: 20px;
+    text-align: left;
+  }
+
   .match-modal-header {
     padding: 20px;
   }

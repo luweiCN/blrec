@@ -43,7 +43,8 @@
     </div>
 
     <p *ngIf="afkAdjustmentLabel() as label" class="match-afk-adjustment">
-      {{ label }}
+      <strong>计分说明</strong>
+      <span>{{ label }}</span>
     </p>
 
     <div class="match-team-columns">
