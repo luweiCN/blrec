@@ -1,6 +1,6 @@
 [Unit]
 Description=BLREC public dashboard match API
-After=network-online.target blrec-dashboard-db-tunnel.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]

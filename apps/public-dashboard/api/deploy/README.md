@@ -1,72 +1,40 @@
 # 排行榜 API 部署
 
-API 在阿里云 ECS 上以独立 systemd 服务运行，只监听 `127.0.0.1:8787`，由 Nginx
-通过 `https://vg-api.luwei.host/v1/` 对外提供。
+排行榜 API 只部署在 PVE 的 BLREC Platform 虚拟机。FastAPI 监听
+`127.0.0.1:8787`，同机 Nginx 监听内网地址的 `8787` 端口；公网入口只负责经
+WireGuard 把 `vg-api.luwei.host` 转发到该内网端口，不运行 API，也不保存数据库连接。
 
-API 通过受限 SSH 隧道连接移动云 PostgreSQL：
+API 直接连接 PVE PostgreSQL：
 
-- `core` 是权威业务数据源。API 账号只对 `grant-core-read.sql` 列出的表拥有
-  `SELECT` 权限；
-- `public` 保存结算图片元数据、写入幂等记录和可重建的历史查询缓存，不是第二套权威
-  对局数据；
-- API 使用 `direct` 模式直接读取 `core`，并按 source revision 在进程内缓存当前榜单、
-  对局、搜索和评分数据；
+- `core` 是权威业务数据源；
+- `public` 保存结算图片元数据、写入幂等记录和可重建缓存，不是第二套权威对局数据；
+- API 使用 `direct` 模式读取 `core`，按 `dashboard_source_state.revision` 刷新内存中的
+  榜单、对局、搜索和评分；
 - NAS Publisher 只发布图片资产和处理回放可见性，不发送玩家或对局增量。
 
-首次切换前，由 PostgreSQL 管理员执行 `grant-core-read.sql`。部署脚本会逐一验证 API
-角色能读取批准的 `core` 表；任何表缺少权限或 revision 无效都会在切换 release 前
-终止。
+服务配置位于 `/etc/blrec-dashboard-api/api.env`，权限为 `0600`。生产配置必须保持
+`DASHBOARD_API_REPOSITORY_MODE=direct`。`DASHBOARD_API_DATABASE_URL` 与
+`DASHBOARD_API_SOURCE_DATABASE_URL` 都应直连 PVE PostgreSQL，不得配置 SSH 隧道。
+可选的 `DASHBOARD_API_PUBLIC_LISTEN_ADDRESS` 用于指定 Nginx 的内网监听地址；未设置时
+部署脚本从 `192.168.50.0/24` 地址中自动选择。
 
-每次切换 release 前，部署脚本会备份持久化的 `public` schema 到
-`/var/lib/blrec-dashboard-api/backups/`，确认文件非空并能被
-`pg_restore --list` 读取。SQLite 只用于本地测试，其备份仍执行
-`PRAGMA quick_check`。任一检查失败都不会重启服务。
+每次切换 release 前，部署脚本会把 `public` schema 备份到
+`/var/lib/blrec-dashboard-api/backups/`，确认文件非空并能被 `pg_restore --list`
+读取。SQLite 只用于本地测试，备份会执行 `PRAGMA quick_check`。任一检查失败都不会
+重启服务。
 
-服务配置位于 `/etc/blrec-dashboard-api/api.env`，权限为 `0600`。默认情况下，同一
-PostgreSQL URL 分别固定 `search_path=public` 和 `search_path=core`；也可通过
-`DASHBOARD_API_SOURCE_DATABASE_URL` 使用独立的只读账号。NAS 只持有图片写入 API 的
-Bearer 密钥，不持有 API 数据库密码。生产配置必须保持
-`DASHBOARD_API_REPOSITORY_MODE=direct`。
+## 正式发布
 
-站长视图使用单独的高熵 Bearer 令牌。服务端只在 `api.env` 保存令牌的 SHA-256：
+`.github/workflows/deploy-public-dashboard-api.yml` 分为两步：
 
-```text
-DASHBOARD_API_OWNER_TOKEN_SHA256=<64 位小写十六进制摘要>
-```
+1. GitHub 托管 runner 运行测试、构建两个 wheel 和离线 wheelhouse，并上传不可变的
+   `dashboard-api-release` artifact；
+2. 标记为 `self-hosted, linux, x64, blrec-platform` 的 PVE runner 下载同一 artifact，
+   在本机执行安装脚本、数据库备份、健康检查和回滚。
 
-令牌明文不能进入仓库、静态构建或 URL。Dashboard 只在当前浏览器会话的
-`sessionStorage` 中保存明文；站长响应使用 `private, no-store`，不能进入 CDN
-共享缓存。
+workflow 不包含远程 SSH 地址和密钥，也不存在可改名后误指向旧服务器的部署目标。
+PVE runner 只需要对 `install-release.sh` 的非交互 sudo 权限。健康检查失败时脚本恢复
+上一 release；成功后 reload 同机 Nginx，再验证公网接口。
 
-## PostgreSQL 数据源与缓存边界
-
-`core` 是唯一事实来源。API 根据 `dashboard_source_state.revision` 发现变化并刷新内存
-缓存；刷新失败时继续提供上一份完整缓存，但后续刷新仍直接来自 `core`，不等待 NAS
-文件 outbox。
-
-`public` 中现存的旧玩家/对局投影表仅作为短期回滚数据保留；当前 API 和 Publisher 都不
-推进它们。跨过回滚窗口后应通过单独迁移删除，不能在恢复发布的同一部署中破坏历史
-备份。
-
-SSH 隧道需要以下文件：
-
-- `/etc/blrec-dashboard-api/db-tunnel.key`
-- `/etc/blrec-dashboard-api/db-tunnel-known-hosts`
-- `/etc/blrec-dashboard-api/db-tunnel-ssh.conf`
-
-移动云 SSH 公钥应使用 `restrict,permitopen="127.0.0.1:5432"` 限制，仅允许端口
-转发。PostgreSQL 不监听公网地址。
-
-`deploy-public-dashboard-api.yml` 在 GitHub Actions 中构建 API 与共享计算代码的
-wheel 和离线 wheelhouse，然后上传新 release。服务器健康检查失败时恢复上一个
-release；成功后才 reload Nginx，并从公网验证健康、榜单和对局汇总接口。
-
-GitHub Environment `vainglory-dashboard-production` 需要：
-
-- `DASHBOARD_API_SSH_HOST`
-- `DASHBOARD_API_SSH_PORT`
-- `DASHBOARD_API_SSH_USER`
-- `DASHBOARD_API_SSH_PRIVATE_KEY`
-- `DASHBOARD_API_SSH_KNOWN_HOSTS`
-
-API 图片写入密钥不是 GitHub Actions 部署密钥，不应进入 workflow 或构建产物。
+API 图片写入密钥、数据库凭据和内网站长凭据都只存在 PVE 配置文件，不进入 workflow、
+仓库或构建产物。

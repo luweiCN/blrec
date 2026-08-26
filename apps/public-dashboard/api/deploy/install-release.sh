@@ -53,7 +53,6 @@ test -s "$release/runtime-requirements.txt"
 test -d "$release/wheelhouse"
 test -d "$release/wheels"
 test -s "$release/deploy/blrec-dashboard-api.service"
-test -s "$release/deploy/blrec-dashboard-db-tunnel.service"
 test -s "$release/deploy/vg-api.luwei.host.nginx.conf"
 
 python3 -m venv "$release/venv"
@@ -83,6 +82,16 @@ set -a
 # shellcheck disable=SC1091
 source /etc/blrec-dashboard-api/api.env
 set +a
+listen_address="${DASHBOARD_API_PUBLIC_LISTEN_ADDRESS:-}"
+if [[ -z "$listen_address" ]]; then
+  listen_address="$(
+    hostname -I | tr ' ' '\n' | grep -E '^192\.168\.50\.[0-9]+$' | head -n 1 || true
+  )"
+fi
+if [[ -z "$listen_address" ]]; then
+  echo "PVE API LAN listen address is missing" >&2
+  exit 1
+fi
 database_path="${DASHBOARD_API_DATABASE_PATH:-$database_root/dashboard.sqlite3}"
 database_url="${DASHBOARD_API_DATABASE_URL:-}"
 if [[ -n "$database_url" ]]; then
@@ -94,16 +103,6 @@ if [[ -n "$database_url" ]]; then
     echo "PostgreSQL client tools are required for API database backup" >&2
     exit 1
   fi
-  if [[ ! -s /etc/blrec-dashboard-api/db-tunnel-ssh.conf ]]; then
-    echo "PostgreSQL SSH tunnel configuration is missing" >&2
-    exit 1
-  fi
-  install -m 0644 -o root -g root \
-    "$release/deploy/blrec-dashboard-db-tunnel.service" \
-    /etc/systemd/system/blrec-dashboard-db-tunnel.service
-  systemctl daemon-reload
-  systemctl enable blrec-dashboard-db-tunnel.service >/dev/null
-  systemctl restart blrec-dashboard-db-tunnel.service
   postgres_url="${database_url/postgresql+psycopg:\/\//postgresql:\/\/}"
   source_database_url="${DASHBOARD_API_SOURCE_DATABASE_URL:-$postgres_url}"
   source_database_url="${source_database_url/postgresql+psycopg:\/\//postgresql:\/\/}"
@@ -188,6 +187,7 @@ else
     exit 1
   fi
 fi
+
 if [[ -z "$database_url" && -e "$database_path" ]]; then
   if [[ ! -f "$database_path" || -L "$database_path" ]]; then
     echo "API database path is not a regular file" >&2
@@ -229,9 +229,10 @@ unlink "$verify_unit"
 install -m 0644 -o root -g root \
   "$release/deploy/blrec-dashboard-api.service" \
   /etc/systemd/system/blrec-dashboard-api.service
-install -m 0644 -o root -g root \
-  "$release/deploy/vg-api.luwei.host.nginx.conf" \
-  "$nginx_available"
+sed "s/__BLREC_PLATFORM_LISTEN_ADDRESS__/$listen_address/g" \
+  "$release/deploy/vg-api.luwei.host.nginx.conf" > "$nginx_available"
+chown root:root "$nginx_available"
+chmod 0644 "$nginx_available"
 
 previous_nginx=""
 if [[ -L "$nginx_enabled" ]]; then

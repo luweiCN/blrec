@@ -114,7 +114,7 @@ def test_ingest_batch_routes_allow_long_running_children() -> None:
     assert 'proxy_send_timeout 1h;' in write_location
 
 
-def test_api_deployment_ssh_keeps_long_remote_backups_alive() -> None:
+def test_api_deployment_runs_only_on_the_pve_runner() -> None:
     workflow = (
         Path(__file__).resolve().parents[4]
         / '.github'
@@ -122,11 +122,21 @@ def test_api_deployment_ssh_keeps_long_remote_backups_alive() -> None:
         / 'deploy-public-dashboard-api.yml'
     ).read_text(encoding='utf-8')
 
-    assert 'ServerAliveInterval=15' in workflow
-    assert 'ServerAliveCountMax=40' in workflow
-    assert workflow.count('"${ssh_options[@]}"') == 4
-    assert 'remote_hostname' in workflow
-    assert 'blrec-platform' in workflow
+    assert 'runs-on: [self-hosted, linux, x64, blrec-platform]' in workflow
+    assert 'DASHBOARD_API_SSH_' not in workflow
+    assert 'remote_hostname' not in workflow
+    assert 'scp ' not in workflow
+
+
+def test_api_release_uses_the_local_pve_database_without_an_ssh_tunnel() -> None:
+    deploy_root = Path(__file__).resolve().parents[1] / 'deploy'
+    script = (deploy_root / 'install-release.sh').read_text(encoding='utf-8')
+    service = (deploy_root / 'blrec-dashboard-api.service').read_text(
+        encoding='utf-8'
+    )
+
+    assert 'db-tunnel' not in script
+    assert 'db-tunnel' not in service
 
 
 def _empty_postgres(database_url: str) -> None:

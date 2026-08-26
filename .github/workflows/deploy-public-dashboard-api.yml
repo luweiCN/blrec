@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Test, build and deploy API
+  build:
+    name: Test and build API release
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     env:
@@ -38,10 +38,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-    environment:
-      name: vainglory-dashboard-production
-      url: https://vg-api.luwei.host/v1/health
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,7 +78,6 @@ jobs:
           cp apps/public-dashboard/api/dist/*.whl "$release_root/wheels/"
           cp apps/public-dashboard/api/deploy/runtime-requirements.txt "$release_root/"
           cp apps/public-dashboard/api/deploy/blrec-dashboard-api.service "$release_root/deploy/"
-          cp apps/public-dashboard/api/deploy/blrec-dashboard-db-tunnel.service "$release_root/deploy/"
           cp apps/public-dashboard/api/deploy/vg-api.luwei.host.nginx.conf "$release_root/deploy/"
           python -m pip download \
             --only-binary=:all: \
@@ -90,43 +85,38 @@ jobs:
             --requirement apps/public-dashboard/api/deploy/runtime-requirements.txt
           tar --create --gzip --file dashboard-api-release.tgz -C "$release_root" .
 
-      - name: Configure deployment SSH
-        shell: bash
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.DASHBOARD_API_SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.DASHBOARD_API_SSH_KNOWN_HOSTS }}
-        run: |
-          install -d -m 0700 ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dashboard-api
-          chmod 0600 ~/.ssh/dashboard-api
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 0644 ~/.ssh/known_hosts
+      - name: Upload immutable release
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-api-release
+          path: dashboard-api-release.tgz
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Deploy release
+  deploy:
+    name: Deploy API on PVE
+    if: github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: [self-hosted, linux, x64, blrec-platform]
+    environment:
+      name: vainglory-dashboard-production
+      url: https://vg-api.luwei.host/v1/health
+
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+
+      - name: Download immutable release
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-api-release
+
+      - name: Install release on PVE
         shell: bash
-        env:
-          SSH_HOST: ${{ secrets.DASHBOARD_API_SSH_HOST }}
-          SSH_PORT: ${{ secrets.DASHBOARD_API_SSH_PORT }}
-          SSH_USER: ${{ secrets.DASHBOARD_API_SSH_USER }}
         run: |
-          destination="${SSH_USER}@${SSH_HOST}"
-          remote_archive="/tmp/blrec-dashboard-api-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tgz"
-          ssh_options=(-o ServerAliveInterval=15 -o ServerAliveCountMax=40 -o TCPKeepAlive=yes)
-          remote_hostname="$(
-            ssh "${ssh_options[@]}" -p "$SSH_PORT" -i ~/.ssh/dashboard-api \
-              "$destination" hostname
-          )"
-          if [[ "$remote_hostname" != 'blrec-platform' ]]; then
-            echo "Dashboard API deployment target is not blrec-platform" >&2
-            exit 1
-          fi
-          scp "${ssh_options[@]}" -P "$SSH_PORT" -i ~/.ssh/dashboard-api dashboard-api-release.tgz \
-            "${destination}:${remote_archive}"
-          ssh "${ssh_options[@]}" -p "$SSH_PORT" -i ~/.ssh/dashboard-api "$destination" \
-            "bash -s -- '${remote_archive}' '${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'" \
-            < apps/public-dashboard/api/deploy/install-release.sh
-          ssh "${ssh_options[@]}" -p "$SSH_PORT" -i ~/.ssh/dashboard-api "$destination" \
-            "rm -f '${remote_archive}'"
+          sudo -n bash apps/public-dashboard/api/deploy/install-release.sh \
+            "$PWD/dashboard-api-release.tgz" \
+            "${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
       - name: Verify public endpoint
         run: |
