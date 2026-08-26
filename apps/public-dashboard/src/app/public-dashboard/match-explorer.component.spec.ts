@@ -171,6 +171,24 @@ describe('MatchExplorerComponent', () => {
     expect(fixture.nativeElement.querySelector('app-match-detail-modal')).toBeNull();
   });
 
+  it('keeps the admin editor open when SSE data refreshes the matches input', () => {
+    spyOnProperty(component.adminApi, 'enabled', 'get').and.returnValue(true);
+    const initial = TEST_DASHBOARD_MATCHES[0];
+    component.openAdminEditor(initial);
+    const refreshed = { ...initial, durationSeconds: initial.durationSeconds + 1 };
+
+    fixture.componentRef.setInput('matches', [
+      refreshed,
+      ...TEST_DASHBOARD_MATCHES.slice(1),
+    ]);
+    fixture.detectChanges();
+
+    expect(component.selectedAdminMatch).toBe(refreshed);
+    expect(
+      fixture.nativeElement.querySelector('app-match-admin-editor-modal'),
+    ).not.toBeNull();
+  });
+
   it('keeps live preanalysis outside the compact result badge', () => {
     fixture.componentRef.setInput('matches', [
       { ...TEST_DASHBOARD_MATCHES[0], analysisProvisional: true },

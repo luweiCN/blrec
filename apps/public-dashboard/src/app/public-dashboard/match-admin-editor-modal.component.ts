@@ -21,10 +21,22 @@ import {
 } from './dashboard-admin-api.service';
 import { DashboardMatch } from './public-dashboard.models';
 
+type MatchAdminEditorSection =
+  | { readonly kind: 'basic' }
+  | {
+      readonly kind: 'player';
+      readonly side: DashboardAdminMatchPlayer['side'];
+      readonly slot: number;
+    }
+  | null;
+
 @Component({
   selector: 'app-match-admin-editor-modal',
   templateUrl: './match-admin-editor-modal.component.html',
-  styleUrls: ['./match-admin-editor-modal.component.scss'],
+  styleUrls: [
+    './match-admin-editor-modal.component.scss',
+    './match-admin-editor-modal-responsive.scss',
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class MatchAdminEditorModalComponent
@@ -47,6 +59,7 @@ export class MatchAdminEditorModalComponent
   recordedPlayer = '';
   heroPickerPlayer: DashboardAdminMatchPlayer | null = null;
   heroQuery = '';
+  editingSection: MatchAdminEditorSection = null;
   readonly sides = ['left', 'right'] as const;
 
   private readonly restoreFocusTo = document.activeElement as HTMLElement | null;
@@ -232,6 +245,28 @@ export class MatchAdminEditorModalComponent
     this.closeHeroPicker();
   }
 
+  isBasicEditing(): boolean {
+    return this.editingSection?.kind === 'basic';
+  }
+
+  toggleBasicEditor(): void {
+    this.editingSection = this.isBasicEditing() ? null : { kind: 'basic' };
+  }
+
+  isPlayerEditing(player: DashboardAdminMatchPlayer): boolean {
+    return (
+      this.editingSection?.kind === 'player' &&
+      this.editingSection.side === player.side &&
+      this.editingSection.slot === player.slot
+    );
+  }
+
+  togglePlayerEditor(player: DashboardAdminMatchPlayer): void {
+    this.editingSection = this.isPlayerEditing(player)
+      ? null
+      : { kind: 'player', side: player.side, slot: player.slot };
+  }
+
   isRecordedPlayer(player: DashboardAdminMatchPlayer): boolean {
     return this.recordedPlayer === `${player.side}:${player.slot}`;
   }
@@ -253,6 +288,80 @@ export class MatchAdminEditorModalComponent
     return player === undefined
       ? '未确认'
       : `${player.side === 'left' ? '左' : '右'}${player.slot} · ${this.heroName(player.heroId)} · ${player.name || '未知玩家'}`;
+  }
+
+  gameModeLabel(mode: DashboardAdminMatch['gameMode']): string {
+    switch (mode) {
+      case '3v3':
+        return '3V3';
+      case '5v5':
+        return '5V5';
+      case 'aram':
+        return '大乱斗';
+      case 'other':
+        return '其他';
+      case 'unknown':
+        return '未知';
+    }
+  }
+
+  winnerLabel(winner: DashboardAdminMatch['winnerColor']): string {
+    return winner === 'teal'
+      ? '主播方胜'
+      : winner === 'orange'
+        ? '主播方负'
+        : '胜负未知';
+  }
+
+  matchKindLabel(kind: DashboardAdminMatch['matchKind']): string {
+    return kind === 'pvp'
+      ? '玩家对战'
+      : kind === 'bot'
+        ? '人机'
+        : kind === 'practice'
+          ? '单人练习'
+          : '未知';
+  }
+
+  viewContextLabel(context: DashboardAdminMatch['viewContext']): string {
+    return context === 'played'
+      ? '本人对局'
+      : context === 'observed'
+        ? '观战 / 回放'
+        : '来源未知';
+  }
+
+  endReasonLabel(reason: DashboardAdminMatch['endReason']): string {
+    return reason === 'normal'
+      ? '正常结束'
+      : reason === 'surrender'
+        ? '投降'
+        : '未知';
+  }
+
+  formatDuration(seconds: number | null): string {
+    if (seconds === null) {
+      return '—';
+    }
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  }
+
+  formatStat(value: number | null): string {
+    return value === null ? '—' : value.toLocaleString('zh-CN');
+  }
+
+  playerAfkLabel(player: DashboardAdminMatchPlayer): string {
+    if (player.afkManualOverride !== null) {
+      return player.afkManualOverride ? '挂机 · 人工' : '未挂机 · 人工';
+    }
+    if (player.afkPredictionStatus === 'unknown') {
+      return '挂机未知';
+    }
+    const probability =
+      player.afkProbability === null
+        ? ''
+        : ` ${(player.afkProbability * 100).toFixed(1)}%`;
+    return `${player.afkPredictionStatus === 'afk' ? '挂机' : '未挂机'} · 模型${probability}`;
   }
 
   players(side: 'left' | 'right'): readonly DashboardAdminMatchPlayer[] {

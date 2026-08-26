@@ -132,19 +132,38 @@ describe('MatchAdminEditorModalComponent', () => {
     fixture.detectChanges();
   });
 
-  it('places basic fields beside the result image and shows selected heroes', () => {
+  it('keeps the result image visible and defaults to compact summaries', () => {
     const editor = fixture.nativeElement as HTMLElement;
 
-    expect(editor.querySelector('.match-admin-overview')).not.toBeNull();
+    expect(editor.querySelector('.match-admin-workspace')).not.toBeNull();
     expect(
       editor.querySelector('.match-admin-proof-image img')?.getAttribute('src'),
     ).toBe('/data/result.webp');
-    expect(editor.querySelectorAll('.match-admin-hero-trigger img').length).toBe(
-      2,
-    );
-    expect(editor.querySelector('.match-admin-hero-trigger')?.textContent).toContain(
+    expect(editor.querySelector('.match-admin-fields')).toBeNull();
+    expect(editor.querySelector('.match-admin-player-editor')).toBeNull();
+    expect(editor.querySelectorAll('.match-admin-player-summary').length).toBe(2);
+    expect(editor.querySelector('.match-admin-player-summary')?.textContent).toContain(
       '斯凯伊 · Skye',
     );
+  });
+
+  it('opens only one editable section at a time', () => {
+    component.toggleBasicEditor();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.match-admin-fields')).not.toBeNull();
+
+    const player = component.editableMatch?.players[0];
+    expect(player).toBeDefined();
+    if (player === undefined) {
+      return;
+    }
+    component.togglePlayerEditor(player);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.match-admin-fields')).toBeNull();
+    expect(
+      fixture.nativeElement.querySelectorAll('.match-admin-player-editor').length,
+    ).toBe(1);
   });
 
   it('allows any player to replace the recorded player', () => {
@@ -153,6 +172,7 @@ describe('MatchAdminEditorModalComponent', () => {
     if (opponent === undefined) {
       return;
     }
+    component.togglePlayerEditor(opponent);
     component.setRecordedPlayer(opponent);
     fixture.detectChanges();
 
@@ -170,6 +190,7 @@ describe('MatchAdminEditorModalComponent', () => {
     if (player === undefined) {
       return;
     }
+    component.togglePlayerEditor(player);
     component.openHeroPicker(player);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.match-admin-hero-picker')).not.toBeNull();

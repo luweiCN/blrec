@@ -94,7 +94,12 @@ export class MatchExplorerComponent implements OnChanges, OnDestroy {
   ngOnChanges(): void {
     this.page = 1;
     this.selectedMatch = null;
-    this.selectedAdminMatch = null;
+    if (this.selectedAdminMatch !== null) {
+      this.selectedAdminMatch =
+        this.matches.find(
+          (match) => match.id === this.selectedAdminMatch?.id,
+        ) ?? this.selectedAdminMatch;
+    }
     this.expandSelectedResultImage = false;
     this.trimHeroSelection();
     void this.loadApiPage();

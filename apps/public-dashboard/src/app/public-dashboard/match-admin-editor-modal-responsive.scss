@@ -1,0 +1,119 @@
+@media (max-width: 1180px) {
+  .match-admin-backdrop {
+    padding: 10px;
+  }
+
+  .match-admin-dialog {
+    max-height: calc(100vh - 20px);
+  }
+
+  .match-admin-body {
+    display: block;
+    overflow-y: auto;
+  }
+
+  .match-admin-messages:not(:empty) {
+    margin-bottom: 12px;
+  }
+
+  .match-admin-workspace {
+    grid-template-columns: 1fr;
+    overflow: visible;
+  }
+
+  .match-admin-proof-image,
+  .match-admin-proof-image img {
+    max-height: 420px;
+  }
+
+  .match-admin-editor-pane {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 720px) {
+  .match-admin-player-summary {
+    grid-template-columns: 28px 40px minmax(0, 1fr) 58px;
+  }
+
+  .match-admin-player-summary > .match-admin-hero-avatar {
+    width: 40px;
+    height: 40px;
+  }
+
+  .match-admin-player-quick-stats {
+    grid-column: 2 / 4;
+  }
+
+  .match-admin-player-summary > .match-admin-edit-toggle {
+    grid-column: 4;
+    grid-row: 1;
+  }
+
+  .match-admin-player-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .match-admin-kda {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .match-admin-backdrop {
+    padding: 0;
+  }
+
+  .match-admin-dialog {
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  .match-admin-header,
+  .match-admin-body,
+  .match-admin-footer {
+    padding-inline: 14px;
+  }
+
+  .match-admin-proof > header,
+  .match-admin-basic > header,
+  .match-admin-section > header {
+    align-items: flex-start;
+  }
+
+  .match-admin-evidence {
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .match-admin-fields,
+  .match-admin-player-identity {
+    grid-template-columns: 1fr;
+  }
+
+  .match-admin-fields .wide {
+    grid-column: auto;
+  }
+
+  .match-admin-footer {
+    display: grid;
+    align-items: flex-start;
+
+    div,
+    button {
+      width: 100%;
+    }
+  }
+
+  .match-admin-hero-picker-backdrop {
+    padding: 56px 12px;
+  }
+
+  .match-admin-hero-picker {
+    width: 100%;
+  }
+
+  .match-admin-hero-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -92,11 +92,20 @@ select {
 
 .match-admin-body {
   display: grid;
-  gap: 20px;
-  padding: 18px 20px 24px;
-  overflow: auto;
-  scrollbar-color: var(--cyan-strong) var(--surface-1);
-  scrollbar-width: thin;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+  padding: 18px 20px 20px;
+  overflow: hidden;
+}
+
+.match-admin-messages {
+  display: grid;
+  gap: 8px;
+
+  &:empty {
+    display: none;
+  }
 }
 
 .match-admin-status {
@@ -116,11 +125,12 @@ select {
   }
 }
 
-.match-admin-overview {
+.match-admin-workspace {
   display: grid;
-  grid-template-columns: minmax(620px, 1.15fr) minmax(460px, 0.85fr);
+  grid-template-columns: minmax(540px, 1.12fr) minmax(500px, 0.88fr);
   gap: 20px;
-  align-items: flex-start;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .match-admin-proof,
@@ -128,10 +138,11 @@ select {
 .match-admin-section {
   display: grid;
   gap: 12px;
+  min-width: 0;
 
   & > header {
     display: flex;
-    gap: 20px;
+    gap: 16px;
     align-items: flex-end;
     justify-content: space-between;
   }
@@ -153,6 +164,11 @@ select {
   }
 }
 
+.match-admin-proof {
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
 .match-admin-evidence {
   display: flex;
   flex-wrap: wrap;
@@ -163,8 +179,7 @@ select {
 
 .match-admin-proof-image {
   display: grid;
-  min-height: 180px;
-  max-height: 420px;
+  min-height: 220px;
   overflow: hidden;
   place-items: center;
   border-radius: 10px;
@@ -174,7 +189,7 @@ select {
     display: block;
     width: 100%;
     height: 100%;
-    max-height: 420px;
+    max-height: 100%;
     object-fit: contain;
   }
 
@@ -185,16 +200,86 @@ select {
   }
 }
 
-.match-admin-section {
-  padding-top: 18px;
-  border-top: 1px solid var(--line-soft);
+.match-admin-editor-pane {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  min-height: 0;
+  padding-right: 4px;
+  overflow-y: auto;
+  scrollbar-color: var(--cyan-strong) var(--surface-1);
+  scrollbar-width: thin;
 }
 
 .match-admin-basic {
-  align-content: start;
   padding: 14px;
   border-radius: 10px;
   background: var(--surface-0);
+}
+
+.match-admin-edit-toggle {
+  min-width: 58px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: var(--type-caption);
+  font-weight: 720;
+
+  &:hover,
+  &[aria-expanded='true'] {
+    border-color: var(--cyan-strong);
+    background: var(--cyan-wash);
+    color: var(--cyan);
+  }
+}
+
+.match-admin-summary-title {
+  overflow: hidden;
+  color: var(--ink-soft) !important;
+  font-size: var(--type-label) !important;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.match-admin-basic-summary {
+  display: grid;
+  gap: 10px;
+
+  dl {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 16px;
+    margin: 0;
+  }
+
+  dl > div {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+
+    &.wide {
+      grid-column: 1 / -1;
+    }
+  }
+
+  dt {
+    color: var(--ink-muted);
+    font-size: 0.68rem;
+  }
+
+  dd {
+    margin: 0;
+    overflow: hidden;
+    color: var(--ink-soft);
+    font-size: var(--type-caption);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .match-admin-fields {
@@ -204,31 +289,6 @@ select {
 
   .wide {
     grid-column: span 2;
-  }
-}
-
-.match-admin-recorded-summary {
-  display: grid;
-  gap: 3px;
-  align-content: center;
-  min-height: 58px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface-2);
-
-  span,
-  small {
-    color: var(--ink-muted);
-    font-size: var(--type-caption);
-  }
-
-  strong {
-    overflow: hidden;
-    color: var(--ink-soft);
-    font-size: var(--type-label);
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 }
 
@@ -248,7 +308,7 @@ input,
 select {
   width: 100%;
   min-width: 0;
-  min-height: 38px;
+  min-height: 40px;
   padding: 6px 9px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -267,15 +327,19 @@ select {
   gap: 6px;
 }
 
+.match-admin-section {
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
 .match-admin-teams {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: 12px;
 }
 
 .match-admin-team {
   min-width: 0;
-  padding: 0 14px;
+  padding: 0 12px;
   border-radius: 10px;
   background: var(--surface-0);
 
@@ -283,7 +347,7 @@ select {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    min-height: 48px;
+    min-height: 44px;
 
     h4 {
       margin: 0;
@@ -299,57 +363,31 @@ select {
 }
 
 .match-admin-player {
-  padding: 12px 0 14px;
+  padding: 9px 0;
   border-top: 1px solid var(--line-soft);
 
-  & > header {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px 10px;
-    align-items: baseline;
-    margin-bottom: 8px;
-
-    strong {
-      color: var(--cyan);
-      font-size: var(--type-label);
-    }
-
-    span {
-      color: var(--ink-muted);
-      font-size: 0.68rem;
-    }
+  &.editing {
+    padding-bottom: 12px;
   }
 }
 
-.match-admin-recorded-toggle {
-  min-height: 30px;
-  margin-left: auto;
-  padding: 4px 9px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface-2);
-  color: var(--ink-muted);
-  cursor: pointer;
-  font-size: var(--type-caption);
-  font-weight: 720;
-
-  &:hover,
-  &.selected {
-    border-color: var(--cyan-strong);
-    background: var(--cyan-wash);
-    color: var(--cyan);
-  }
-}
-
-.match-admin-player-body {
+.match-admin-player-summary {
   display: grid;
+  grid-template-columns: 28px 44px minmax(130px, 1fr) minmax(118px, auto) 58px;
   gap: 9px;
+  align-items: center;
+  min-width: 0;
+}
+
+.match-admin-player-position {
+  color: var(--cyan);
+  font-size: var(--type-caption);
 }
 
 .match-admin-hero-avatar {
   display: grid;
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   place-items: center;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -364,9 +402,91 @@ select {
   }
 }
 
+.match-admin-player-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+
+  strong,
+  span,
+  small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: var(--ink-soft);
+    font-size: var(--type-label);
+  }
+
+  span,
+  small {
+    color: var(--ink-muted);
+    font-size: 0.68rem;
+  }
+}
+
+.match-admin-player-quick-stats {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+
+  div {
+    display: flex;
+    gap: 6px;
+    justify-content: space-between;
+  }
+
+  dt,
+  dd {
+    margin: 0;
+    font-size: 0.68rem;
+    white-space: nowrap;
+  }
+
+  dt {
+    color: var(--ink-muted);
+  }
+
+  dd {
+    color: var(--ink-soft);
+  }
+}
+
+.match-admin-player-flags {
+  display: flex;
+  gap: 3px 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+
+  span {
+    color: var(--ink-muted);
+    font-size: 0.65rem;
+    white-space: nowrap;
+
+    &.recorded {
+      color: var(--cyan);
+    }
+
+    &.afk {
+      color: var(--gold);
+    }
+  }
+}
+
+.match-admin-player-editor {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+
 .match-admin-player-identity {
   display: grid;
-  grid-template-columns: minmax(110px, 1fr) minmax(140px, 1.15fr);
+  grid-template-columns: minmax(130px, 1fr) minmax(160px, 1.1fr);
   gap: 8px;
 }
 
@@ -384,12 +504,12 @@ select {
 
 .match-admin-hero-trigger {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
+  grid-template-columns: 28px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   min-width: 0;
-  min-height: 48px;
-  padding: 5px 9px 5px 6px;
+  min-height: 40px;
+  padding: 4px 9px 4px 6px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--surface-2);
@@ -402,14 +522,14 @@ select {
   }
 
   .match-admin-hero-avatar {
-    width: 36px;
-    height: 36px;
+    width: 28px;
+    height: 28px;
   }
 }
 
 .match-admin-hero-copy {
   display: grid;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 
   strong,
@@ -426,7 +546,7 @@ select {
 
   small {
     color: var(--ink-muted);
-    font-size: 0.68rem;
+    font-size: 0.65rem;
   }
 }
 
@@ -469,6 +589,26 @@ select {
     input {
       padding-left: 22px;
     }
+  }
+}
+
+.match-admin-recorded-toggle {
+  justify-self: start;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: var(--type-caption);
+  font-weight: 720;
+
+  &:hover,
+  &.selected {
+    border-color: var(--cyan-strong);
+    background: var(--cyan-wash);
+    color: var(--cyan);
   }
 }
 
@@ -614,80 +754,5 @@ select {
     font-size: 0.68rem;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-}
-
-@media (max-width: 1180px) {
-  .match-admin-backdrop {
-    padding: 10px;
-  }
-
-  .match-admin-dialog {
-    max-height: calc(100vh - 20px);
-  }
-
-  .match-admin-overview,
-  .match-admin-teams {
-    grid-template-columns: 1fr;
-  }
-
-  .match-admin-proof > header,
-  .match-admin-basic > header,
-  .match-admin-section > header {
-    display: grid;
-    align-items: flex-start;
-  }
-
-  .match-admin-evidence {
-    justify-content: flex-start;
-    text-align: left;
-  }
-}
-
-@media (max-width: 560px) {
-  .match-admin-backdrop {
-    padding: 0;
-  }
-
-  .match-admin-dialog {
-    max-height: 100vh;
-    border-radius: 0;
-  }
-
-  .match-admin-header,
-  .match-admin-body,
-  .match-admin-footer {
-    padding-inline: 14px;
-  }
-
-  .match-admin-footer {
-    display: grid;
-    align-items: flex-start;
-
-    div,
-    button {
-      width: 100%;
-    }
-  }
-
-  .match-admin-player-identity,
-  .match-admin-player-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .match-admin-kda {
-    grid-column: 1 / -1;
-  }
-
-  .match-admin-hero-picker-backdrop {
-    padding: 56px 12px;
-  }
-
-  .match-admin-hero-picker {
-    width: 100%;
-  }
-
-  .match-admin-hero-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

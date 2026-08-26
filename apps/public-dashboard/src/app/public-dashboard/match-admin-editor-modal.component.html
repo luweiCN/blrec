@@ -22,218 +22,266 @@
     </header>
 
     <main class="match-admin-body">
-      <p *ngIf="loading" class="match-admin-status">正在加载模型原值和置信度…</p>
-      <p *ngIf="error" class="match-admin-status error" role="alert">
-        {{ error }}
-      </p>
-      <p *ngIf="saved" class="match-admin-status saved" role="status">
-        已保存；纠错样本已送入 Vision Lab，排行榜正在按完整时间线重新计算。
-      </p>
+      <div class="match-admin-messages">
+        <p *ngIf="loading" class="match-admin-status">正在加载模型原值和置信度…</p>
+        <p *ngIf="error" class="match-admin-status error" role="alert">
+          {{ error }}
+        </p>
+        <p *ngIf="saved" class="match-admin-status saved" role="status">
+          已保存；纠错样本已送入 Vision Lab，排行榜正在按完整时间线重新计算。
+        </p>
+      </div>
 
       <ng-container *ngIf="editableMatch as editable">
-        <div class="match-admin-overview">
+        <div class="match-admin-workspace">
           <section class="match-admin-proof" aria-labelledby="match-admin-proof-title">
-          <header>
-            <div>
-              <h3 id="match-admin-proof-title">结算图对照</h3>
-              <p>修改下方数据时，可以直接对照这张原始结算画面。</p>
+            <header>
+              <div>
+                <h3 id="match-admin-proof-title">结算图对照</h3>
+                <p>右侧滚动或编辑时，原图保持可见。</p>
+              </div>
+              <p class="match-admin-evidence">
+                结算识别 {{ (editable.confidence * 100).toFixed(1) }}%
+                <span aria-hidden="true">·</span>
+                主播位置 {{ editable.recordedPlayerSource === "manual" ? "人工指定" : "模型" }}
+                {{ editable.recordedPlayerConfidence === null ? "" : (editable.recordedPlayerConfidence * 100).toFixed(1) + "%" }}
+              </p>
+            </header>
+            <div class="match-admin-proof-image">
+              <img
+                *ngIf="match.resultImage as resultImage; else noResultImage"
+                [src]="resultImage.url"
+                [width]="resultImage.width"
+                [height]="resultImage.height"
+                [alt]="streamerName + '本局原始结算图'"
+              />
+              <ng-template #noResultImage>
+                <p>本局没有可用的结算原图，请依据模型原值谨慎修改。</p>
+              </ng-template>
             </div>
-            <p class="match-admin-evidence">
-              结算识别 {{ (editable.confidence * 100).toFixed(1) }}%
-              <span aria-hidden="true">·</span>
-              主播位置 {{ editable.recordedPlayerSource === "manual" ? "人工指定" : "模型" }}
-              {{ editable.recordedPlayerConfidence === null ? "" : (editable.recordedPlayerConfidence * 100).toFixed(1) + "%" }}
-            </p>
-          </header>
-          <div class="match-admin-proof-image">
-            <img
-              *ngIf="match.resultImage as resultImage; else noResultImage"
-              [src]="resultImage.url"
-              [width]="resultImage.width"
-              [height]="resultImage.height"
-              [alt]="streamerName + '本局原始结算图'"
-            />
-            <ng-template #noResultImage>
-              <p>本局没有可用的结算原图，请依据模型原值谨慎修改。</p>
-            </ng-template>
-          </div>
           </section>
 
-          <section class="match-admin-basic" aria-labelledby="match-admin-basic-title">
-          <header>
-            <h3 id="match-admin-basic-title">基本信息</h3>
-            <p>先确认模式、胜负与主播本人，再核对双方阵容。</p>
-          </header>
-          <div class="match-admin-fields">
-            <label class="wide">
-              <span>对局标题</span>
-              <input type="text" maxlength="200" [value]="editable.title" (input)="editable.title = $any($event.target).value" />
-            </label>
-            <label>
-              <span>模式</span>
-              <select [value]="editable.gameMode" (change)="editable.gameMode = $any($event.target).value">
-                <option value="3v3">3V3</option>
-                <option value="5v5">5V5</option>
-                <option value="aram">大乱斗</option>
-                <option value="other">其他</option>
-                <option value="unknown">未知</option>
-              </select>
-            </label>
-            <label>
-              <span>胜负</span>
-              <select [value]="editable.winnerColor" (change)="editable.winnerColor = $any($event.target).value">
-                <option value="teal">主播方胜</option>
-                <option value="orange">主播方负</option>
-                <option value="unknown">未知</option>
-              </select>
-            </label>
-            <div class="match-admin-recorded-summary">
-              <span>主播本人</span>
-              <strong>{{ recordedPlayerLabel() }}</strong>
-              <small>在下方阵容中点击“设为主播”修改</small>
-            </div>
-            <label>
-              <span>时长（秒）</span>
-              <input type="number" min="1" [value]="editable.durationSeconds === null ? '' : editable.durationSeconds" (input)="editable.durationSeconds = $any($event.target).value === '' ? null : +$any($event.target).value" />
-            </label>
-            <label>
-              <span>结束方式</span>
-              <select [value]="editable.endReason" (change)="editable.endReason = $any($event.target).value">
-                <option value="normal">正常结束</option>
-                <option value="surrender">投降</option>
-                <option value="unknown">未知</option>
-              </select>
-            </label>
-            <label>
-              <span>对局类型</span>
-              <select [value]="editable.matchKind" (change)="editable.matchKind = $any($event.target).value">
-                <option value="pvp">玩家对战</option>
-                <option value="bot">人机</option>
-                <option value="practice">单人练习</option>
-                <option value="unknown">未知</option>
-              </select>
-            </label>
-            <label>
-              <span>画面来源</span>
-              <select [value]="editable.viewContext" (change)="editable.viewContext = $any($event.target).value">
-                <option value="played">本人对局</option>
-                <option value="observed">观战 / 回放</option>
-                <option value="unknown">未知</option>
-              </select>
-            </label>
-            <label>
-              <span>计入排行榜</span>
-              <select [value]="editable.statsEligible ? 'yes' : 'no'" (change)="editable.statsEligible = $any($event.target).value === 'yes'">
-                <option value="yes">计入</option>
-                <option value="no">不计入</option>
-              </select>
-            </label>
-            <label>
-              <span>结果文字</span>
-              <input type="text" maxlength="32" [value]="editable.resultText" (input)="editable.resultText = $any($event.target).value" />
-            </label>
-            <label>
-              <span>左 / 右击杀</span>
-              <span class="match-admin-pair">
-                <input aria-label="左队击杀" type="number" min="0" [value]="editable.leftKills === null ? '' : editable.leftKills" (input)="editable.leftKills = $any($event.target).value === '' ? null : +$any($event.target).value" />
-                <input aria-label="右队击杀" type="number" min="0" [value]="editable.rightKills === null ? '' : editable.rightKills" (input)="editable.rightKills = $any($event.target).value === '' ? null : +$any($event.target).value" />
-              </span>
-            </label>
-            <label>
-              <span>左 / 右经济</span>
-              <span class="match-admin-pair">
-                <input aria-label="左队经济" type="number" min="0" [value]="editable.leftEconomy === null ? '' : editable.leftEconomy" (input)="editable.leftEconomy = $any($event.target).value === '' ? null : +$any($event.target).value" />
-                <input aria-label="右队经济" type="number" min="0" [value]="editable.rightEconomy === null ? '' : editable.rightEconomy" (input)="editable.rightEconomy = $any($event.target).value === '' ? null : +$any($event.target).value" />
-              </span>
-            </label>
-          </div>
-          </section>
-        </div>
-
-        <section class="match-admin-section" aria-labelledby="match-admin-players-title">
-          <header>
-            <h3 id="match-admin-players-title">双方阵容</h3>
-            <p>英雄头像会随选择实时更新；概率均为修改前的模型原值。</p>
-          </header>
-          <div class="match-admin-teams">
-            <section *ngFor="let side of sides" class="match-admin-team">
+          <div class="match-admin-editor-pane">
+            <section class="match-admin-basic" aria-labelledby="match-admin-basic-title">
               <header>
-                <h4>{{ sideLabel(side) }}</h4>
-                <span>{{ players(side).length }} 人</span>
+                <div>
+                  <h3 id="match-admin-basic-title">基本信息</h3>
+                  <p>默认显示识别结果，需要纠错时再展开。</p>
+                </div>
+                <button
+                  type="button"
+                  class="match-admin-edit-toggle"
+                  [attr.aria-expanded]="isBasicEditing()"
+                  (click)="toggleBasicEditor()"
+                >{{ isBasicEditing() ? "收起" : "编辑" }}</button>
               </header>
-              <article *ngFor="let player of players(side)" class="match-admin-player">
-                <header>
-                  <strong>{{ side === "left" ? "左" : "右" }}{{ player.slot }}</strong>
-                  <span>玩家名 OCR {{ (player.confidence * 100).toFixed(1) }}%</span>
-                  <span>
-                    英雄{{ player.heroSource === "manual" ? "人工" : "模型" }}
-                    {{ player.heroProbability === null ? "历史未保存" : (player.heroProbability * 100).toFixed(1) + "%" }}
+
+              <div *ngIf="!isBasicEditing()" class="match-admin-basic-summary">
+                <p class="match-admin-summary-title">{{ editable.title }}</p>
+                <dl>
+                  <div><dt>模式 / 胜负</dt><dd>{{ gameModeLabel(editable.gameMode) }} · {{ winnerLabel(editable.winnerColor) }}</dd></div>
+                  <div><dt>击杀</dt><dd>{{ formatStat(editable.leftKills) }} : {{ formatStat(editable.rightKills) }}</dd></div>
+                  <div><dt>时长 / 结束</dt><dd>{{ formatDuration(editable.durationSeconds) }} · {{ endReasonLabel(editable.endReason) }}</dd></div>
+                  <div><dt>类型 / 来源</dt><dd>{{ matchKindLabel(editable.matchKind) }} · {{ viewContextLabel(editable.viewContext) }}</dd></div>
+                  <div class="wide"><dt>主播本人</dt><dd>{{ recordedPlayerLabel() }}</dd></div>
+                  <div><dt>排行榜</dt><dd>{{ editable.statsEligible ? "计入" : "不计入" }}</dd></div>
+                </dl>
+              </div>
+
+              <div *ngIf="isBasicEditing()" class="match-admin-fields">
+                <label class="wide">
+                  <span>对局标题</span>
+                  <input type="text" maxlength="200" [value]="editable.title" (input)="editable.title = $any($event.target).value" />
+                </label>
+                <label>
+                  <span>模式</span>
+                  <select [value]="editable.gameMode" (change)="editable.gameMode = $any($event.target).value">
+                    <option value="3v3">3V3</option>
+                    <option value="5v5">5V5</option>
+                    <option value="aram">大乱斗</option>
+                    <option value="other">其他</option>
+                    <option value="unknown">未知</option>
+                  </select>
+                </label>
+                <label>
+                  <span>胜负</span>
+                  <select [value]="editable.winnerColor" (change)="editable.winnerColor = $any($event.target).value">
+                    <option value="teal">主播方胜</option>
+                    <option value="orange">主播方负</option>
+                    <option value="unknown">未知</option>
+                  </select>
+                </label>
+                <label>
+                  <span>时长（秒）</span>
+                  <input type="number" min="1" [value]="editable.durationSeconds === null ? '' : editable.durationSeconds" (input)="editable.durationSeconds = $any($event.target).value === '' ? null : +$any($event.target).value" />
+                </label>
+                <label>
+                  <span>结束方式</span>
+                  <select [value]="editable.endReason" (change)="editable.endReason = $any($event.target).value">
+                    <option value="normal">正常结束</option>
+                    <option value="surrender">投降</option>
+                    <option value="unknown">未知</option>
+                  </select>
+                </label>
+                <label>
+                  <span>对局类型</span>
+                  <select [value]="editable.matchKind" (change)="editable.matchKind = $any($event.target).value">
+                    <option value="pvp">玩家对战</option>
+                    <option value="bot">人机</option>
+                    <option value="practice">单人练习</option>
+                    <option value="unknown">未知</option>
+                  </select>
+                </label>
+                <label>
+                  <span>画面来源</span>
+                  <select [value]="editable.viewContext" (change)="editable.viewContext = $any($event.target).value">
+                    <option value="played">本人对局</option>
+                    <option value="observed">观战 / 回放</option>
+                    <option value="unknown">未知</option>
+                  </select>
+                </label>
+                <label>
+                  <span>计入排行榜</span>
+                  <select [value]="editable.statsEligible ? 'yes' : 'no'" (change)="editable.statsEligible = $any($event.target).value === 'yes'">
+                    <option value="yes">计入</option>
+                    <option value="no">不计入</option>
+                  </select>
+                </label>
+                <label>
+                  <span>结果文字</span>
+                  <input type="text" maxlength="32" [value]="editable.resultText" (input)="editable.resultText = $any($event.target).value" />
+                </label>
+                <label>
+                  <span>左 / 右击杀</span>
+                  <span class="match-admin-pair">
+                    <input aria-label="左队击杀" type="number" min="0" [value]="editable.leftKills === null ? '' : editable.leftKills" (input)="editable.leftKills = $any($event.target).value === '' ? null : +$any($event.target).value" />
+                    <input aria-label="右队击杀" type="number" min="0" [value]="editable.rightKills === null ? '' : editable.rightKills" (input)="editable.rightKills = $any($event.target).value === '' ? null : +$any($event.target).value" />
                   </span>
-                  <button
-                    type="button"
-                    class="match-admin-recorded-toggle"
-                    [class.selected]="isRecordedPlayer(player)"
-                    [attr.aria-pressed]="isRecordedPlayer(player)"
-                    (click)="setRecordedPlayer(player)"
-                  >{{ isRecordedPlayer(player) ? "主播本人" : "设为主播" }}</button>
-                </header>
-                <div class="match-admin-player-body">
-                  <div class="match-admin-player-identity">
-                    <label>
-                      <span>玩家名</span>
-                      <input type="text" maxlength="80" [value]="player.name" (input)="player.name = $any($event.target).value" />
-                    </label>
-                    <div class="match-admin-hero-field">
-                      <span>英雄</span>
+                </label>
+                <label>
+                  <span>左 / 右经济</span>
+                  <span class="match-admin-pair">
+                    <input aria-label="左队经济" type="number" min="0" [value]="editable.leftEconomy === null ? '' : editable.leftEconomy" (input)="editable.leftEconomy = $any($event.target).value === '' ? null : +$any($event.target).value" />
+                    <input aria-label="右队经济" type="number" min="0" [value]="editable.rightEconomy === null ? '' : editable.rightEconomy" (input)="editable.rightEconomy = $any($event.target).value === '' ? null : +$any($event.target).value" />
+                  </span>
+                </label>
+              </div>
+            </section>
+
+            <section class="match-admin-section" aria-labelledby="match-admin-players-title">
+              <header>
+                <div>
+                  <h3 id="match-admin-players-title">双方阵容</h3>
+                  <p>点某位玩家的“编辑”后，仅展开这一项。</p>
+                </div>
+              </header>
+              <div class="match-admin-teams">
+                <section *ngFor="let side of sides" class="match-admin-team">
+                  <header>
+                    <h4>{{ sideLabel(side) }}</h4>
+                    <span>{{ players(side).length }} 人</span>
+                  </header>
+                  <article
+                    *ngFor="let player of players(side)"
+                    class="match-admin-player"
+                    [class.editing]="isPlayerEditing(player)"
+                  >
+                    <div class="match-admin-player-summary">
+                      <strong class="match-admin-player-position">{{ side === "left" ? "左" : "右" }}{{ player.slot }}</strong>
+                      <span class="match-admin-hero-avatar">
+                        <img
+                          *ngIf="heroThumbnail(player.heroId) as thumbnail"
+                          [src]="thumbnail"
+                          [alt]="heroName(player.heroId)"
+                        />
+                        <span *ngIf="!heroThumbnail(player.heroId)" aria-label="英雄未识别">?</span>
+                      </span>
+                      <div class="match-admin-player-copy">
+                        <strong>{{ player.name || "未知玩家" }}</strong>
+                        <span>{{ heroName(player.heroId) }}</span>
+                        <small>
+                          OCR {{ (player.confidence * 100).toFixed(1) }}% · 英雄{{ player.heroSource === "manual" ? "人工" : "模型" }}
+                          {{ player.heroProbability === null ? "—" : (player.heroProbability * 100).toFixed(1) + "%" }}
+                        </small>
+                        <div class="match-admin-player-flags">
+                          <span *ngIf="isRecordedPlayer(player)" class="recorded">主播本人</span>
+                          <span [class.afk]="player.afkPredictionStatus === 'afk' || player.afkManualOverride === true">{{ playerAfkLabel(player) }}</span>
+                        </div>
+                      </div>
+                      <dl class="match-admin-player-quick-stats">
+                        <div><dt>KDA</dt><dd>{{ formatStat(player.kills) }} / {{ formatStat(player.deaths) }} / {{ formatStat(player.assists) }}</dd></div>
+                        <div><dt>经济</dt><dd>{{ formatStat(player.economy) }}</dd></div>
+                      </dl>
                       <button
                         type="button"
-                        class="match-admin-hero-trigger"
-                        (click)="openHeroPicker(player)"
-                      >
-                        <span class="match-admin-hero-avatar">
-                          <img
-                            *ngIf="heroThumbnail(player.heroId) as thumbnail"
-                            [src]="thumbnail"
-                            [alt]="heroName(player.heroId)"
-                          />
-                          <span *ngIf="!heroThumbnail(player.heroId)" aria-label="英雄未识别">?</span>
-                        </span>
-                        <span class="match-admin-hero-copy">
-                          <strong>{{ heroName(player.heroId) }}</strong>
-                          <small>点击更换</small>
-                        </span>
-                      </button>
+                        class="match-admin-edit-toggle"
+                        [attr.aria-expanded]="isPlayerEditing(player)"
+                        (click)="togglePlayerEditor(player)"
+                      >{{ isPlayerEditing(player) ? "收起" : "编辑" }}</button>
                     </div>
-                  </div>
-                  <div class="match-admin-player-stats">
-                    <fieldset class="match-admin-kda">
-                      <legend>K / D / A</legend>
-                      <label><span>K</span><input type="number" min="0" [value]="player.kills === null ? '' : player.kills" (input)="player.kills = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
-                      <label><span>D</span><input type="number" min="0" [value]="player.deaths === null ? '' : player.deaths" (input)="player.deaths = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
-                      <label><span>A</span><input type="number" min="0" [value]="player.assists === null ? '' : player.assists" (input)="player.assists = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
-                    </fieldset>
-                    <label>
-                      <span>经济</span>
-                      <input type="number" min="0" [value]="player.economy === null ? '' : player.economy" (input)="player.economy = $any($event.target).value === '' ? null : +$any($event.target).value" />
-                    </label>
-                    <label>
-                      <span>第三项</span>
-                      <input type="number" min="0" [value]="player.lastHits === null ? '' : player.lastHits" (input)="player.lastHits = $any($event.target).value === '' ? null : +$any($event.target).value" />
-                    </label>
-                    <label>
-                      <span>挂机 · 模型 {{ player.afkProbability === null ? "—" : (player.afkProbability * 100).toFixed(1) + "%" }}</span>
-                      <select [value]="player.afkManualOverride === null ? 'model' : player.afkManualOverride ? 'afk' : 'active'" (change)="player.afkManualOverride = $any($event.target).value === 'model' ? null : $any($event.target).value === 'afk'">
-                        <option value="model">采用模型</option>
-                        <option value="active">未挂机</option>
-                        <option value="afk">挂机</option>
-                      </select>
-                    </label>
-                  </div>
-                </div>
-              </article>
+
+                    <div *ngIf="isPlayerEditing(player)" class="match-admin-player-editor">
+                      <div class="match-admin-player-identity">
+                        <label>
+                          <span>玩家名</span>
+                          <input type="text" maxlength="80" [value]="player.name" (input)="player.name = $any($event.target).value" />
+                        </label>
+                        <div class="match-admin-hero-field">
+                          <span>英雄</span>
+                          <button type="button" class="match-admin-hero-trigger" (click)="openHeroPicker(player)">
+                            <span class="match-admin-hero-avatar">
+                              <img
+                                *ngIf="heroThumbnail(player.heroId) as thumbnail"
+                                [src]="thumbnail"
+                                [alt]="heroName(player.heroId)"
+                              />
+                              <span *ngIf="!heroThumbnail(player.heroId)" aria-label="英雄未识别">?</span>
+                            </span>
+                            <span class="match-admin-hero-copy">
+                              <strong>{{ heroName(player.heroId) }}</strong>
+                              <small>点击更换</small>
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+                      <div class="match-admin-player-stats">
+                        <fieldset class="match-admin-kda">
+                          <legend>K / D / A</legend>
+                          <label><span>K</span><input type="number" min="0" [value]="player.kills === null ? '' : player.kills" (input)="player.kills = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+                          <label><span>D</span><input type="number" min="0" [value]="player.deaths === null ? '' : player.deaths" (input)="player.deaths = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+                          <label><span>A</span><input type="number" min="0" [value]="player.assists === null ? '' : player.assists" (input)="player.assists = $any($event.target).value === '' ? null : +$any($event.target).value" /></label>
+                        </fieldset>
+                        <label>
+                          <span>经济</span>
+                          <input type="number" min="0" [value]="player.economy === null ? '' : player.economy" (input)="player.economy = $any($event.target).value === '' ? null : +$any($event.target).value" />
+                        </label>
+                        <label>
+                          <span>第三项</span>
+                          <input type="number" min="0" [value]="player.lastHits === null ? '' : player.lastHits" (input)="player.lastHits = $any($event.target).value === '' ? null : +$any($event.target).value" />
+                        </label>
+                        <label>
+                          <span>挂机 · 模型 {{ player.afkProbability === null ? "—" : (player.afkProbability * 100).toFixed(1) + "%" }}</span>
+                          <select [value]="player.afkManualOverride === null ? 'model' : player.afkManualOverride ? 'afk' : 'active'" (change)="player.afkManualOverride = $any($event.target).value === 'model' ? null : $any($event.target).value === 'afk'">
+                            <option value="model">采用模型</option>
+                            <option value="active">未挂机</option>
+                            <option value="afk">挂机</option>
+                          </select>
+                        </label>
+                      </div>
+                      <button
+                        type="button"
+                        class="match-admin-recorded-toggle"
+                        [class.selected]="isRecordedPlayer(player)"
+                        [attr.aria-pressed]="isRecordedPlayer(player)"
+                        (click)="setRecordedPlayer(player)"
+                      >{{ isRecordedPlayer(player) ? "✓ 主播本人" : "设为主播本人" }}</button>
+                    </div>
+                  </article>
+                </section>
+              </div>
             </section>
           </div>
-        </section>
+        </div>
       </ng-container>
     </main>
 
