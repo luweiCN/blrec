@@ -124,7 +124,9 @@ def test_api_deployment_ssh_keeps_long_remote_backups_alive() -> None:
 
     assert 'ServerAliveInterval=15' in workflow
     assert 'ServerAliveCountMax=40' in workflow
-    assert workflow.count('"${ssh_options[@]}"') == 3
+    assert workflow.count('"${ssh_options[@]}"') == 4
+    assert 'remote_hostname' in workflow
+    assert 'blrec-platform' in workflow
 
 
 def _empty_postgres(database_url: str) -> None:
