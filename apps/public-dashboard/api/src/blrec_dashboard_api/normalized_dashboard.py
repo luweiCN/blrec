@@ -56,6 +56,7 @@ def _ranking_rows(connection: Any, *, owner_view: bool) -> List[Mapping[str, Any
         'match.exact_fingerprint,match.stats_eligible,'
         'match.mode AS game_mode,match.played_at_epoch AS played_at,'
         'match.duration_seconds,match.result,ally.side AS recorded_player_side,'
+        'match.recorded_player_confidence,match.recorded_player_source,'
         'enemy.side AS enemy_side,COALESCE(recorded.hero_name,\'\') AS hero_name,'
         'recorded.slot AS recorded_player_slot,recorded.kills,recorded.deaths,'
         'recorded.assists,recorded.economy '

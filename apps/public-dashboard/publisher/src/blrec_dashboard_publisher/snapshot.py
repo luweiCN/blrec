@@ -32,6 +32,7 @@ from .rating import (
     VirtualMatchRating,
     calculate_rating_forecast,
     calculate_virtual_match_rating_timeline,
+    recorded_player_identity_is_trusted_for_afk_rating,
     resolve_afk_rating_adjustment,
 )
 from .source_database import connect_source_database
@@ -494,7 +495,8 @@ def _match_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
         'match.result_part_id,part.part_index,part.record_start_time,'
         'match.result_at_ms,match.started_at_ms,match.duration_seconds,'
         'match.game_mode,match.winner_side,match.recorded_player_side,'
-        'match.recorded_player_slot,match.left_color,match.right_color,'
+        'match.recorded_player_slot,match.recorded_player_confidence,'
+        'match.recorded_player_source,match.left_color,match.right_color,'
         'match.stats_eligible,match.stats_exclusion_reason,'
         'match.duplicate_of_match_id,'
         'match.duplicate_review_state,'
@@ -839,6 +841,12 @@ def _public_matches(
             'result': ('W' if str(row['winner_side']) == recorded_side else 'L'),
             'streamTitle': str(row['stream_title'] or ''),
             'analysisProvisional': str(row['analysis_state']) == 'provisional',
+            'recordedPlayerConfidence': (
+                None
+                if row['recorded_player_confidence'] is None
+                else float(row['recorded_player_confidence'])
+            ),
+            'recordedPlayerSource': str(row['recorded_player_source']),
             'duplicateOfMatchId': (
                 None
                 if row['duplicate_of_match_id'] is None
@@ -1503,6 +1511,16 @@ def _standings_for_rows(
             recorded_status=recorded_status,
             teammate_statuses=teammate_statuses,
             enemy_statuses=enemy_statuses,
+            recorded_player_trusted=(
+                recorded_player_identity_is_trusted_for_afk_rating(
+                    source=str(row.get('recorded_player_source') or ''),
+                    confidence=(
+                        None
+                        if row.get('recorded_player_confidence') is None
+                        else float(row['recorded_player_confidence'])
+                    ),
+                )
+            ),
         )
         modes = player_modes.setdefault(player_id, _empty_player_modes())
         modes[public_mode].add(

@@ -7,6 +7,7 @@ from typing import Literal, Optional, Sequence
 
 __all__ = (
     'CARRYOVER_MATCH_CAP',
+    'MINIMUM_RECORDED_PLAYER_CONFIDENCE_FOR_AFK_RATING',
     'NEUTRAL_DISPLAY_SCORE',
     'PRIOR_MATCHES',
     'PROBABILITY_SCALE',
@@ -24,12 +25,14 @@ __all__ = (
     'calculate_virtual_match_rating',
     'calculate_virtual_match_rating_timeline',
     'expected_win_probability',
+    'recorded_player_identity_is_trusted_for_afk_rating',
     'resolve_afk_rating_adjustment',
 )
 
 
 PRIOR_MATCHES = 20
 CARRYOVER_MATCH_CAP = 200
+MINIMUM_RECORDED_PLAYER_CONFIDENCE_FOR_AFK_RATING = 0.90
 PROVISIONAL_MATCHES = 5
 NEUTRAL_DISPLAY_SCORE = 1200
 NEW_PLAYER_DISPLAY_SCORE = 1000
@@ -164,9 +167,12 @@ def resolve_afk_rating_adjustment(
     recorded_status: str,
     teammate_statuses: Sequence[str],
     enemy_statuses: Sequence[str],
+    recorded_player_trusted: bool = True,
 ) -> RatingAfkAdjustment:
     if result not in ('W', 'L'):
         raise ValueError('virtual match rating result must be W or L')
+    if not recorded_player_trusted:
+        return RatingAfkAdjustment()
     team_size = len(teammate_statuses) + 1
     statuses = (recorded_status, *teammate_statuses, *enemy_statuses)
     if (
@@ -189,6 +195,19 @@ def resolve_afk_rating_adjustment(
             net_player_deficit=net_player_deficit,
         )
     return RatingAfkAdjustment()
+
+
+def recorded_player_identity_is_trusted_for_afk_rating(
+    *, source: str, confidence: Optional[float]
+) -> bool:
+    if source == 'manual':
+        return True
+    return (
+        source == 'automatic'
+        and confidence is not None
+        and math.isfinite(confidence)
+        and confidence >= MINIMUM_RECORDED_PLAYER_CONFIDENCE_FOR_AFK_RATING
+    )
 
 
 def _display_score_for_ability(ability: float) -> float:

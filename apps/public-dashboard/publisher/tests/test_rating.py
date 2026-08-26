@@ -265,6 +265,18 @@ def test_resolve_afk_rating_adjustment(
     assert adjustment.net_player_deficit == deficit
 
 
+def test_untrusted_recorded_player_identity_disables_afk_rating_adjustment() -> None:
+    adjustment = resolve_afk_rating_adjustment(
+        result='L',
+        recorded_status='afk',
+        teammate_statuses=('active', 'active'),
+        enemy_statuses=('active', 'active', 'active'),
+        recorded_player_trusted=False,
+    )
+
+    assert adjustment.kind == 'none'
+
+
 def test_teammate_afk_loss_freezes_visible_and_hidden_rating() -> None:
     timeline = calculate_virtual_match_rating_timeline(
         results=['L'], afk_adjustments=[RatingAfkAdjustment(kind='protected_loss')]

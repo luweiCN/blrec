@@ -12,6 +12,7 @@ from blrec_dashboard_publisher.rating import (
     RATING_MODEL_VERSION,
     RatingAfkAdjustment,
     calculate_virtual_match_rating_timeline,
+    recorded_player_identity_is_trusted_for_afk_rating,
     resolve_afk_rating_adjustment,
 )
 from pypinyin import Style, lazy_pinyin
@@ -220,8 +221,9 @@ _MATCH_INSERT_SQL = (
     'played_at_epoch,duration_seconds,result,stream_title,replay_kind,replay_url,'
     'result_image_url,result_image_width,result_image_height,exact_fingerprint,'
     'analysis_provisional,stats_eligible,replay_access,duplicate_of_match_id,'
-    'duplicate_review_state,created_at,updated_at'
-    ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    'duplicate_review_state,recorded_player_confidence,recorded_player_source,'
+    'created_at,updated_at'
+    ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
 )
 
 
@@ -255,6 +257,8 @@ def _match_values(
         match.replay_access,
         match.duplicate_of_match_id,
         match.duplicate_review_state,
+        match.recorded_player_confidence,
+        match.recorded_player_source,
         now,
         now,
     )
@@ -326,6 +330,8 @@ def _upsert_match(
         'replay_access=excluded.replay_access,'
         'duplicate_of_match_id=excluded.duplicate_of_match_id,'
         'duplicate_review_state=excluded.duplicate_review_state,'
+        'recorded_player_confidence=excluded.recorded_player_confidence,'
+        'recorded_player_source=excluded.recorded_player_source,'
         'updated_at=excluded.updated_at',
         _match_values(match, revision=revision, fingerprint=fingerprint, now=now),
     )
@@ -532,7 +538,8 @@ def _afk_adjustments_by_match(
         rows.extend(
             connection.execute(
                 'SELECT participant.match_id,participant.team_role,'
-                'participant.is_recorded_player,participant.afk_status,match.result '
+                'participant.is_recorded_player,participant.afk_status,match.result,'
+                'match.recorded_player_confidence,match.recorded_player_source '
                 'FROM match_participants participant JOIN matches match '
                 'ON match.source_match_id=participant.match_id '
                 'WHERE participant.match_id IN ({}) '
@@ -563,6 +570,16 @@ def _afk_adjustments_by_match(
                 str(row['afk_status']) for row in allies if row is not recorded
             ),
             enemy_statuses=tuple(str(row['afk_status']) for row in enemies),
+            recorded_player_trusted=(
+                recorded_player_identity_is_trusted_for_afk_rating(
+                    source=str(recorded['recorded_player_source']),
+                    confidence=(
+                        None
+                        if recorded['recorded_player_confidence'] is None
+                        else float(recorded['recorded_player_confidence'])
+                    ),
+                )
+            ),
         )
     return adjustments
 

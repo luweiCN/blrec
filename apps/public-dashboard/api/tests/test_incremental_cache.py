@@ -90,6 +90,8 @@ def cache_batch(
                 'streamTitle': '深夜排位',
                 'analysisProvisional': False,
                 'statsEligible': True,
+                'recordedPlayerConfidence': 1.0,
+                'recordedPlayerSource': 'manual',
                 'duplicateOfMatchId': None,
                 'duplicateReviewState': 'none',
                 'ally': _team('ally'),
@@ -113,6 +115,8 @@ def test_cache_batch_model_preserves_visibility_dedup_and_revision() -> None:
     assert batch.publish is True
     assert batch.players[0].public_visible is True
     assert batch.matches[0].stats_eligible is True
+    assert batch.matches[0].recorded_player_confidence == 1.0
+    assert batch.matches[0].recorded_player_source == 'manual'
     assert batch.matches[0].replay_access == 'owner'
     assert batch.matches[0].duplicate_of_match_id is None
     assert batch.matches[0].duplicate_review_state == 'none'
@@ -143,13 +147,15 @@ def test_latest_schema_keeps_incremental_columns_for_rollback(tmp_path: Path) ->
     finally:
         connection.close()
 
-    assert version == 12
+    assert version == 13
     assert 'public_visible' in player_columns
     assert {
         'stats_eligible',
         'replay_access',
         'duplicate_of_match_id',
         'duplicate_review_state',
+        'recorded_player_confidence',
+        'recorded_player_source',
     }.issubset(match_columns)
     assert state is not None
 
@@ -566,6 +572,55 @@ def test_ingest_recomputes_rating_when_afk_status_changes(tmp_path: Path) -> Non
     assert int(ordinary['score_delta']) == -5
     assert str(ordinary['afk_adjustment']) == 'none'
     assert int(ordinary['model_version']) == 8
+
+
+def test_ingest_does_not_apply_afk_penalty_for_low_confidence_identity(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / 'dashboard.sqlite3'
+    initialize_database(database_path)
+    source = cache_batch(source_revision=10)
+    match = source['matches'][0]
+    match['result'] = 'L'
+    match['recordedPlayerConfidence'] = 0.578518
+    match['recordedPlayerSource'] = 'automatic'
+    for role, statuses in (
+        ('ally', ('afk', 'active', 'active')),
+        ('enemy', ('active', 'active', 'active')),
+    ):
+        match[role]['players'] = [
+            {
+                'slot': slot,
+                'name': '{}-{}'.format(role, slot),
+                'heroName': '英雄-{}-{}'.format(role, slot),
+                'kills': 1,
+                'deaths': 1,
+                'assists': 1,
+                'economy': 1000,
+                'lastHits': 10,
+                'isRecordedPlayer': role == 'ally' and slot == 1,
+                'afkStatus': status,
+            }
+            for slot, status in enumerate(statuses, start=1)
+        ]
+
+    apply_ingest_batch(
+        database_path,
+        idempotency_key='low-confidence-recorded-player',
+        batch=IngestBatch.parse_obj(source),
+    )
+    connection = connect_database(database_path)
+    try:
+        rating = connection.execute(
+            'SELECT score_delta,afk_adjustment FROM rating_events '
+            "WHERE match_id=1 AND scope='all' AND season_key='2026-summer'"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert rating is not None
+    assert int(rating['score_delta']) == -5
+    assert str(rating['afk_adjustment']) == 'none'
 
 
 def test_ingest_recomputes_all_players_when_one_match_changes(

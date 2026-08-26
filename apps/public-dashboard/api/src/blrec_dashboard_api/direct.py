@@ -17,6 +17,7 @@ from blrec_dashboard_publisher.deduplication import exact_match_fingerprint
 from blrec_dashboard_publisher.rating import (
     RATING_MODEL_VERSION,
     calculate_virtual_match_rating_timeline,
+    recorded_player_identity_is_trusted_for_afk_rating,
     resolve_afk_rating_adjustment,
 )
 from blrec_dashboard_publisher.snapshot import SHANGHAI, build_dashboard_runtime_source
@@ -205,6 +206,16 @@ def _match_afk_adjustment(match: Mapping[str, Any]) -> Any:
         ),
         enemy_statuses=tuple(
             str(player.get('afkStatus', 'unknown')) for player in enemy_players
+        ),
+        recorded_player_trusted=(
+            recorded_player_identity_is_trusted_for_afk_rating(
+                source=str(match.get('recordedPlayerSource') or ''),
+                confidence=(
+                    None
+                    if match.get('recordedPlayerConfidence') is None
+                    else float(match['recordedPlayerConfidence'])
+                ),
+            )
         ),
     )
 

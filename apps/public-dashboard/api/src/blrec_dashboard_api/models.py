@@ -126,6 +126,12 @@ class IngestMatch(StrictModel):
     stream_title: str = Field(alias='streamTitle', max_length=240)
     analysis_provisional: bool = Field(default=False, alias='analysisProvisional')
     stats_eligible: bool = Field(default=True, alias='statsEligible')
+    recorded_player_confidence: Optional[float] = Field(
+        default=None, alias='recordedPlayerConfidence', ge=0, le=1
+    )
+    recorded_player_source: Literal['automatic', 'manual'] = Field(
+        default='automatic', alias='recordedPlayerSource'
+    )
     duplicate_of_match_id: Optional[int] = Field(
         default=None, alias='duplicateOfMatchId', gt=0
     )
