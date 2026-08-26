@@ -148,21 +148,21 @@ describe('MatchAdminEditorModalComponent', () => {
   });
 
   it('opens only one editable section at a time', () => {
-    component.toggleBasicEditor();
+    const editor = fixture.nativeElement as HTMLElement;
+    (editor.querySelector('.match-admin-basic .match-admin-edit-toggle') as HTMLButtonElement).click();
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.match-admin-fields')).not.toBeNull();
+    expect(editor.querySelector('.match-admin-fields')).not.toBeNull();
 
-    const player = component.editableMatch?.players[0];
-    expect(player).toBeDefined();
-    if (player === undefined) {
-      return;
-    }
-    component.togglePlayerEditor(player);
+    (
+      editor.querySelector(
+        '.match-admin-player-summary .match-admin-edit-toggle',
+      ) as HTMLButtonElement
+    ).click();
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.querySelector('.match-admin-fields')).toBeNull();
+    expect(editor.querySelector('.match-admin-fields')).toBeNull();
     expect(
-      fixture.nativeElement.querySelectorAll('.match-admin-player-editor').length,
+      editor.querySelectorAll('.match-admin-player-editor').length,
     ).toBe(1);
   });
 
@@ -172,13 +172,23 @@ describe('MatchAdminEditorModalComponent', () => {
     if (opponent === undefined) {
       return;
     }
-    component.togglePlayerEditor(opponent);
-    component.setRecordedPlayer(opponent);
+    const editor = fixture.nativeElement as HTMLElement;
+    (
+      editor.querySelectorAll(
+        '.match-admin-player-summary .match-admin-edit-toggle',
+      )[1] as HTMLButtonElement
+    ).click();
+    fixture.detectChanges();
+    (
+      editor.querySelector(
+        '.match-admin-player.editing .match-admin-recorded-toggle',
+      ) as HTMLButtonElement
+    ).click();
     fixture.detectChanges();
 
     expect(component.recordedPlayer).toBe('right:1');
     expect(component.recordedPlayerLabel()).toContain('右1');
-    const selected = fixture.nativeElement.querySelector(
+    const selected = editor.querySelector(
       '.match-admin-recorded-toggle.selected',
     ) as HTMLButtonElement;
     expect(selected.textContent).toContain('主播本人');
@@ -190,8 +200,14 @@ describe('MatchAdminEditorModalComponent', () => {
     if (player === undefined) {
       return;
     }
-    component.togglePlayerEditor(player);
-    component.openHeroPicker(player);
+    const editor = fixture.nativeElement as HTMLElement;
+    (
+      editor.querySelector(
+        '.match-admin-player-summary .match-admin-edit-toggle',
+      ) as HTMLButtonElement
+    ).click();
+    fixture.detectChanges();
+    (editor.querySelector('.match-admin-hero-trigger') as HTMLButtonElement).click();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.match-admin-hero-picker')).not.toBeNull();
 
