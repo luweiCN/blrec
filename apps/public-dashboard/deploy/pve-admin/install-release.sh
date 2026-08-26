@@ -39,6 +39,8 @@ install -d -m 0755 -o root -g root "$release"
 tar --extract --gzip --file "$archive" --directory "$release"
 test -s "$release/site/index.html"
 test -s "$release/deploy/nginx.conf.template"
+chown -R root:root "$release"
+chmod -R u=rwX,go=rX "$release/site"
 
 set -a
 # shellcheck disable=SC1091
