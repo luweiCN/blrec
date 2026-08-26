@@ -343,6 +343,7 @@ class MatchPlayerResponse(ApiModel):
     hero_id: Optional[int]
     hero_label: str
     hero_source: Literal['automatic', 'manual']
+    hero_probability: Optional[float]
     kills: Optional[int]
     deaths: Optional[int]
     assists: Optional[int]
@@ -350,6 +351,11 @@ class MatchPlayerResponse(ApiModel):
     last_hits: Optional[int]
     confidence: float
     is_recorded_player: bool
+    afk_prediction_status: Literal['unknown', 'active', 'afk']
+    afk_probability: Optional[float]
+    afk_model_version: str
+    afk_gate_reason: str
+    afk_manual_override: Optional[bool]
 
 
 class MatchResponse(ApiModel):
@@ -555,6 +561,12 @@ class MatchPlayerUpdateRequest(ApiModel):
     assists: Optional[int] = Field(None, ge=0)
     economy: Optional[int] = Field(None, ge=0)
     last_hits: Optional[int] = Field(None, ge=0)
+    afk_manual_override: Optional[bool] = None
+
+
+class RecordedPlayerRequest(ApiModel):
+    side: Literal['left', 'right']
+    slot: int = Field(..., ge=1, le=5)
 
 
 class MatchUpdateRequest(ApiModel):
@@ -572,6 +584,7 @@ class MatchUpdateRequest(ApiModel):
     left_economy: Optional[int] = Field(None, ge=0)
     right_economy: Optional[int] = Field(None, ge=0)
     players: Optional[List[MatchPlayerUpdateRequest]] = Field(None, max_items=10)
+    recorded_player: Optional[RecordedPlayerRequest] = None
 
 
 class DuplicateReviewRequest(ApiModel):
@@ -594,11 +607,6 @@ class PlayerRoomSeedRequest(ApiModel):
 
 class PlayerRoomSyncRequest(ApiModel):
     rooms: List[PlayerRoomSeedRequest] = Field(..., max_items=500)
-
-
-class RecordedPlayerRequest(ApiModel):
-    side: Literal['left', 'right']
-    slot: int = Field(..., ge=1, le=5)
 
 
 class PlayerHeroRequest(ApiModel):
@@ -845,6 +853,7 @@ def _player(value: MatchPlayerRecord) -> MatchPlayerResponse:
         hero_id=value.hero_id,
         hero_label=hero_chinese_name(value.hero_label),
         hero_source=value.hero_source,
+        hero_probability=value.hero_probability,
         kills=value.kills,
         deaths=value.deaths,
         assists=value.assists,
@@ -852,6 +861,11 @@ def _player(value: MatchPlayerRecord) -> MatchPlayerResponse:
         last_hits=value.last_hits,
         confidence=value.confidence,
         is_recorded_player=value.is_recorded_player,
+        afk_prediction_status=value.afk_prediction_status,
+        afk_probability=value.afk_probability,
+        afk_model_version=value.afk_model_version,
+        afk_gate_reason=value.afk_gate_reason,
+        afk_manual_override=value.afk_manual_override,
     )
 
 
@@ -2373,6 +2387,19 @@ async def update_match(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
         ) from error
+
+
+@router.get('/matches/{match_id}', response_model=MatchResponse)
+async def get_match(
+    match_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> MatchResponse:
+    try:
+        return _match(await index.get_match(match_id))
+    except VaingloryNotFound as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
 
 
 @router.put('/matches/{match_id}/duplicate-review', response_model=MatchResponse)

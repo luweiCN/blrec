@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterator, List, Optional
 
 import pytest
@@ -28,6 +29,7 @@ from blrec.bili_upload.archive_migration import (
 )
 from blrec.bili_upload.errors import AccountWriteBusy
 from blrec.web import security
+from blrec.web.auth_store import AdminAuthStore
 from blrec.web.routers import bili_accounts
 
 
@@ -292,6 +294,31 @@ def test_sensitive_routes_require_a_configured_api_key(
         response = test_client.get('/api/v1/bili-accounts')
 
     assert response.status_code == 401
+
+
+def test_trusted_proxy_api_key_works_with_session_auth_enabled(
+    tmp_path: Path, manager: FakeAccountManager
+) -> None:
+    store = AdminAuthStore(str(tmp_path / 'auth.sqlite3'), admin_username='owner')
+    store.open()
+    security.configure(store, bootstrap_api_key='trusted-proxy-key')
+    api = FastAPI()
+    api.include_router(bili_accounts.router, prefix='/api/v1')
+
+    try:
+        with TestClient(api) as test_client:
+            accepted = test_client.get(
+                '/api/v1/bili-accounts', headers={'x-api-key': 'trusted-proxy-key'}
+            )
+            rejected = test_client.get(
+                '/api/v1/bili-accounts', headers={'x-api-key': 'wrong-key'}
+            )
+    finally:
+        security.reset()
+        store.close()
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 401
 
 
 def test_unavailable_account_manager_fails_closed(

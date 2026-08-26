@@ -2441,6 +2441,10 @@
         nzMessage="人工修正会持久保留"
         nzDescription="以后即使用新算法重新分析，这些人工字段也不会被自动结果覆盖。"
       ></nz-alert>
+      <p class="match-editor-model-summary" *ngIf="editingMatch as match">
+        结算识别 {{ (match.confidence * 100).toFixed(1) }}% · 主播位置
+        {{ recordedPlayerStateLabel(match) }}
+      </p>
       <section class="match-editor-grid">
         <label class="match-editor-wide">
           <span>对局标题</span>
@@ -2497,6 +2501,19 @@
             <nz-option nzValue="unknown" nzLabel="未知"></nz-option>
           </nz-select>
         </label>
+        <label *ngIf="editingMatch as match">
+          <span>主播使用的英雄</span>
+          <nz-select
+            [(ngModel)]="draft.recordedPlayer"
+            nzPlaceHolder="未确认"
+          >
+            <nz-option
+              *ngFor="let player of recordedPlayerCandidates(match)"
+              [nzValue]="recordedPlayerOptionValue(player)"
+              [nzLabel]="recordedPlayerOptionLabel(player)"
+            ></nz-option>
+          </nz-select>
+        </label>
         <label class="match-editor-wide">
           <span>结果文字</span>
           <input nz-input maxlength="32" [(ngModel)]="draft.resultText" />
@@ -2543,7 +2560,8 @@
         <h3>玩家数据</h3>
         <div class="match-editor-player-header" aria-hidden="true">
           <span>位置</span><span>玩家名</span><span>英雄</span> <span>K</span
-          ><span>D</span><span>A</span><span>经济</span><span>补刀</span>
+          ><span>D</span><span>A</span><span>经济</span><span>补刀</span
+          ><span>挂机</span>
         </div>
         <div
           *ngFor="let player of draft.players"
@@ -2552,19 +2570,30 @@
           <strong
             >{{ player.side === "left" ? "左" : "右" }}{{ player.slot }}</strong
           >
-          <input nz-input maxlength="80" [(ngModel)]="player.name" />
-          <nz-select
-            nzShowSearch
-            nzAllowClear
-            nzPlaceHolder="未识别"
-            [(ngModel)]="player.heroId"
-          >
-            <nz-option
-              *ngFor="let hero of heroes; trackBy: trackHero"
-              [nzValue]="hero.id"
-              [nzLabel]="hero.label"
-            ></nz-option>
-          </nz-select>
+          <label class="match-editor-evidence-field">
+            <input nz-input maxlength="80" [(ngModel)]="player.name" />
+            <small *ngIf="matchEditPlayerEvidence(player) as evidence">
+              OCR {{ (evidence.confidence * 100).toFixed(1) }}%
+            </small>
+          </label>
+          <label class="match-editor-evidence-field">
+            <nz-select
+              nzShowSearch
+              nzAllowClear
+              nzPlaceHolder="未识别"
+              [(ngModel)]="player.heroId"
+            >
+              <nz-option
+                *ngFor="let hero of heroes; trackBy: trackHero"
+                [nzValue]="hero.id"
+                [nzLabel]="hero.label"
+              ></nz-option>
+            </nz-select>
+            <small *ngIf="matchEditPlayerEvidence(player) as evidence">
+              {{ evidence.heroSource === "manual" ? "人工" : "模型" }} · 模型原概率
+              {{ evidence.heroProbability == null ? "历史未保存" : (evidence.heroProbability * 100).toFixed(1) + "%" }}
+            </small>
+          </label>
           <nz-input-number
             [(ngModel)]="player.kills"
             [nzMin]="0"
@@ -2585,6 +2614,17 @@
             [(ngModel)]="player.lastHits"
             [nzMin]="0"
           ></nz-input-number>
+          <label class="match-editor-evidence-field">
+            <nz-select [(ngModel)]="player.afkManualOverride">
+              <nz-option [nzValue]="null" nzLabel="采用模型"></nz-option>
+              <nz-option [nzValue]="false" nzLabel="未挂机"></nz-option>
+              <nz-option [nzValue]="true" nzLabel="挂机"></nz-option>
+            </nz-select>
+            <small *ngIf="matchEditPlayerEvidence(player) as evidence">
+              模型
+              {{ evidence.afkProbability == null ? "—" : (evidence.afkProbability * 100).toFixed(1) + "%" }}
+            </small>
+          </label>
         </div>
       </section>
     </ng-container>

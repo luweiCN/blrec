@@ -193,6 +193,10 @@ def get_archive_migration() -> ArchiveMigrationService:
 async def authenticated_manager_subject(
     request: Request, x_api_key: Optional[str] = Header(None)
 ) -> str:
+    if security.valid_api_key(x_api_key):
+        assert request.client is not None
+        value = '{}\0{}'.format(request.client.host, x_api_key).encode('utf8')
+        return hashlib.sha256(value).hexdigest()
     if security.auth_store is not None:
         return security.manager_subject(request)
     if not security.api_key:

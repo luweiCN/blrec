@@ -172,6 +172,7 @@ interface MatchPlayerEditDraft {
   assists: number | null;
   economy: number | null;
   lastHits: number | null;
+  afkManualOverride: boolean | null;
 }
 
 interface MatchEditDraft {
@@ -188,6 +189,7 @@ interface MatchEditDraft {
   rightKills: number | null;
   leftEconomy: number | null;
   rightEconomy: number | null;
+  recordedPlayer: string | null;
   players: MatchPlayerEditDraft[];
 }
 
@@ -1377,6 +1379,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       rightKills: match.rightKills,
       leftEconomy: match.leftEconomy,
       rightEconomy: match.rightEconomy,
+      recordedPlayer: this.recordedPlayerSelection(match),
       players: match.players.map((player) => ({
         side: player.side,
         slot: player.slot,
@@ -1387,6 +1390,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         assists: player.assists,
         economy: player.economy,
         lastHits: player.lastHits,
+        afkManualOverride: player.afkManualOverride ?? null,
       })),
     };
     this.matchEditorVisible = true;
@@ -1398,9 +1402,25 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (match === null || draft === null || this.savingMatchEdit) {
       return;
     }
+    const { recordedPlayer: selectedRecordedPlayer, ...draftChanges } = draft;
+    let recordedPlayer:
+      | Readonly<{ side: 'left' | 'right'; slot: number }>
+      | undefined;
+    if (selectedRecordedPlayer !== null) {
+      const [side, slotText] = selectedRecordedPlayer.split(':');
+      const slot = Number(slotText);
+      if ((side !== 'left' && side !== 'right') || !Number.isInteger(slot)) {
+        this.messages.error('主播英雄位置无效');
+        return;
+      }
+      recordedPlayer = { side, slot };
+    }
     this.savingMatchEdit = true;
     this.vainglory
-      .updateMatch(match.id, draft)
+      .updateMatch(match.id, {
+        ...draftChanges,
+        recordedPlayer,
+      })
       .pipe(
         takeUntil(this.destroy$),
         finalize(() => {
@@ -1422,6 +1442,17 @@ export class VaingloryComponent implements OnInit, OnDestroy {
           this.messages.error(this.errorMessage(error, '对局信息保存失败'));
         },
       });
+  }
+
+  matchEditPlayerEvidence(
+    player: MatchPlayerEditDraft,
+  ): VaingloryMatchPlayer | null {
+    return (
+      this.editingMatch?.players.find(
+        (candidate) =>
+          candidate.side === player.side && candidate.slot === player.slot,
+      ) ?? null
+    );
   }
 
   toggleMatchStatsEligibility(match: VaingloryMatch): void {

@@ -235,6 +235,10 @@ class FakeService:
         self.updated_titles.append((match_id, title))
         return stored_match(title=title.strip() or '投稿标题')
 
+    async def get_match(self, match_id: int) -> MatchRecord:
+        assert match_id == 3
+        return stored_match()
+
     async def update_match_fields(self, match_id: int, changes: object) -> MatchRecord:
         self.updated_matches.append((match_id, changes))
         return stored_match()
@@ -562,11 +566,17 @@ def stored_match(*, title: str = '投稿标题') -> MatchRecord:
                 hero_id=5,
                 hero_label='英雄',
                 hero_source='automatic',
+                hero_probability=0.93,
                 kills=7,
                 deaths=2,
                 assists=8,
                 economy=15_000,
                 confidence=0.9,
+                afk_prediction_status='afk',
+                afk_probability=0.97,
+                afk_model_version='afk-status-20260822',
+                afk_gate_reason='',
+                afk_manual_override=None,
             ),
         ),
     )
@@ -961,6 +971,23 @@ def test_updates_match_title_and_returns_timeline_metadata(
     )
 
 
+def test_gets_one_match_with_model_evidence_for_internal_review(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, _fake = api_client
+
+    response = client.get('/api/v1/vainglory/matches/3')
+
+    assert response.status_code == 200
+    player = response.json()['players'][0]
+    assert player['confidence'] == pytest.approx(0.9)
+    assert player['heroProbability'] == pytest.approx(0.93)
+    assert player['afkPredictionStatus'] == 'afk'
+    assert player['afkProbability'] == pytest.approx(0.97)
+    assert player['afkModelVersion'] == 'afk-status-20260822'
+    assert player['afkManualOverride'] is None
+
+
 def test_reviews_a_suspected_duplicate(
     api_client: Tuple[TestClient, FakeService]
 ) -> None:
@@ -1015,8 +1042,16 @@ def test_updates_all_editable_match_fields(
             'gameMode': '5v5',
             'winnerColor': 'orange',
             'statsEligible': False,
+            'recordedPlayer': {'side': 'left', 'slot': 1},
             'players': [
-                {'side': 'left', 'slot': 1, 'name': '修正玩家', 'heroId': 7, 'kills': 8}
+                {
+                    'side': 'left',
+                    'slot': 1,
+                    'name': '修正玩家',
+                    'heroId': 7,
+                    'kills': 8,
+                    'afkManualOverride': True,
+                }
             ],
         },
     )
@@ -1029,6 +1064,7 @@ def test_updates_all_editable_match_fields(
                 'game_mode': '5v5',
                 'winner_color': 'orange',
                 'stats_eligible': False,
+                'recorded_player': {'side': 'left', 'slot': 1},
                 'players': [
                     {
                         'side': 'left',
@@ -1036,6 +1072,7 @@ def test_updates_all_editable_match_fields(
                         'name': '修正玩家',
                         'hero_id': 7,
                         'kills': 8,
+                        'afk_manual_override': True,
                     }
                 ],
             },

@@ -166,6 +166,15 @@ def _afk_predictions_by_position(
     }
 
 
+def _hero_probabilities_by_position(
+    match: AnalyzedMatch,
+) -> Dict[Tuple[str, int], float]:
+    return {
+        (str(hero.side), int(hero.slot)): max(0.0, min(1.0, float(hero.confidence)))
+        for hero in match.heroes
+    }
+
+
 def _afk_prediction_values(
     predictions: Mapping[Tuple[str, int], AnalyzedAfkStatus], *, side: str, slot: int
 ) -> Tuple[str, Optional[float], str, str]:
@@ -647,6 +656,7 @@ class MatchPlayerRecord:
     assists: Optional[int]
     economy: Optional[int]
     confidence: float
+    hero_probability: Optional[float] = None
     last_hits: Optional[int] = None
     is_recorded_player: bool = False
     afk_prediction_status: Literal['unknown', 'active', 'afk'] = 'unknown'
@@ -753,6 +763,9 @@ def _manual_correction_snapshot(match: MatchRecord) -> Dict[str, Any]:
                 'name': player.name,
                 'hero_id': player.hero_id,
                 'hero_label': player.hero_label,
+                'hero_source': player.hero_source,
+                'hero_probability': player.hero_probability,
+                'ocr_confidence': player.confidence,
                 'kills': player.kills,
                 'deaths': player.deaths,
                 'assists': player.assists,
@@ -3276,6 +3289,7 @@ class VaingloryRepository:
         )
         match_id = int(cursor.lastrowid)
         afk_predictions = _afk_predictions_by_position(match)
+        hero_probabilities = _hero_probabilities_by_position(match)
         for player in match.ocr.players:
             afk_values = _afk_prediction_values(
                 afk_predictions, side=player.side, slot=player.slot
@@ -3283,10 +3297,11 @@ class VaingloryRepository:
             connection.execute(
                 'INSERT INTO vainglory_match_players('
                 'match_id,side,slot,player_name,normalized_name,hero_id,hero_source,'
-                'kills,deaths,assists,economy,last_hits,confidence,'
+                'hero_prediction_probability,kills,deaths,assists,economy,last_hits,'
+                'confidence,'
                 'afk_prediction_status,afk_prediction_probability,'
                 'afk_prediction_model_version,afk_prediction_gate_reason) '
-                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (
                     match_id,
                     player.side,
@@ -3295,6 +3310,7 @@ class VaingloryRepository:
                     player.normalized_name,
                     hero_ids.get((player.side, player.slot)),
                     'automatic',
+                    hero_probabilities.get((player.side, int(player.slot))),
                     player.stats.kills,
                     player.stats.deaths,
                     player.stats.assists,
@@ -4817,6 +4833,7 @@ class VaingloryRepository:
                 match_id = int(cursor.lastrowid)
                 inserted_match_ids.append(match_id)
                 afk_predictions = _afk_predictions_by_position(match)
+                hero_probabilities = _hero_probabilities_by_position(match)
                 for player in match.ocr.players:
                     stats = player.stats
                     override_key = (
@@ -4869,11 +4886,12 @@ class VaingloryRepository:
                     connection.execute(
                         'INSERT INTO vainglory_match_players('
                         'match_id,side,slot,player_name,normalized_name,hero_id,'
-                        'hero_source,kills,deaths,assists,economy,last_hits,'
+                        'hero_source,hero_prediction_probability,kills,deaths,'
+                        'assists,economy,last_hits,'
                         'confidence,afk_prediction_status,'
                         'afk_prediction_probability,afk_prediction_model_version,'
                         'afk_prediction_gate_reason,afk_manual_override) '
-                        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                         (
                             match_id,
                             player.side,
@@ -4886,6 +4904,7 @@ class VaingloryRepository:
                                 else hero_ids.get((player.side, player.slot))
                             ),
                             ('manual' if manual_hero_id is not None else 'automatic'),
+                            hero_probabilities.get((player.side, int(player.slot))),
                             stats.kills,
                             stats.deaths,
                             stats.assists,
@@ -5784,6 +5803,7 @@ class VaingloryRepository:
                 'DELETE FROM vainglory_match_players WHERE match_id=?', (int(match_id),)
             )
             afk_predictions = _afk_predictions_by_position(recognized)
+            hero_probabilities = _hero_probabilities_by_position(recognized)
             for player in recognized.ocr.players:
                 stats = player.stats
                 afk_values = _afk_prediction_values(
@@ -5792,11 +5812,12 @@ class VaingloryRepository:
                 connection.execute(
                     'INSERT INTO vainglory_match_players('
                     'match_id,side,slot,player_name,normalized_name,hero_id,'
-                    'hero_source,kills,deaths,assists,economy,last_hits,'
+                    'hero_source,hero_prediction_probability,kills,deaths,'
+                    'assists,economy,last_hits,'
                     'confidence,afk_prediction_status,'
                     'afk_prediction_probability,afk_prediction_model_version,'
                     'afk_prediction_gate_reason,afk_manual_override) '
-                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (
                         int(match_id),
                         player.side,
@@ -5805,6 +5826,7 @@ class VaingloryRepository:
                         player.normalized_name,
                         hero_ids.get((player.side, player.slot)),
                         'automatic',
+                        hero_probabilities.get((player.side, int(player.slot))),
                         stats.kills,
                         stats.deaths,
                         stats.assists,
@@ -6254,10 +6276,17 @@ class VaingloryRepository:
                 if hero_id is None:
                     continue
                 updated += connection.execute(
-                    'UPDATE vainglory_match_players SET hero_id=? '
+                    'UPDATE vainglory_match_players SET hero_id=?,'
+                    'hero_prediction_probability=? '
                     'WHERE match_id=? AND side=? AND slot=? AND hero_id IS NULL '
                     "AND hero_source<>'manual'",
-                    (hero_id, int(match_id), hero.side, hero.slot),
+                    (
+                        hero_id,
+                        max(0.0, min(1.0, float(hero.confidence))),
+                        int(match_id),
+                        hero.side,
+                        hero.slot,
+                    ),
                 ).rowcount
             connection.execute(
                 'UPDATE vainglory_matches SET hero_recognition_version=? WHERE id=?',
@@ -6605,12 +6634,32 @@ class VaingloryRepository:
         def update(connection: sqlite3.Connection) -> None:
             match = connection.execute(
                 'SELECT session_id,result_part_id,result_at_ms,'
-                'content_fingerprint '
+                'content_fingerprint,team_size,left_color,right_color '
                 'FROM vainglory_matches WHERE id=?',
                 (int(match_id),),
             ).fetchone()
             if match is None:
                 raise VaingloryNotFound('对局不存在')
+            recorded_player = patch.get('recorded_player')
+            if isinstance(recorded_player, Mapping):
+                if match['team_size'] is None or int(match['team_size']) not in (3, 5):
+                    raise VaingloryConflict('当前对局不支持确认主播英雄')
+                side = str(recorded_player['side'])
+                slot = int(recorded_player['slot'])
+                teal_side = (
+                    'left'
+                    if str(match['left_color']) == 'teal'
+                    else 'right' if str(match['right_color']) == 'teal' else ''
+                )
+                if side != teal_side:
+                    raise VaingloryConflict('只能从主播所在的蓝绿色一方选择')
+                player = connection.execute(
+                    'SELECT 1 FROM vainglory_match_players '
+                    'WHERE match_id=? AND side=? AND slot=?',
+                    (int(match_id), side, slot),
+                ).fetchone()
+                if player is None:
+                    raise VaingloryNotFound('对局中的玩家位置不存在')
             self._merge_match_override(
                 connection,
                 part_id=int(match['result_part_id']),
@@ -8229,6 +8278,7 @@ class VaingloryRepository:
             'left_economy',
             'right_economy',
             'players',
+            'recorded_player',
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -8324,6 +8374,20 @@ class VaingloryRepository:
                     normalized_players['{}:{}'.format(side, slot)] = player_patch
             if normalized_players:
                 patch['players'] = normalized_players
+        if 'recorded_player' in changes:
+            recorded_player = changes['recorded_player']
+            if not isinstance(recorded_player, Mapping):
+                raise ValueError('主播位置无效')
+            side = str(recorded_player.get('side') or '')
+            slot = recorded_player.get('slot')
+            if (
+                side not in ('left', 'right')
+                or type(slot) is not int
+                or slot < 1
+                or slot > 5
+            ):
+                raise ValueError('主播位置无效')
+            patch['recorded_player'] = {'side': side, 'slot': slot}
         return patch
 
     @staticmethod
@@ -8540,6 +8604,11 @@ class VaingloryRepository:
             economy=None if row['economy'] is None else int(row['economy']),
             last_hits=(None if row['last_hits'] is None else int(row['last_hits'])),
             confidence=float(row['confidence']),
+            hero_probability=(
+                None
+                if row['hero_prediction_probability'] is None
+                else float(row['hero_prediction_probability'])
+            ),
             is_recorded_player=bool(int(row['is_recorded_player'])),
             afk_prediction_status=cast(
                 Literal['unknown', 'active', 'afk'], str(row['afk_prediction_status'])

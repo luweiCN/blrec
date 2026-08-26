@@ -2402,3 +2402,21 @@ async def test_migration_82_queues_result_frames_for_afk_backfill(
         assert await database.scalar('PRAGMA quick_check') == 'ok'
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_83_adds_hero_prediction_probability(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        columns = {
+            str(row['name'])
+            for row in await database.fetchall(
+                'PRAGMA table_info(vainglory_match_players)'
+            )
+        }
+
+        assert 'hero_prediction_probability' in columns
+        assert await database.scalar('PRAGMA quick_check') == 'ok'
+    finally:
+        await database.close()

@@ -87,6 +87,10 @@ def valid_media_access(
     return hmac.compare_digest(token, expected)
 
 
+def valid_api_key(value: Optional[str]) -> bool:
+    return bool(api_key and value and secrets.compare_digest(value, api_key))
+
+
 def require_same_origin(request: Request) -> None:
     origin = request.headers.get('origin')
     if origin is None or not valid_origin(request, origin):

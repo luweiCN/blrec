@@ -550,6 +550,7 @@ export interface VaingloryMatchPlayer {
   readonly heroId: number | null;
   readonly heroLabel: string;
   readonly heroSource: HeroRecognitionSource;
+  readonly heroProbability?: number | null;
   readonly kills: number | null;
   readonly deaths: number | null;
   readonly assists: number | null;
@@ -557,6 +558,11 @@ export interface VaingloryMatchPlayer {
   readonly lastHits: number | null;
   readonly confidence: number;
   readonly isRecordedPlayer: boolean;
+  readonly afkPredictionStatus?: 'unknown' | 'active' | 'afk';
+  readonly afkProbability?: number | null;
+  readonly afkModelVersion?: string;
+  readonly afkGateReason?: string;
+  readonly afkManualOverride?: boolean | null;
 }
 
 export interface VaingloryMatch {
@@ -621,6 +627,7 @@ export interface VaingloryMatchPlayerUpdate {
   readonly assists?: number | null;
   readonly economy?: number | null;
   readonly lastHits?: number | null;
+  readonly afkManualOverride?: boolean | null;
 }
 
 export interface VaingloryMatchUpdate {
@@ -637,6 +644,10 @@ export interface VaingloryMatchUpdate {
   readonly rightKills?: number | null;
   readonly leftEconomy?: number | null;
   readonly rightEconomy?: number | null;
+  readonly recordedPlayer?: Readonly<{
+    side: 'left' | 'right';
+    slot: number;
+  }>;
   readonly players?: readonly VaingloryMatchPlayerUpdate[];
 }
 

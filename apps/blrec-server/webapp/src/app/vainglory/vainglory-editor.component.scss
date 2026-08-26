@@ -8,6 +8,11 @@
   color: #595959;
 }
 
+.match-editor-model-summary {
+  margin: 12px 0 0;
+  color: #595959;
+}
+
 .manual-marker-fields,
 .match-editor-grid,
 .match-editor-team-totals {
@@ -77,10 +82,10 @@
   grid-template-columns: 48px minmax(120px, 1.4fr) minmax(140px, 1.4fr) repeat(
       3,
       70px
-    ) repeat(2, 92px);
+    ) repeat(2, 92px) 108px;
   align-items: center;
   gap: 8px;
-  min-width: 850px;
+  min-width: 970px;
 }
 
 .match-editor-player-header {
@@ -91,4 +96,16 @@
 .match-editor-player-row {
   padding: 6px 0;
   border-top: 1px solid #f0f0f0;
+}
+
+.match-editor-evidence-field {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.match-editor-evidence-field small {
+  color: #8c8c8c;
+  font-size: 11px;
+  line-height: 1.2;
 }

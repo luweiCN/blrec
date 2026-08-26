@@ -969,6 +969,7 @@ def analyzed_match() -> AnalyzedMatch:
                 fingerprint='{:016x}'.format(side_index * 3 + slot),
                 thumbnail_png=b'\x89PNG',
                 label='Caine',
+                confidence=0.88,
             )
             for side_index, side in enumerate(('left', 'right'))
             for slot in range(1, 4)
@@ -1021,6 +1022,7 @@ async def test_afk_predictions_persist_with_revision_and_separate_manual_overrid
 
         stored = (await repository.list_matches()).items[0]
         left_one = stored.players[0]
+        assert left_one.hero_probability == pytest.approx(0.88)
         assert left_one.afk_prediction_status == 'afk'
         assert left_one.afk_probability == pytest.approx(0.92)
         assert left_one.afk_model_version == 'afk-run-1'
@@ -1656,6 +1658,7 @@ async def test_repository_rematches_only_missing_heroes_from_saved_results(
                         fingerprint='f' * 64,
                         thumbnail_png=b'ignored',
                         label='Caine',
+                        confidence=0.96,
                     ),
                     AnalyzedHero(
                         side='left',
@@ -1669,11 +1672,13 @@ async def test_repository_rematches_only_missing_heroes_from_saved_results(
             == 1
         )
         rows = await database.fetchall(
-            'SELECT slot,hero_id FROM vainglory_match_players '
+            'SELECT slot,hero_id,hero_prediction_probability '
+            'FROM vainglory_match_players '
             "WHERE match_id=? AND side='left' ORDER BY slot",
             (match_id,),
         )
         assert int(rows[0]['hero_id']) == known_hero_id
+        assert float(rows[0]['hero_prediction_probability']) == pytest.approx(0.96)
         assert int(rows[1]['hero_id']) == known_hero_id
         assert await repository.next_hero_rematch() is None
     finally:
@@ -2384,6 +2389,7 @@ async def test_manual_match_fields_survive_a_later_rescan(tmp_path: Path) -> Non
                 'game_mode': 'aram',
                 'winner_color': 'orange',
                 'stats_eligible': False,
+                'recorded_player': {'side': 'right', 'slot': 2},
                 'players': [
                     {'side': 'left', 'slot': 1, 'name': '人工玩家', 'kills': 99}
                 ],
@@ -2393,6 +2399,7 @@ async def test_manual_match_fields_survive_a_later_rescan(tmp_path: Path) -> Non
         assert edited.team_size == 3
         assert edited.winner_color == 'orange'
         assert edited.stats_eligible is False
+        assert edited.players[4].is_recorded_player is True
 
         await repository.request_scan(1)
         assert await repository.claim_next() is not None
@@ -2402,6 +2409,7 @@ async def test_manual_match_fields_survive_a_later_rescan(tmp_path: Path) -> Non
         assert rescanned.game_mode == 'aram'
         assert rescanned.winner_color == 'orange'
         assert rescanned.stats_eligible is False
+        assert rescanned.players[4].is_recorded_player is True
         assert rescanned.players[0].name == '人工玩家'
         assert rescanned.players[0].kills == 99
     finally:
