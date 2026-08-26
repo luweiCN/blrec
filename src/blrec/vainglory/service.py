@@ -1229,6 +1229,9 @@ class VaingloryIndexService:
     ) -> Tuple[HeroStatsRecord, ...]:
         return await self._repository.list_hero_stats(game_mode=game_mode)
 
+    async def get_match(self, match_id: int) -> MatchRecord:
+        return await self._repository.get_match(match_id)
+
     async def update_match_title(self, match_id: int, title: str) -> MatchRecord:
         return await self._repository.update_match_title(match_id, title)
 
