@@ -125,7 +125,7 @@ describe('PublicDashboardShellComponent', () => {
     expect(dialog?.textContent).toContain(
       '挂机对局开始按实际参战人数修正排位分',
     );
-    expect(dialog?.textContent).toContain('少人一方输掉对局不扣排位分');
+    expect(dialog?.textContent).toContain('即使对方也有人挂机，保护仍然生效');
     expect(dialog?.textContent).toContain('挂机本人无论胜负都会受到额外扣分');
     expect(dialog?.textContent).toContain('十段铜胜一局');
     expect(dialog?.textContent).toContain('失败通常扣 6～12 分');
