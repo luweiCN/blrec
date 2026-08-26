@@ -40,6 +40,7 @@ tar --extract --gzip --file "$archive" --directory "$release"
 test -s "$release/site/index.html"
 test -s "$release/deploy/nginx.conf.template"
 chown -R root:root "$release"
+chmod 0755 "$release"
 chmod -R u=rwX,go=rX "$release/site"
 
 set -a
