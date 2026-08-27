@@ -1,4 +1,4 @@
-ARG PYTHON_BASE_IMAGE=www.luwei.space:4008/proxy-docker-hub/library/python:3.12-slim-bookworm
+ARG PYTHON_BASE_IMAGE=www.luwei.space:4008/blrec/python-base:3.12-slim-bookworm
 
 FROM ${PYTHON_BASE_IMAGE} AS wheel-builder
 WORKDIR /build
