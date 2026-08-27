@@ -60,6 +60,9 @@ def test_server_release_has_independent_exact_image_contract() -> None:
 def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     test = (WORKFLOWS / 'test-vision-lab.yml').read_text(encoding='utf8')
     release = (WORKFLOWS / 'release-vision-lab.yml').read_text(encoding='utf8')
+    publisher = (ROOT / 'apps/vision-lab/deploy/harbor-publish-image.sh').read_text(
+        encoding='utf8'
+    )
     assert 'working-directory: apps/vision-lab' in test
     assert "python-version: '3.12'" in test
     assert 'python -m unittest discover' in test
@@ -68,14 +71,23 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'uses: ./.github/workflows/test-vision-lab.yml' in release
     assert 'runs-on: [self-hosted, linux, x64, blrec-platform]' in release
     assert "remote_host='root@192.168.50.17'" in release
-    assert 'DOCKER_BUILDKIT=1 /usr/bin/docker build' in release
-    assert '--platform linux/amd64' in release
-    assert '/usr/bin/docker push "$image:$release_tag"' in release
+    assert (
+        "identity_file='/opt/actions-runner/.ssh/harbor_vision_publish_ed25519'"
+        in release
+    )
+    assert 'blrec-vision-publish receive-context $remote_suffix' in release
+    assert 'blrec-vision-publish publish $remote_suffix $RELEASE_TAG' in release
     assert 'HARBOR_SSH_HOST_KEY: ${{ vars.HARBOR_SSH_HOST_KEY }}' in release
     assert '-o UserKnownHostsFile="$known_hosts"' in release
     assert 'timeout-minutes: 30' in release
     assert 'docker/build-push-action' not in release
     assert 'ghcr.io/luweicn/blrec-vision-lab' not in release
+    assert "readonly registry='www.luwei.space:4008'" in publisher
+    assert 'DOCKER_BUILDKIT=1 /usr/bin/docker build' in publisher
+    assert '--platform linux/amd64' in publisher
+    assert '/usr/bin/docker push "$image:$release_tag"' in publisher
+    assert "SSH_ORIGINAL_COMMAND" in publisher
+    assert "fail 'action is not allowed'" in publisher
 
 
 def test_legacy_automatic_publishers_cannot_run_for_tag() -> None:

@@ -135,7 +135,8 @@ blrec-vision-restore --target-url-file /path/to/local-database.url --apply
 
 Worker 可以在页面中随时暂停领取任务。打开页面不会自动在访问者电脑上执行训练
 或推理。生产镜像只由 `release-vision-lab.yml` 构建，并直接发布到私有 Harbor；
-NAS 使用只读凭据从 Harbor 拉取。
+`blrec-platform` Runner 通过受限 SSH 强制命令调用 Harbor VM 上的发布器，不能借该
+密钥执行任意远程命令。NAS 使用独立的只读凭据从 Harbor 拉取。
 
 ## 旧视频导入（仅源码开发模式）
 
