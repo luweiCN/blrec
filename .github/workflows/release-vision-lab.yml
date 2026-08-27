@@ -103,6 +103,7 @@ jobs:
             --title "BLREC Vision Lab ${version}"
 
   publish-harbor:
+    name: prepare Harbor image
     if: |
       always() &&
       needs.quality.result == 'success' &&
@@ -165,30 +166,96 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Harbor
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ vars.HARBOR_REGISTRY }}
-          username: ${{ secrets.HARBOR_USERNAME }}
-          password: ${{ secrets.HARBOR_PASSWORD }}
-
-      - name: Copy Vision Lab image to Harbor
+      - name: Export Harbor image artifact
+        id: export
         shell: bash
         run: |
           auth_file="$HOME/.docker/config.json"
+          archive_path="$RUNNER_TEMP/blrec-vision-lab-${RELEASE_TAG}-amd64.tar"
           skopeo_bin="$(go env GOPATH)/bin/skopeo"
           test -s "$auth_file"
           test -x "$skopeo_bin"
-          copy_image() {
-            destination_tag="$1"
-            "$skopeo_bin" --override-os linux --override-arch amd64 copy \
-              --src-authfile "$auth_file" \
-              --dest-authfile "$auth_file" \
-              --image-parallel-copies 1 \
-              --retry-times 10 \
-              --preserve-digests \
-              "docker://${GHCR_IMAGE}:${RELEASE_TAG}" \
-              "docker://${HARBOR_IMAGE}:${destination_tag}"
+          "$skopeo_bin" --override-os linux --override-arch amd64 copy \
+            --src-authfile "$auth_file" \
+            --image-parallel-copies 1 \
+            --retry-times 10 \
+            --preserve-digests \
+            "docker://${GHCR_IMAGE}:${RELEASE_TAG}" \
+            "docker-archive:${archive_path}:${HARBOR_IMAGE}:${RELEASE_TAG}"
+          test -s "$archive_path"
+          printf 'archive_path=%s\n' "$archive_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Harbor image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vision-lab-harbor-amd64-${{ env.RELEASE_TAG }}
+          path: ${{ steps.export.outputs.archive_path }}
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  import-harbor:
+    name: publish Harbor image
+    needs: publish-harbor
+    runs-on: [self-hosted, blrec-platform]
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
+      HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
+      RELAY_DIR: ${{ runner.temp }}/blrec-vision-harbor-${{ github.run_id }}
+    steps:
+      - name: Download Harbor image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vision-lab-harbor-amd64-${{ env.RELEASE_TAG }}
+          path: ${{ env.RELAY_DIR }}
+
+      - name: Import and publish on Harbor host
+        shell: bash
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_RUN_ID" in
+            ''|*[!0-9]*) exit 2 ;;
+          esac
+          remote_host=root@192.168.50.17
+          remote_archive="/tmp/blrec-vision-lab-${GITHUB_RUN_ID}.tar"
+          remote_auth="/tmp/blrec-harbor-auth-${GITHUB_RUN_ID}"
+          local_archive="$RELAY_DIR/blrec-vision-lab-${RELEASE_TAG}-amd64.tar"
+          ssh_options=(
+            -o BatchMode=yes
+            -o ConnectTimeout=8
+            -o StrictHostKeyChecking=yes
+          )
+          cleanup() {
+            rm -f "$local_archive"
+            rmdir "$RELAY_DIR" 2>/dev/null || true
+            ssh "${ssh_options[@]}" "$remote_host" \
+              "rm -f '$remote_archive'; rm -rf '$remote_auth'" || true
           }
-          copy_image "$RELEASE_TAG"
-          copy_image latest
+          trap cleanup EXIT
+          test -s "$local_archive"
+          ssh "${ssh_options[@]}" "$remote_host" \
+            "rm -f '$remote_archive'; rm -rf '$remote_auth'; mkdir -m 700 '$remote_auth'"
+          scp "${ssh_options[@]}" "$local_archive" \
+            "$remote_host:$remote_archive"
+          printf '%s\n' "$HARBOR_PASSWORD" | \
+            ssh "${ssh_options[@]}" "$remote_host" \
+              "DOCKER_CONFIG='$remote_auth' /usr/bin/docker login \
+                --username '$HARBOR_USERNAME' --password-stdin '$HARBOR_REGISTRY'"
+          ssh "${ssh_options[@]}" "$remote_host" \
+            "set -eu; \
+             /usr/bin/docker load --input '$remote_archive'; \
+             test \"\$(/usr/bin/docker image inspect '$HARBOR_IMAGE:$RELEASE_TAG' \
+               --format '{{.Architecture}}')\" = amd64; \
+             DOCKER_CONFIG='$remote_auth' /usr/bin/docker push \
+               '$HARBOR_IMAGE:$RELEASE_TAG'; \
+             /usr/bin/docker tag '$HARBOR_IMAGE:$RELEASE_TAG' \
+               '$HARBOR_IMAGE:latest'; \
+             DOCKER_CONFIG='$remote_auth' /usr/bin/docker push \
+               '$HARBOR_IMAGE:latest'"
