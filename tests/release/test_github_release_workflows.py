@@ -63,6 +63,9 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     publisher = (ROOT / 'apps/vision-lab/deploy/harbor-publish-image.sh').read_text(
         encoding='utf8'
     )
+    downloader = (
+        ROOT / 'apps/vision-lab/deploy/download-actions-artifact.sh'
+    ).read_text(encoding='utf8')
     assert 'working-directory: apps/vision-lab' in test
     assert "python-version: '3.12'" in test
     assert 'python -m unittest discover' in test
@@ -75,7 +78,8 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'platforms: linux/amd64' in release
     assert 'outputs: type=docker,dest=' in release
     assert 'uses: actions/upload-artifact@v4' in release
-    assert 'uses: actions/download-artifact@v4' in release
+    assert 'steps.upload-image.outputs.artifact-id' in release
+    assert 'download-actions-artifact.sh' in release
     assert 'sha256sum --check blrec-vision-lab.tar.sha256' in release
     assert "if: always() && needs.build-image.result == 'success'" in release
     assert "remote_host='root@192.168.50.17'" in release
@@ -97,6 +101,9 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert '/usr/bin/docker push "$image:$release_tag"' in publisher
     assert "SSH_ORIGINAL_COMMAND" in publisher
     assert "fail 'action is not allowed'" in publisher
+    assert 'cloudflare-dns.com:443:1.1.1.1' in downloader
+    assert 'range = "%s-%s"' in downloader
+    assert 'parallelism=${3:-16}' in downloader
 
 
 def test_legacy_automatic_publishers_cannot_run_for_tag() -> None:

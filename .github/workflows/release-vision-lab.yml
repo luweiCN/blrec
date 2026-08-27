@@ -78,6 +78,8 @@ jobs:
     needs: [quality, release]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      artifact-id: ${{ steps.upload-image.outputs.artifact-id }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
@@ -143,6 +145,7 @@ jobs:
           sha256sum blrec-vision-lab.tar >blrec-vision-lab.tar.sha256
 
       - name: Upload immutable image artifact
+        id: upload-image
         uses: actions/upload-artifact@v4
         with:
           name: vision-lab-image-${{ github.run_id }}-${{ github.run_attempt }}
@@ -157,16 +160,30 @@ jobs:
     needs: build-image
     runs-on: [self-hosted, linux, x64, blrec-platform]
     timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
+      IMAGE_ARTIFACT_ID: ${{ needs.build-image.outputs.artifact-id }}
       HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
       HARBOR_SSH_HOST_KEY: ${{ vars.HARBOR_SSH_HOST_KEY }}
     steps:
-      - name: Download immutable image artifact
-        uses: actions/download-artifact@v4
+      - name: Checkout artifact downloader
+        uses: actions/checkout@v4
         with:
-          name: vision-lab-image-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/vision-lab-image
+          ref: ${{ env.SOURCE_REF }}
+
+      - name: Download immutable image artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          apps/vision-lab/deploy/download-actions-artifact.sh \
+            "$IMAGE_ARTIFACT_ID" \
+            "$RUNNER_TEMP/vision-lab-image" \
+            16
 
       - name: Verify image artifact
         shell: bash
