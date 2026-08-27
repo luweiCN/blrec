@@ -103,11 +103,19 @@ jobs:
             --title "BLREC Vision Lab ${version}"
 
   publish-harbor:
-    needs: quality
+    if: |
+      always() &&
+      needs.quality.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || needs.publish.result == 'success')
+    needs: [quality, publish]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
+      GHCR_IMAGE: ghcr.io/luweicn/blrec-vision-lab
       HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
     defaults:
       run:
@@ -135,8 +143,27 @@ jobs:
           test -n "$package_version"
           test "$version" = "$package_version"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.6'
+          cache: false
+
+      - name: Build Skopeo
+        shell: bash
+        run: |
+          CGO_ENABLED=0 go install \
+            -tags 'exclude_graphdriver_btrfs containers_image_openpgp' \
+            github.com/containers/skopeo/cmd/skopeo@v1.17.0
+          "$(go env GOPATH)/bin/skopeo" copy --help \
+            | grep -q -- '--image-parallel-copies'
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Harbor
         uses: docker/login-action@v3
@@ -145,13 +172,23 @@ jobs:
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
 
-      - name: Publish Vision Lab image to Harbor
-        uses: docker/build-push-action@v6
-        with:
-          context: apps/vision-lab
-          file: apps/vision-lab/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.HARBOR_IMAGE }}:${{ env.RELEASE_TAG }}
-            ${{ env.HARBOR_IMAGE }}:latest
+      - name: Copy Vision Lab image to Harbor
+        shell: bash
+        run: |
+          auth_file="$HOME/.docker/config.json"
+          skopeo_bin="$(go env GOPATH)/bin/skopeo"
+          test -s "$auth_file"
+          test -x "$skopeo_bin"
+          copy_image() {
+            destination_tag="$1"
+            "$skopeo_bin" --override-os linux --override-arch amd64 copy \
+              --src-authfile "$auth_file" \
+              --dest-authfile "$auth_file" \
+              --image-parallel-copies 1 \
+              --retry-times 10 \
+              --preserve-digests \
+              "docker://${GHCR_IMAGE}:${RELEASE_TAG}" \
+              "docker://${HARBOR_IMAGE}:${destination_tag}"
+          }
+          copy_image "$RELEASE_TAG"
+          copy_image latest
