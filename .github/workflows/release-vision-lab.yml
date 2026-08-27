@@ -83,6 +83,7 @@ jobs:
       SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
       HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
       HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
+      HARBOR_SSH_HOST_KEY: ${{ vars.HARBOR_SSH_HOST_KEY }}
       PYTHON_BASE_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/python-base:3.12-slim-bookworm
     steps:
       - name: Checkout
@@ -127,10 +128,12 @@ jobs:
           remote_context="/tmp/blrec-vision-build-${remote_suffix}"
           remote_auth="/tmp/blrec-harbor-auth-${remote_suffix}"
           local_auth="$(mktemp -d "${RUNNER_TEMP}/blrec-harbor-auth.XXXXXX")"
+          known_hosts="$local_auth/known_hosts"
           ssh_options=(
             -o BatchMode=yes
             -o ConnectTimeout=8
             -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$known_hosts"
           )
 
           cleanup() {
@@ -139,6 +142,16 @@ jobs:
             rm -rf -- "$local_auth"
           }
           trap cleanup EXIT
+
+          case "$HARBOR_SSH_HOST_KEY" in
+            '192.168.50.17 ssh-ed25519 '*) ;;
+            *)
+              echo 'HARBOR_SSH_HOST_KEY is missing or invalid' >&2
+              exit 1
+              ;;
+          esac
+          printf '%s\n' "$HARBOR_SSH_HOST_KEY" >"$known_hosts"
+          chmod 600 "$known_hosts"
 
           ssh "${ssh_options[@]}" "$remote_host" \
             "install -d -m 700 '$remote_context' '$remote_auth'"

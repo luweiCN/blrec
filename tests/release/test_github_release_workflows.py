@@ -71,6 +71,8 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'DOCKER_BUILDKIT=1 /usr/bin/docker build' in release
     assert '--platform linux/amd64' in release
     assert '/usr/bin/docker push "$image:$release_tag"' in release
+    assert 'HARBOR_SSH_HOST_KEY: ${{ vars.HARBOR_SSH_HOST_KEY }}' in release
+    assert '-o UserKnownHostsFile="$known_hosts"' in release
     assert 'timeout-minutes: 30' in release
     assert 'docker/build-push-action' not in release
     assert 'ghcr.io/luweicn/blrec-vision-lab' not in release
