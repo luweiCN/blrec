@@ -1,12 +1,12 @@
 """NAS 控制面不得直接执行视频处理或旧模型批量推理。"""
 
 import tempfile
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
 import pytest
 from fastapi import HTTPException
-from fastapi.responses import RedirectResponse
 from labeler import config, db, hero_review, model_prefill, server, vision_jobs
 
 
@@ -1668,21 +1668,58 @@ def test_material_suggestions_show_historical_and_new_confirmed_breakdown() -> N
     assert "'新素材'" in render
 
 
-def test_worker_control_plane_redirects_only_frame_media_to_nas(monkeypatch) -> None:
+def test_worker_control_plane_proxies_frame_media_from_nas(monkeypatch) -> None:
     monkeypatch.setattr(config, 'MEDIA_SERVER_URL', 'http://nas:8800/')
     local_database = mock.Mock(side_effect=AssertionError('图片回源不应查询本地数据库'))
     monkeypatch.setattr(server, '_conn', local_database)
+    requests = []
+
+    def open_media(url, *, timeout):
+        requests.append((url, timeout))
+        payload, media_type = {
+            'http://nas:8800/api/frames/17/image': (b'full-image', 'image/png'),
+            'http://nas:8800/api/frames/17/thumb': (b'thumbnail', 'image/jpeg'),
+        }[url]
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = payload
+        response.__enter__.return_value.headers.get_content_type.return_value = (
+            media_type
+        )
+        return response
+
+    monkeypatch.setattr(server.urllib.request, 'urlopen', open_media)
 
     image = server.api_frame_image(17)
     thumb = server.api_frame_thumb(17)
 
-    assert isinstance(image, RedirectResponse)
-    assert image.headers['location'] == 'http://nas:8800/api/frames/17/image'
+    assert image.body == b'full-image'
+    assert image.media_type == 'image/png'
+    assert 'location' not in image.headers
     assert image.headers['cache-control'] == 'private, max-age=31536000, immutable'
-    assert isinstance(thumb, RedirectResponse)
-    assert thumb.headers['location'] == 'http://nas:8800/api/frames/17/thumb'
+    assert thumb.body == b'thumbnail'
+    assert thumb.media_type == 'image/jpeg'
+    assert 'location' not in thumb.headers
     assert thumb.headers['cache-control'] == 'private, max-age=31536000, immutable'
+    assert requests == [
+        ('http://nas:8800/api/frames/17/image', 60),
+        ('http://nas:8800/api/frames/17/thumb', 60),
+    ]
     local_database.assert_not_called()
+
+
+def test_worker_control_plane_reports_unreachable_media_server(monkeypatch) -> None:
+    monkeypatch.setattr(config, 'MEDIA_SERVER_URL', 'http://nas:8800')
+    monkeypatch.setattr(
+        server.urllib.request,
+        'urlopen',
+        mock.Mock(side_effect=urllib.error.URLError('unreachable')),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        server.api_frame_image(17)
+
+    assert error.value.status_code == 502
+    assert error.value.detail == 'NAS 图片服务不可用'
 
 
 def test_nas_media_reports_png_result_archive_content_type(monkeypatch) -> None:

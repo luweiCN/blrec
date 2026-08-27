@@ -11,13 +11,14 @@ import json
 import secrets
 import threading
 import time
+import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 # isort: off
@@ -709,10 +710,7 @@ def api_frame(frame_id: int) -> Dict[str, Any]:
 def api_frame_image(frame_id: int) -> Response:
     cache_headers = {'Cache-Control': 'private, max-age=31536000, immutable'}
     if config.MEDIA_SERVER_URL:
-        return RedirectResponse(
-            f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/image',
-            headers=cache_headers,
-        )
+        return _proxy_frame_media(frame_id, 'image', cache_headers)
     with _db_lock:
         conn = _conn()
         try:
@@ -732,10 +730,7 @@ def api_frame_image(frame_id: int) -> Response:
 def api_frame_thumb(frame_id: int) -> Response:
     cache_headers = {'Cache-Control': 'private, max-age=31536000, immutable'}
     if config.MEDIA_SERVER_URL:
-        return RedirectResponse(
-            f'{config.MEDIA_SERVER_URL.rstrip("/")}/api/frames/{int(frame_id)}/thumb',
-            headers=cache_headers,
-        )
+        return _proxy_frame_media(frame_id, 'thumb', cache_headers)
     with _db_lock:
         conn = _conn()
         try:
@@ -753,6 +748,22 @@ def api_frame_thumb(frame_id: int) -> Response:
     )
     media_type = 'image/png' if Path(path).suffix.lower() == '.png' else 'image/jpeg'
     return FileResponse(path, media_type=media_type, headers=cache_headers)
+
+
+def _proxy_frame_media(frame_id: int, kind: str, headers: Dict[str, str]) -> Response:
+    base_url = config.MEDIA_SERVER_URL.rstrip('/')
+    url = f'{base_url}/api/frames/{int(frame_id)}/{kind}'
+    try:
+        with urllib.request.urlopen(url, timeout=60) as upstream:
+            content = upstream.read()
+            media_type = upstream.headers.get_content_type()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise HTTPException(404, '帧不存在') from exc
+        raise HTTPException(502, 'NAS 图片服务不可用') from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(502, 'NAS 图片服务不可用') from exc
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 def _fetch_frame_image_bytes(frame_id: int) -> bytes:
