@@ -1,0 +1,23 @@
+# Optional observability sidecar for the Synology deployment.
+# The sidecar only reads the application log directory and pushes to the
+# existing Loki server; it does not expose a host port.
+services:
+  blrec-next:
+    environment:
+      BLREC_METRICS_TOKEN: ${BLREC_METRICS_TOKEN:?请设置 BLREC_METRICS_TOKEN}
+
+  blrec-alloy:
+    image: grafana/alloy:v1.10.2
+    container_name: blrec-alloy
+    restart: unless-stopped
+    user: '0:0'
+    read_only: true
+    command:
+      - run
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ${BLREC_LOG_DIR:-/volume1/docker/blrec-next/log}:/var/log/blrec:ro
+      - ${BLREC_OBSERVABILITY_DIR:-/volume1/docker/blrec-next/observability}/alloy-blrec.config.alloy:/etc/alloy/config.alloy:ro
+      - ${BLREC_OBSERVABILITY_DIR:-/volume1/docker/blrec-next/observability}/alloy-data:/var/lib/alloy
