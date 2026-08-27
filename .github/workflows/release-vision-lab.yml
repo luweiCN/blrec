@@ -179,7 +179,7 @@ jobs:
             --src-authfile "$auth_file" \
             --image-parallel-copies 1 \
             --retry-times 10 \
-            --preserve-digests \
+            --format v2s2 \
             "docker://${GHCR_IMAGE}:${RELEASE_TAG}" \
             "docker-archive:${archive_path}:${HARBOR_IMAGE}:${RELEASE_TAG}"
           test -s "$archive_path"
