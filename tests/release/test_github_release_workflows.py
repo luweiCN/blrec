@@ -70,21 +70,29 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert "tags: ['vision-lab-v*.*.*']" in release
     assert 'uses: ./.github/workflows/test-vision-lab.yml' in release
     assert 'runs-on: [self-hosted, linux, x64, blrec-platform]' in release
+    assert 'name: build private Harbor image artifact' in release
+    assert 'uses: docker/build-push-action@v6' in release
+    assert 'platforms: linux/amd64' in release
+    assert 'outputs: type=docker,dest=' in release
+    assert 'uses: actions/upload-artifact@v4' in release
+    assert 'uses: actions/download-artifact@v4' in release
+    assert 'sha256sum --check blrec-vision-lab.tar.sha256' in release
     assert "remote_host='root@192.168.50.17'" in release
     assert (
         "identity_file='/opt/actions-runner/.ssh/harbor_vision_publish_ed25519'"
         in release
     )
-    assert 'blrec-vision-publish receive-context $remote_suffix' in release
-    assert 'blrec-vision-publish publish $remote_suffix $RELEASE_TAG' in release
+    assert (
+        'blrec-vision-publish publish $remote_suffix $RELEASE_TAG $image_size'
+        in release
+    )
     assert 'HARBOR_SSH_HOST_KEY: ${{ vars.HARBOR_SSH_HOST_KEY }}' in release
     assert '-o UserKnownHostsFile="$known_hosts"' in release
     assert 'timeout-minutes: 30' in release
-    assert 'docker/build-push-action' not in release
     assert 'ghcr.io/luweicn/blrec-vision-lab' not in release
     assert "readonly registry='www.luwei.space:4008'" in publisher
-    assert 'DOCKER_BUILDKIT=0 /usr/bin/docker build' in publisher
-    assert '--platform linux/amd64' in publisher
+    assert 'head -c "$image_size" | /usr/bin/docker load' in publisher
+    assert '/usr/bin/docker build' not in publisher
     assert '/usr/bin/docker push "$image:$release_tag"' in publisher
     assert "SSH_ORIGINAL_COMMAND" in publisher
     assert "fail 'action is not allowed'" in publisher

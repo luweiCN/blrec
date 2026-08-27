@@ -134,9 +134,10 @@ blrec-vision-restore --target-url-file /path/to/local-database.url --apply
 避免它在正常视频分析期间误领训练任务。
 
 Worker 可以在页面中随时暂停领取任务。打开页面不会自动在访问者电脑上执行训练
-或推理。生产镜像只由 `release-vision-lab.yml` 构建，并直接发布到私有 Harbor；
-`blrec-platform` Runner 通过受限 SSH 强制命令调用 Harbor VM 上的发布器，不能借该
-密钥执行任意远程命令。NAS 使用独立的只读凭据从 Harbor 拉取。
+或推理。生产镜像只由 `release-vision-lab.yml` 使用 Harbor 私有基础镜像构建；镜像
+artifact 带 SHA-256 且只保留一天。`blrec-platform` Runner 校验 artifact 后，通过
+受限 SSH 强制命令流式载入 Harbor，不能借该密钥执行任意远程命令。NAS 使用独立的
+只读凭据从 Harbor 拉取。
 
 ## 旧视频导入（仅源码开发模式）
 

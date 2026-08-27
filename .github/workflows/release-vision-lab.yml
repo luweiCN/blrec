@@ -69,20 +69,20 @@ jobs:
             --prerelease \
             --title "BLREC Vision Lab ${version}"
 
-  publish-image:
-    name: publish private Harbor image
+  build-image:
+    name: build private Harbor image artifact
     if: |
       always() &&
       needs.quality.result == 'success' &&
       (github.event_name == 'workflow_dispatch' || needs.release.result == 'success')
     needs: [quality, release]
-    runs-on: [self-hosted, linux, x64, blrec-platform]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
       HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
-      HARBOR_SSH_HOST_KEY: ${{ vars.HARBOR_SSH_HOST_KEY }}
+      HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -109,7 +109,72 @@ jobs:
           test -n "$package_version"
           test "$version" = "$package_version"
 
-      - name: Build and publish inside Harbor LAN
+      - name: Prepare image artifact directory
+        shell: bash
+        run: mkdir -p "$RUNNER_TEMP/vision-lab-image"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to private Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Build private Vision Lab image artifact
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/vision-lab
+          file: apps/vision-lab/Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: ${{ env.HARBOR_IMAGE }}:${{ env.RELEASE_TAG }}
+          outputs: type=docker,dest=${{ runner.temp }}/vision-lab-image/blrec-vision-lab.tar
+          cache-from: type=gha,scope=vision-lab
+          cache-to: type=gha,mode=max,scope=vision-lab
+          provenance: false
+
+      - name: Create image checksum
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/vision-lab-image"
+          sha256sum blrec-vision-lab.tar >blrec-vision-lab.tar.sha256
+
+      - name: Upload immutable image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vision-lab-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vision-lab-image/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish-image:
+    name: publish private Harbor image
+    needs: build-image
+    runs-on: [self-hosted, linux, x64, blrec-platform]
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
+      HARBOR_SSH_HOST_KEY: ${{ vars.HARBOR_SSH_HOST_KEY }}
+    steps:
+      - name: Download immutable image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vision-lab-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vision-lab-image
+
+      - name: Verify image artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/vision-lab-image"
+          sha256sum --check blrec-vision-lab.tar.sha256
+
+      - name: Publish artifact inside Harbor LAN
         shell: bash
         env:
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
@@ -118,10 +183,17 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^vision-lab-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$HARBOR_REGISTRY" = 'www.luwei.space:4008'
 
           remote_host='root@192.168.50.17'
           remote_suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           identity_file='/opt/actions-runner/.ssh/harbor_vision_publish_ed25519'
+          image_tar="$RUNNER_TEMP/vision-lab-image/blrec-vision-lab.tar"
+          image_size="$(stat --format=%s "$image_tar")"
+          [[ "$image_size" =~ ^[0-9]+$ ]]
+          test "$image_size" -gt 0
+          test "$image_size" -le 2147483648
           local_auth="$(mktemp -d "${RUNNER_TEMP}/blrec-harbor-auth.XXXXXX")"
           known_hosts="$local_auth/known_hosts"
           ssh_options=(
@@ -154,10 +226,6 @@ jobs:
           ssh "${ssh_options[@]}" "$remote_host" \
             "blrec-vision-publish prepare $remote_suffix"
 
-          git archive --format=tar HEAD:apps/vision-lab | \
-            ssh "${ssh_options[@]}" "$remote_host" \
-              "blrec-vision-publish receive-context $remote_suffix"
-
           HARBOR_CONFIG_PATH="$local_auth/config.json" python3 - <<'PY'
           import base64
           import json
@@ -185,4 +253,5 @@ jobs:
             <"$local_auth/config.json"
 
           ssh "${ssh_options[@]}" "$remote_host" \
-            "blrec-vision-publish publish $remote_suffix $RELEASE_TAG"
+            "blrec-vision-publish publish $remote_suffix $RELEASE_TAG $image_size" \
+            <"$image_tar"
