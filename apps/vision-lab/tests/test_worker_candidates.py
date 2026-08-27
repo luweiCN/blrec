@@ -33,6 +33,18 @@ class ReviewNas(FakeNas):
         self.reviews.append((image_path, review))
 
 
+class PostgreSQLBooleanAggregateGuard:
+    """模拟 PostgreSQL 拒绝 SUM(boolean)，其余语句交给 SQLite 验证。"""
+
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, sql, parameters=()):
+        if "SUM(review_status =" in sql:
+            raise RuntimeError('function sum(boolean) does not exist')
+        return self.connection.execute(sql, parameters)
+
+
 class TestWorkerCandidateSync(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -144,6 +156,27 @@ class TestWorkerCandidateSync(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]['suggested_label'], 'in_match')
         self.assertEqual(db.list_bp_review_items(self.conn), [])
+
+    def test_candidate_stats_use_postgresql_compatible_aggregates(self):
+        item = self.item()
+        item.update(
+            {
+                'schema_version': 2,
+                'task': 'screen_state',
+                'suggested_label': 'in_match',
+                'stage_class': 'gameplay',
+                'selection_reason': 'worker 粗扫代表帧',
+                'suggested_boxes': [],
+            }
+        )
+        worker_candidates.sync_worker_candidates(self.conn, self.nas, [item])
+
+        stats = db.worker_candidate_stats(PostgreSQLBooleanAggregateGuard(self.conn))
+
+        self.assertEqual(stats['total'], 1)
+        self.assertEqual(
+            stats['by_task']['screen_state'], {'total': 1, 'pending': 1, 'confirmed': 0}
+        )
 
     def test_multiple_detection_boxes_are_pushed_as_review_sidecar(self):
         nas = ReviewNas(self.image)

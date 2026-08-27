@@ -3498,8 +3498,10 @@ def worker_candidate_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         for row in conn.execute(
             """
             SELECT task, COUNT(*) AS total,
-                   SUM(review_status = 'pending') AS pending,
-                   SUM(review_status = 'confirmed') AS confirmed
+                   SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END)
+                     AS pending,
+                   SUM(CASE WHEN review_status = 'confirmed' THEN 1 ELSE 0 END)
+                     AS confirmed
             FROM worker_candidate_items GROUP BY task
             """
         ).fetchall()
