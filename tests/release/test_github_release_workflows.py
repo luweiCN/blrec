@@ -66,8 +66,13 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'python -m build' in test
     assert "tags: ['vision-lab-v*.*.*']" in release
     assert 'uses: ./.github/workflows/test-vision-lab.yml' in release
-    assert '${{ env.HARBOR_IMAGE }}:${{ env.RELEASE_TAG }}' in release
-    assert 'docker/build-push-action@v6' in release
+    assert 'runs-on: [self-hosted, linux, x64, blrec-platform]' in release
+    assert "remote_host='root@192.168.50.17'" in release
+    assert 'DOCKER_BUILDKIT=1 /usr/bin/docker build' in release
+    assert '--platform linux/amd64' in release
+    assert '/usr/bin/docker push "$image:$release_tag"' in release
+    assert 'timeout-minutes: 30' in release
+    assert 'docker/build-push-action' not in release
     assert 'ghcr.io/luweicn/blrec-vision-lab' not in release
 
 

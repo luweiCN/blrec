@@ -76,14 +76,14 @@ jobs:
       needs.quality.result == 'success' &&
       (github.event_name == 'workflow_dispatch' || needs.release.result == 'success')
     needs: [quality, release]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, blrec-platform]
+    timeout-minutes: 30
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
+      HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
       HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
-    defaults:
-      run:
-        working-directory: apps/vision-lab
+      PYTHON_BASE_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/python-base:3.12-slim-bookworm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -93,6 +93,11 @@ jobs:
       - name: Validate version
         shell: bash
         run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^vision-lab-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$HARBOR_REGISTRY" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]
+          [[ "$HARBOR_IMAGE" =~ ^[A-Za-z0-9./:_-]+$ ]]
+          [[ "$PYTHON_BASE_IMAGE" =~ ^[A-Za-z0-9./:_-]+$ ]]
           version="${RELEASE_TAG#vision-lab-v}"
           package_version="$(awk '
             $0 == "[project]" { project = 1; next }
@@ -103,32 +108,98 @@ jobs:
               print
               exit
             }
-          ' pyproject.toml)"
+          ' apps/vision-lab/pyproject.toml)"
           test -n "$package_version"
           test "$version" = "$package_version"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Build and publish inside Harbor LAN
+        shell: bash
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          remote_host='root@192.168.50.17'
+          remote_suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_context="/tmp/blrec-vision-build-${remote_suffix}"
+          remote_auth="/tmp/blrec-harbor-auth-${remote_suffix}"
+          local_auth="$(mktemp -d "${RUNNER_TEMP}/blrec-harbor-auth.XXXXXX")"
+          ssh_options=(
+            -o BatchMode=yes
+            -o ConnectTimeout=8
+            -o StrictHostKeyChecking=yes
+          )
 
-      - name: Log in to private Harbor
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ vars.HARBOR_REGISTRY }}
-          username: ${{ secrets.HARBOR_USERNAME }}
-          password: ${{ secrets.HARBOR_PASSWORD }}
+          cleanup() {
+            ssh "${ssh_options[@]}" "$remote_host" \
+              "rm -rf -- '$remote_context' '$remote_auth'" || true
+            rm -rf -- "$local_auth"
+          }
+          trap cleanup EXIT
 
-      - name: Build and publish Vision Lab image
-        uses: docker/build-push-action@v6
-        with:
-          context: apps/vision-lab
-          file: apps/vision-lab/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.HARBOR_IMAGE }}:${{ env.RELEASE_TAG }}
-            ${{ env.HARBOR_IMAGE }}:latest
-          cache-from: type=gha,scope=vision-lab
-          cache-to: type=gha,mode=max,scope=vision-lab
+          ssh "${ssh_options[@]}" "$remote_host" \
+            "install -d -m 700 '$remote_context' '$remote_auth'"
+
+          git archive --format=tar HEAD:apps/vision-lab | \
+            ssh "${ssh_options[@]}" "$remote_host" \
+              "tar -xf - -C '$remote_context'"
+
+          HARBOR_CONFIG_PATH="$local_auth/config.json" python3 - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+
+          registry = os.environ['HARBOR_REGISTRY']
+          credentials = (
+              f"{os.environ['HARBOR_USERNAME']}:"
+              f"{os.environ['HARBOR_PASSWORD']}"
+          ).encode()
+          config = {
+              'auths': {
+                  registry: {
+                      'auth': base64.b64encode(credentials).decode(),
+                  },
+              },
+          }
+          path = Path(os.environ['HARBOR_CONFIG_PATH'])
+          path.write_text(json.dumps(config), encoding='utf8')
+          path.chmod(0o600)
+          PY
+          scp "${ssh_options[@]}" "$local_auth/config.json" \
+            "$remote_host:$remote_auth/config.json"
+
+          ssh "${ssh_options[@]}" "$remote_host" \
+            "bash -s -- '$remote_context' '$remote_auth' '$HARBOR_IMAGE' '$RELEASE_TAG' '$PYTHON_BASE_IMAGE'" <<'REMOTE'
+          set -euo pipefail
+          context=$1
+          auth=$2
+          image=$3
+          release_tag=$4
+          base_image=$5
+          export DOCKER_CONFIG="$auth"
+
+          /usr/bin/docker pull --platform linux/amd64 "$base_image"
+
+          cache_args=()
+          if /usr/bin/docker image inspect "$image:$release_tag" >/dev/null 2>&1; then
+            cache_args=(--cache-from "$image:$release_tag")
+          fi
+
+          DOCKER_BUILDKIT=1 /usr/bin/docker build \
+            --platform linux/amd64 \
+            --pull=false \
+            --build-arg "PYTHON_BASE_IMAGE=$base_image" \
+            "${cache_args[@]}" \
+            --tag "$image:$release_tag" \
+            --file "$context/Dockerfile" \
+            "$context"
+          /usr/bin/docker tag "$image:$release_tag" "$image:latest"
+          /usr/bin/docker push "$image:$release_tag"
+          /usr/bin/docker push "$image:latest"
+
+          test "$(/usr/bin/docker image inspect --format '{{.Architecture}}' "$image:$release_tag")" = amd64
+          REMOTE
