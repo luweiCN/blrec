@@ -2498,11 +2498,10 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
             'result_quality': {},
             'hero_lineup': None,
         }
+        item['review'] = review
 
         worker_candidates.sync_worker_candidates(self.conn, nas, [item])
-        pulled = worker_candidates.pull_training_review_reviews(self.conn, [review])
 
-        self.assertEqual(pulled['reviews_pulled'], 1)
         confirmed = db.list_training_review_items(self.conn, status='partial')[0]
         self.assertEqual(confirmed['match_mode_label'], '3v3')
         self.assertIn('manual_correction', confirmed['source_categories'])

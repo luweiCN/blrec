@@ -5,6 +5,7 @@ import json
 import threading
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import pytest
 
@@ -2427,12 +2428,26 @@ async def test_manual_match_correction_creates_training_candidate(
         video.write_bytes(b'video')
         await seed_session(database, video)
         candidate_root = tmp_path / 'candidates'
+        ingested_candidates: list[Mapping[str, Any]] = []
+
+        async def ingest(candidates: Sequence[Mapping[str, Any]]) -> None:
+            ingested_candidates.extend(candidates)
+
         repository = VaingloryRepository(
-            database, training_candidate_root=candidate_root, clock=lambda: 100
+            database,
+            training_candidate_root=candidate_root,
+            candidate_ingest=ingest,
+            clock=lambda: 100,
         )
         assert await repository.claim_next() is not None
         await repository.complete_part(1, (analyzed_match(),))
+        ingested_candidates.clear()
         before = (await repository.list_matches()).items[0]
+        revision_before = int(
+            await database.scalar(
+                'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+            )
+        )
         after = await repository.update_match_fields(before.id, {'game_mode': 'aram'})
 
         written = await repository.record_manual_correction_candidate(
@@ -2462,6 +2477,15 @@ async def test_manual_match_correction_creates_training_candidate(
         assert review['labels']['match_mode_label'] == 'aram'
         image = candidate_root / metadata['image_path']
         assert image.read_bytes() == analyzed_match().result_frame_png
+        assert ingested_candidates == [metadata]
+        assert (
+            int(
+                await database.scalar(
+                    'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+                )
+            )
+            > revision_before
+        )
     finally:
         await database.close()
 

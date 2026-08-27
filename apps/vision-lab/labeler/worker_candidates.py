@@ -374,6 +374,11 @@ def sync_worker_candidates(
                     source_created_at=_created_at(item),
                     stage_for_prefill=source_type == 'worker',
                 )
+                manual_review = item.get('review')
+                if source_type == 'manual_correction' and isinstance(
+                    manual_review, Mapping
+                ):
+                    pull_training_review_reviews(conn, (manual_review,))
                 known_sources.add((source_type, item['source_id']))
                 result['inserted' if was_inserted else 'updated'] += 1
                 task_counts = result['by_task'].setdefault(

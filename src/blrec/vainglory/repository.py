@@ -6190,6 +6190,7 @@ class VaingloryRepository:
                 'reviewed_at': str(created_at),
                 'reviewer': 'blrec_admin_manual_correction',
             }
+            metadata['review'] = review
 
             def write() -> None:
                 self._write_training_candidate(
@@ -6213,6 +6214,17 @@ class VaingloryRepository:
                 )
 
             await asyncio.get_running_loop().run_in_executor(None, write)
+            if self._candidate_ingest is not None:
+                try:
+                    await self._candidate_ingest((metadata,))
+                except (OSError, RuntimeError, ValueError) as error:
+                    logger.warning(
+                        'Vainglory manual correction candidate immediate ingest '
+                        'failed; persisted candidate remains available for retry: '
+                        'match_id={} error={!r}',
+                        after.id,
+                        error,
+                    )
             return True
         except (OSError, ValueError) as error:
             logger.warning(
