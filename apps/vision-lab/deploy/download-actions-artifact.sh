@@ -77,24 +77,28 @@ curl --fail --silent --show-error \
   --header 'accept: application/dns-json' \
   --output "$dns_json" \
   "https://cloudflare-dns.com/dns-query?name=${artifact_host}&type=A"
-artifact_ip=$(python3 - "$dns_json" <<'PY'
+mapfile -t artifact_ips < <(python3 - "$dns_json" <<'PY'
 import ipaddress
 import json
 import sys
 
 with open(sys.argv[1], encoding='utf8') as stream:
     response = json.load(stream)
+seen = set()
 for answer in response.get('Answer', []):
     if answer.get('type') != 1:
         continue
     try:
-        print(ipaddress.IPv4Address(answer.get('data', '')))
-        break
+        address = str(ipaddress.IPv4Address(answer.get('data', '')))
     except ipaddress.AddressValueError:
         continue
+    if address not in seen:
+        seen.add(address)
+        print(address)
 PY
 )
-test -n "$artifact_ip" || fail 'could not resolve artifact host directly'
+test "${#artifact_ips[@]}" -gt 0 || fail 'could not resolve artifact host directly'
+artifact_ip=${artifact_ips[0]}
 
 probe_headers="$work_dir/probe.headers"
 probe_config="$work_dir/probe.curl"
@@ -128,20 +132,31 @@ for ((index = 0; index < part_count; index++)); do
   expected_size=$((end - start + 1))
   part=$(printf '%s/part-%03d' "$work_dir" "$index")
   part_config="${part}.curl"
-  {
-    printf 'silent\nshow-error\nfail\nlocation\n'
-    printf 'connect-timeout = 15\nmax-time = 1800\n'
-    printf 'retry = 8\nretry-all-errors\n'
-    printf 'resolve = "%s:443:%s"\n' "$artifact_host" "$artifact_ip"
-    printf 'range = "%s-%s"\n' "$start" "$end"
-    printf 'output = "%s"\n' "$part"
-    printf 'url = "%s"\n' "$signed_url"
-  } >"$part_config"
-  chmod 600 "$part_config"
   (
-    code=$(curl --config "$part_config" --write-out '%{http_code}')
-    test "$code" = 206
-    test "$(stat --format=%s "$part")" -eq "$expected_size"
+    success=0
+    for ((attempt = 0; attempt < 8; attempt++)); do
+      ip_index=$(((index + attempt) % ${#artifact_ips[@]}))
+      part_ip=${artifact_ips[$ip_index]}
+      {
+        printf 'silent\nshow-error\nfail\nlocation\n'
+        printf 'connect-timeout = 15\nmax-time = 600\n'
+        printf 'speed-limit = 32768\nspeed-time = 30\n'
+        printf 'resolve = "%s:443:%s"\n' "$artifact_host" "$part_ip"
+        printf 'range = "%s-%s"\n' "$start" "$end"
+        printf 'output = "%s"\n' "$part"
+        printf 'url = "%s"\n' "$signed_url"
+      } >"$part_config"
+      chmod 600 "$part_config"
+      : >"$part"
+      if code=$(curl --config "$part_config" --write-out '%{http_code}') && \
+        test "$code" = 206 && \
+        test "$(stat --format=%s "$part")" -eq "$expected_size"; then
+        success=1
+        break
+      fi
+      sleep $((attempt + 1))
+    done
+    test "$success" -eq 1
   ) &
   pids+=("$!")
 done

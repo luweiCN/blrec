@@ -105,6 +105,8 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'resolve = "%s:443:%s"' in downloader
     assert 'range = "%s-%s"' in downloader
     assert 'parallelism=${3:-16}' in downloader
+    assert 'speed-limit = 32768' in downloader
+    assert 'artifact_ips' in downloader
     assert 'zipfile.ZipFile' in downloader
     assert 'artifact contains an unsafe path' in downloader
 

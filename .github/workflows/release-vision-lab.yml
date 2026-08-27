@@ -183,7 +183,7 @@ jobs:
           apps/vision-lab/deploy/download-actions-artifact.sh \
             "$IMAGE_ARTIFACT_ID" \
             "$RUNNER_TEMP/vision-lab-image" \
-            16
+            32
 
       - name: Verify image artifact
         shell: bash
