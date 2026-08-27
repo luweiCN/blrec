@@ -101,7 +101,8 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert '/usr/bin/docker push "$image:$release_tag"' in publisher
     assert "SSH_ORIGINAL_COMMAND" in publisher
     assert "fail 'action is not allowed'" in publisher
-    assert 'cloudflare-dns.com:443:1.1.1.1' in downloader
+    assert 'https://cloudflare-dns.com/dns-query' in downloader
+    assert 'resolve = "%s:443:%s"' in downloader
     assert 'range = "%s-%s"' in downloader
     assert 'parallelism=${3:-16}' in downloader
     assert 'zipfile.ZipFile' in downloader

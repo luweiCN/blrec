@@ -70,7 +70,10 @@ print(urllib.parse.urlsplit(sys.stdin.read()).hostname or "")
 
 dns_json="$work_dir/dns.json"
 curl --fail --silent --show-error \
-  --resolve cloudflare-dns.com:443:1.1.1.1 \
+  --connect-timeout 10 \
+  --max-time 30 \
+  --retry 3 \
+  --retry-all-errors \
   --header 'accept: application/dns-json' \
   --output "$dns_json" \
   "https://cloudflare-dns.com/dns-query?name=${artifact_host}&type=A"
