@@ -77,6 +77,7 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'uses: actions/upload-artifact@v4' in release
     assert 'uses: actions/download-artifact@v4' in release
     assert 'sha256sum --check blrec-vision-lab.tar.sha256' in release
+    assert "if: always() && needs.build-image.result == 'success'" in release
     assert "remote_host='root@192.168.50.17'" in release
     assert (
         "identity_file='/opt/actions-runner/.ssh/harbor_vision_publish_ed25519'"

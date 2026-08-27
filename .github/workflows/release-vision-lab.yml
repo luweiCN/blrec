@@ -153,6 +153,7 @@ jobs:
 
   publish-image:
     name: publish private Harbor image
+    if: always() && needs.build-image.result == 'success'
     needs: build-image
     runs-on: [self-hosted, linux, x64, blrec-platform]
     timeout-minutes: 30
