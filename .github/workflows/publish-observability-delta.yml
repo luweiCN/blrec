@@ -1,0 +1,63 @@
+name: Publish BLREC Server observability delta
+
+on:
+  push:
+    tags: ['server-observability-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/luweicn/blrec-server
+      IMAGE_TAG: 3.0.0-beta.141-observability.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push observability delta image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/blrec-server/Dockerfile.observability-delta
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=3.0.0-beta.141
+            REVISION=${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=blrec-server-observability-delta
+          cache-to: type=gha,mode=max,scope=blrec-server-observability-delta
+
+      - name: Verify manifest platforms
+        shell: bash
+        run: |
+          docker buildx imagetools inspect --raw "$IMAGE:$IMAGE_TAG" > manifest.json
+          python - <<'PY'
+          import json
+          manifest = json.load(open('manifest.json', encoding='utf8'))
+          platforms = {
+              (item.get('platform') or {}).get('os', '') + '/' +
+              (item.get('platform') or {}).get('architecture', '')
+              for item in manifest.get('manifests', [])
+          }
+          assert {'linux/amd64', 'linux/arm64'} <= platforms, platforms
+          PY
