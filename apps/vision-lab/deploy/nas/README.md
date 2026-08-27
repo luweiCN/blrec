@@ -22,6 +22,7 @@ Worker 本机，直接连接本机 PostgreSQL。普通标注 API 不经过 NAS�
 
 ```dotenv
 VISION_LAB_WORKER_TOKEN=独立随机令牌
+VISION_LAB_IMAGE_REPOSITORY=私有 Harbor 项目中的镜像仓库
 VISION_LAB_IMAGE_TAG=vision-lab-v0.3.58
 VISION_LAB_DATABASE_URL=postgresql://vision:密码@127.0.0.1:15434/blrec_vision
 VISION_LAB_DATABASE_SCHEMA=vision_lab

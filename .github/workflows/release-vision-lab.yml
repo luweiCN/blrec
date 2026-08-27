@@ -3,6 +3,12 @@ name: Publish Vision Lab release
 on:
   push:
     tags: ['vision-lab-v*.*.*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Vision Lab tag to publish to Harbor
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,6 +21,9 @@ jobs:
   publish:
     needs: quality
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
     permissions:
       contents: write
       packages: write
@@ -24,6 +33,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,7 +44,7 @@ jobs:
       - name: Validate version
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#vision-lab-v}"
+          version="${RELEASE_TAG#vision-lab-v}"
           package_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           test "$version" = "$package_version"
 
@@ -47,13 +58,22 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
       - name: Publish Vision Lab image
+        if: github.event_name == 'push'
         uses: docker/build-push-action@v6
         with:
           context: apps/vision-lab
@@ -63,15 +83,30 @@ jobs:
           tags: |
             ghcr.io/luweicn/blrec-vision-lab:${{ github.ref_name }}
             ghcr.io/luweicn/blrec-vision-lab:latest
+            ${{ env.HARBOR_IMAGE }}:${{ env.RELEASE_TAG }}
+            ${{ env.HARBOR_IMAGE }}:latest
+
+      - name: Backfill Vision Lab image to Harbor
+        if: github.event_name == 'workflow_dispatch'
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/vision-lab
+          file: apps/vision-lab/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.HARBOR_IMAGE }}:${{ env.RELEASE_TAG }}
+            ${{ env.HARBOR_IMAGE }}:latest
 
       - name: Create Vision Lab release
+        if: github.event_name == 'push'
         working-directory: .
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#vision-lab-v}"
-          gh release create "$GITHUB_REF_NAME" \
+          version="${RELEASE_TAG#vision-lab-v}"
+          gh release create "$RELEASE_TAG" \
             apps/vision-lab/dist/* \
             apps/vision-lab/deploy/macos/*.plist \
             --verify-tag \
