@@ -134,7 +134,8 @@ blrec-vision-restore --target-url-file /path/to/local-database.url --apply
 避免它在正常视频分析期间误领训练任务。
 
 Worker 可以在页面中随时暂停领取任务。打开页面不会自动在访问者电脑上执行训练
-或推理。生产镜像只由 `release-vision-lab.yml` 构建，NAS 直接从 GHCR 拉取。
+或推理。生产镜像只由 `release-vision-lab.yml` 构建，并直接发布到私有 Harbor；
+NAS 使用只读凭据从 Harbor 拉取。
 
 ## 旧视频导入（仅源码开发模式）
 

@@ -66,6 +66,9 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'python -m build' in test
     assert "tags: ['vision-lab-v*.*.*']" in release
     assert 'uses: ./.github/workflows/test-vision-lab.yml' in release
+    assert '${{ env.HARBOR_IMAGE }}:${{ env.RELEASE_TAG }}' in release
+    assert 'docker/build-push-action@v6' in release
+    assert 'ghcr.io/luweicn/blrec-vision-lab' not in release
 
 
 def test_legacy_automatic_publishers_cannot_run_for_tag() -> None:

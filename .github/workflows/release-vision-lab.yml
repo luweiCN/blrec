@@ -17,13 +17,12 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   quality:
     uses: ./.github/workflows/test-vision-lab.yml
 
-  publish:
+  release:
     if: github.event_name == 'push'
     needs: quality
     runs-on: ubuntu-latest
@@ -31,7 +30,6 @@ jobs:
       RELEASE_TAG: ${{ github.ref_name }}
     permissions:
       contents: write
-      packages: write
     defaults:
       run:
         working-directory: apps/vision-lab
@@ -56,37 +54,6 @@ jobs:
       - name: Build
         run: python -m pip install build && python -m build
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to Harbor for base images
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ vars.HARBOR_REGISTRY }}
-          username: ${{ secrets.HARBOR_USERNAME }}
-          password: ${{ secrets.HARBOR_PASSWORD }}
-
-      - name: Publish Vision Lab image
-        uses: docker/build-push-action@v6
-        with:
-          context: apps/vision-lab
-          file: apps/vision-lab/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/luweicn/blrec-vision-lab:${{ github.ref_name }}
-            ghcr.io/luweicn/blrec-vision-lab:latest
-
       - name: Create Vision Lab release
         working-directory: .
         env:
@@ -102,21 +69,17 @@ jobs:
             --prerelease \
             --title "BLREC Vision Lab ${version}"
 
-  publish-harbor:
-    name: prepare Harbor image
+  publish-image:
+    name: publish private Harbor image
     if: |
       always() &&
       needs.quality.result == 'success' &&
-      (github.event_name == 'workflow_dispatch' || needs.publish.result == 'success')
-    needs: [quality, publish]
+      (github.event_name == 'workflow_dispatch' || needs.release.result == 'success')
+    needs: [quality, release]
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
-      GHCR_IMAGE: ghcr.io/luweicn/blrec-vision-lab
       HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
     defaults:
       run:
@@ -144,119 +107,28 @@ jobs:
           test -n "$package_version"
           test "$version" = "$package_version"
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22.6'
-          cache: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Build Skopeo
-        shell: bash
-        run: |
-          CGO_ENABLED=0 go install \
-            -tags 'exclude_graphdriver_btrfs containers_image_openpgp' \
-            github.com/containers/skopeo/cmd/skopeo@v1.17.0
-          "$(go env GOPATH)/bin/skopeo" copy --help \
-            | grep -q -- '--image-parallel-copies'
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to private Harbor
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ vars.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
 
-      - name: Export Harbor image artifact
-        id: export
-        shell: bash
-        run: |
-          auth_file="$HOME/.docker/config.json"
-          archive_path="$RUNNER_TEMP/blrec-vision-lab-${RELEASE_TAG}-amd64.tar"
-          skopeo_bin="$(go env GOPATH)/bin/skopeo"
-          test -s "$auth_file"
-          test -x "$skopeo_bin"
-          "$skopeo_bin" --override-os linux --override-arch amd64 copy \
-            --src-authfile "$auth_file" \
-            --image-parallel-copies 1 \
-            --retry-times 10 \
-            --format v2s2 \
-            "docker://${GHCR_IMAGE}:${RELEASE_TAG}" \
-            "docker-archive:${archive_path}:${HARBOR_IMAGE}:${RELEASE_TAG}"
-          test -s "$archive_path"
-          printf 'archive_path=%s\n' "$archive_path" >> "$GITHUB_OUTPUT"
-
-      - name: Upload Harbor image artifact
-        uses: actions/upload-artifact@v4
+      - name: Build and publish Vision Lab image
+        uses: docker/build-push-action@v6
         with:
-          name: vision-lab-harbor-amd64-${{ env.RELEASE_TAG }}
-          path: ${{ steps.export.outputs.archive_path }}
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 1
-
-  import-harbor:
-    name: publish Harbor image
-    if: always() && needs.publish-harbor.result == 'success'
-    needs: publish-harbor
-    runs-on: [self-hosted, blrec-platform]
-    permissions:
-      actions: read
-      contents: read
-    env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-      HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
-      HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
-    steps:
-      - name: Download Harbor image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: vision-lab-harbor-amd64-${{ env.RELEASE_TAG }}
-          path: ${{ runner.temp }}/blrec-vision-harbor-${{ github.run_id }}
-
-      - name: Import and publish on Harbor host
-        shell: bash
-        env:
-          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
-          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
-          RELAY_DIR: ${{ runner.temp }}/blrec-vision-harbor-${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          case "$GITHUB_RUN_ID" in
-            ''|*[!0-9]*) exit 2 ;;
-          esac
-          remote_host=root@192.168.50.17
-          remote_archive="/tmp/blrec-vision-lab-${GITHUB_RUN_ID}.tar"
-          remote_auth="/tmp/blrec-harbor-auth-${GITHUB_RUN_ID}"
-          local_archive="$RELAY_DIR/blrec-vision-lab-${RELEASE_TAG}-amd64.tar"
-          ssh_options=(
-            -o BatchMode=yes
-            -o ConnectTimeout=8
-            -o StrictHostKeyChecking=yes
-          )
-          cleanup() {
-            rm -f "$local_archive"
-            rmdir "$RELAY_DIR" 2>/dev/null || true
-            ssh "${ssh_options[@]}" "$remote_host" \
-              "rm -f '$remote_archive'; rm -rf '$remote_auth'" || true
-          }
-          trap cleanup EXIT
-          test -s "$local_archive"
-          ssh "${ssh_options[@]}" "$remote_host" \
-            "rm -f '$remote_archive'; rm -rf '$remote_auth'; mkdir -m 700 '$remote_auth'"
-          scp "${ssh_options[@]}" "$local_archive" \
-            "$remote_host:$remote_archive"
-          printf '%s\n' "$HARBOR_PASSWORD" | \
-            ssh "${ssh_options[@]}" "$remote_host" \
-              "DOCKER_CONFIG='$remote_auth' /usr/bin/docker login \
-                --username '$HARBOR_USERNAME' --password-stdin '$HARBOR_REGISTRY'"
-          ssh "${ssh_options[@]}" "$remote_host" \
-            "set -eu; \
-             /usr/bin/docker load --input '$remote_archive'; \
-             test \"\$(/usr/bin/docker image inspect '$HARBOR_IMAGE:$RELEASE_TAG' \
-               --format '{{.Architecture}}')\" = amd64; \
-             DOCKER_CONFIG='$remote_auth' /usr/bin/docker push \
-               '$HARBOR_IMAGE:$RELEASE_TAG'; \
-             /usr/bin/docker tag '$HARBOR_IMAGE:$RELEASE_TAG' \
-               '$HARBOR_IMAGE:latest'; \
-             DOCKER_CONFIG='$remote_auth' /usr/bin/docker push \
-               '$HARBOR_IMAGE:latest'"
+          context: apps/vision-lab
+          file: apps/vision-lab/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.HARBOR_IMAGE }}:${{ env.RELEASE_TAG }}
+            ${{ env.HARBOR_IMAGE }}:latest
+          cache-from: type=gha,scope=vision-lab
+          cache-to: type=gha,mode=max,scope=vision-lab

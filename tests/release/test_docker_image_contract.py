@@ -71,3 +71,13 @@ def test_smoke_script_uses_ephemeral_credentials_and_cleans_up() -> None:
     assert 'trap cleanup EXIT' in script
     assert 'BLREC_CREDENTIAL_KEY_FILE=/cfg/credential.key' in script
     assert '/api/v1/auth/status' in script
+
+
+def test_vision_lab_healthcheck_allows_slow_synology_python_startup() -> None:
+    dockerfile = (ROOT / 'apps/vision-lab/Dockerfile').read_text(encoding='utf8')
+    compose = (ROOT / 'apps/vision-lab/deploy/nas/compose.yml').read_text(
+        encoding='utf8'
+    )
+
+    assert 'HEALTHCHECK --interval=30s --timeout=45s' in dockerfile
+    assert 'timeout: 45s' in compose
