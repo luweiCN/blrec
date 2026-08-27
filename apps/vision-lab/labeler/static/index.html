@@ -674,8 +674,16 @@
         </section>
         <div id="candidate-material-list" class="candidate-material-list"></div>
       </dialog>
-      <div id="candidate-layout">
+      <div id="candidate-layout" aria-busy="false">
         <div id="candidate-stage">
+          <div id="candidate-item-loading" class="candidate-item-loading hidden"
+               role="status" aria-live="polite">
+            <span class="candidate-item-loading-spinner" aria-hidden="true"></span>
+            <div>
+              <strong id="candidate-item-loading-title">正在加载当前图片和预填内容…</strong>
+              <span id="candidate-item-loading-detail">图片、页面类型和英雄头像框就绪后才会显示</span>
+            </div>
+          </div>
           <div id="candidate-model-banner" class="candidate-model-banner">
             <div class="candidate-model-title">模型建议</div>
             <div id="candidate-suggestion"></div>
@@ -760,6 +768,11 @@
             <span id="candidate-progress" class="muted"
                   role="status" aria-live="polite">0/0</span>
             <button id="btn-candidate-next">→</button>
+          </div>
+          <div id="candidate-inspector-loading"
+               class="candidate-inspector-loading hidden" aria-hidden="true">
+            <span class="candidate-item-loading-spinner" aria-hidden="true"></span>
+            <span id="candidate-inspector-loading-text">正在加载本图的页面类型和模型预填…</span>
           </div>
           <div id="candidate-meta" class="muted small"></div>
           <div id="candidate-hero-filter-reasons"

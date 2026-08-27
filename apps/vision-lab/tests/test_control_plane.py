@@ -154,7 +154,9 @@ def test_control_plane_uses_automatic_candidate_index_ui() -> None:
     assert 'signal: controller.signal' in script
     assert "afk_prediction: $('#candidate-afk-prediction-filter').value" in script
     assert '挂机概率 ${afkPrediction.textContent}' in script
-    assert "identityConfidence.className = 'candidate-hero-identity-confidence'" in script
+    assert (
+        "identityConfidence.className = 'candidate-hero-identity-confidence'" in script
+    )
     assert '英雄识别置信度 ${identityConfidence.textContent}' in script
 
     style = (
@@ -208,6 +210,75 @@ def test_candidate_review_prefetches_ahead_and_reduces_state_polling() -> None:
     assert 'signal: entry.controller.signal' in script
     assert "api('/api/worker-candidates/state')" not in script
     assert 'setInterval(refreshCandidateIndexState, 30000)' not in script
+
+
+def test_candidate_transition_hides_stale_content_until_current_item_ready() -> None:
+    root = Path(__file__).resolve().parent.parent / 'labeler/static'
+    html = (root / 'index.html').read_text(encoding='utf-8')
+    script = (root / 'app.js').read_text(encoding='utf-8')
+    style = (root / 'style.css').read_text(encoding='utf-8')
+
+    assert 'id="candidate-item-loading"' in html
+    assert 'id="candidate-inspector-loading"' in html
+    assert '正在加载当前图片和预填内容' in html
+    assert (
+        'role="status" aria-live="polite"'
+        in html[
+            html.index('id="candidate-item-loading"') : html.index(
+                'id="candidate-item-loading"'
+            )
+            + 300
+        ]
+    )
+    assert '.candidate-item-loading {' in style
+    assert '.candidate-inspector-loading {' in style
+    assert 'let candidateItemLoadToken = 0;' in script
+
+    begin = script[
+        script.index('function beginCandidateItemLoading(') : script.index(
+            'function candidateItemLoadIsCurrent('
+        )
+    ]
+    hide_image = begin.index("image.classList.add('hidden');")
+    clear_image = begin.index("image.removeAttribute('src');")
+    clear_draft = begin.index('candidateDraft = null;')
+    clear_heroes = begin.index('resetCandidateHeroReview();')
+    assert hide_image < clear_image
+    assert clear_image < clear_draft < clear_heroes
+    assert "stage.classList.add('candidate-item-is-loading');" in begin
+    assert "inspector.classList.add('candidate-item-is-loading');" in begin
+    assert "const inspectorLoading = $('#candidate-inspector-loading');" in begin
+    assert "inspectorLoading.classList.remove('hidden', 'error');" in begin
+    assert "layout.setAttribute('aria-busy', 'true');" in begin
+
+    loader = script[
+        script.index('async function completeCandidateItemLoading(') : script.index(
+            'function renderCandidateItem()'
+        )
+    ]
+    start_heroes = loader.index('const heroReady = loadCandidateHeroLineup(item);')
+    decode = loader.index('await image.decode();')
+    current_after_decode = loader.index(
+        'if (!candidateItemLoadIsCurrent(item, token)) return;', decode
+    )
+    heroes = loader.index('await heroReady;')
+    current_before_ready = loader.index(
+        'if (!candidateItemLoadIsCurrent(item, token)) return;', heroes
+    )
+    ready = loader.index('finishCandidateItemLoading(item, token);')
+    assert start_heroes < decode < current_after_decode < heroes
+    assert heroes < current_before_ready < ready
+    assert 'failCandidateItemLoading(item, token, error);' in loader
+
+    render = script[
+        script.index('function renderCandidateItem()') : script.index(
+            'function renderCandidateHeroFilterReasons('
+        )
+    ]
+    begin_loading = render.index('const token = beginCandidateItemLoading(item);')
+    next_image = render.index('image.src = prefetchedImage', begin_loading)
+    finish_loading = render.index('void completeCandidateItemLoading(item, token);')
+    assert begin_loading < next_image < finish_loading
 
 
 def test_candidate_hud_prefill_shows_progress_and_preserves_manual_edits() -> None:

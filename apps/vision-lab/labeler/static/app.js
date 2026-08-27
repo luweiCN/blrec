@@ -78,6 +78,7 @@ let candidateReviewRefillPromise = null;
 let candidatePreparationRunnerPromise = null;
 let candidateReviewLoadToken = 0;
 let candidateReviewAbortController = null;
+let candidateItemLoadToken = 0;
 let modelTestRuns = [];
 let modelTestSamples = [];
 let modelTestIndex = 0;
@@ -3583,6 +3584,103 @@ async function prefetchNextCandidate() {
   if (upcoming.length) ensureCandidateReviewWarm();
 }
 
+function beginCandidateItemLoading(item) {
+  const token = ++candidateItemLoadToken;
+  const layout = $('#candidate-layout');
+  const stage = $('#candidate-stage');
+  const inspector = $('#candidate-inspector');
+  const image = $('#candidate-image');
+  stage.scrollTop = 0;
+  inspector.scrollTop = 0;
+  layout.setAttribute('aria-busy', 'true');
+  stage.classList.add('candidate-item-is-loading');
+  inspector.classList.add('candidate-item-is-loading');
+  const stageLoading = $('#candidate-item-loading');
+  stageLoading.classList.remove('hidden', 'error');
+  $('#candidate-item-loading-title').textContent =
+    '正在加载当前图片和预填内容…';
+  $('#candidate-item-loading-detail').textContent =
+    '图片、页面类型和英雄头像框就绪后才会显示';
+  const inspectorLoading = $('#candidate-inspector-loading');
+  inspectorLoading.classList.remove('hidden', 'error');
+  $('#candidate-inspector-loading-text').textContent =
+    '正在加载本图的页面类型和模型预填…';
+  image.onload = null;
+  image.onerror = null;
+  image.classList.add('hidden');
+  image.removeAttribute('src');
+  delete image.dataset.frameId;
+  candidateDraft = null;
+  candidateBoxes = [];
+  resetCandidateHeroReview();
+  candidateHeroTeamSizeExplicit = false;
+  candidateHeroTeamSizeOverride = null;
+  candidateFormTouched = false;
+  candidateHeroContextTouched = false;
+  $('#candidate-empty').classList.add('hidden');
+  $('#candidate-image-wrap').classList.remove('hidden');
+  $('#candidate-save-state').classList.remove('error');
+  $('#candidate-save-state').textContent = '正在加载当前图片和预填内容…';
+  $('#btn-candidate-save').disabled = true;
+  $('#btn-candidate-skip').disabled = true;
+  return token;
+}
+
+function candidateItemLoadIsCurrent(item, token) {
+  return token === candidateItemLoadToken && currentCandidate() === item;
+}
+
+function finishCandidateItemLoading(item, token) {
+  if (!candidateItemLoadIsCurrent(item, token)) return;
+  $('#candidate-layout').setAttribute('aria-busy', 'false');
+  $('#candidate-stage').classList.remove('candidate-item-is-loading');
+  $('#candidate-inspector').classList.remove('candidate-item-is-loading');
+  $('#candidate-item-loading').classList.add('hidden');
+  $('#candidate-inspector-loading').classList.add('hidden');
+  $('#candidate-image').classList.remove('hidden');
+  $('#btn-candidate-save').disabled = candidateHeroLoading;
+}
+
+function failCandidateItemLoading(item, token, error) {
+  if (!candidateItemLoadIsCurrent(item, token)) return;
+  const message = error instanceof Error ? error.message : String(error);
+  $('#candidate-layout').setAttribute('aria-busy', 'false');
+  const stageLoading = $('#candidate-item-loading');
+  stageLoading.classList.add('error');
+  $('#candidate-item-loading-title').textContent = '当前条目加载失败';
+  $('#candidate-item-loading-detail').textContent = message;
+  const inspectorLoading = $('#candidate-inspector-loading');
+  inspectorLoading.classList.add('error');
+  $('#candidate-inspector-loading-text').textContent =
+    `图片或预填加载失败：${message}`;
+  $('#candidate-save-state').classList.add('error');
+  $('#candidate-save-state').textContent = `加载失败：${message}`;
+  $('#btn-candidate-save').disabled = true;
+  $('#btn-candidate-skip').disabled = true;
+}
+
+async function completeCandidateItemLoading(item, token) {
+  const image = $('#candidate-image');
+  const heroReady = loadCandidateHeroLineup(item);
+  try {
+    try {
+      await image.decode();
+    } catch (_error) {
+      if (!image.complete || !image.naturalWidth) {
+        throw new Error('图片解码失败');
+      }
+    }
+    if (!candidateItemLoadIsCurrent(item, token)) return;
+    await heroReady;
+    if (!candidateItemLoadIsCurrent(item, token)) return;
+    finishCandidateItemLoading(item, token);
+    renderCandidateBoxes();
+  } catch (error) {
+    if (!candidateItemLoadIsCurrent(item, token)) return;
+    failCandidateItemLoading(item, token, error);
+  }
+}
+
 function renderCandidateItem() {
   const item = currentCandidate();
   pruneCandidateNavigationPrefetches();
@@ -3590,10 +3688,20 @@ function renderCandidateItem() {
   const empty = $('#candidate-empty');
   renderCandidateProgress();
   $('#btn-candidate-prev').disabled = !item || candidateIndex <= 0;
-  $('#btn-candidate-next').disabled = !item || candidateIndex >= candidateQueue.length - 1;
+  $('#btn-candidate-next').disabled =
+    !item || candidateIndex >= candidateQueue.length - 1;
   if (!item) {
+    candidateItemLoadToken += 1;
+    $('#candidate-layout').setAttribute('aria-busy', 'false');
+    $('#candidate-stage').classList.remove('candidate-item-is-loading');
+    $('#candidate-inspector').classList.remove('candidate-item-is-loading');
+    $('#candidate-item-loading').classList.add('hidden');
+    $('#candidate-inspector-loading').classList.add('hidden');
     image.onload = null;
+    image.onerror = null;
+    image.classList.remove('hidden');
     image.removeAttribute('src');
+    delete image.dataset.frameId;
     $('#candidate-image-wrap').classList.add('hidden');
     empty.classList.remove('hidden');
     $('#candidate-meta').textContent = '';
@@ -3603,6 +3711,7 @@ function renderCandidateItem() {
     $('#candidate-prefill-status').textContent = '';
     $('#candidate-reason').textContent = '';
     $('#btn-candidate-save').disabled = true;
+    $('#btn-candidate-skip').disabled = true;
     candidateDraft = null;
     candidateHeroTeamSizeExplicit = false;
     candidateHeroTeamSizeOverride = null;
@@ -3612,17 +3721,17 @@ function renderCandidateItem() {
     renderCandidateBoxes();
     return;
   }
+  const token = beginCandidateItemLoading(item);
   empty.classList.add('hidden');
   $('#candidate-image-wrap').classList.remove('hidden');
   const frameId = item.frame_id;
   candidateFormTouched = false;
   candidateHeroContextTouched = false;
   image.onload = () => {
-    if (currentCandidate() && currentCandidate().frame_id === frameId) {
-      renderCandidateBoxes();
-    }
+    if (candidateItemLoadIsCurrent(item, token)) renderCandidateBoxes();
   };
   const prefetchedImage = candidateImagePrefetches.get(Number(frameId));
+  image.dataset.frameId = String(frameId);
   image.src = prefetchedImage && prefetchedImage.image.src
     ? prefetchedImage.image.src : candidateImageUrl(item);
   candidateHeroTeamSizeExplicit = false;
@@ -3645,7 +3754,7 @@ function renderCandidateItem() {
   renderCandidateHeroFilterReasons(item);
   renderCandidateSuggestions(item);
   renderCandidateChoices();
-  $('#btn-candidate-save').disabled = false;
+  $('#btn-candidate-save').disabled = true;
   $('#candidate-save-state').classList.remove('error');
   const historical = (item.source_categories || []).includes('legacy');
   $('#candidate-save-state').textContent = item.legacy_hero_needs_review
@@ -3668,7 +3777,7 @@ function renderCandidateItem() {
     (item.review_status === 'confirmed' &&
       !item.legacy_migration_needs_review);
   renderCandidateBoxes();
-  loadCandidateHeroLineup(item);
+  void completeCandidateItemLoading(item, token);
   prefetchNextCandidate();
 }
 
