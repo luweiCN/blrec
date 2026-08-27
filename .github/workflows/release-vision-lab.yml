@@ -205,19 +205,19 @@ jobs:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
       HARBOR_IMAGE: ${{ vars.HARBOR_REGISTRY }}/${{ vars.HARBOR_PROJECT }}/blrec-vision-lab
-      RELAY_DIR: ${{ runner.temp }}/blrec-vision-harbor-${{ github.run_id }}
     steps:
       - name: Download Harbor image artifact
         uses: actions/download-artifact@v4
         with:
           name: vision-lab-harbor-amd64-${{ env.RELEASE_TAG }}
-          path: ${{ env.RELAY_DIR }}
+          path: ${{ runner.temp }}/blrec-vision-harbor-${{ github.run_id }}
 
       - name: Import and publish on Harbor host
         shell: bash
         env:
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          RELAY_DIR: ${{ runner.temp }}/blrec-vision-harbor-${{ github.run_id }}
         run: |
           set -euo pipefail
           case "$GITHUB_RUN_ID" in
