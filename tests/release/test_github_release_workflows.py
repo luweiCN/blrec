@@ -83,7 +83,7 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'docker/build-push-action' not in release
     assert 'ghcr.io/luweicn/blrec-vision-lab' not in release
     assert "readonly registry='www.luwei.space:4008'" in publisher
-    assert 'DOCKER_BUILDKIT=1 /usr/bin/docker build' in publisher
+    assert 'DOCKER_BUILDKIT=0 /usr/bin/docker build' in publisher
     assert '--platform linux/amd64' in publisher
     assert '/usr/bin/docker push "$image:$release_tag"' in publisher
     assert "SSH_ORIGINAL_COMMAND" in publisher

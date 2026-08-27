@@ -82,7 +82,7 @@ if not isinstance(auth, str) or not auth:
       cache_args=(--cache-from "$image:$release_tag")
     fi
 
-    DOCKER_BUILDKIT=1 /usr/bin/docker build \
+    DOCKER_BUILDKIT=0 /usr/bin/docker build \
       --platform linux/amd64 \
       --pull=false \
       --build-arg "PYTHON_BASE_IMAGE=$base_image" \
