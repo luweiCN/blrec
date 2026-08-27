@@ -104,6 +104,8 @@ def test_vision_lab_has_independent_test_and_release_workflows() -> None:
     assert 'cloudflare-dns.com:443:1.1.1.1' in downloader
     assert 'range = "%s-%s"' in downloader
     assert 'parallelism=${3:-16}' in downloader
+    assert 'zipfile.ZipFile' in downloader
+    assert 'artifact contains an unsafe path' in downloader
 
 
 def test_legacy_automatic_publishers_cannot_run_for_tag() -> None:

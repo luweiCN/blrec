@@ -20,7 +20,7 @@ test -n "${GH_TOKEN:-}" || fail 'GH_TOKEN is required'
 test -n "${RUNNER_TEMP:-}" || fail 'RUNNER_TEMP is required'
 [[ "$output_dir" == "$RUNNER_TEMP"/* ]] || fail 'output must be under RUNNER_TEMP'
 
-for command in curl python3 sha256sum unzip; do
+for command in curl python3 sha256sum; do
   command -v "$command" >/dev/null || fail "$command is required"
 done
 
@@ -165,6 +165,23 @@ if test -d "$output_dir"; then
 else
   install -d -m 700 "$output_dir"
 fi
-unzip -q "$archive" -d "$output_dir"
+python3 - "$archive" "$output_dir" <<'PY'
+import pathlib
+import stat
+import sys
+import zipfile
+
+archive = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2]).resolve()
+with zipfile.ZipFile(archive) as bundle:
+    for member in bundle.infolist():
+        destination = (target / member.filename).resolve()
+        if destination != target and target not in destination.parents:
+            raise SystemExit('artifact contains an unsafe path')
+        mode = (member.external_attr >> 16) & 0o170000
+        if mode == stat.S_IFLNK:
+            raise SystemExit('artifact contains a symbolic link')
+    bundle.extractall(target)
+PY
 printf 'ACTIONS_ARTIFACT_DOWNLOADED bytes=%s parts=%s host=%s\n' \
   "$archive_size" "$part_count" "$artifact_host"
