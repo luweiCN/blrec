@@ -196,6 +196,7 @@ jobs:
 
   import-harbor:
     name: publish Harbor image
+    if: always() && needs.publish-harbor.result == 'success'
     needs: publish-harbor
     runs-on: [self-hosted, blrec-platform]
     permissions:
