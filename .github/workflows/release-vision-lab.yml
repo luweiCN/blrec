@@ -111,16 +111,21 @@ jobs:
         with:
           ref: ${{ env.SOURCE_REF }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Validate version
         shell: bash
         run: |
           version="${RELEASE_TAG#vision-lab-v}"
-          package_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          package_version="$(awk '
+            $0 == "[project]" { project = 1; next }
+            /^\[/ { project = 0 }
+            project && /^version = "/ {
+              sub(/^version = "/, "")
+              sub(/"$/, "")
+              print
+              exit
+            }
+          ' pyproject.toml)"
+          test -n "$package_version"
           test "$version" = "$package_version"
 
       - name: Set up QEMU
