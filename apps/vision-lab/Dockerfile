@@ -1,12 +1,12 @@
-# syntax=docker/dockerfile:1.7
+ARG PYTHON_BASE_IMAGE=www.luwei.space:4008/proxy-docker-hub/library/python:3.12-slim-bookworm
 
-FROM python:3.12-slim-bookworm AS wheel-builder
+FROM ${PYTHON_BASE_IMAGE} AS wheel-builder
 WORKDIR /build
 COPY . ./apps/vision-lab
 RUN python -m pip install --no-cache-dir build && \
     python -m build --wheel --outdir /wheels apps/vision-lab
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM ${PYTHON_BASE_IMAGE} AS runtime
 WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends libglib2.0-0 libgl1 && \
