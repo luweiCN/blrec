@@ -47,6 +47,8 @@ from blrec.notification.providers import (
     Serverchan,
     Telegram,
 )
+from blrec.observability import CONTENT_TYPE_LATEST
+from blrec.observability import metrics as observability_metrics
 from blrec.path.helpers import create_file, file_exists
 from blrec.setting import EnvSettings, Settings, SettingsIn
 from blrec.setting.file_work import (
@@ -910,6 +912,17 @@ api.add_middleware(
 api.add_middleware(RouteRedirectMiddleware)
 
 
+@api.get('/metrics', include_in_schema=False)
+async def prometheus_metrics() -> Response:
+    await observability_metrics.refresh(
+        application=app,
+        database=_bili_account_runtime.database,
+        network_manager=_network_route_manager,
+        application_ready=_application_started,
+    )
+    return Response(observability_metrics.render(), media_type=CONTENT_TYPE_LATEST)
+
+
 @api.exception_handler(NotFoundError)
 async def not_found_error_handler(request: Request, exc: NotFoundError) -> JSONResponse:
     return JSONResponse(
@@ -1006,6 +1019,7 @@ async def on_startup() -> None:
             _admin_auth_store,
             bootstrap_api_key=_env_settings.api_key or '',
             worker_token=os.environ.get('BLREC_ANALYSIS_WORKER_TOKEN', ''),
+            metrics_token_value=os.environ.get('BLREC_METRICS_TOKEN', ''),
         )
         auth.configure(
             _admin_auth_store,

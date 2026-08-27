@@ -33,6 +33,7 @@ from blrec.networking.manager import (
     NetworkUnavailable,
 )
 from blrec.networking.resolver import SourceBoundResolver
+from blrec.observability.metrics import record_outbound_request
 
 from .crypto import CredentialBundle
 from .errors import (
@@ -225,8 +226,10 @@ class AiohttpProtocolTransport:
                         selection.interface_name, purpose, 'up', len(request.body)
                     )
                     kwargs['data'] = request.body
-            else:
-                kwargs['data'] = request.body
+        else:
+            kwargs['data'] = request.body
+        started_at = time.perf_counter()
+        response_status: Optional[int] = None
         try:
             async with session.request(
                 request.method, request.url, **kwargs
@@ -236,10 +239,14 @@ class AiohttpProtocolTransport:
                     self._route_manager.traffic_meter.record(
                         selection.interface_name, purpose, 'down', len(body)
                     )
+                response_status = response.status
                 return ProtocolResponse(
                     status=response.status, headers=dict(response.headers), body=body
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            record_outbound_request(
+                purpose, request.method, None, time.perf_counter() - started_at
+            )
             trace_context['failed'] = True
             if self._route_manager is not None and selection is not None:
                 self._route_manager.report_failure(purpose, selection.interface_name)
@@ -247,8 +254,15 @@ class AiohttpProtocolTransport:
                 headers_sent=bool(trace_context['headers_sent'])
             ) from None
         finally:
+            # Failed requests return through the except block before this reset.
+            if not trace_context.get('failed'):
+                record_outbound_request(
+                    purpose,
+                    request.method,
+                    response_status,
+                    time.perf_counter() - started_at,
+                )
             if self._route_manager is not None and selection is not None:
-                # Failed requests return through the except block before this reset.
                 if not trace_context.get('failed'):
                     self._route_manager.report_success(
                         purpose, selection.interface_name

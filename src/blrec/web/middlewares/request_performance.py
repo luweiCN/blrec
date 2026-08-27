@@ -6,6 +6,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from blrec.logging.audit import audit
+from blrec.observability.metrics import record_http_request
 from blrec.web.request_metrics import request_metrics_scope
 
 _OCTET_STREAM_MEDIA_ROUTES = frozenset(
@@ -39,6 +40,15 @@ class RequestPerformanceMiddleware:
                 normalized_content_type = content_type.partition(';')[0].lower()
                 route = scope.get('route')
                 normalized_route = getattr(route, 'path', None) or '<unmatched>'
+                elapsed_seconds = time.perf_counter() - started
+                if normalized_route != '/metrics':
+                    record_http_request(
+                        scope.get('method', ''),
+                        normalized_route,
+                        event_status,
+                        elapsed_seconds,
+                        response_bytes,
+                    )
                 if 200 <= event_status < 400 and (
                     normalized_content_type == 'text/event-stream'
                     or normalized_content_type.startswith('audio/')
@@ -49,7 +59,7 @@ class RequestPerformanceMiddleware:
                     )
                 ):
                     return
-                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                elapsed_ms = elapsed_seconds * 1000.0
                 if exception or event_status >= 500 or elapsed_ms >= self._slow_ms:
                     level = 'WARNING'
                 elif event_status >= 400:

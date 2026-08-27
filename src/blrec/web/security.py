@@ -15,6 +15,7 @@ from .auth_store import AdminAuthStore, ExtensionIdentity
 
 api_key = ''
 analysis_worker_token = ''
+metrics_token = ''
 auth_store: Optional[AdminAuthStore] = None
 
 SESSION_COOKIE_NAME = 'blrec_session'
@@ -51,22 +52,28 @@ _TRUSTED_PROXY_WRITE_PATHS = (re.compile(r'^/api/v1/vainglory/matches/\d+$'),)
 
 
 def configure(
-    store: AdminAuthStore, *, bootstrap_api_key: str = '', worker_token: str = ''
+    store: AdminAuthStore,
+    *,
+    bootstrap_api_key: str = '',
+    worker_token: str = '',
+    metrics_token_value: str = '',
 ) -> None:
-    global analysis_worker_token, api_key, auth_store
+    global analysis_worker_token, api_key, auth_store, metrics_token
     auth_store = store
     api_key = bootstrap_api_key
     analysis_worker_token = worker_token.strip()
+    metrics_token = metrics_token_value.strip()
     whitelist.clear()
     blacklist.clear()
     attempting_clients.clear()
 
 
 def reset() -> None:
-    global analysis_worker_token, api_key, auth_store
+    global analysis_worker_token, api_key, auth_store, metrics_token
     auth_store = None
     api_key = ''
     analysis_worker_token = ''
+    metrics_token = ''
     whitelist.clear()
     blacklist.clear()
     attempting_clients.clear()
@@ -128,8 +135,12 @@ def manager_subject(request: Request) -> str:
 
 
 async def authenticate(
-    request: Request, x_api_key: Optional[str] = Header(None)
+    request: Request,
+    x_api_key: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
 ) -> None:
+    if _valid_metrics_request(request, authorization):
+        return
     if auth_store is None:
         await _legacy_test_authenticate(request, x_api_key)
         return
@@ -244,6 +255,20 @@ def _valid_trusted_proxy_request(request: Request, x_api_key: Optional[str]) -> 
         else _TRUSTED_PROXY_WRITE_PATHS if request.method == 'PATCH' else ()
     )
     return any(pattern.fullmatch(request.url.path) for pattern in patterns)
+
+
+def _valid_metrics_request(request: Request, authorization: Optional[str]) -> bool:
+    if request.method not in {'GET', 'HEAD'} or request.url.path != '/metrics':
+        return False
+    if not metrics_token or not authorization:
+        return False
+    scheme, separator, token = authorization.partition(' ')
+    return bool(
+        separator
+        and scheme.lower() == 'bearer'
+        and token
+        and secrets.compare_digest(token, metrics_token)
+    )
 
 
 def _signed_media_resource_id(path: str) -> Optional[int]:

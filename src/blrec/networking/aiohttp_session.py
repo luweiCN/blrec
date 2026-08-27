@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import socket
+import time
 from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 
 from blrec.bili.net import timeout
+from blrec.observability.metrics import record_outbound_request
 
 from .manager import NetworkPurpose, NetworkRouteManager, RouteSelection
 from .resolver import SourceBoundResolver
@@ -144,15 +146,40 @@ class AiohttpSessionPool:
     ) -> aiohttp.ClientSession:
         trace_config = aiohttp.TraceConfig()
 
-        async def request_end(
-            _session: aiohttp.ClientSession, _context: Any, _params: Any
+        async def request_start(
+            _session: aiohttp.ClientSession, context: Any, _params: Any
         ) -> None:
+            setattr(context, 'blrec_started_at', time.perf_counter())
+            setattr(context, 'blrec_recorded', False)
+
+        async def request_end(
+            _session: aiohttp.ClientSession, context: Any, params: Any
+        ) -> None:
+            if not getattr(context, 'blrec_recorded', False):
+                response = getattr(params, 'response', None)
+                record_outbound_request(
+                    purpose,
+                    getattr(params, 'method', 'UNKNOWN'),
+                    getattr(response, 'status', None),
+                    time.perf_counter()
+                    - getattr(context, 'blrec_started_at', time.perf_counter()),
+                )
+                setattr(context, 'blrec_recorded', True)
             self._manager.report_success(purpose, selection.interface_name)
 
         async def request_exception(
-            _session: aiohttp.ClientSession, _context: Any, params: Any
+            _session: aiohttp.ClientSession, context: Any, params: Any
         ) -> None:
             error = getattr(params, 'exception', None)
+            if not getattr(context, 'blrec_recorded', False):
+                record_outbound_request(
+                    purpose,
+                    getattr(params, 'method', 'UNKNOWN'),
+                    getattr(error, 'status', None),
+                    time.perf_counter()
+                    - getattr(context, 'blrec_started_at', time.perf_counter()),
+                )
+                setattr(context, 'blrec_recorded', True)
             if isinstance(error, aiohttp.ClientResponseError):
                 self._manager.report_http_result(
                     purpose, selection.interface_name, error.status
@@ -160,6 +187,8 @@ class AiohttpSessionPool:
             elif isinstance(error, BaseException) and is_route_transport_failure(error):
                 self._manager.report_failure(purpose, selection.interface_name)
 
+        request_start_signal: Any = trace_config.on_request_start
+        request_start_signal.append(request_start)
         request_end_signal: Any = trace_config.on_request_end
         request_end_signal.append(request_end)
         request_exception_signal: Any = trace_config.on_request_exception

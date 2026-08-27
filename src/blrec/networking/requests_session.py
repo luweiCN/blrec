@@ -1,4 +1,5 @@
 import socket
+import time
 from threading import RLock
 from typing import Any, Callable, Dict, Optional, Sequence, Type
 
@@ -8,6 +9,8 @@ from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import NewConnectionError
 from urllib3.util import connection
+
+from blrec.observability.metrics import record_outbound_request
 
 from .manager import NetworkPurpose, NetworkRouteManager, RouteSelection
 from .resolver import SyncSourceBoundResolver
@@ -159,12 +162,22 @@ class RoutedRequestsSession(requests.Session):
             self._purpose, anonymous=self._anonymous, affinity_key=self._affinity_key
         )
         session = self._session_for(selection)
+        started_at = time.perf_counter()
         try:
             response = session.request(method, url, **kwargs)
         except (requests.RequestException, OSError) as error:
+            record_outbound_request(
+                self._purpose, method, None, time.perf_counter() - started_at
+            )
             if is_route_connection_failure(error):
                 self._manager.report_failure(self._purpose, selection.interface_name)
             raise
+        record_outbound_request(
+            self._purpose,
+            method,
+            response.status_code,
+            time.perf_counter() - started_at,
+        )
         self._manager.report_success(self._purpose, selection.interface_name)
         response.raw = _MeteredRaw(
             response.raw,
