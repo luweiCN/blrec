@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Iterable, Optional, Sequence, Tuple
+from typing import Any, Iterable, Optional, Sequence, Tuple, cast
 
 from loguru import logger
 from prometheus_client import (
@@ -73,7 +73,7 @@ def _normalized_status(status: object) -> Optional[int]:
     if status is None:
         return None
     try:
-        return int(status)
+        return int(cast(Any, status))
     except (TypeError, ValueError):
         return None
 
@@ -122,7 +122,7 @@ def _set_grouped_counts(
 
 
 def _set_count(metric: Gauge, value: object) -> None:
-    metric.set(float(value or 0))
+    metric.set(float(cast(Any, value) or 0))
 
 
 class BlrecMetrics:
